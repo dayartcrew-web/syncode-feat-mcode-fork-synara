@@ -1,0 +1,15 @@
+[package]
+name = "syncode-auth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Authentication — credential management, auth policies, secret storage"
+
+[dependencies]
+syncode-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

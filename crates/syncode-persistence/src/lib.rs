@@ -1,0 +1,101 @@
+//! Syncode Persistence — Event Store & Projections
+//!
+//! Append-only event store, read model projection tables,
+//! SQLx migrations, and snapshot queries.
+
+pub mod event_store;
+pub mod migrations;
+pub mod projections;
+pub mod snapshot;
+
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::SqlitePool;
+use std::str::FromStr;
+use std::path::Path;
+
+/// Initialize the SQLite database with migrations
+pub async fn init_database(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
+    let db_url = if db_path.to_string_lossy().is_empty() {
+        "sqlite::memory:".to_string()
+    } else {
+        format!("sqlite:{}?mode=rwc", db_path.display())
+    };
+
+    let options = SqliteConnectOptions::from_str(&db_url)?
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await?;
+
+    // Run embedded migrations
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE IF NOT EXISTS domain_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            aggregate_id  TEXT    NOT NULL,
+            event_type    TEXT    NOT NULL,
+            sequence      INTEGER NOT NULL,
+            data          TEXT    NOT NULL,
+            timestamp     TEXT    NOT NULL,
+            metadata      TEXT    DEFAULT '{}',
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(aggregate_id, sequence)
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_aggregate ON domain_events(aggregate_id, sequence);
+        CREATE INDEX IF NOT EXISTS idx_events_type ON domain_events(event_type);
+
+        CREATE TABLE IF NOT EXISTS snapshots (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            aggregate_id  TEXT    NOT NULL,
+            sequence      INTEGER NOT NULL,
+            data          TEXT    NOT NULL,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(aggregate_id)
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    tracing::info!("Database initialized at {}", db_url);
+    Ok(pool)
+}
+
+/// Get a connection from the pool
+pub async fn get_pool(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
+    init_database(db_path).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_init_in_memory_database() {
+        let pool = init_database(std::path::Path::new("")).await;
+        assert!(pool.is_ok(), "Should create in-memory database");
+
+        // Verify tables exist
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='domain_events'"
+        )
+        .fetch_optional(pool.as_ref().unwrap())
+        .await
+        .unwrap();
+
+        assert!(row.is_some(), "domain_events table should exist");
+
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='snapshots'"
+        )
+        .fetch_optional(pool.as_ref().unwrap())
+        .await
+        .unwrap();
+
+        assert!(row.is_some(), "snapshots table should exist");
+    }
+}

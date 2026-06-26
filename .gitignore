@@ -1,0 +1,47 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Tauri
+src-tauri/target/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Contracts generated
+contracts/generated/
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Build artifacts
+*.wasm
+*.exe
+
+# Logs
+*.log
+
+# Masday
+.masday/state/

@@ -1,0 +1,16 @@
+[package]
+name = "syncode-git"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Git integration — status, diff, branch, worktree, checkpoint, stacked actions"
+
+[dependencies]
+syncode-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+git2 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

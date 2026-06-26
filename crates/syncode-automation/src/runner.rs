@@ -1,0 +1,269 @@
+//! Run lifecycle
+//!
+//! Tracks the lifecycle of an automation run: pending → running →
+//! completed/failed/cancelled/timeout.
+
+use serde::{Deserialize, Serialize};
+
+/// Status of an automation run
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// Waiting to execute
+    Pending,
+    /// Currently executing
+    Running,
+    /// Completed successfully
+    Completed,
+    /// Failed (exit code non-zero or error)
+    Failed,
+    /// Cancelled by user
+    Cancelled,
+    /// Timed out
+    TimedOut,
+    /// Retrying after failure
+    Retrying,
+}
+
+impl RunStatus {
+    /// Whether the run is in a terminal state
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled | RunStatus::TimedOut)
+    }
+
+    /// Whether the run was successful
+    pub fn is_success(&self) -> bool {
+        matches!(self, RunStatus::Completed)
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunStatus::Pending => write!(f, "pending"),
+            RunStatus::Running => write!(f, "running"),
+            RunStatus::Completed => write!(f, "completed"),
+            RunStatus::Failed => write!(f, "failed"),
+            RunStatus::Cancelled => write!(f, "cancelled"),
+            RunStatus::TimedOut => write!(f, "timed_out"),
+            RunStatus::Retrying => write!(f, "retrying"),
+        }
+    }
+}
+
+/// A single automation run record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRun {
+    /// Unique run identifier
+    pub id: String,
+    /// The automation definition ID
+    pub automation_id: String,
+    /// Current status
+    pub status: RunStatus,
+    /// Attempt number (0-indexed)
+    pub attempt: u32,
+    /// Exit code (None if not yet completed)
+    pub exit_code: Option<i32>,
+    /// Stdout output (truncated)
+    pub stdout: String,
+    /// Stderr output (truncated)
+    pub stderr: String,
+    /// Error message if failed
+    pub error: Option<String>,
+    /// Start timestamp
+    pub started_at: Option<String>,
+    /// End timestamp
+    pub ended_at: Option<String>,
+    /// Duration in milliseconds
+    pub duration_ms: Option<u64>,
+}
+
+impl AutomationRun {
+    /// Create a new pending run
+    pub fn new(automation_id: String) -> Self {
+        Self {
+            id: format!("run-{}", uuid::Uuid::new_v4().hyphenated()),
+            automation_id,
+            status: RunStatus::Pending,
+            attempt: 0,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: None,
+            started_at: None,
+            ended_at: None,
+            duration_ms: None,
+        }
+    }
+
+    /// Mark the run as started
+    pub fn mark_started(&mut self) {
+        self.status = RunStatus::Running;
+        self.started_at = Some(chrono::Utc::now().to_rfc3339());
+    }
+
+    /// Mark the run as completed with an exit code
+    pub fn mark_completed(&mut self, exit_code: i32, stdout: String, stderr: String) {
+        self.exit_code = Some(exit_code);
+        self.stdout = stdout;
+        self.stderr = stderr;
+        self.ended_at = Some(chrono::Utc::now().to_rfc3339());
+        self.status = if exit_code == 0 {
+            RunStatus::Completed
+        } else {
+            RunStatus::Failed
+        };
+        self.compute_duration();
+    }
+
+    /// Mark the run as failed with an error message
+    pub fn mark_failed(&mut self, error: String) {
+        self.error = Some(error);
+        self.status = RunStatus::Failed;
+        self.ended_at = Some(chrono::Utc::now().to_rfc3339());
+        self.compute_duration();
+    }
+
+    /// Mark the run as timed out
+    pub fn mark_timed_out(&mut self) {
+        self.status = RunStatus::TimedOut;
+        self.error = Some("Run timed out".to_string());
+        self.ended_at = Some(chrono::Utc::now().to_rfc3339());
+        self.compute_duration();
+    }
+
+    /// Mark the run as cancelled
+    pub fn mark_cancelled(&mut self) {
+        self.status = RunStatus::Cancelled;
+        self.ended_at = Some(chrono::Utc::now().to_rfc3339());
+        self.compute_duration();
+    }
+
+    /// Mark the run as retrying
+    pub fn mark_retrying(&mut self, attempt: u32) {
+        self.attempt = attempt;
+        self.status = RunStatus::Retrying;
+    }
+
+    fn compute_duration(&mut self) {
+        if let (Some(start), Some(end)) = (&self.started_at, &self.ended_at) {
+            if let (Ok(s), Ok(e)) = (
+                chrono::DateTime::parse_from_rfc3339(start),
+                chrono::DateTime::parse_from_rfc3339(end),
+            ) {
+                self.duration_ms = Some((e - s).num_milliseconds() as u64);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_status_is_terminal() {
+        assert!(!RunStatus::Pending.is_terminal());
+        assert!(!RunStatus::Running.is_terminal());
+        assert!(!RunStatus::Retrying.is_terminal());
+        assert!(RunStatus::Completed.is_terminal());
+        assert!(RunStatus::Failed.is_terminal());
+        assert!(RunStatus::Cancelled.is_terminal());
+        assert!(RunStatus::TimedOut.is_terminal());
+    }
+
+    #[test]
+    fn run_status_display() {
+        assert_eq!(RunStatus::Pending.to_string(), "pending");
+        assert_eq!(RunStatus::Running.to_string(), "running");
+        assert_eq!(RunStatus::Completed.to_string(), "completed");
+        assert_eq!(RunStatus::TimedOut.to_string(), "timed_out");
+    }
+
+    #[test]
+    fn automation_run_new() {
+        let run = AutomationRun::new("auto-123".to_string());
+        assert_eq!(run.automation_id, "auto-123");
+        assert_eq!(run.status, RunStatus::Pending);
+        assert_eq!(run.attempt, 0);
+        assert!(run.id.starts_with("run-"));
+    }
+
+    #[test]
+    fn automation_run_lifecycle_success() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        run.mark_started();
+        assert_eq!(run.status, RunStatus::Running);
+        assert!(run.started_at.is_some());
+
+        run.mark_completed(0, "hello".to_string(), String::new());
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.exit_code, Some(0));
+        assert!(run.ended_at.is_some());
+        assert!(run.duration_ms.is_some());
+    }
+
+    #[test]
+    fn automation_run_lifecycle_failure() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        run.mark_started();
+        run.mark_completed(1, String::new(), "error msg".to_string());
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.exit_code, Some(1));
+    }
+
+    #[test]
+    fn automation_run_timeout() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        run.mark_started();
+        run.mark_timed_out();
+        assert_eq!(run.status, RunStatus::TimedOut);
+        assert_eq!(run.error.as_deref(), Some("Run timed out"));
+    }
+
+    #[test]
+    fn automation_run_cancelled() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        run.mark_started();
+        run.mark_cancelled();
+        assert_eq!(run.status, RunStatus::Cancelled);
+    }
+
+    #[test]
+    fn automation_run_retrying() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        run.mark_started();
+        run.mark_retrying(1);
+        assert_eq!(run.status, RunStatus::Retrying);
+        assert_eq!(run.attempt, 1);
+    }
+
+    #[test]
+    fn automation_run_serialization() {
+        let run = AutomationRun::new("auto-123".to_string());
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(json.contains("automationId"));
+        assert!(json.contains("run-"));
+        let back: AutomationRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.automation_id, "auto-123");
+    }
+
+    #[test]
+    fn run_status_serialization() {
+        let statuses = vec![
+            RunStatus::Pending,
+            RunStatus::Running,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+            RunStatus::TimedOut,
+            RunStatus::Retrying,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: RunStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+}

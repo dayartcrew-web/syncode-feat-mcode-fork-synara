@@ -1,0 +1,25 @@
+[package]
+name = "syncode-tauri"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Tauri desktop integration — app shell, IPC commands, auto-update, system tray"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+syncode-core = { workspace = true }
+syncode-git = { workspace = true }
+syncode-terminal = { workspace = true }
+syncode-ws = { workspace = true }
+tauri = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

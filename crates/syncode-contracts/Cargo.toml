@@ -1,0 +1,17 @@
+[package]
+name = "syncode-contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Contract types — Rust types that generate TypeScript definitions via ts-rs"
+
+[build-dependencies]
+ts-rs = { workspace = true }
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+ts-rs = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

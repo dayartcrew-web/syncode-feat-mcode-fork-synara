@@ -1,0 +1,18 @@
+[package]
+name = "syncode-terminal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Terminal PTY — process management, session lifecycle, output buffering"
+
+[dependencies]
+syncode-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+portable-pty = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

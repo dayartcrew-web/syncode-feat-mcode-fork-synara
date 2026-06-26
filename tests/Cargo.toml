@@ -1,0 +1,19 @@
+[package]
+name = "syncode-integration-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[test]]
+name = "workspace_integration"
+path = "workspace_integration.rs"
+
+[dev-dependencies]
+syncode-core = { workspace = true }
+syncode-contracts = { workspace = true }
+syncode-provider = { workspace = true }
+syncode-terminal = { workspace = true }
+syncode-automation = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }

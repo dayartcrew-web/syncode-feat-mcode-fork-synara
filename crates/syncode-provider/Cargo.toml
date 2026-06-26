@@ -1,0 +1,22 @@
+[package]
+name = "syncode-provider"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Provider abstraction — adapter trait, registry, and per-provider implementations"
+
+[dependencies]
+syncode-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+async-trait = "0.1"
+async-stream = "0.3"
+tokio-stream = "0.1"
+reqwest = { workspace = true }

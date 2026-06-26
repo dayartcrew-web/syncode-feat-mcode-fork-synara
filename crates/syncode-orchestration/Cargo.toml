@@ -1,0 +1,20 @@
+[package]
+name = "syncode-orchestration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CQRS/Event Sourcing engine — command bus, event store, decider, projector, read models"
+
+[dependencies]
+syncode-core = { workspace = true }
+syncode-provider = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+tokio-stream = "0.1"

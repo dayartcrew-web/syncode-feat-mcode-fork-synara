@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickel-org/tauri/v2/capability/schema.json",
+  "identifier": "default",
+  "description": "Default permissions for Syncode desktop app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-set-title",
+    "core:window:allow-toggle-maximize"
+  ]
+}
