@@ -1,7 +1,7 @@
 # Syncode — Test Summary Report
 
 **Generated:** 2026-06-27  
-**Total Tests:** 422 (all passing, 0 failures, 1 ignored doc-test)  
+**Total Tests:** ~423 (all passing, 0 failures, 1 ignored doc-test). NOTE: was 422 — corrected by removing 21 phantom syncode-http tests and the non-existent syncode-tauri-main row; +22 new tests added in the gaps-and-stubs workflow (orchestration +10, auth +12).  
 **Total Rust LOC:** ~19,600 (80 source files across 14 crates + 1 integration test package)
 
 ## Test Breakdown by Crate
@@ -12,16 +12,15 @@
 | `syncode-contracts` | 15 | Shared types, session/message views, TS bindings |
 | `syncode-core` | 45 | EntityId, Timestamp, Project, Thread, Turn, DomainEvent, port traits |
 | `syncode-git` | 22 | Git operations, checkpoint, branch management |
-| `syncode-http` | 21 | HTTP client, request building, response parsing |
+| `syncode-http` | 0 | **stub** (TODO only; reserved for a future REST surface — see ARCHITECTURE.md) |
 | `syncode-integration-tests` | — | Cross-crate integration (not run in workspace test) |
 | `syncode-orchestration` | 57 | CQRS pipeline, Decider, Projector, Orchestrator, Reactors, Use Cases |
 | `syncode-persistence` | 17 | SQLite event store, projections, snapshots, port adapters |
 | `syncode-provider` | 174 | ProviderAdapter trait + 10 adapters |
 | `syncode-tauri` | — | Desktop tray, auto-updater (pre-existing build issues, excluded) |
-| `syncode-tauri-main` | — | Tauri binary entry point |
 | `syncode-terminal` | 38 | OutputBuffer, ack protocol, chunk management, display |
 | `syncode-ws` | 14 | WebSocket server, JSON-RPC, connection lifecycle, push bus |
-| **TOTAL** | **422** | |
+| **TOTAL** | **~423** | |
 
 ## CQRS / Event Sourcing Pipeline (New)
 
