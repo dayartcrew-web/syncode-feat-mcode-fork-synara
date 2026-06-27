@@ -1,5 +1,7 @@
 # MCode vs Syncode — Feature Comparison & Implementation Plan
 
+> ⚠️ **STATUS (2026-06-27) — PLANNING DOC, SUPERSEDED.** This was authored when the repo was empty (it states *"Proyek ini kosong"*). The implementation has since progressed to **422 passing tests and ~19,600 LOC across 12 crates**. For the **current** architecture see [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`CRATES.md`](./CRATES.md), and the per-crate intelligence in [`.masday/intel/`](../.masday/intel/README.md). This file is retained as the original MCode→Syncode plan and gap analysis.
+
 > **Tanggal**: 2026-06-27
 > **Scope**: Perbandingan fitur lengkap MCode (TypeScript monorepo) → Syncode (Rust DDD blueprint)
 > **Tujuan**: High-to-low documentation untuk re-implementasi / porting dari MCode ke Syncode

@@ -1,5 +1,7 @@
 # Frontend Comparison: MCode (`apps/web`) vs Syncode (`frontend/`)
 
+> ⚠️ **STATUS (2026-06-27) — PLANNING DOC, SUPERSEDED.** Authored as a forward-looking gap analysis/roadmap for the (currently minimal) React+Vite frontend. The backend has since been substantially built — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`.masday/intel/`](../.masday/intel/README.md) for current state. Retained as the original frontend roadmap.
+
 > **Tanggal**: 2026-06-27
 > **Scope**: Perbandingan detail frontend MCode (React + Vite + Electron) → Syncode (React + Vite + Tauri)
 > **Tujuan**: Mengidentifikasi semua gap dan membuat roadmap implementasi frontend Syncode
