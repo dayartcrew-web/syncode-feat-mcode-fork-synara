@@ -1,8 +1,12 @@
 //! JSON-RPC handler — orchestration methods
+//!
+//! All command-handling methods route through `WsState.orchestrator.handle_command()`,
+//! which runs the full CQRS pipeline:
+//!   Decider → Events → EventRepository persist → Projector → ReadModelStore
 
 use crate::{JsonRpcRequest, JsonRpcResponse, WsState};
 use serde_json::Value;
-use syncode_orchestration::{Command, Decider};
+use syncode_orchestration::Command;
 
 /// Handle an incoming JSON-RPC message
 pub async fn handle_rpc(state: &WsState, raw: &str) -> Option<String> {
@@ -204,13 +208,14 @@ async fn handle_project_create(
     };
 
     let cmd = Command::CreateProject { name, root_path };
-    match Decider::decide(cmd, None) {
-        Ok(events) => {
-            let mut store = state.read_store.write().await;
-            syncode_orchestration::Projector::project_many(&events, &mut store);
-            if let Some(ev) = events.first() {
-                let project_id = ev.aggregate_id();
-                let project = store.projects.get(&project_id.as_str()).cloned()
+    match state.orchestrator.handle_command(cmd).await {
+        Ok(result) => {
+            // Read the updated entity from the read model
+            if let Some(envelope) = result.events.first() {
+                let project_id = envelope.event.aggregate_id();
+                let store = state.read_store.read().await;
+                let project = store.projects.get(&project_id.as_str())
+                    .cloned()
                     .map(|p| serde_json::to_value(p).unwrap_or(Value::Null));
                 JsonRpcResponse::success(id, project.unwrap_or(Value::Null))
             } else {
@@ -275,13 +280,13 @@ async fn handle_thread_create(
     };
 
     let cmd = Command::CreateThread { project_id, provider_id, model };
-    match Decider::decide(cmd, None) {
-        Ok(events) => {
-            let mut store = state.read_store.write().await;
-            syncode_orchestration::Projector::project_many(&events, &mut store);
-            if let Some(ev) = events.first() {
-                let thread_id = ev.aggregate_id();
-                let thread = store.threads.get(&thread_id.as_str()).cloned()
+    match state.orchestrator.handle_command(cmd).await {
+        Ok(result) => {
+            if let Some(envelope) = result.events.first() {
+                let thread_id = envelope.event.aggregate_id();
+                let store = state.read_store.read().await;
+                let thread = store.threads.get(&thread_id.as_str())
+                    .cloned()
                     .map(|t| serde_json::to_value(t).unwrap_or(Value::Null));
                 JsonRpcResponse::success(id, thread.unwrap_or(Value::Null))
             } else {
@@ -331,19 +336,13 @@ async fn apply_thread_command(
         Err(_) => return JsonRpcResponse::error(Some(id), crate::error_codes::INVALID_PARAMS, "Invalid id format"),
     };
 
-    // Get current state for the decider
-    let current_status = {
-        let store = state.read_store.read().await;
-        store.threads.get(thread_id_str).map(|t| t.status.clone())
-    };
-    let state_json = current_status.map(|s| serde_json::json!({"status": s}));
-
     let cmd = cmd_fn(thread_id);
-    match Decider::decide(cmd, state_json.as_ref()) {
-        Ok(events) => {
-            let mut store = state.read_store.write().await;
-            syncode_orchestration::Projector::project_many(&events, &mut store);
-            let thread = store.threads.get(thread_id_str).cloned()
+    match state.orchestrator.handle_command(cmd).await {
+        Ok(_result) => {
+            // The orchestrator already projected to read model, read the updated thread
+            let store = state.read_store.read().await;
+            let thread = store.threads.get(thread_id_str)
+                .cloned()
                 .map(|t| serde_json::to_value(t).unwrap_or(Value::Null));
             JsonRpcResponse::success(id, thread.unwrap_or(Value::Null))
         }
@@ -398,13 +397,13 @@ async fn handle_turn_start(
     };
 
     let cmd = Command::StartTurn { thread_id, sequence, user_input };
-    match Decider::decide(cmd, None) {
-        Ok(events) => {
-            let mut store = state.read_store.write().await;
-            syncode_orchestration::Projector::project_many(&events, &mut store);
-            if let Some(ev) = events.first() {
-                let turn_id = ev.aggregate_id();
-                let turn = store.turns.get(&turn_id.as_str()).cloned()
+    match state.orchestrator.handle_command(cmd).await {
+        Ok(result) => {
+            if let Some(envelope) = result.events.first() {
+                let turn_id = envelope.event.aggregate_id();
+                let store = state.read_store.read().await;
+                let turn = store.turns.get(&turn_id.as_str())
+                    .cloned()
                     .map(|t| serde_json::to_value(t).unwrap_or(Value::Null));
                 JsonRpcResponse::success(id, turn.unwrap_or(Value::Null))
             } else {
@@ -435,18 +434,12 @@ async fn handle_turn_complete(
         Err(_) => return JsonRpcResponse::error(Some(id), crate::error_codes::INVALID_PARAMS, "Invalid id format"),
     };
 
-    let current_status = {
-        let store = state.read_store.read().await;
-        store.turns.get(turn_id_str).map(|t| t.status.clone())
-    };
-    let state_json = current_status.map(|s| serde_json::json!({"status": s}));
-
     let cmd = Command::CompleteTurn { id: turn_id, assistant_output, duration_ms };
-    match Decider::decide(cmd, state_json.as_ref()) {
-        Ok(events) => {
-            let mut store = state.read_store.write().await;
-            syncode_orchestration::Projector::project_many(&events, &mut store);
-            let turn = store.turns.get(turn_id_str).cloned()
+    match state.orchestrator.handle_command(cmd).await {
+        Ok(_result) => {
+            let store = state.read_store.read().await;
+            let turn = store.turns.get(turn_id_str)
+                .cloned()
                 .map(|t| serde_json::to_value(t).unwrap_or(Value::Null));
             JsonRpcResponse::success(id, turn.unwrap_or(Value::Null))
         }
@@ -460,7 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_ping() {
-        let state = WsState::new(16);
+        let state = WsState::new_in_memory(16);
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -476,7 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_unknown_method() {
-        let state = WsState::new(16);
+        let state = WsState::new_in_memory(16);
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -492,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_notification_no_response() {
-        let state = WsState::new(16);
+        let state = WsState::new_in_memory(16);
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "ping"
@@ -504,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_project_create_and_list() {
-        let state = WsState::new(16);
+        let state = WsState::new_in_memory(16);
 
         // Create project
         let create_req = serde_json::json!({
@@ -536,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_project_create_validation() {
-        let state = WsState::new(16);
+        let state = WsState::new_in_memory(16);
 
         let req = serde_json::json!({
             "jsonrpc": "2.0",

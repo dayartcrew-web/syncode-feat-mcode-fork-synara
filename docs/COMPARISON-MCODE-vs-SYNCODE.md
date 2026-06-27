@@ -243,22 +243,22 @@ Runtime logic with explicit subpath exports:
 │  Option C: Yew (native Rust WASM)               │
 └──────────┬──────────────────────────────────────┘
            │ Tauri IPC / WebSocket
-┌──────────▼──────────────────────────────────────┐
-│  Backend (Rust)                                 │
-│  Framework: Axum (HTTP + WebSocket)              │
-│  ORM: SQLx (compile-time SQL)                   │
-│  Runtime: Tokio (async)                          │
+┌──────────▼────────────────────────────────────────┐
+│  Backend (Rust)                                   │
+│  Framework: Axum (HTTP + WebSocket)               │
+│  ORM: SQLx (compile-time SQL)                     │
+│  Runtime: Tokio (async)                           │
 │  Serialization: Serde + TS-RS (TypeScript bridge) │
-│  Validation: Garde / Validator                   │
-│  Logging: tracing                               │
-│  CLI Provider: tokio::process (stdin/stdout)    │
-└──────────┬──────────────────────────────────────┘
+│  Validation: Garde / Validator                    │
+│  Logging: tracing                                 │
+│  CLI Provider: tokio::process (stdin/stdout)      │
+└──────────┬────────────────────────────────────────┘
            │
-┌──────────▼──────────────────────────────────────┐
+┌──────────▼───────────────────────────────────────┐
 │  Desktop (Tauri)                                 │
 │  Auto-update, tray, native menus, window mgmt    │
 │  Cross-platform: macOS, Linux, Windows           │
-└─────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────┘
 ```
 
 ### 3.2 Bounded Contexts (DDD)

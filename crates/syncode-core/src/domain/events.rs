@@ -2,11 +2,18 @@
 //!
 //! These are the core events in the Syncode system, persisted to the event store
 //! and used to reconstruct state via replay.
+//!
+//! `DomainEvent` is the pure payload — the "what happened" data.
+//! `Envelope` wraps a `DomainEvent` with stream-level metadata (sequence, timestamp)
+//! and is what gets persisted to the event store.
 
 use serde::{Deserialize, Serialize};
-use crate::domain::primitives::{EntityId, Timestamp};
+use crate::domain::primitives::{DomainEvent as DomainEventTrait, EntityId, Timestamp};
 
-/// All domain event types in the system
+/// All domain event types in the system (the payload).
+///
+/// Each variant carries only the data relevant to that event type.
+/// Stream-level metadata (sequence, timestamp) lives on [`Envelope`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
 pub enum DomainEvent {
@@ -139,6 +146,59 @@ impl DomainEvent {
     }
 }
 
+/// Envelope wrapping a domain event with stream-level metadata.
+///
+/// This is what the event store persists. The `sequence` is the position
+/// within the aggregate's event stream (for optimistic concurrency).
+/// The `timestamp` is when the event was created/written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    /// The domain event payload
+    pub event: DomainEvent,
+    /// Monotonically increasing sequence within the aggregate stream
+    pub sequence: u64,
+    /// Timestamp when this event was created
+    pub timestamp: Timestamp,
+}
+
+impl Envelope {
+    /// Wrap a domain event with stream metadata
+    pub fn new(event: DomainEvent, sequence: u64) -> Self {
+        Self {
+            event,
+            sequence,
+            timestamp: Timestamp::now(),
+        }
+    }
+
+    /// Wrap with an explicit timestamp (e.g. when replaying from store)
+    pub fn with_timestamp(event: DomainEvent, sequence: u64, timestamp: Timestamp) -> Self {
+        Self {
+            event,
+            sequence,
+            timestamp,
+        }
+    }
+}
+
+impl DomainEventTrait for Envelope {
+    fn event_type(&self) -> &str {
+        self.event.event_type_name()
+    }
+
+    fn aggregate_id(&self) -> EntityId {
+        self.event.aggregate_id()
+    }
+
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    fn timestamp(&self) -> Timestamp {
+        self.timestamp
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +257,56 @@ mod tests {
         let json = serde_json::to_value(&ev).expect("to_value");
         assert_eq!(json["event_type"], "ThreadStatusChanged");
         assert!(json.get("data").is_some());
+    }
+
+    #[test]
+    fn envelope_implements_domain_event_trait() {
+        let id = EntityId::new();
+        let event = DomainEvent::ProjectCreated {
+            id,
+            name: "test".into(),
+            root_path: "/test".into(),
+            created_at: Timestamp::now(),
+        };
+        let envelope = Envelope::new(event, 1);
+
+        assert_eq!(envelope.event_type(), "ProjectCreated");
+        assert_eq!(envelope.aggregate_id(), id);
+        assert_eq!(envelope.sequence(), 1);
+        // timestamp should be recent
+        assert!(envelope.timestamp().to_millis() > 0);
+    }
+
+    #[test]
+    fn envelope_serialization_roundtrip() {
+        let id = EntityId::new();
+        let event = DomainEvent::ThreadCreated {
+            id,
+            project_id: EntityId::new(),
+            provider_id: "anthropic".into(),
+            model: "claude-3".into(),
+            created_at: Timestamp::now(),
+        };
+        let envelope = Envelope::new(event, 42);
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let back: Envelope = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.sequence(), 42);
+        assert_eq!(back.event.event_type_name(), "ThreadCreated");
+        assert_eq!(back.aggregate_id(), id);
+    }
+
+    #[test]
+    fn envelope_with_timestamp() {
+        let id = EntityId::new();
+        let ts = Timestamp::now();
+        let event = DomainEvent::TurnCompleted {
+            id,
+            assistant_output: "done".into(),
+            duration_ms: 500,
+            completed_at: ts,
+        };
+        let envelope = Envelope::with_timestamp(event, 10, ts);
+        assert_eq!(envelope.timestamp(), ts);
+        assert_eq!(envelope.sequence(), 10);
     }
 }

@@ -9,6 +9,8 @@ description = "WebSocket transport — JSON-RPC server, push bus, channels, conn
 [dependencies]
 syncode-core = { workspace = true }
 syncode-orchestration = { path = "../syncode-orchestration" }
+syncode-persistence = { path = "../syncode-persistence" }
+async-trait = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

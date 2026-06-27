@@ -14,5 +14,6 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+async-trait = "0.1"
 uuid = { workspace = true }
 chrono = { workspace = true }

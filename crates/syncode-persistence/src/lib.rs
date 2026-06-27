@@ -3,6 +3,7 @@
 //! Append-only event store, read model projection tables,
 //! SQLx migrations, and snapshot queries.
 
+pub mod adapters;
 pub mod event_store;
 pub mod migrations;
 pub mod projections;
