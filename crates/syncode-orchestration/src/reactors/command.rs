@@ -82,6 +82,11 @@ impl ProviderCommandReactor {
                 self.handle_cancel_turn(*id, adapter).await
             }
 
+            Command::InterruptTurn { id } => {
+                // Interrupt an in-progress turn: interrupt the provider session (if any).
+                self.handle_interrupt_turn(*id, adapter).await
+            }
+
             Command::PauseThread { id: _ } => {
                 // Pause thread: interrupt all active sessions
                 let results = self.session_manager.interrupt_all(adapter).await;
@@ -112,6 +117,7 @@ impl ProviderCommandReactor {
             | Command::ResumeThread { .. }
             | Command::CompleteThread { .. }
             | Command::SetThreadTitle { .. }
+            | Command::RevertToCheckpoint { .. }
             | Command::CompleteTurn { .. }
             | Command::RecordTurnFiles { .. }
             | Command::SetTurnCheckpoint { .. }
@@ -179,6 +185,27 @@ impl ProviderCommandReactor {
 
     /// Handle FailTurn: interrupt the session
     async fn handle_fail_turn(
+        &self,
+        turn_id: EntityId,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> Result<CommandReaction, CommandReactorError> {
+        self.interrupt_session_for_turn(turn_id, adapter).await
+    }
+
+    /// Handle InterruptTurn: interrupt the session (same lifecycle as FailTurn).
+    async fn handle_interrupt_turn(
+        &self,
+        turn_id: EntityId,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> Result<CommandReaction, CommandReactorError> {
+        self.interrupt_session_for_turn(turn_id, adapter).await
+    }
+
+    /// Interrupt the provider session backing a turn, if one exists.
+    ///
+    /// Shared by `FailTurn` and `InterruptTurn` — both interrupt an in-flight
+    /// provider session, differing only in the domain event the Decider emits.
+    async fn interrupt_session_for_turn(
         &self,
         turn_id: EntityId,
         adapter: &syncode_provider::registry::SharedAdapter,

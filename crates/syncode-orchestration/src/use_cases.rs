@@ -95,12 +95,20 @@ impl ApplicationService {
     // ─── Thread Command Use Cases ────────────────────────────────
 
     /// Create a new thread within a project.
+    ///
+    /// Rejects with [`OrchestrationError::ProjectNotFound`] if the parent
+    /// project does not exist in the read model, preventing orphan threads.
+    /// (The Decider is pure and has no project state, so this precondition
+    /// is enforced here at the application layer.)
     pub async fn create_thread(
         &self,
         project_id: EntityId,
         provider_id: String,
         model: String,
     ) -> Result<CommandResult, OrchestrationError> {
+        if self.get_project(&project_id.to_string()).await.is_none() {
+            return Err(OrchestrationError::ProjectNotFound(project_id));
+        }
         self.orchestrator
             .handle_command(Command::CreateThread {
                 project_id,
@@ -237,6 +245,31 @@ impl ApplicationService {
         self.orchestrator
             .handle_command(Command::SetTurnCheckpoint {
                 id: turn_id,
+                git_ref,
+            })
+            .await
+    }
+
+    /// Interrupt an in-progress (running) turn. Also interrupts the backing
+    /// provider session when a `CommandReactor` is wired into the orchestrator.
+    pub async fn interrupt_turn(
+        &self,
+        turn_id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::InterruptTurn { id: turn_id })
+            .await
+    }
+
+    /// Roll a thread back to a previously-captured git checkpoint.
+    pub async fn revert_to_checkpoint(
+        &self,
+        thread_id: EntityId,
+        git_ref: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::RevertToCheckpoint {
+                thread_id,
                 git_ref,
             })
             .await
@@ -449,6 +482,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_thread_rejects_unknown_project() {
+        // Orphan-thread guard: a thread cannot be created against a non-existent project.
+        let svc = make_service();
+        let bogus = EntityId::new();
+        let result = svc
+            .create_thread(bogus, "openai".into(), "gpt-4".into())
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OrchestrationError::ProjectNotFound(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn test_full_turn_lifecycle() {
         let svc = make_service();
 
@@ -651,5 +699,57 @@ mod tests {
 
         let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
         assert_eq!(thread.title.as_deref(), Some("My Cool Thread"));
+    }
+
+    #[tokio::test]
+    async fn test_revert_to_checkpoint_use_case() {
+        let svc = make_service();
+
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let project_id = proj.events[0].event.aggregate_id();
+        let thr = svc
+            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let thread_id = thr.events[0].event.aggregate_id();
+
+        // Revert the thread to a captured checkpoint ref.
+        let result = svc
+            .revert_to_checkpoint(thread_id, "deadbeef".into())
+            .await
+            .unwrap();
+        assert!(!result.events.is_empty());
+
+        // Projector should have recorded the revert target as the thread's checkpoint.
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.git_checkpoint.as_deref(), Some("deadbeef"));
+    }
+
+    #[tokio::test]
+    async fn test_revert_to_checkpoint_unknown_thread_rejected() {
+        let svc = make_service();
+        let bogus = EntityId::new();
+        let result = svc.revert_to_checkpoint(bogus, "abc".into()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_turn_non_running_rejected() {
+        // A freshly started turn is "pending" (no provider "running" transition in
+        // the pure CQRS flow), so interrupt must be rejected by the decider guard.
+        let svc = make_service();
+
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let project_id = proj.events[0].event.aggregate_id();
+        let thr = svc
+            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let thread_id = thr.events[0].event.aggregate_id();
+        let start = svc.start_turn(thread_id, 1, "hi".into()).await.unwrap();
+        let turn_id = start.events[0].event.aggregate_id();
+
+        let result = svc.interrupt_turn(turn_id).await;
+        assert!(result.is_err(), "interrupting a non-running turn must fail");
     }
 }

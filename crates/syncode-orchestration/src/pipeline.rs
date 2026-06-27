@@ -51,6 +51,9 @@ pub enum OrchestrationError {
 
     #[error("No current state found for aggregate {0}")]
     NoState(EntityId),
+
+    #[error("Project not found: {0}")]
+    ProjectNotFound(EntityId),
 }
 
 /// The Orchestrator is the central pipeline that processes commands.
@@ -263,10 +266,14 @@ impl Orchestrator {
             | Command::CompleteThread { id, .. }
             | Command::CancelThread { id, .. } => Some(*id),
 
+            // Revert targets the thread's checkpoint stream
+            Command::RevertToCheckpoint { thread_id, .. } => Some(*thread_id),
+
             // Turn-level commands
             Command::CompleteTurn { id, .. }
             | Command::FailTurn { id, .. }
             | Command::CancelTurn { id, .. }
+            | Command::InterruptTurn { id, .. }
             | Command::RecordTurnFiles { id, .. }
             | Command::SetTurnCheckpoint { id, .. } => Some(*id),
         }
@@ -301,7 +308,8 @@ impl Orchestrator {
             | Command::PauseThread { .. }
             | Command::ResumeThread { .. }
             | Command::CompleteThread { .. }
-            | Command::CancelThread { .. } => {
+            | Command::CancelThread { .. }
+            | Command::RevertToCheckpoint { .. } => {
                 read_model.threads.get(&id.as_str()).map(|t| {
                     serde_json::json!({"status": t.status})
                 })
@@ -322,6 +330,7 @@ impl Orchestrator {
             Command::CompleteTurn { .. }
             | Command::FailTurn { .. }
             | Command::CancelTurn { .. }
+            | Command::InterruptTurn { .. }
             | Command::RecordTurnFiles { .. }
             | Command::SetTurnCheckpoint { .. } => {
                 read_model.turns.get(&id.as_str()).map(|t| {
@@ -340,6 +349,7 @@ impl Orchestrator {
             Command::StartTurn { .. }
             | Command::FailTurn { .. }
             | Command::CancelTurn { .. }
+            | Command::InterruptTurn { .. }
             | Command::PauseThread { .. }
             | Command::CancelThread { .. }
         )

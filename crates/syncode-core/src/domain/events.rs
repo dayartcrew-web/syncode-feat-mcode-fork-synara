@@ -53,6 +53,12 @@ pub enum DomainEvent {
         id: EntityId,
         git_ref: String,
     },
+    /// A thread was rolled back to a previously-captured git checkpoint.
+    ThreadReverted {
+        id: EntityId,
+        git_ref: String,
+        reverted_at: Timestamp,
+    },
 
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
@@ -76,6 +82,11 @@ pub enum DomainEvent {
     TurnCancelled {
         id: EntityId,
         completed_at: Timestamp,
+    },
+    /// An in-progress turn was interrupted (e.g. user pressed stop) while still running.
+    TurnInterrupted {
+        id: EntityId,
+        interrupted_at: Timestamp,
     },
     TurnFilesModified {
         id: EntityId,
@@ -114,10 +125,12 @@ impl DomainEvent {
             | Self::ThreadStatusChanged { id, .. }
             | Self::ThreadTitleSet { id, .. }
             | Self::ThreadCheckpointSet { id, .. }
+            | Self::ThreadReverted { id, .. }
             | Self::TurnStarted { id, .. }
             | Self::TurnCompleted { id, .. }
             | Self::TurnFailed { id, .. }
             | Self::TurnCancelled { id, .. }
+            | Self::TurnInterrupted { id, .. }
             | Self::TurnFilesModified { id, .. }
             | Self::TurnCheckpointSet { id, .. }
             | Self::MessageAdded { id, .. }
@@ -134,10 +147,12 @@ impl DomainEvent {
             Self::ThreadStatusChanged { .. } => "ThreadStatusChanged",
             Self::ThreadTitleSet { .. } => "ThreadTitleSet",
             Self::ThreadCheckpointSet { .. } => "ThreadCheckpointSet",
+            Self::ThreadReverted { .. } => "ThreadReverted",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",
             Self::TurnCancelled { .. } => "TurnCancelled",
+            Self::TurnInterrupted { .. } => "TurnInterrupted",
             Self::TurnFilesModified { .. } => "TurnFilesModified",
             Self::TurnCheckpointSet { .. } => "TurnCheckpointSet",
             Self::MessageAdded { .. } => "MessageAdded",

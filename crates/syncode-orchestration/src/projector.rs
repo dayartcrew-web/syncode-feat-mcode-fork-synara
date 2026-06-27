@@ -107,6 +107,15 @@ impl Projector {
                 }
             }
 
+            DomainEvent::ThreadReverted { id, git_ref, reverted_at } => {
+                // A revert restores the thread to a captured checkpoint: record it as the
+                // thread's current checkpoint and bump the updated_at watermark.
+                if let Some(thread) = store.threads.get_mut(&id.as_str()) {
+                    thread.git_checkpoint = Some(git_ref.clone());
+                    thread.updated_at = reverted_at.to_string();
+                }
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at,
             } => {
@@ -155,6 +164,13 @@ impl Projector {
                 if let Some(turn) = store.turns.get_mut(&id.as_str()) {
                     turn.status = "cancelled".to_string();
                     turn.completed_at = Some(completed_at.to_string());
+                }
+            }
+
+            DomainEvent::TurnInterrupted { id, interrupted_at } => {
+                if let Some(turn) = store.turns.get_mut(&id.as_str()) {
+                    turn.status = "interrupted".to_string();
+                    turn.completed_at = Some(interrupted_at.to_string());
                 }
             }
 

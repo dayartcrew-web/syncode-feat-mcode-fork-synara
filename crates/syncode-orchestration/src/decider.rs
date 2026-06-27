@@ -49,6 +49,11 @@ pub enum Command {
         id: EntityId,
         title: String,
     },
+    /// Roll a thread back to a previously-captured git checkpoint.
+    RevertToCheckpoint {
+        thread_id: EntityId,
+        git_ref: String,
+    },
 
     // ─── Turn Commands ────────────────────────────────────────────
     StartTurn {
@@ -66,6 +71,10 @@ pub enum Command {
         error: String,
     },
     CancelTurn {
+        id: EntityId,
+    },
+    /// Interrupt an in-progress (running) turn.
+    InterruptTurn {
         id: EntityId,
     },
     RecordTurnFiles {
@@ -124,6 +133,12 @@ pub enum DeciderError {
     #[error("Turn already cancelled")]
     TurnAlreadyCancelled,
 
+    #[error("Turn is not running; cannot interrupt (current status: {0})")]
+    TurnNotRunning(String),
+
+    #[error("Checkpoint git ref cannot be empty")]
+    EmptyCheckpointRef,
+
     #[error("Invalid thread status for this operation: {0}")]
     InvalidThreadStatus(String),
 
@@ -173,6 +188,9 @@ impl Decider {
             Command::SetThreadTitle { id, title } => {
                 Self::decide_set_thread_title(id, current_state, title)
             }
+            Command::RevertToCheckpoint { thread_id, git_ref } => {
+                Self::decide_revert_to_checkpoint(thread_id, current_state, git_ref)
+            }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
             }
@@ -184,6 +202,9 @@ impl Decider {
             }
             Command::CancelTurn { id } => {
                 Self::decide_cancel_turn(id, current_state)
+            }
+            Command::InterruptTurn { id } => {
+                Self::decide_interrupt_turn(id, current_state)
             }
             Command::RecordTurnFiles { id, files } => {
                 Self::decide_record_turn_files(id, files)
@@ -338,6 +359,27 @@ impl Decider {
         Ok(vec![DomainEvent::ThreadTitleSet { id, title }])
     }
 
+    fn decide_revert_to_checkpoint(
+        thread_id: EntityId,
+        state: Option<&serde_json::Value>,
+        git_ref: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist (extract_thread_status errors if state is None).
+        let _ = Self::extract_thread_status(state, &thread_id)?;
+
+        // Guard: a revert target must be specified.
+        let git_ref_trimmed = git_ref.trim().to_string();
+        if git_ref_trimmed.is_empty() {
+            return Err(DeciderError::EmptyCheckpointRef);
+        }
+
+        Ok(vec![DomainEvent::ThreadReverted {
+            id: thread_id,
+            git_ref: git_ref_trimmed,
+            reverted_at: Timestamp::now(),
+        }])
+    }
+
     // ─── Turn Decisions ──────────────────────────────────────────
 
     fn decide_start_turn(
@@ -413,6 +455,22 @@ impl Decider {
         Ok(vec![DomainEvent::TurnCancelled {
             id,
             completed_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_interrupt_turn(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: only a running turn can be interrupted.
+        let status = Self::extract_turn_status(state, &id)?;
+        if status != "running" {
+            return Err(DeciderError::TurnNotRunning(status));
+        }
+
+        Ok(vec![DomainEvent::TurnInterrupted {
+            id,
+            interrupted_at: Timestamp::now(),
         }])
     }
 
@@ -803,5 +861,93 @@ mod tests {
             }
             _ => panic!("expected MessageAdded"),
         }
+    }
+
+    // ─── InterruptTurn / RevertToCheckpoint tests ────────────────
+
+    #[test]
+    fn interrupt_turn_running_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::InterruptTurn { id },
+            Some(&turn_state_running()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::TurnInterrupted { id: ev_id, .. } => assert_eq!(ev_id, &id),
+            _ => panic!("expected TurnInterrupted"),
+        }
+    }
+
+    #[test]
+    fn interrupt_turn_non_running_rejected() {
+        let id = EntityId::new();
+        // pending turn cannot be interrupted
+        let result = Decider::decide(
+            Command::InterruptTurn { id },
+            Some(&turn_state_pending()),
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::TurnNotRunning(_)));
+
+        // completed turn cannot be interrupted
+        let id2 = EntityId::new();
+        let result2 = Decider::decide(
+            Command::InterruptTurn { id: id2 },
+            Some(&serde_json::json!({"status": "completed"})),
+        );
+        assert!(matches!(result2.unwrap_err(), DeciderError::TurnNotRunning(_)));
+    }
+
+    #[test]
+    fn interrupt_turn_not_found() {
+        let id = EntityId::new();
+        let result = Decider::decide(Command::InterruptTurn { id }, None);
+        assert!(matches!(result.unwrap_err(), DeciderError::TurnNotFound(_)));
+    }
+
+    #[test]
+    fn revert_to_checkpoint_success() {
+        let tid = EntityId::new();
+        let events = Decider::decide(
+            Command::RevertToCheckpoint {
+                thread_id: tid,
+                git_ref: "abc1234".to_string(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadReverted { id, git_ref, .. } => {
+                assert_eq!(id, &tid);
+                assert_eq!(git_ref, "abc1234");
+            }
+            _ => panic!("expected ThreadReverted"),
+        }
+    }
+
+    #[test]
+    fn revert_to_checkpoint_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::RevertToCheckpoint {
+                thread_id: tid,
+                git_ref: "abc1234".to_string(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn revert_to_checkpoint_empty_ref_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::RevertToCheckpoint {
+                thread_id: tid,
+                git_ref: "   ".to_string(),
+            },
+            Some(&thread_state_active()),
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::EmptyCheckpointRef));
     }
 }

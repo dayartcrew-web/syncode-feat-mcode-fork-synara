@@ -243,6 +243,17 @@ impl ProjectionManager {
                 .await?;
             }
 
+            DomainEvent::ThreadReverted { id, git_ref, reverted_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_threads SET git_checkpoint = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(git_ref)
+                .bind(reverted_at.to_string())
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at, ..
             } => {
@@ -311,6 +322,16 @@ impl ProjectionManager {
                     "UPDATE view_turns SET status = 'cancelled', completed_at = ? WHERE id = ?",
                 )
                 .bind(completed_at.to_string())
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::TurnInterrupted { id, interrupted_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_turns SET status = 'interrupted', completed_at = ? WHERE id = ?",
+                )
+                .bind(interrupted_at.to_string())
                 .bind(id.to_string())
                 .execute(&self.pool)
                 .await?;
