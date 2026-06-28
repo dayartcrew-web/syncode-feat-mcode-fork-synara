@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use syncode_core::EntityId;
 
-use crate::decider::Command;
+use crate::decider::{Command, ImportedMessage};
 use crate::pipeline::{CommandResult, Orchestrator, OrchestrationError};
 use crate::read_model::{
     ActivityView, MessageView, ProjectView, ThreadView, TurnView,
@@ -172,6 +172,86 @@ impl ApplicationService {
         id: EntityId,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator.handle_command(Command::DeleteThread { id }).await
+    }
+
+    /// Create a thread by handoff from a source thread, importing its messages.
+    /// Faithful to mcode `thread.handoff.create`.
+    pub async fn handoff_create_thread(
+        &self,
+        project_id: EntityId,
+        provider_id: String,
+        model: String,
+        source_thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.create_thread_from_source(
+            project_id,
+            provider_id,
+            model,
+            source_thread_id,
+            imported_messages,
+            |project_id, provider_id, model, source_thread_id, imported_messages| {
+                Command::HandoffCreateThread {
+                    project_id,
+                    provider_id,
+                    model,
+                    source_thread_id,
+                    imported_messages,
+                }
+            },
+        )
+        .await
+    }
+
+    /// Create a thread by forking a source thread, importing its messages.
+    /// Faithful to mcode `thread.fork.create`.
+    pub async fn fork_create_thread(
+        &self,
+        project_id: EntityId,
+        provider_id: String,
+        model: String,
+        source_thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.create_thread_from_source(
+            project_id,
+            provider_id,
+            model,
+            source_thread_id,
+            imported_messages,
+            |project_id, provider_id, model, source_thread_id, imported_messages| {
+                Command::ForkCreateThread {
+                    project_id,
+                    provider_id,
+                    model,
+                    source_thread_id,
+                    imported_messages,
+                }
+            },
+        )
+        .await
+    }
+
+    /// Shared precondition checks for handoff/fork thread creation: the parent
+    /// project and the source thread must both exist in the read model.
+    async fn create_thread_from_source(
+        &self,
+        project_id: EntityId,
+        provider_id: String,
+        model: String,
+        source_thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+        build: impl Fn(EntityId, String, String, EntityId, Vec<ImportedMessage>) -> Command,
+    ) -> Result<CommandResult, OrchestrationError> {
+        if self.get_project(&project_id.to_string()).await.is_none() {
+            return Err(OrchestrationError::ProjectNotFound(project_id));
+        }
+        if self.get_thread(&source_thread_id.to_string()).await.is_none() {
+            return Err(OrchestrationError::ThreadNotFound(source_thread_id));
+        }
+        self.orchestrator
+            .handle_command(build(project_id, provider_id, model, source_thread_id, imported_messages))
+            .await
     }
 
     /// Cancel a thread (and any in-progress turns).
@@ -579,6 +659,64 @@ mod tests {
         assert_eq!(result.events[0].event.event_type_name(), "ThreadDeleted");
         // Tombstone removes it from the read model
         assert!(svc.get_thread(&tid.to_string()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handoff_create_thread_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+
+        // Source thread must exist
+        let source = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let source_id = source.events[0].event.aggregate_id();
+
+        let imported = vec![
+            ImportedMessage { source_message_id: EntityId::new(), role: "user".into(), text: "hi".into() },
+            ImportedMessage { source_message_id: EntityId::new(), role: "assistant".into(), text: "hello".into() },
+        ];
+        let result = svc
+            .handoff_create_thread(pid, "anthropic".into(), "claude-3".into(), source_id, imported)
+            .await
+            .unwrap();
+
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadCreated");
+        assert_eq!(result.events[1].event.event_type_name(), "ThreadMessagesImported");
+    }
+
+    #[tokio::test]
+    async fn test_handoff_create_rejects_unknown_source_thread() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+
+        let result = svc
+            .handoff_create_thread(pid, "anthropic".into(), "claude-3".into(), EntityId::new(), vec![])
+            .await;
+        assert!(matches!(result, Err(OrchestrationError::ThreadNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_fork_create_thread_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let source = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let source_id = source.events[0].event.aggregate_id();
+
+        let result = svc
+            .fork_create_thread(pid, "openai".into(), "gpt-4".into(), source_id, vec![])
+            .await
+            .unwrap();
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[1].event.event_type_name(), "ThreadMessagesImported");
     }
 
     #[tokio::test]

@@ -54,6 +54,9 @@ pub enum OrchestrationError {
 
     #[error("Project not found: {0}")]
     ProjectNotFound(EntityId),
+
+    #[error("Thread not found: {0}")]
+    ThreadNotFound(EntityId),
 }
 
 /// The Orchestrator is the central pipeline that processes commands.
@@ -253,6 +256,8 @@ impl Orchestrator {
             // Create commands: the Decider generates the ID
             Command::CreateProject { .. }
             | Command::CreateThread { .. }
+            | Command::HandoffCreateThread { .. }
+            | Command::ForkCreateThread { .. }
             | Command::StartTurn { .. }
             | Command::AddMessage { .. } => None,
 
@@ -347,6 +352,11 @@ impl Orchestrator {
             }
 
             Command::AddMessage { .. } => None,
+
+            // Thread-creation-by-import: the Decider trusts the command (project
+            // and source-thread existence are enforced at the application layer).
+            Command::HandoffCreateThread { .. }
+            | Command::ForkCreateThread { .. } => None,
         }
     }
 

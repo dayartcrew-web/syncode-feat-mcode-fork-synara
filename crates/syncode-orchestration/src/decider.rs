@@ -10,6 +10,20 @@ use syncode_core::{
 };
 use thiserror::Error;
 
+// ─── Imported Message (handoff/fork) ──────────────────────────────
+
+/// A message carried over from a source thread during a handoff or fork.
+///
+/// Faithful to mcode's `ThreadHandoffImportedMessage` shape (messageId, role,
+/// text, createdAt). We capture the essentials needed to record the import;
+/// attachments are deferred.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedMessage {
+    pub source_message_id: EntityId,
+    pub role: String,
+    pub text: String,
+}
+
 // ─── Commands ─────────────────────────────────────────────────────
 
 /// All commands in the orchestration bounded context.
@@ -69,6 +83,24 @@ pub enum Command {
     /// Delete a thread (tombstone). Faithful to mcode `thread.delete`.
     DeleteThread {
         id: EntityId,
+    },
+    /// Create a thread by handoff from a source thread, importing its
+    /// messages. Faithful to mcode `thread.handoff.create`.
+    HandoffCreateThread {
+        project_id: EntityId,
+        provider_id: String,
+        model: String,
+        source_thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+    },
+    /// Create a thread by forking a source thread, importing its messages.
+    /// Faithful to mcode `thread.fork.create`.
+    ForkCreateThread {
+        project_id: EntityId,
+        provider_id: String,
+        model: String,
+        source_thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
     },
 
     // ─── Turn Commands ────────────────────────────────────────────
@@ -218,6 +250,20 @@ impl Decider {
             }
             Command::DeleteThread { id } => {
                 Self::decide_delete_thread(id, current_state)
+            }
+            Command::HandoffCreateThread {
+                project_id, provider_id, model, source_thread_id, imported_messages,
+            } => {
+                Self::decide_thread_with_import(
+                    project_id, provider_id, model, source_thread_id, imported_messages,
+                )
+            }
+            Command::ForkCreateThread {
+                project_id, provider_id, model, source_thread_id, imported_messages,
+            } => {
+                Self::decide_thread_with_import(
+                    project_id, provider_id, model, source_thread_id, imported_messages,
+                )
             }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
@@ -473,6 +519,41 @@ impl Decider {
             id,
             deleted_at: Timestamp::now(),
         }])
+    }
+
+    /// Shared decision logic for handoff/fork thread creation.
+    ///
+    /// Emits a `ThreadCreated` for the new thread, then a `ThreadMessagesImported`
+    /// recording the source thread and the number of imported messages — faithful
+    /// to mcode's `thread.create` + internal `thread.messages.import` sequence.
+    /// The decider is pure and trusts the command (project/source existence is
+    /// enforced at the application layer, like `CreateThread`).
+    fn decide_thread_with_import(
+        project_id: EntityId,
+        provider_id: String,
+        model: String,
+        source_thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let id = EntityId::new();
+        let now = Timestamp::now();
+        let count = imported_messages.len() as u32;
+
+        Ok(vec![
+            DomainEvent::ThreadCreated {
+                id,
+                project_id,
+                provider_id,
+                model,
+                created_at: now,
+            },
+            DomainEvent::ThreadMessagesImported {
+                thread_id: id,
+                source_thread_id,
+                count,
+                imported_at: now,
+            },
+        ])
     }
 
     // ─── Turn Decisions ──────────────────────────────────────────
@@ -1128,5 +1209,81 @@ mod tests {
         let id = EntityId::new();
         let result = Decider::decide(Command::DeleteThread { id }, None);
         assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    // ─── Handoff / fork thread creation ───────────────────────────
+
+    fn imported(role: &str, text: &str) -> ImportedMessage {
+        ImportedMessage {
+            source_message_id: EntityId::new(),
+            role: role.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn handoff_create_thread_emits_created_and_import() {
+        let pid = EntityId::new();
+        let src = EntityId::new();
+        let events = Decider::decide(
+            Command::HandoffCreateThread {
+                project_id: pid,
+                provider_id: "anthropic".into(),
+                model: "claude-3".into(),
+                source_thread_id: src,
+                imported_messages: vec![imported("user", "hi"), imported("assistant", "hello")],
+            },
+            None,
+        ).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], DomainEvent::ThreadCreated { .. }));
+        match &events[1] {
+            DomainEvent::ThreadMessagesImported { source_thread_id, count, .. } => {
+                assert_eq!(*source_thread_id, src);
+                assert_eq!(*count, 2);
+            }
+            _ => panic!("expected ThreadMessagesImported"),
+        }
+    }
+
+    #[test]
+    fn fork_create_thread_emits_created_and_import() {
+        let pid = EntityId::new();
+        let src = EntityId::new();
+        let events = Decider::decide(
+            Command::ForkCreateThread {
+                project_id: pid,
+                provider_id: "openai".into(),
+                model: "gpt-4".into(),
+                source_thread_id: src,
+                imported_messages: vec![imported("user", "q")],
+            },
+            None,
+        ).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], DomainEvent::ThreadCreated { .. }));
+        assert!(matches!(events[1], DomainEvent::ThreadMessagesImported { count: 1, .. }));
+    }
+
+    #[test]
+    fn handoff_create_thread_empty_messages_still_records_source() {
+        let pid = EntityId::new();
+        let src = EntityId::new();
+        let events = Decider::decide(
+            Command::HandoffCreateThread {
+                project_id: pid,
+                provider_id: "anthropic".into(),
+                model: "claude-3".into(),
+                source_thread_id: src,
+                imported_messages: vec![],
+            },
+            None,
+        ).unwrap();
+        // Source linkage preserved even with zero imported messages.
+        assert!(matches!(
+            events[1],
+            DomainEvent::ThreadMessagesImported { count: 0, source_thread_id, .. } if source_thread_id == src
+        ));
     }
 }

@@ -82,6 +82,17 @@ pub enum DomainEvent {
         id: EntityId,
         deleted_at: Timestamp,
     },
+    /// Messages were imported into a thread from a source thread (handoff/fork).
+    /// Faithful to mcode's internal `thread.messages.import`: records the new
+    /// thread, its source, and the number of imported messages. The message
+    /// bodies live in the command; this event is the durable record of the
+    /// import (read-model materialization of imported bodies is deferred).
+    ThreadMessagesImported {
+        thread_id: EntityId,
+        source_thread_id: EntityId,
+        count: u32,
+        imported_at: Timestamp,
+    },
 
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
@@ -162,6 +173,9 @@ impl DomainEvent {
             | Self::TurnCheckpointSet { id, .. }
             | Self::MessageAdded { id, .. }
             | Self::ActivityLogged { id, .. } => *id,
+
+            // Events keyed by a differently-named aggregate field.
+            Self::ThreadMessagesImported { thread_id, .. } => *thread_id,
         }
     }
 
@@ -179,6 +193,7 @@ impl DomainEvent {
             Self::ThreadArchived { .. } => "ThreadArchived",
             Self::ThreadUnarchived { .. } => "ThreadUnarchived",
             Self::ThreadDeleted { .. } => "ThreadDeleted",
+            Self::ThreadMessagesImported { .. } => "ThreadMessagesImported",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",

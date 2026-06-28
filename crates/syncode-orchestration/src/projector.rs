@@ -143,6 +143,13 @@ impl Projector {
                 store.threads.remove(&id.as_str());
             }
 
+            DomainEvent::ThreadMessagesImported { .. } => {
+                // Handoff/fork import is recorded as a durable event (source of truth).
+                // Materializing imported message bodies into the queryable read model is
+                // deferred — syncode's messages are turn-scoped, unlike mcode's thread-scoped
+                // imported messages.
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at,
             } => {

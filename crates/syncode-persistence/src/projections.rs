@@ -328,6 +328,12 @@ impl ProjectionManager {
                 .await?;
             }
 
+            DomainEvent::ThreadMessagesImported { .. } => {
+                // Handoff/fork import is durably persisted in the event store. Read-model
+                // materialization of imported message bodies is deferred (syncode messages
+                // are turn-scoped). No projection mutation needed here.
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at, ..
             } => {
