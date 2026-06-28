@@ -265,7 +265,10 @@ impl Orchestrator {
             Command::PauseThread { id, .. }
             | Command::ResumeThread { id, .. }
             | Command::CompleteThread { id, .. }
-            | Command::CancelThread { id, .. } => Some(*id),
+            | Command::CancelThread { id, .. }
+            | Command::ArchiveThread { id, .. }
+            | Command::UnarchiveThread { id, .. }
+            | Command::DeleteThread { id, .. } => Some(*id),
 
             // Revert targets the thread's checkpoint stream
             Command::RevertToCheckpoint { thread_id, .. } => Some(*thread_id),
@@ -311,7 +314,10 @@ impl Orchestrator {
             | Command::ResumeThread { .. }
             | Command::CompleteThread { .. }
             | Command::CancelThread { .. }
-            | Command::RevertToCheckpoint { .. } => {
+            | Command::RevertToCheckpoint { .. }
+            | Command::ArchiveThread { .. }
+            | Command::UnarchiveThread { .. }
+            | Command::DeleteThread { .. } => {
                 read_model.threads.get(&id.as_str()).map(|t| {
                     serde_json::json!({"status": t.status})
                 })

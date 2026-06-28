@@ -58,6 +58,18 @@ pub enum Command {
         thread_id: EntityId,
         git_ref: String,
     },
+    /// Archive a thread. Faithful to mcode `thread.archive`.
+    ArchiveThread {
+        id: EntityId,
+    },
+    /// Unarchive (restore) a thread. Faithful to mcode `thread.unarchive`.
+    UnarchiveThread {
+        id: EntityId,
+    },
+    /// Delete a thread (tombstone). Faithful to mcode `thread.delete`.
+    DeleteThread {
+        id: EntityId,
+    },
 
     // ─── Turn Commands ────────────────────────────────────────────
     StartTurn {
@@ -197,6 +209,15 @@ impl Decider {
             }
             Command::RevertToCheckpoint { thread_id, git_ref } => {
                 Self::decide_revert_to_checkpoint(thread_id, current_state, git_ref)
+            }
+            Command::ArchiveThread { id } => {
+                Self::decide_archive_thread(id, current_state)
+            }
+            Command::UnarchiveThread { id } => {
+                Self::decide_unarchive_thread(id, current_state)
+            }
+            Command::DeleteThread { id } => {
+                Self::decide_delete_thread(id, current_state)
             }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
@@ -400,6 +421,57 @@ impl Decider {
             id: thread_id,
             git_ref: git_ref_trimmed,
             reverted_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_archive_thread(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let status = Self::extract_thread_status(state, &id)?;
+        if status == "archived" {
+            return Err(DeciderError::InvalidStateTransition {
+                aggregate: "Thread",
+                current: status,
+                target: "archived".to_string(),
+            });
+        }
+
+        Ok(vec![DomainEvent::ThreadArchived {
+            id,
+            archived_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_unarchive_thread(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let status = Self::extract_thread_status(state, &id)?;
+        if status != "archived" {
+            return Err(DeciderError::InvalidStateTransition {
+                aggregate: "Thread",
+                current: status,
+                target: "active".to_string(),
+            });
+        }
+
+        Ok(vec![DomainEvent::ThreadUnarchived {
+            id,
+            unarchived_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_delete_thread(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. Any existing thread may be deleted.
+        let _ = Self::extract_thread_status(state, &id)?;
+
+        Ok(vec![DomainEvent::ThreadDeleted {
+            id,
+            deleted_at: Timestamp::now(),
         }])
     }
 
@@ -994,5 +1066,67 @@ mod tests {
             Some(&thread_state_active()),
         );
         assert!(matches!(result.unwrap_err(), DeciderError::EmptyCheckpointRef));
+    }
+
+    // ─── Thread lifecycle: delete / archive / unarchive ───────────
+
+    #[test]
+    fn archive_thread_active_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::ArchiveThread { id },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], DomainEvent::ThreadArchived { .. }));
+    }
+
+    #[test]
+    fn archive_thread_already_archived_rejected() {
+        let id = EntityId::new();
+        let result = Decider::decide(
+            Command::ArchiveThread { id },
+            Some(&serde_json::json!({"status": "archived"})),
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::InvalidStateTransition { .. }));
+    }
+
+    #[test]
+    fn unarchive_thread_archived_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::UnarchiveThread { id },
+            Some(&serde_json::json!({"status": "archived"})),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], DomainEvent::ThreadUnarchived { .. }));
+    }
+
+    #[test]
+    fn unarchive_thread_non_archived_rejected() {
+        let id = EntityId::new();
+        let result = Decider::decide(
+            Command::UnarchiveThread { id },
+            Some(&thread_state_active()),
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::InvalidStateTransition { .. }));
+    }
+
+    #[test]
+    fn delete_thread_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::DeleteThread { id },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], DomainEvent::ThreadDeleted { .. }));
+    }
+
+    #[test]
+    fn delete_thread_not_found() {
+        let id = EntityId::new();
+        let result = Decider::decide(Command::DeleteThread { id }, None);
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
     }
 }

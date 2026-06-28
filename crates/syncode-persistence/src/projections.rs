@@ -288,6 +288,46 @@ impl ProjectionManager {
                 .await?;
             }
 
+            DomainEvent::ThreadArchived { id, archived_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_threads SET status = 'archived', updated_at = ? WHERE id = ?",
+                )
+                .bind(archived_at.to_string())
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::ThreadUnarchived { id, unarchived_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_threads SET status = 'active', updated_at = ? WHERE id = ?",
+                )
+                .bind(unarchived_at.to_string())
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::ThreadDeleted { id, .. } => {
+                // Tombstone: cascade-remove the thread's messages and turns, then the
+                // thread itself (view tables lack ON DELETE CASCADE foreign keys).
+                let tid = id.to_string();
+                sqlx::query(
+                    "DELETE FROM view_messages WHERE turn_id IN (SELECT id FROM view_turns WHERE thread_id = ?)",
+                )
+                .bind(&tid)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query("DELETE FROM view_turns WHERE thread_id = ?")
+                .bind(&tid)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query("DELETE FROM view_threads WHERE id = ?")
+                .bind(&tid)
+                .execute(&self.pool)
+                .await?;
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at, ..
             } => {

@@ -65,6 +65,23 @@ pub enum DomainEvent {
         git_ref: String,
         reverted_at: Timestamp,
     },
+    /// A thread was archived. Faithful to mcode `thread.archived` {threadId, archivedAt}.
+    ThreadArchived {
+        id: EntityId,
+        archived_at: Timestamp,
+    },
+    /// A thread was unarchived (restored to active). Faithful to mcode
+    /// `thread.unarchived`.
+    ThreadUnarchived {
+        id: EntityId,
+        unarchived_at: Timestamp,
+    },
+    /// A thread was deleted (tombstone). Faithful to mcode `thread.deleted`
+    /// {threadId, deletedAt} — hard, event-sourced delete.
+    ThreadDeleted {
+        id: EntityId,
+        deleted_at: Timestamp,
+    },
 
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
@@ -133,6 +150,9 @@ impl DomainEvent {
             | Self::ThreadTitleSet { id, .. }
             | Self::ThreadCheckpointSet { id, .. }
             | Self::ThreadReverted { id, .. }
+            | Self::ThreadArchived { id, .. }
+            | Self::ThreadUnarchived { id, .. }
+            | Self::ThreadDeleted { id, .. }
             | Self::TurnStarted { id, .. }
             | Self::TurnCompleted { id, .. }
             | Self::TurnFailed { id, .. }
@@ -156,6 +176,9 @@ impl DomainEvent {
             Self::ThreadTitleSet { .. } => "ThreadTitleSet",
             Self::ThreadCheckpointSet { .. } => "ThreadCheckpointSet",
             Self::ThreadReverted { .. } => "ThreadReverted",
+            Self::ThreadArchived { .. } => "ThreadArchived",
+            Self::ThreadUnarchived { .. } => "ThreadUnarchived",
+            Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",

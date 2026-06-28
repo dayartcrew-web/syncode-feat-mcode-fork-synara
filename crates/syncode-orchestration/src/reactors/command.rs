@@ -118,6 +118,9 @@ impl ProviderCommandReactor {
             | Command::ResumeThread { .. }
             | Command::CompleteThread { .. }
             | Command::SetThreadTitle { .. }
+            | Command::ArchiveThread { .. }
+            | Command::UnarchiveThread { .. }
+            | Command::DeleteThread { .. }
             | Command::RevertToCheckpoint { .. }
             | Command::CompleteTurn { .. }
             | Command::RecordTurnFiles { .. }

@@ -150,6 +150,30 @@ impl ApplicationService {
         self.orchestrator.handle_command(Command::ResumeThread { id }).await
     }
 
+    /// Archive a thread. Faithful to mcode `thread.archive`.
+    pub async fn archive_thread(
+        &self,
+        id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator.handle_command(Command::ArchiveThread { id }).await
+    }
+
+    /// Unarchive (restore) a thread. Faithful to mcode `thread.unarchive`.
+    pub async fn unarchive_thread(
+        &self,
+        id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator.handle_command(Command::UnarchiveThread { id }).await
+    }
+
+    /// Delete a thread (tombstone). Faithful to mcode `thread.delete`.
+    pub async fn delete_thread(
+        &self,
+        id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator.handle_command(Command::DeleteThread { id }).await
+    }
+
     /// Cancel a thread (and any in-progress turns).
     pub async fn cancel_thread(
         &self,
@@ -499,6 +523,62 @@ mod tests {
             result,
             Err(OrchestrationError::ProjectNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_thread_archive_unarchive_lifecycle() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+
+        let thread = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let tid = thread.events[0].event.aggregate_id();
+
+        // Archive
+        let archived = svc.archive_thread(tid).await.unwrap();
+        assert_eq!(archived.events[0].event.event_type_name(), "ThreadArchived");
+        assert_eq!(svc.get_thread(&tid.to_string()).await.unwrap().status, "archived");
+
+        // Unarchive restores to active
+        let unarchived = svc.unarchive_thread(tid).await.unwrap();
+        assert_eq!(unarchived.events[0].event.event_type_name(), "ThreadUnarchived");
+        assert_eq!(svc.get_thread(&tid.to_string()).await.unwrap().status, "active");
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_non_archived_rejected() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thread = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let tid = thread.events[0].event.aggregate_id();
+
+        // Active thread cannot be unarchived (Decider guard).
+        let result = svc.unarchive_thread(tid).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_thread_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thread = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let tid = thread.events[0].event.aggregate_id();
+
+        let result = svc.delete_thread(tid).await.unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadDeleted");
+        // Tombstone removes it from the read model
+        assert!(svc.get_thread(&tid.to_string()).await.is_none());
     }
 
     #[tokio::test]

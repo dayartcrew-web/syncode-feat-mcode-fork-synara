@@ -123,6 +123,26 @@ impl Projector {
                 }
             }
 
+            DomainEvent::ThreadArchived { id, archived_at } => {
+                if let Some(thread) = store.threads.get_mut(&id.as_str()) {
+                    thread.status = "archived".to_string();
+                    thread.updated_at = archived_at.to_string();
+                }
+            }
+
+            DomainEvent::ThreadUnarchived { id, unarchived_at } => {
+                if let Some(thread) = store.threads.get_mut(&id.as_str()) {
+                    thread.status = "active".to_string();
+                    thread.updated_at = unarchived_at.to_string();
+                }
+            }
+
+            DomainEvent::ThreadDeleted { id, .. } => {
+                // Tombstone: drop the thread from the read model. Child turns remain
+                // in-memory (eventually consistent); the SQLite projection cascades.
+                store.threads.remove(&id.as_str());
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at,
             } => {
