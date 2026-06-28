@@ -30,6 +30,12 @@ pub enum DomainEvent {
         default_model: Option<String>,
         updated_at: Timestamp,
     },
+    /// A project was deleted (tombstone). Faithful to mcode `project.deleted`
+    /// payload `{ projectId, deletedAt }` — hard, event-sourced delete.
+    ProjectDeleted {
+        id: EntityId,
+        deleted_at: Timestamp,
+    },
 
     // ─── Thread Events ──────────────────────────────────────────────────
     ThreadCreated {
@@ -121,6 +127,7 @@ impl DomainEvent {
         match self {
             Self::ProjectCreated { id, .. }
             | Self::ProjectUpdated { id, .. }
+            | Self::ProjectDeleted { id, .. }
             | Self::ThreadCreated { id, .. }
             | Self::ThreadStatusChanged { id, .. }
             | Self::ThreadTitleSet { id, .. }
@@ -143,6 +150,7 @@ impl DomainEvent {
         match self {
             Self::ProjectCreated { .. } => "ProjectCreated",
             Self::ProjectUpdated { .. } => "ProjectUpdated",
+            Self::ProjectDeleted { .. } => "ProjectDeleted",
             Self::ThreadCreated { .. } => "ThreadCreated",
             Self::ThreadStatusChanged { .. } => "ThreadStatusChanged",
             Self::ThreadTitleSet { .. } => "ThreadTitleSet",

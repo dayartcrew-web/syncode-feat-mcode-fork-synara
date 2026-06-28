@@ -64,6 +64,13 @@ impl Projector {
                 }
             }
 
+            DomainEvent::ProjectDeleted { id, .. } => {
+                // Tombstone: drop the project from the read model. Child threads
+                // remain in the in-memory store (eventually consistent); the SQLite
+                // projection cascades their removal on persistence.
+                store.projects.remove(&id.as_str());
+            }
+
             DomainEvent::ThreadCreated {
                 id, project_id, provider_id, model, created_at,
             } => {

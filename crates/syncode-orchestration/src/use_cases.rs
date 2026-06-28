@@ -92,6 +92,22 @@ impl ApplicationService {
             .await
     }
 
+    /// Delete a project (tombstone). Faithful to mcode `project.delete`.
+    ///
+    /// Rejects with [`OrchestrationError::ProjectNotFound`] if the project does
+    /// not exist in the read model; the Decider mirrors the same guard.
+    pub async fn delete_project(
+        &self,
+        id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        if self.get_project(&id.to_string()).await.is_none() {
+            return Err(OrchestrationError::ProjectNotFound(id));
+        }
+        self.orchestrator
+            .handle_command(Command::DeleteProject { id })
+            .await
+    }
+
     // ─── Thread Command Use Cases ────────────────────────────────
 
     /// Create a new thread within a project.
@@ -455,6 +471,34 @@ mod tests {
         let project = svc.get_project(&project_id.to_string()).await;
         assert!(project.is_some());
         assert_eq!(project.unwrap().name, "My Project");
+    }
+
+    #[tokio::test]
+    async fn test_delete_project_use_case() {
+        let svc = make_service();
+        let proj_result = svc
+            .create_project("Doomed".into(), "/tmp/doomed".into())
+            .await
+            .unwrap();
+        let project_id = proj_result.events[0].event.aggregate_id();
+
+        // Delete it
+        let result = svc.delete_project(project_id).await.unwrap();
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].event.event_type_name(), "ProjectDeleted");
+
+        // Tombstone removes it from the read model
+        assert!(svc.get_project(&project_id.to_string()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_project_rejects_unknown_project() {
+        let svc = make_service();
+        let result = svc.delete_project(EntityId::new()).await;
+        assert!(matches!(
+            result,
+            Err(OrchestrationError::ProjectNotFound(_))
+        ));
     }
 
     #[tokio::test]

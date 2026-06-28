@@ -26,6 +26,10 @@ pub enum Command {
         provider_id: Option<String>,
         default_model: Option<String>,
     },
+    /// Delete a project (tombstone). Faithful to mcode `project.delete` { projectId }.
+    DeleteProject {
+        id: EntityId,
+    },
 
     // ─── Thread Commands ──────────────────────────────────────────
     CreateThread {
@@ -170,6 +174,9 @@ impl Decider {
             Command::UpdateProjectConfig { id, provider_id, default_model } => {
                 Self::decide_update_project(id, current_state, provider_id, default_model)
             }
+            Command::DeleteProject { id } => {
+                Self::decide_delete_project(id, current_state)
+            }
             Command::CreateThread { project_id, provider_id, model } => {
                 Self::decide_create_thread(project_id, provider_id, model)
             }
@@ -257,6 +264,22 @@ impl Decider {
             provider_id,
             default_model,
             updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_delete_project(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: the project must exist. mcode rejects `project.delete` on an
+        // unknown project; we surface the same invariant via ProjectNotFound.
+        if state.is_none() {
+            return Err(DeciderError::ProjectNotFound(id));
+        }
+
+        Ok(vec![DomainEvent::ProjectDeleted {
+            id,
+            deleted_at: Timestamp::now(),
         }])
     }
 
@@ -651,6 +674,28 @@ mod tests {
             }
             _ => panic!("expected ProjectUpdated"),
         }
+    }
+
+    #[test]
+    fn delete_project_success() {
+        let id = EntityId::new();
+        let state = serde_json::json!({ "id": id.as_str() });
+        let events = Decider::decide(
+            Command::DeleteProject { id },
+            Some(&state),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ProjectDeleted { id: ev_id, .. } => assert_eq!(ev_id, &id),
+            _ => panic!("expected ProjectDeleted"),
+        }
+    }
+
+    #[test]
+    fn delete_project_not_found() {
+        let id = EntityId::new();
+        let result = Decider::decide(Command::DeleteProject { id }, None);
+        assert!(matches!(result.unwrap_err(), DeciderError::ProjectNotFound(_)));
     }
 
     // ─── Thread tests ────────────────────────────────────────────

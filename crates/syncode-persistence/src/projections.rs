@@ -182,6 +182,40 @@ impl ProjectionManager {
                 .await?;
             }
 
+            DomainEvent::ProjectDeleted { id, .. } => {
+                // Tombstone: cascade-remove the project and its child threads,
+                // turns, and messages so a rebuild leaves no orphans (the view
+                // tables have no ON DELETE CASCADE foreign keys).
+                let pid = id.to_string();
+                sqlx::query(
+                    r#"
+                    DELETE FROM view_messages
+                    WHERE turn_id IN (
+                        SELECT t.id FROM view_turns t
+                        JOIN view_threads th ON t.thread_id = th.id
+                        WHERE th.project_id = ?
+                    )
+                    "#,
+                )
+                .bind(&pid)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query(
+                    "DELETE FROM view_turns WHERE thread_id IN (SELECT id FROM view_threads WHERE project_id = ?)",
+                )
+                .bind(&pid)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query("DELETE FROM view_threads WHERE project_id = ?")
+                .bind(&pid)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query("DELETE FROM view_projects WHERE id = ?")
+                .bind(&pid)
+                .execute(&self.pool)
+                .await?;
+            }
+
             DomainEvent::ThreadCreated {
                 id, project_id, provider_id, model, created_at, ..
             } => {
