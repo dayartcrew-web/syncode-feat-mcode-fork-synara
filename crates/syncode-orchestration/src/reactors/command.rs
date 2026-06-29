@@ -110,6 +110,21 @@ impl ProviderCommandReactor {
                 })
             }
 
+            Command::StopThreadSession { id: _ } => {
+                // Stop the thread's active provider session. SessionManager has no
+                // thread→session index yet, so stop all active sessions (same effect as
+                // CancelThread). A thread-scoped stop needs a session-by-thread lookup.
+                let active = self.session_manager.list_active_sessions().await;
+                for sid in active {
+                    let _ = self.session_manager.stop_session(adapter, &sid).await;
+                }
+                Ok(CommandReaction {
+                    handled: !self.session_manager.list_active_sessions().await.is_empty(),
+                    session_id: None,
+                    events: vec![],
+                })
+            }
+
             // Commands that don't need provider interaction
             Command::CreateProject { .. }
             | Command::UpdateProjectConfig { .. }

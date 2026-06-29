@@ -174,6 +174,16 @@ impl ApplicationService {
         self.orchestrator.handle_command(Command::DeleteThread { id }).await
     }
 
+    /// Stop the active provider session for a thread. Faithful to mcode
+    /// `thread.session.stop`. Emits a stop-request event; the reactor performs
+    /// the actual session stop as a side effect.
+    pub async fn stop_thread_session(
+        &self,
+        id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator.handle_command(Command::StopThreadSession { id }).await
+    }
+
     /// Create a thread by handoff from a source thread, importing its messages.
     /// Faithful to mcode `thread.handoff.create`.
     pub async fn handoff_create_thread(
@@ -659,6 +669,28 @@ mod tests {
         assert_eq!(result.events[0].event.event_type_name(), "ThreadDeleted");
         // Tombstone removes it from the read model
         assert!(svc.get_thread(&tid.to_string()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stop_thread_session_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thread = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let tid = thread.events[0].event.aggregate_id();
+
+        let result = svc.stop_thread_session(tid).await.unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadSessionStopRequested");
+    }
+
+    #[tokio::test]
+    async fn test_stop_thread_session_unknown_thread_rejected() {
+        let svc = make_service();
+        let result = svc.stop_thread_session(EntityId::new()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

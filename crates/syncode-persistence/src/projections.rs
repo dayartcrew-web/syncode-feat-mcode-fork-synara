@@ -334,6 +334,11 @@ impl ProjectionManager {
                 // are turn-scoped). No projection mutation needed here.
             }
 
+            DomainEvent::ThreadSessionStopRequested { .. } => {
+                // Transient stop request; the session stop is a reactor side effect.
+                // No projection mutation needed.
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at, ..
             } => {

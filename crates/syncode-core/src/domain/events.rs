@@ -93,6 +93,14 @@ pub enum DomainEvent {
         count: u32,
         imported_at: Timestamp,
     },
+    /// A request to stop the active provider session for a thread. Faithful to
+    /// mcode `thread.session.stop` → ThreadSessionStopRequestedPayload
+    /// {threadId, createdAt}. The "Requested" naming mirrors mcode: the actual
+    /// session stop is an async side effect handled by the command reactor.
+    ThreadSessionStopRequested {
+        id: EntityId,
+        requested_at: Timestamp,
+    },
 
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
@@ -164,6 +172,7 @@ impl DomainEvent {
             | Self::ThreadArchived { id, .. }
             | Self::ThreadUnarchived { id, .. }
             | Self::ThreadDeleted { id, .. }
+            | Self::ThreadSessionStopRequested { id, .. }
             | Self::TurnStarted { id, .. }
             | Self::TurnCompleted { id, .. }
             | Self::TurnFailed { id, .. }
@@ -194,6 +203,7 @@ impl DomainEvent {
             Self::ThreadUnarchived { .. } => "ThreadUnarchived",
             Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::ThreadMessagesImported { .. } => "ThreadMessagesImported",
+            Self::ThreadSessionStopRequested { .. } => "ThreadSessionStopRequested",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",

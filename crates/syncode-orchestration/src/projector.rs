@@ -150,6 +150,11 @@ impl Projector {
                 // imported messages.
             }
 
+            DomainEvent::ThreadSessionStopRequested { .. } => {
+                // Transient stop request; the actual session stop is a reactor side
+                // effect (SessionManager). No read-model mutation needed.
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at,
             } => {

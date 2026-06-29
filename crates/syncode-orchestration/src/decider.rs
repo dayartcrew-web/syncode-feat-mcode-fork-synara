@@ -102,6 +102,11 @@ pub enum Command {
         source_thread_id: EntityId,
         imported_messages: Vec<ImportedMessage>,
     },
+    /// Stop the active provider session for a thread. Faithful to mcode
+    /// `thread.session.stop`.
+    StopThreadSession {
+        id: EntityId,
+    },
 
     // ─── Turn Commands ────────────────────────────────────────────
     StartTurn {
@@ -264,6 +269,9 @@ impl Decider {
                 Self::decide_thread_with_import(
                     project_id, provider_id, model, source_thread_id, imported_messages,
                 )
+            }
+            Command::StopThreadSession { id } => {
+                Self::decide_stop_thread_session(id, current_state)
             }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
@@ -554,6 +562,20 @@ impl Decider {
                 imported_at: now,
             },
         ])
+    }
+
+    fn decide_stop_thread_session(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The actual provider-session stop is an async
+        // side effect handled by the command reactor (SessionManager).
+        let _ = Self::extract_thread_status(state, &id)?;
+
+        Ok(vec![DomainEvent::ThreadSessionStopRequested {
+            id,
+            requested_at: Timestamp::now(),
+        }])
     }
 
     // ─── Turn Decisions ──────────────────────────────────────────
@@ -1208,6 +1230,29 @@ mod tests {
     fn delete_thread_not_found() {
         let id = EntityId::new();
         let result = Decider::decide(Command::DeleteThread { id }, None);
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    // ─── Stop thread session ──────────────────────────────────────
+
+    #[test]
+    fn stop_thread_session_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::StopThreadSession { id },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadSessionStopRequested { id: ev_id, .. } => assert_eq!(ev_id, &id),
+            _ => panic!("expected ThreadSessionStopRequested"),
+        }
+    }
+
+    #[test]
+    fn stop_thread_session_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let result = Decider::decide(Command::StopThreadSession { id }, None);
         assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
     }
 
