@@ -147,6 +147,28 @@ pub enum Command {
         activity_type: String,
         description: String,
     },
+    /// Pin a message to a thread. Faithful to mcode `thread.pinned-message.add`.
+    AddPinnedMessage {
+        id: EntityId,
+        message_id: EntityId,
+    },
+    /// Unpin a message from a thread. Faithful to mcode `thread.pinned-message.remove`.
+    RemovePinnedMessage {
+        id: EntityId,
+        message_id: EntityId,
+    },
+    /// Set a pinned message's done flag. Faithful to mcode `thread.pinned-message.done.set`.
+    SetPinnedMessageDone {
+        id: EntityId,
+        message_id: EntityId,
+        done: bool,
+    },
+    /// Set a pinned message's label. Faithful to mcode `thread.pinned-message.label.set`.
+    SetPinnedMessageLabel {
+        id: EntityId,
+        message_id: EntityId,
+        label: Option<String>,
+    },
 
     // ─── Turn Commands ────────────────────────────────────────────
     StartTurn {
@@ -330,6 +352,18 @@ impl Decider {
             }
             Command::AppendThreadActivity { id, activity_type, description } => {
                 Self::decide_append_thread_activity(id, current_state, activity_type, description)
+            }
+            Command::AddPinnedMessage { id, message_id } => {
+                Self::decide_add_pinned_message(id, current_state, message_id)
+            }
+            Command::RemovePinnedMessage { id, message_id } => {
+                Self::decide_remove_pinned_message(id, current_state, message_id)
+            }
+            Command::SetPinnedMessageDone { id, message_id, done } => {
+                Self::decide_set_pinned_message_done(id, current_state, message_id, done)
+            }
+            Command::SetPinnedMessageLabel { id, message_id, label } => {
+                Self::decide_set_pinned_message_label(id, current_state, message_id, label)
             }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
@@ -737,6 +771,68 @@ impl Decider {
             activity_type,
             description,
             created_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_add_pinned_message(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        message_id: EntityId,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. mcode caps pinned messages at 100
+        // (PINNED_MESSAGES_MAX_COUNT); enforcing the cap needs the current pin set, deferred.
+        let _ = Self::extract_thread_status(state, &id)?;
+        let now = Timestamp::now();
+        Ok(vec![DomainEvent::PinnedMessageAdded {
+            thread_id: id,
+            message_id,
+            label: None,
+            done: false,
+            pinned_at: now,
+            updated_at: now,
+        }])
+    }
+
+    fn decide_remove_pinned_message(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        message_id: EntityId,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::PinnedMessageRemoved {
+            thread_id: id,
+            message_id,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_set_pinned_message_done(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        message_id: EntityId,
+        done: bool,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::PinnedMessageDoneSet {
+            thread_id: id,
+            message_id,
+            done,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_set_pinned_message_label(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        message_id: EntityId,
+        label: Option<String>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::PinnedMessageLabelSet {
+            thread_id: id,
+            message_id,
+            label,
+            updated_at: Timestamp::now(),
         }])
     }
 
@@ -1660,5 +1756,76 @@ mod tests {
             id, activity_type: "t".into(), description: "d".into(),
         }, None);
         assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    // ─── Pinned messages ─────────────────────────────────────────
+
+    #[test]
+    fn add_pinned_message_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::AddPinnedMessage { id, message_id: mid },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::PinnedMessageAdded { thread_id, message_id, label, done, .. } => {
+                assert_eq!(*thread_id, id);
+                assert_eq!(*message_id, mid);
+                assert!(label.is_none());
+                assert!(!*done);
+            }
+            _ => panic!("expected PinnedMessageAdded"),
+        }
+    }
+
+    #[test]
+    fn remove_pinned_message_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::RemovePinnedMessage { id, message_id: mid },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert!(matches!(events[0], DomainEvent::PinnedMessageRemoved { .. }));
+    }
+
+    #[test]
+    fn set_pinned_message_done_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::SetPinnedMessageDone { id, message_id: mid, done: true },
+            Some(&thread_state_active()),
+        ).unwrap();
+        match &events[0] {
+            DomainEvent::PinnedMessageDoneSet { done, .. } => assert!(*done),
+            _ => panic!("expected PinnedMessageDoneSet"),
+        }
+    }
+
+    #[test]
+    fn set_pinned_message_label_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::SetPinnedMessageLabel { id, message_id: mid, label: Some("todo".into()) },
+            Some(&thread_state_active()),
+        ).unwrap();
+        match &events[0] {
+            DomainEvent::PinnedMessageLabelSet { label, .. } => assert_eq!(label.as_deref(), Some("todo")),
+            _ => panic!("expected PinnedMessageLabelSet"),
+        }
+    }
+
+    #[test]
+    fn pinned_message_commands_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        assert!(Decider::decide(Command::AddPinnedMessage { id, message_id: mid }, None).is_err());
+        assert!(Decider::decide(Command::RemovePinnedMessage { id, message_id: mid }, None).is_err());
+        assert!(Decider::decide(Command::SetPinnedMessageDone { id, message_id: mid, done: true }, None).is_err());
+        assert!(Decider::decide(Command::SetPinnedMessageLabel { id, message_id: mid, label: None }, None).is_err());
     }
 }

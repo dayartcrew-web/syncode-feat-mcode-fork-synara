@@ -280,7 +280,11 @@ impl Orchestrator {
             | Command::RespondThreadApproval { id, .. }
             | Command::RespondThreadUserInput { id, .. }
             | Command::EditAndResendThreadMessage { id, .. }
-            | Command::AppendThreadActivity { id, .. } => Some(*id),
+            | Command::AppendThreadActivity { id, .. }
+            | Command::AddPinnedMessage { id, .. }
+            | Command::RemovePinnedMessage { id, .. }
+            | Command::SetPinnedMessageDone { id, .. }
+            | Command::SetPinnedMessageLabel { id, .. } => Some(*id),
 
             // Revert targets the thread's checkpoint stream
             Command::RevertToCheckpoint { thread_id, .. } => Some(*thread_id),
@@ -336,7 +340,11 @@ impl Orchestrator {
             | Command::RespondThreadApproval { .. }
             | Command::RespondThreadUserInput { .. }
             | Command::EditAndResendThreadMessage { .. }
-            | Command::AppendThreadActivity { .. } => {
+            | Command::AppendThreadActivity { .. }
+            | Command::AddPinnedMessage { .. }
+            | Command::RemovePinnedMessage { .. }
+            | Command::SetPinnedMessageDone { .. }
+            | Command::SetPinnedMessageLabel { .. } => {
                 read_model.threads.get(&id.as_str()).map(|t| {
                     serde_json::json!({"status": t.status})
                 })

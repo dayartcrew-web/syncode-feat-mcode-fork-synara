@@ -152,6 +152,10 @@ impl ProviderCommandReactor {
             | Command::SetThreadRuntimeMode { .. }
             | Command::SetThreadInteractionMode { .. }
             | Command::AppendThreadActivity { .. }
+            | Command::AddPinnedMessage { .. }
+            | Command::RemovePinnedMessage { .. }
+            | Command::SetPinnedMessageDone { .. }
+            | Command::SetPinnedMessageLabel { .. }
             | Command::HandoffCreateThread { .. }
             | Command::ForkCreateThread { .. }
             | Command::RevertToCheckpoint { .. }

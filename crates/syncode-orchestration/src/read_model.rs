@@ -89,3 +89,16 @@ pub struct ActivityView {
     pub metadata: serde_json::Value,
     pub created_at: String,
 }
+
+// ─── Pinned Message Read Model (thread sub-aggregate) ───────────
+
+/// Denormalized pinned-message view for queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinnedMessageView {
+    pub thread_id: String,
+    pub message_id: String,
+    pub label: Option<String>,
+    pub done: bool,
+    pub pinned_at: String,
+    pub updated_at: String,
+}

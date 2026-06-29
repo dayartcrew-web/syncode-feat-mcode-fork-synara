@@ -372,6 +372,52 @@ impl ApplicationService {
             .await
     }
 
+    /// Pin a message to a thread. Faithful to mcode `thread.pinned-message.add`.
+    pub async fn add_pinned_message(
+        &self,
+        id: EntityId,
+        message_id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::AddPinnedMessage { id, message_id })
+            .await
+    }
+
+    /// Unpin a message from a thread. Faithful to mcode `thread.pinned-message.remove`.
+    pub async fn remove_pinned_message(
+        &self,
+        id: EntityId,
+        message_id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::RemovePinnedMessage { id, message_id })
+            .await
+    }
+
+    /// Set a pinned message's done flag. Faithful to mcode `thread.pinned-message.done.set`.
+    pub async fn set_pinned_message_done(
+        &self,
+        id: EntityId,
+        message_id: EntityId,
+        done: bool,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::SetPinnedMessageDone { id, message_id, done })
+            .await
+    }
+
+    /// Set a pinned message's label. Faithful to mcode `thread.pinned-message.label.set`.
+    pub async fn set_pinned_message_label(
+        &self,
+        id: EntityId,
+        message_id: EntityId,
+        label: Option<String>,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::SetPinnedMessageLabel { id, message_id, label })
+            .await
+    }
+
     // ─── Turn Command Use Cases ──────────────────────────────────
 
     /// Start a conversation turn.
@@ -1220,6 +1266,38 @@ mod tests {
             .append_thread_activity(EntityId::new(), "t".into(), "d".into())
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pinned_message_lifecycle_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let tid = thr.events[0].event.aggregate_id();
+        let mid = EntityId::new();
+
+        let r = svc.add_pinned_message(tid, mid).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "PinnedMessageAdded");
+
+        let r = svc.set_pinned_message_done(tid, mid, true).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "PinnedMessageDoneSet");
+
+        let r = svc.set_pinned_message_label(tid, mid, Some("todo".into())).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "PinnedMessageLabelSet");
+
+        let r = svc.remove_pinned_message(tid, mid).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "PinnedMessageRemoved");
+    }
+
+    #[tokio::test]
+    async fn test_pinned_message_commands_unknown_thread_rejected() {
+        let svc = make_service();
+        let mid = EntityId::new();
+        assert!(svc.add_pinned_message(EntityId::new(), mid).await.is_err());
+        assert!(svc.remove_pinned_message(EntityId::new(), mid).await.is_err());
+        assert!(svc.set_pinned_message_done(EntityId::new(), mid, true).await.is_err());
+        assert!(svc.set_pinned_message_label(EntityId::new(), mid, None).await.is_err());
     }
 
     #[tokio::test]

@@ -144,6 +144,41 @@ pub enum DomainEvent {
         edited_at: Timestamp,
     },
 
+    // ─── Pinned Message Events (thread sub-aggregate) ───────────────────
+    /// A message was pinned to a thread. Faithful to mcode
+    /// `thread.pinned-message-added` {threadId, pin:{messageId,label,done,pinnedAt}, updatedAt}.
+    PinnedMessageAdded {
+        thread_id: EntityId,
+        message_id: EntityId,
+        label: Option<String>,
+        done: bool,
+        pinned_at: Timestamp,
+        updated_at: Timestamp,
+    },
+    /// A pinned message was removed from a thread. Faithful to mcode
+    /// `thread.pinned-message-removed` {threadId, messageId, updatedAt}.
+    PinnedMessageRemoved {
+        thread_id: EntityId,
+        message_id: EntityId,
+        updated_at: Timestamp,
+    },
+    /// A pinned message's done flag was set. Faithful to mcode
+    /// `thread.pinned-message-done-set` {threadId, messageId, done, updatedAt}.
+    PinnedMessageDoneSet {
+        thread_id: EntityId,
+        message_id: EntityId,
+        done: bool,
+        updated_at: Timestamp,
+    },
+    /// A pinned message's label was set. Faithful to mcode
+    /// `thread.pinned-message-label-set` {threadId, messageId, label, updatedAt}.
+    PinnedMessageLabelSet {
+        thread_id: EntityId,
+        message_id: EntityId,
+        label: Option<String>,
+        updated_at: Timestamp,
+    },
+
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
         id: EntityId,
@@ -230,8 +265,12 @@ impl DomainEvent {
             | Self::MessageAdded { id, .. }
             | Self::ActivityLogged { id, .. } => *id,
 
-            // Events keyed by a differently-named aggregate field.
-            Self::ThreadMessagesImported { thread_id, .. } => *thread_id,
+            // Events keyed by a differently-named aggregate field (thread sub-aggregates).
+            Self::ThreadMessagesImported { thread_id, .. }
+            | Self::PinnedMessageAdded { thread_id, .. }
+            | Self::PinnedMessageRemoved { thread_id, .. }
+            | Self::PinnedMessageDoneSet { thread_id, .. }
+            | Self::PinnedMessageLabelSet { thread_id, .. } => *thread_id,
         }
     }
 
@@ -256,6 +295,10 @@ impl DomainEvent {
             Self::ThreadApprovalResponded { .. } => "ThreadApprovalResponded",
             Self::ThreadUserInputResponded { .. } => "ThreadUserInputResponded",
             Self::ThreadMessageEditedAndResent { .. } => "ThreadMessageEditedAndResent",
+            Self::PinnedMessageAdded { .. } => "PinnedMessageAdded",
+            Self::PinnedMessageRemoved { .. } => "PinnedMessageRemoved",
+            Self::PinnedMessageDoneSet { .. } => "PinnedMessageDoneSet",
+            Self::PinnedMessageLabelSet { .. } => "PinnedMessageLabelSet",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",

@@ -117,6 +117,17 @@ impl ProjectionManager {
             CREATE INDEX IF NOT EXISTS idx_activities_project ON view_activities(project_id);
             CREATE INDEX IF NOT EXISTS idx_activities_thread ON view_activities(thread_id);
 
+            CREATE TABLE IF NOT EXISTS view_pinned_messages (
+                thread_id   TEXT NOT NULL,
+                message_id  TEXT NOT NULL,
+                label       TEXT,
+                done        INTEGER NOT NULL DEFAULT 0,
+                pinned_at   TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (thread_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pinned_messages_thread ON view_pinned_messages(thread_id);
+
             -- Track the last projected event ID so we can resume
             CREATE TABLE IF NOT EXISTS projection_watermark (
                 id         INTEGER PRIMARY KEY CHECK (id = 1),
@@ -367,6 +378,59 @@ impl ProjectionManager {
             | DomainEvent::ThreadUserInputResponded { .. }
             | DomainEvent::ThreadMessageEditedAndResent { .. } => {
                 // Transient provider-response records; no projection mutation.
+            }
+
+            DomainEvent::PinnedMessageAdded {
+                thread_id, message_id, label, done, pinned_at, updated_at, ..
+            } => {
+                sqlx::query(
+                    r#"
+                    INSERT OR REPLACE INTO view_pinned_messages (thread_id, message_id, label, done, pinned_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(thread_id.to_string())
+                .bind(message_id.to_string())
+                .bind(label.as_deref())
+                .bind(*done as i64)
+                .bind(pinned_at.to_string())
+                .bind(updated_at.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::PinnedMessageRemoved { thread_id, message_id, .. } => {
+                sqlx::query(
+                    "DELETE FROM view_pinned_messages WHERE thread_id = ? AND message_id = ?",
+                )
+                .bind(thread_id.to_string())
+                .bind(message_id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::PinnedMessageDoneSet { thread_id, message_id, done, updated_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_pinned_messages SET done = ?, updated_at = ? WHERE thread_id = ? AND message_id = ?",
+                )
+                .bind(*done as i64)
+                .bind(updated_at.to_string())
+                .bind(thread_id.to_string())
+                .bind(message_id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::PinnedMessageLabelSet { thread_id, message_id, label, updated_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_pinned_messages SET label = ?, updated_at = ? WHERE thread_id = ? AND message_id = ?",
+                )
+                .bind(label.as_deref())
+                .bind(updated_at.to_string())
+                .bind(thread_id.to_string())
+                .bind(message_id.to_string())
+                .execute(&self.pool)
+                .await?;
             }
 
             DomainEvent::TurnStarted {

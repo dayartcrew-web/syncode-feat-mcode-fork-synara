@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use syncode_core::domain::events::DomainEvent;
 use crate::read_model::{
-    ProjectView, ThreadView, TurnView, MessageView, ActivityView,
+    ProjectView, ThreadView, TurnView, MessageView, ActivityView, PinnedMessageView,
 };
 
 /// In-memory read model store maintained by the Projector.
@@ -19,6 +19,7 @@ pub struct ReadModelStore {
     pub turns: HashMap<String, TurnView>,
     pub messages: HashMap<String, MessageView>,
     pub activities: Vec<ActivityView>,
+    pub pinned_messages: HashMap<String, PinnedMessageView>,
 }
 
 impl ReadModelStore {
@@ -176,6 +177,41 @@ impl Projector {
             | DomainEvent::ThreadMessageEditedAndResent { .. } => {
                 // Transient provider-response records; the actual provider dispatch is
                 // a reactor side effect (not yet wired). No read-model mutation needed.
+            }
+
+            DomainEvent::PinnedMessageAdded {
+                thread_id, message_id, label, done, pinned_at, updated_at,
+            } => {
+                let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
+                store.pinned_messages.insert(key, PinnedMessageView {
+                    thread_id: thread_id.as_str(),
+                    message_id: message_id.as_str(),
+                    label: label.clone(),
+                    done: *done,
+                    pinned_at: pinned_at.to_string(),
+                    updated_at: updated_at.to_string(),
+                });
+            }
+
+            DomainEvent::PinnedMessageRemoved { thread_id, message_id, .. } => {
+                let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
+                store.pinned_messages.remove(&key);
+            }
+
+            DomainEvent::PinnedMessageDoneSet { thread_id, message_id, done, updated_at } => {
+                let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
+                if let Some(pm) = store.pinned_messages.get_mut(&key) {
+                    pm.done = *done;
+                    pm.updated_at = updated_at.to_string();
+                }
+            }
+
+            DomainEvent::PinnedMessageLabelSet { thread_id, message_id, label, updated_at } => {
+                let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
+                if let Some(pm) = store.pinned_messages.get_mut(&key) {
+                    pm.label = label.clone();
+                    pm.updated_at = updated_at.to_string();
+                }
             }
 
             DomainEvent::TurnStarted {
