@@ -119,6 +119,34 @@ pub enum Command {
         id: EntityId,
         interaction_mode: String,
     },
+    /// Respond to a pending provider approval request for a thread. Faithful to
+    /// mcode `thread.approval.respond` {requestId, decision}.
+    RespondThreadApproval {
+        id: EntityId,
+        request_id: String,
+        decision: String,
+    },
+    /// Respond to a pending provider user-input request for a thread. Faithful
+    /// to mcode `thread.user-input.respond` {requestId, answers}.
+    RespondThreadUserInput {
+        id: EntityId,
+        request_id: String,
+        answers: String,
+    },
+    /// Edit a thread message and trigger a new provider turn from it. Faithful
+    /// to mcode `thread.message.edit-and-resend` {messageId, text, ...}.
+    EditAndResendThreadMessage {
+        id: EntityId,
+        message_id: EntityId,
+        text: String,
+    },
+    /// Append an activity entry to a thread. Faithful to mcode
+    /// `thread.activity.append` {activity} → activity-appended payload.
+    AppendThreadActivity {
+        id: EntityId,
+        activity_type: String,
+        description: String,
+    },
 
     // ─── Turn Commands ────────────────────────────────────────────
     StartTurn {
@@ -290,6 +318,18 @@ impl Decider {
             }
             Command::SetThreadInteractionMode { id, interaction_mode } => {
                 Self::decide_set_thread_interaction_mode(id, current_state, interaction_mode)
+            }
+            Command::RespondThreadApproval { id, request_id, decision } => {
+                Self::decide_respond_thread_approval(id, current_state, request_id, decision)
+            }
+            Command::RespondThreadUserInput { id, request_id, answers } => {
+                Self::decide_respond_thread_user_input(id, current_state, request_id, answers)
+            }
+            Command::EditAndResendThreadMessage { id, message_id, text } => {
+                Self::decide_edit_and_resend_thread_message(id, current_state, message_id, text)
+            }
+            Command::AppendThreadActivity { id, activity_type, description } => {
+                Self::decide_append_thread_activity(id, current_state, activity_type, description)
             }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
@@ -627,6 +667,76 @@ impl Decider {
             id,
             interaction_mode,
             updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_respond_thread_approval(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        request_id: String,
+        decision: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The response is dispatched to the provider by
+        // the command reactor (the provider approval queue is not yet modeled — gap).
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::ThreadApprovalResponded {
+            id,
+            request_id,
+            decision,
+            responded_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_respond_thread_user_input(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        request_id: String,
+        answers: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The response is dispatched to the provider by
+        // the command reactor (the provider user-input queue is not yet modeled — gap).
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::ThreadUserInputResponded {
+            id,
+            request_id,
+            answers,
+            responded_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_edit_and_resend_thread_message(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        message_id: EntityId,
+        text: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The resend (a new provider turn) is triggered by
+        // the command reactor (provider edit-resend is not yet modeled — gap).
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::ThreadMessageEditedAndResent {
+            id,
+            message_id,
+            text,
+            edited_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_append_thread_activity(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        activity_type: String,
+        description: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. Reuses the existing ActivityLogged event
+        // (faithful to mcode `thread.activity-appended` payload {threadId, activity};
+        // thread-scoping of the activity view is deferred — ActivityView.thread_id
+        // stays None since ActivityLogged carries no thread reference).
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::ActivityLogged {
+            id: EntityId::new(),
+            activity_type,
+            description,
+            created_at: Timestamp::now(),
         }])
     }
 
@@ -1450,5 +1560,105 @@ mod tests {
             None,
         );
         assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    // ─── Turn interaction commands ────────────────────────────────
+
+    #[test]
+    fn respond_thread_approval_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::RespondThreadApproval {
+                id,
+                request_id: "req-1".into(),
+                decision: "approved".into(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadApprovalResponded { request_id, decision, .. } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(decision, "approved");
+            }
+            _ => panic!("expected ThreadApprovalResponded"),
+        }
+    }
+
+    #[test]
+    fn respond_thread_user_input_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::RespondThreadUserInput {
+                id,
+                request_id: "req-2".into(),
+                answers: "yes".into(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert!(matches!(events[0], DomainEvent::ThreadUserInputResponded { .. }));
+    }
+
+    #[test]
+    fn edit_and_resend_thread_message_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::EditAndResendThreadMessage {
+                id,
+                message_id: mid,
+                text: "edited".into(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        match &events[0] {
+            DomainEvent::ThreadMessageEditedAndResent { text, .. } => assert_eq!(text, "edited"),
+            _ => panic!("expected ThreadMessageEditedAndResent"),
+        }
+    }
+
+    #[test]
+    fn append_thread_activity_emits_activity_logged() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::AppendThreadActivity {
+                id,
+                activity_type: "checkpoint".into(),
+                description: "captured".into(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ActivityLogged { activity_type, description, .. } => {
+                assert_eq!(activity_type, "checkpoint");
+                assert_eq!(description, "captured");
+            }
+            _ => panic!("expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn turn_interaction_commands_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let r = Decider::decide(Command::RespondThreadApproval {
+            id, request_id: "r".into(), decision: "approved".into(),
+        }, None);
+        assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
+
+        let r = Decider::decide(Command::RespondThreadUserInput {
+            id, request_id: "r".into(), answers: "a".into(),
+        }, None);
+        assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
+
+        let r = Decider::decide(Command::EditAndResendThreadMessage {
+            id, message_id: id, text: "t".into(),
+        }, None);
+        assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
+
+        let r = Decider::decide(Command::AppendThreadActivity {
+            id, activity_type: "t".into(), description: "d".into(),
+        }, None);
+        assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
     }
 }

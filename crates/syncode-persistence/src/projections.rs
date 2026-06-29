@@ -363,6 +363,12 @@ impl ProjectionManager {
                 .await?;
             }
 
+            DomainEvent::ThreadApprovalResponded { .. }
+            | DomainEvent::ThreadUserInputResponded { .. }
+            | DomainEvent::ThreadMessageEditedAndResent { .. } => {
+                // Transient provider-response records; no projection mutation.
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at, ..
             } => {

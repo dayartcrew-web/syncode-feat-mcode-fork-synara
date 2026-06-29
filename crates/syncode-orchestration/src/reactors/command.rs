@@ -125,6 +125,19 @@ impl ProviderCommandReactor {
                 })
             }
 
+            // Provider-dispatch commands (T6 turn interactions). The Decider records
+            // the client's response/edits via Requested-style events, but the provider
+            // bridge for approval / user-input / edit-resend flows is not yet modeled,
+            // so these arms cannot dispatch to the provider (handled = false). Wiring
+            // the provider approval/user-input queues is the remaining gap.
+            Command::RespondThreadApproval { .. }
+            | Command::RespondThreadUserInput { .. }
+            | Command::EditAndResendThreadMessage { .. } => Ok(CommandReaction {
+                handled: false,
+                session_id: None,
+                events: vec![],
+            }),
+
             // Commands that don't need provider interaction
             Command::CreateProject { .. }
             | Command::UpdateProjectConfig { .. }
@@ -138,6 +151,7 @@ impl ProviderCommandReactor {
             | Command::DeleteThread { .. }
             | Command::SetThreadRuntimeMode { .. }
             | Command::SetThreadInteractionMode { .. }
+            | Command::AppendThreadActivity { .. }
             | Command::HandoffCreateThread { .. }
             | Command::ForkCreateThread { .. }
             | Command::RevertToCheckpoint { .. }

@@ -319,6 +319,59 @@ impl ApplicationService {
             .await
     }
 
+    /// Respond to a pending provider approval request for a thread. Faithful to
+    /// mcode `thread.approval.respond`. Records the response; the provider
+    /// dispatch is handled by the command reactor when wired.
+    pub async fn respond_thread_approval(
+        &self,
+        id: EntityId,
+        request_id: String,
+        decision: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::RespondThreadApproval { id, request_id, decision })
+            .await
+    }
+
+    /// Respond to a pending provider user-input request for a thread. Faithful
+    /// to mcode `thread.user-input.respond`.
+    pub async fn respond_thread_user_input(
+        &self,
+        id: EntityId,
+        request_id: String,
+        answers: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::RespondThreadUserInput { id, request_id, answers })
+            .await
+    }
+
+    /// Edit a thread message and trigger a new provider turn from it. Faithful
+    /// to mcode `thread.message.edit-and-resend`.
+    pub async fn edit_and_resend_thread_message(
+        &self,
+        id: EntityId,
+        message_id: EntityId,
+        text: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::EditAndResendThreadMessage { id, message_id, text })
+            .await
+    }
+
+    /// Append an activity entry to a thread. Faithful to mcode
+    /// `thread.activity.append` → activity-appended payload.
+    pub async fn append_thread_activity(
+        &self,
+        id: EntityId,
+        activity_type: String,
+        description: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::AppendThreadActivity { id, activity_type, description })
+            .await
+    }
+
     // ─── Turn Command Use Cases ──────────────────────────────────
 
     /// Start a conversation turn.
@@ -1084,6 +1137,89 @@ mod tests {
             .set_thread_interaction_mode(EntityId::new(), "plan".into())
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_respond_thread_approval_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let tid = thr.events[0].event.aggregate_id();
+
+        let result = svc
+            .respond_thread_approval(tid, "req-1".into(), "approved".into())
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadApprovalResponded");
+    }
+
+    #[tokio::test]
+    async fn test_respond_thread_user_input_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let tid = thr.events[0].event.aggregate_id();
+
+        let result = svc
+            .respond_thread_user_input(tid, "req-2".into(), "yes".into())
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadUserInputResponded");
+    }
+
+    #[tokio::test]
+    async fn test_edit_and_resend_thread_message_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let tid = thr.events[0].event.aggregate_id();
+
+        let result = svc
+            .edit_and_resend_thread_message(tid, EntityId::new(), "edited".into())
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadMessageEditedAndResent");
+    }
+
+    #[tokio::test]
+    async fn test_append_thread_activity_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let tid = thr.events[0].event.aggregate_id();
+
+        // activity.append reuses the existing ActivityLogged event.
+        let result = svc
+            .append_thread_activity(tid, "checkpoint".into(), "captured".into())
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ActivityLogged");
+    }
+
+    #[tokio::test]
+    async fn test_turn_interaction_commands_unknown_thread_rejected() {
+        let svc = make_service();
+        // All four guard thread existence at the Decider.
+        assert!(svc
+            .respond_thread_approval(EntityId::new(), "r".into(), "approved".into())
+            .await
+            .is_err());
+        assert!(svc
+            .respond_thread_user_input(EntityId::new(), "r".into(), "a".into())
+            .await
+            .is_err());
+        assert!(svc
+            .edit_and_resend_thread_message(EntityId::new(), EntityId::new(), "t".into())
+            .await
+            .is_err());
+        assert!(svc
+            .append_thread_activity(EntityId::new(), "t".into(), "d".into())
+            .await
+            .is_err());
     }
 
     #[tokio::test]

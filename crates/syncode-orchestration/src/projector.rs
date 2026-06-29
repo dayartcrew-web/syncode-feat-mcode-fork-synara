@@ -171,6 +171,13 @@ impl Projector {
                 }
             }
 
+            DomainEvent::ThreadApprovalResponded { .. }
+            | DomainEvent::ThreadUserInputResponded { .. }
+            | DomainEvent::ThreadMessageEditedAndResent { .. } => {
+                // Transient provider-response records; the actual provider dispatch is
+                // a reactor side effect (not yet wired). No read-model mutation needed.
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at,
             } => {

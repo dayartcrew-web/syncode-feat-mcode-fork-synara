@@ -276,7 +276,11 @@ impl Orchestrator {
             | Command::DeleteThread { id, .. }
             | Command::StopThreadSession { id, .. }
             | Command::SetThreadRuntimeMode { id, .. }
-            | Command::SetThreadInteractionMode { id, .. } => Some(*id),
+            | Command::SetThreadInteractionMode { id, .. }
+            | Command::RespondThreadApproval { id, .. }
+            | Command::RespondThreadUserInput { id, .. }
+            | Command::EditAndResendThreadMessage { id, .. }
+            | Command::AppendThreadActivity { id, .. } => Some(*id),
 
             // Revert targets the thread's checkpoint stream
             Command::RevertToCheckpoint { thread_id, .. } => Some(*thread_id),
@@ -328,7 +332,11 @@ impl Orchestrator {
             | Command::DeleteThread { .. }
             | Command::StopThreadSession { .. }
             | Command::SetThreadRuntimeMode { .. }
-            | Command::SetThreadInteractionMode { .. } => {
+            | Command::SetThreadInteractionMode { .. }
+            | Command::RespondThreadApproval { .. }
+            | Command::RespondThreadUserInput { .. }
+            | Command::EditAndResendThreadMessage { .. }
+            | Command::AppendThreadActivity { .. } => {
                 read_model.threads.get(&id.as_str()).map(|t| {
                     serde_json::json!({"status": t.status})
                 })
@@ -377,6 +385,9 @@ impl Orchestrator {
             | Command::PauseThread { .. }
             | Command::CancelThread { .. }
             | Command::StopThreadSession { .. }
+            | Command::RespondThreadApproval { .. }
+            | Command::RespondThreadUserInput { .. }
+            | Command::EditAndResendThreadMessage { .. }
         )
     }
 }

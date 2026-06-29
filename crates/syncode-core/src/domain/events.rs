@@ -115,6 +115,34 @@ pub enum DomainEvent {
         interaction_mode: String,
         updated_at: Timestamp,
     },
+    /// A client responded to a pending provider approval request for a thread.
+    /// Faithful to mcode `thread.approval.respond` — mcode dispatches the
+    /// response to the provider with no dedicated orchestration payload; this
+    /// event is the durable record of the response (consistent with syncode's
+    /// `ThreadSessionStopRequested` Requested-style pattern for async provider ops).
+    ThreadApprovalResponded {
+        id: EntityId,
+        request_id: String,
+        decision: String,
+        responded_at: Timestamp,
+    },
+    /// A client responded to a pending provider user-input request for a thread.
+    /// Faithful to mcode `thread.user-input.respond`.
+    ThreadUserInputResponded {
+        id: EntityId,
+        request_id: String,
+        answers: String,
+        responded_at: Timestamp,
+    },
+    /// A thread message was edited and a new provider turn triggered from it.
+    /// Faithful to mcode `thread.message.edit-and-resend` (no dedicated payload;
+    /// the resend surfaces via provider ingestion).
+    ThreadMessageEditedAndResent {
+        id: EntityId,
+        message_id: EntityId,
+        text: String,
+        edited_at: Timestamp,
+    },
 
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
@@ -189,6 +217,9 @@ impl DomainEvent {
             | Self::ThreadSessionStopRequested { id, .. }
             | Self::ThreadRuntimeModeSet { id, .. }
             | Self::ThreadInteractionModeSet { id, .. }
+            | Self::ThreadApprovalResponded { id, .. }
+            | Self::ThreadUserInputResponded { id, .. }
+            | Self::ThreadMessageEditedAndResent { id, .. }
             | Self::TurnStarted { id, .. }
             | Self::TurnCompleted { id, .. }
             | Self::TurnFailed { id, .. }
@@ -222,6 +253,9 @@ impl DomainEvent {
             Self::ThreadSessionStopRequested { .. } => "ThreadSessionStopRequested",
             Self::ThreadRuntimeModeSet { .. } => "ThreadRuntimeModeSet",
             Self::ThreadInteractionModeSet { .. } => "ThreadInteractionModeSet",
+            Self::ThreadApprovalResponded { .. } => "ThreadApprovalResponded",
+            Self::ThreadUserInputResponded { .. } => "ThreadUserInputResponded",
+            Self::ThreadMessageEditedAndResent { .. } => "ThreadMessageEditedAndResent",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",
