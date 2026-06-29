@@ -136,6 +136,8 @@ impl ProviderCommandReactor {
             | Command::ArchiveThread { .. }
             | Command::UnarchiveThread { .. }
             | Command::DeleteThread { .. }
+            | Command::SetThreadRuntimeMode { .. }
+            | Command::SetThreadInteractionMode { .. }
             | Command::HandoffCreateThread { .. }
             | Command::ForkCreateThread { .. }
             | Command::RevertToCheckpoint { .. }

@@ -82,6 +82,8 @@ impl Projector {
                     status: "active".to_string(),
                     title: None,
                     git_checkpoint: None,
+                    runtime_mode: "full-access".to_string(),
+                    interaction_mode: "default".to_string(),
                     turn_count: 0,
                     created_at: created_at.to_string(),
                     updated_at: created_at.to_string(),
@@ -153,6 +155,20 @@ impl Projector {
             DomainEvent::ThreadSessionStopRequested { .. } => {
                 // Transient stop request; the actual session stop is a reactor side
                 // effect (SessionManager). No read-model mutation needed.
+            }
+
+            DomainEvent::ThreadRuntimeModeSet { id, runtime_mode, updated_at } => {
+                if let Some(thread) = store.threads.get_mut(&id.as_str()) {
+                    thread.runtime_mode = runtime_mode.clone();
+                    thread.updated_at = updated_at.to_string();
+                }
+            }
+
+            DomainEvent::ThreadInteractionModeSet { id, interaction_mode, updated_at } => {
+                if let Some(thread) = store.threads.get_mut(&id.as_str()) {
+                    thread.interaction_mode = interaction_mode.clone();
+                    thread.updated_at = updated_at.to_string();
+                }
             }
 
             DomainEvent::TurnStarted {

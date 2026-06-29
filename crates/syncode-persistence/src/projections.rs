@@ -66,6 +66,8 @@ impl ProjectionManager {
                 status        TEXT NOT NULL,
                 title         TEXT,
                 git_checkpoint TEXT,
+                runtime_mode  TEXT NOT NULL DEFAULT 'full-access',
+                interaction_mode TEXT NOT NULL DEFAULT 'default',
                 turn_count    INTEGER NOT NULL DEFAULT 0,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT NOT NULL,
@@ -222,8 +224,8 @@ impl ProjectionManager {
                 let updated_at = created_at.to_string();
                 sqlx::query(
                     r#"
-                    INSERT OR REPLACE INTO view_threads (id, project_id, provider_id, model, status, title, git_checkpoint, turn_count, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'active', NULL, NULL, 0, ?, ?)
+                    INSERT OR REPLACE INTO view_threads (id, project_id, provider_id, model, status, title, git_checkpoint, runtime_mode, interaction_mode, turn_count, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'active', NULL, NULL, 'full-access', 'default', 0, ?, ?)
                     "#,
                 )
                 .bind(id.to_string())
@@ -337,6 +339,28 @@ impl ProjectionManager {
             DomainEvent::ThreadSessionStopRequested { .. } => {
                 // Transient stop request; the session stop is a reactor side effect.
                 // No projection mutation needed.
+            }
+
+            DomainEvent::ThreadRuntimeModeSet { id, runtime_mode, updated_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_threads SET runtime_mode = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(runtime_mode)
+                .bind(updated_at.to_string())
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::ThreadInteractionModeSet { id, interaction_mode, updated_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_threads SET interaction_mode = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(interaction_mode)
+                .bind(updated_at.to_string())
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
             }
 
             DomainEvent::TurnStarted {

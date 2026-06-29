@@ -293,6 +293,32 @@ impl ApplicationService {
             .await
     }
 
+    /// Set a thread's runtime mode. Faithful to mcode `thread.runtime-mode.set`
+    /// (runtimeMode: "approval-required" | "full-access"). The Decider guards
+    /// thread existence.
+    pub async fn set_thread_runtime_mode(
+        &self,
+        id: EntityId,
+        runtime_mode: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::SetThreadRuntimeMode { id, runtime_mode })
+            .await
+    }
+
+    /// Set a thread's provider interaction mode. Faithful to mcode
+    /// `thread.interaction-mode.set` (interactionMode: "default" | "plan"). The
+    /// Decider guards thread existence.
+    pub async fn set_thread_interaction_mode(
+        &self,
+        id: EntityId,
+        interaction_mode: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::SetThreadInteractionMode { id, interaction_mode })
+            .await
+    }
+
     // ─── Turn Command Use Cases ──────────────────────────────────
 
     /// Start a conversation turn.
@@ -993,6 +1019,71 @@ mod tests {
 
         let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
         assert_eq!(thread.title.as_deref(), Some("My Cool Thread"));
+    }
+
+    #[tokio::test]
+    async fn test_set_thread_runtime_mode_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let project_id = proj.events[0].event.aggregate_id();
+        let thr = svc
+            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let thread_id = thr.events[0].event.aggregate_id();
+
+        // Default runtime mode is "full-access" (mcode DEFAULT_RUNTIME_MODE).
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.runtime_mode, "full-access");
+
+        let result = svc
+            .set_thread_runtime_mode(thread_id, "approval-required".into())
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadRuntimeModeSet");
+
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.runtime_mode, "approval-required");
+    }
+
+    #[tokio::test]
+    async fn test_set_thread_interaction_mode_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let project_id = proj.events[0].event.aggregate_id();
+        let thr = svc
+            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let thread_id = thr.events[0].event.aggregate_id();
+
+        // Default interaction mode is "default" (mcode DEFAULT_PROVIDER_INTERACTION_MODE).
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.interaction_mode, "default");
+
+        let result = svc
+            .set_thread_interaction_mode(thread_id, "plan".into())
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].event.event_type_name(), "ThreadInteractionModeSet");
+
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.interaction_mode, "plan");
+    }
+
+    #[tokio::test]
+    async fn test_set_thread_modes_unknown_thread_rejected() {
+        let svc = make_service();
+        // No thread exists → decider existence guard rejects both.
+        let result = svc
+            .set_thread_runtime_mode(EntityId::new(), "approval-required".into())
+            .await;
+        assert!(result.is_err());
+
+        let result = svc
+            .set_thread_interaction_mode(EntityId::new(), "plan".into())
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

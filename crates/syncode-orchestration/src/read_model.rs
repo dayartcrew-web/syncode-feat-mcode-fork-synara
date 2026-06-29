@@ -33,6 +33,10 @@ pub struct ThreadView {
     pub status: String,
     pub title: Option<String>,
     pub git_checkpoint: Option<String>,
+    /// Runtime mode: "approval-required" | "full-access" (mcode RuntimeMode).
+    pub runtime_mode: String,
+    /// Provider interaction mode: "default" | "plan" (mcode ProviderInteractionMode).
+    pub interaction_mode: String,
     pub turn_count: u32,
     pub created_at: String,
     pub updated_at: String,

@@ -107,6 +107,18 @@ pub enum Command {
     StopThreadSession {
         id: EntityId,
     },
+    /// Set a thread's runtime mode. Faithful to mcode `thread.runtime-mode.set`
+    /// {runtimeMode: "approval-required" | "full-access"}.
+    SetThreadRuntimeMode {
+        id: EntityId,
+        runtime_mode: String,
+    },
+    /// Set a thread's provider interaction mode. Faithful to mcode
+    /// `thread.interaction-mode.set` {interactionMode: "default" | "plan"}.
+    SetThreadInteractionMode {
+        id: EntityId,
+        interaction_mode: String,
+    },
 
     // ─── Turn Commands ────────────────────────────────────────────
     StartTurn {
@@ -272,6 +284,12 @@ impl Decider {
             }
             Command::StopThreadSession { id } => {
                 Self::decide_stop_thread_session(id, current_state)
+            }
+            Command::SetThreadRuntimeMode { id, runtime_mode } => {
+                Self::decide_set_thread_runtime_mode(id, current_state, runtime_mode)
+            }
+            Command::SetThreadInteractionMode { id, interaction_mode } => {
+                Self::decide_set_thread_interaction_mode(id, current_state, interaction_mode)
             }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
@@ -575,6 +593,40 @@ impl Decider {
         Ok(vec![DomainEvent::ThreadSessionStopRequested {
             id,
             requested_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_set_thread_runtime_mode(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        runtime_mode: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The mode is a free-form config setting
+        // (mcode RuntimeMode: "approval-required" | "full-access") — no status
+        // transition constraint, so we only assert existence.
+        let _ = Self::extract_thread_status(state, &id)?;
+
+        Ok(vec![DomainEvent::ThreadRuntimeModeSet {
+            id,
+            runtime_mode,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_set_thread_interaction_mode(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        interaction_mode: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The mode is a free-form config setting
+        // (mcode ProviderInteractionMode: "default" | "plan") — no status
+        // transition constraint.
+        let _ = Self::extract_thread_status(state, &id)?;
+
+        Ok(vec![DomainEvent::ThreadInteractionModeSet {
+            id,
+            interaction_mode,
+            updated_at: Timestamp::now(),
         }])
     }
 
@@ -1330,5 +1382,73 @@ mod tests {
             events[1],
             DomainEvent::ThreadMessagesImported { count: 0, source_thread_id, .. } if source_thread_id == src
         ));
+    }
+
+    // ─── Thread mode settings (runtime / interaction) ──────────────
+
+    #[test]
+    fn set_thread_runtime_mode_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::SetThreadRuntimeMode {
+                id,
+                runtime_mode: "approval-required".to_string(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadRuntimeModeSet { id: ev_id, runtime_mode, .. } => {
+                assert_eq!(ev_id, &id);
+                assert_eq!(runtime_mode, "approval-required");
+            }
+            _ => panic!("expected ThreadRuntimeModeSet"),
+        }
+    }
+
+    #[test]
+    fn set_thread_runtime_mode_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let result = Decider::decide(
+            Command::SetThreadRuntimeMode {
+                id,
+                runtime_mode: "full-access".to_string(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn set_thread_interaction_mode_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::SetThreadInteractionMode {
+                id,
+                interaction_mode: "plan".to_string(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadInteractionModeSet { id: ev_id, interaction_mode, .. } => {
+                assert_eq!(ev_id, &id);
+                assert_eq!(interaction_mode, "plan");
+            }
+            _ => panic!("expected ThreadInteractionModeSet"),
+        }
+    }
+
+    #[test]
+    fn set_thread_interaction_mode_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let result = Decider::decide(
+            Command::SetThreadInteractionMode {
+                id,
+                interaction_mode: "default".to_string(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
     }
 }

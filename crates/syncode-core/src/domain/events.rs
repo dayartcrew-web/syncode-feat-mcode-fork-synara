@@ -101,6 +101,20 @@ pub enum DomainEvent {
         id: EntityId,
         requested_at: Timestamp,
     },
+    /// A thread's runtime mode was set. Faithful to mcode
+    /// `thread.runtime-mode-set` {threadId, runtimeMode, updatedAt}.
+    ThreadRuntimeModeSet {
+        id: EntityId,
+        runtime_mode: String,
+        updated_at: Timestamp,
+    },
+    /// A thread's provider interaction mode was set. Faithful to mcode
+    /// `thread.interaction-mode-set` {threadId, interactionMode, updatedAt}.
+    ThreadInteractionModeSet {
+        id: EntityId,
+        interaction_mode: String,
+        updated_at: Timestamp,
+    },
 
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
@@ -173,6 +187,8 @@ impl DomainEvent {
             | Self::ThreadUnarchived { id, .. }
             | Self::ThreadDeleted { id, .. }
             | Self::ThreadSessionStopRequested { id, .. }
+            | Self::ThreadRuntimeModeSet { id, .. }
+            | Self::ThreadInteractionModeSet { id, .. }
             | Self::TurnStarted { id, .. }
             | Self::TurnCompleted { id, .. }
             | Self::TurnFailed { id, .. }
@@ -204,6 +220,8 @@ impl DomainEvent {
             Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::ThreadMessagesImported { .. } => "ThreadMessagesImported",
             Self::ThreadSessionStopRequested { .. } => "ThreadSessionStopRequested",
+            Self::ThreadRuntimeModeSet { .. } => "ThreadRuntimeModeSet",
+            Self::ThreadInteractionModeSet { .. } => "ThreadInteractionModeSet",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",
