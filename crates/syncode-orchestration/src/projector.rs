@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use syncode_core::domain::events::DomainEvent;
 use crate::read_model::{
-    ProjectView, ThreadView, TurnView, MessageView, ActivityView, PinnedMessageView,
+    ProjectView, ThreadView, TurnView, MessageView, ActivityView, PinnedMessageView, MarkerView,
 };
 
 /// In-memory read model store maintained by the Projector.
@@ -20,6 +20,7 @@ pub struct ReadModelStore {
     pub messages: HashMap<String, MessageView>,
     pub activities: Vec<ActivityView>,
     pub pinned_messages: HashMap<String, PinnedMessageView>,
+    pub markers: HashMap<String, MarkerView>,
 }
 
 impl ReadModelStore {
@@ -211,6 +212,48 @@ impl Projector {
                 if let Some(pm) = store.pinned_messages.get_mut(&key) {
                     pm.label = label.clone();
                     pm.updated_at = updated_at.to_string();
+                }
+            }
+
+            DomainEvent::MarkerAdded {
+                thread_id, marker_id, message_id, start_offset, end_offset,
+                selected_text, style, color, label, done, created_at, updated_at,
+            } => {
+                let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
+                store.markers.insert(key, MarkerView {
+                    thread_id: thread_id.as_str(),
+                    marker_id: marker_id.as_str(),
+                    message_id: message_id.as_str(),
+                    start_offset: *start_offset,
+                    end_offset: *end_offset,
+                    selected_text: selected_text.clone(),
+                    style: style.clone(),
+                    color: color.clone(),
+                    label: label.clone(),
+                    done: *done,
+                    created_at: created_at.to_string(),
+                    updated_at: updated_at.to_string(),
+                });
+            }
+
+            DomainEvent::MarkerRemoved { thread_id, marker_id, .. } => {
+                let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
+                store.markers.remove(&key);
+            }
+
+            DomainEvent::MarkerDoneSet { thread_id, marker_id, done, updated_at } => {
+                let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
+                if let Some(m) = store.markers.get_mut(&key) {
+                    m.done = *done;
+                    m.updated_at = updated_at.to_string();
+                }
+            }
+
+            DomainEvent::MarkerLabelSet { thread_id, marker_id, label, updated_at } => {
+                let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
+                if let Some(m) = store.markers.get_mut(&key) {
+                    m.label = label.clone();
+                    m.updated_at = updated_at.to_string();
                 }
             }
 

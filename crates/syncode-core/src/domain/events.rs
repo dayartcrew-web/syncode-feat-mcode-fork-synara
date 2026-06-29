@@ -179,6 +179,47 @@ pub enum DomainEvent {
         updated_at: Timestamp,
     },
 
+    // ─── Marker Events (thread sub-aggregate) ──────────────────────
+    /// A marker was added to a thread message. Faithful to mcode
+    /// `thread.marker-added` {threadId, marker:{id,messageId,startOffset,endOffset,selectedText,style,color,label,done}, updatedAt}.
+    MarkerAdded {
+        thread_id: EntityId,
+        marker_id: EntityId,
+        message_id: EntityId,
+        start_offset: u64,
+        end_offset: u64,
+        selected_text: String,
+        style: String,
+        color: String,
+        label: Option<String>,
+        done: bool,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+    },
+    /// A marker was removed from a thread. Faithful to mcode
+    /// `thread.marker-removed` {threadId, markerId, updatedAt}.
+    MarkerRemoved {
+        thread_id: EntityId,
+        marker_id: EntityId,
+        updated_at: Timestamp,
+    },
+    /// A marker's done flag was set. Faithful to mcode
+    /// `thread.marker-done-set` {threadId, markerId, done, updatedAt}.
+    MarkerDoneSet {
+        thread_id: EntityId,
+        marker_id: EntityId,
+        done: bool,
+        updated_at: Timestamp,
+    },
+    /// A marker's label was set. Faithful to mcode
+    /// `thread.marker-label-set` {threadId, markerId, label, updatedAt}.
+    MarkerLabelSet {
+        thread_id: EntityId,
+        marker_id: EntityId,
+        label: Option<String>,
+        updated_at: Timestamp,
+    },
+
     // ─── Turn Events ────────────────────────────────────────────────────
     TurnStarted {
         id: EntityId,
@@ -270,7 +311,11 @@ impl DomainEvent {
             | Self::PinnedMessageAdded { thread_id, .. }
             | Self::PinnedMessageRemoved { thread_id, .. }
             | Self::PinnedMessageDoneSet { thread_id, .. }
-            | Self::PinnedMessageLabelSet { thread_id, .. } => *thread_id,
+            | Self::PinnedMessageLabelSet { thread_id, .. }
+            | Self::MarkerAdded { thread_id, .. }
+            | Self::MarkerRemoved { thread_id, .. }
+            | Self::MarkerDoneSet { thread_id, .. }
+            | Self::MarkerLabelSet { thread_id, .. } => *thread_id,
         }
     }
 
@@ -299,6 +344,10 @@ impl DomainEvent {
             Self::PinnedMessageRemoved { .. } => "PinnedMessageRemoved",
             Self::PinnedMessageDoneSet { .. } => "PinnedMessageDoneSet",
             Self::PinnedMessageLabelSet { .. } => "PinnedMessageLabelSet",
+            Self::MarkerAdded { .. } => "MarkerAdded",
+            Self::MarkerRemoved { .. } => "MarkerRemoved",
+            Self::MarkerDoneSet { .. } => "MarkerDoneSet",
+            Self::MarkerLabelSet { .. } => "MarkerLabelSet",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnCompleted { .. } => "TurnCompleted",
             Self::TurnFailed { .. } => "TurnFailed",

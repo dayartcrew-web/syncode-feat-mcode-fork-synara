@@ -156,6 +156,10 @@ impl ProviderCommandReactor {
             | Command::RemovePinnedMessage { .. }
             | Command::SetPinnedMessageDone { .. }
             | Command::SetPinnedMessageLabel { .. }
+            | Command::AddMarker { .. }
+            | Command::RemoveMarker { .. }
+            | Command::SetMarkerDone { .. }
+            | Command::SetMarkerLabel { .. }
             | Command::HandoffCreateThread { .. }
             | Command::ForkCreateThread { .. }
             | Command::RevertToCheckpoint { .. }

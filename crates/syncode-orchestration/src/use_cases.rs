@@ -418,6 +418,61 @@ impl ApplicationService {
             .await
     }
 
+    /// Add a marker to a thread message. Faithful to mcode `thread.marker.add`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_marker(
+        &self,
+        id: EntityId,
+        marker_id: EntityId,
+        message_id: EntityId,
+        start_offset: u64,
+        end_offset: u64,
+        selected_text: String,
+        style: String,
+        color: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::AddMarker {
+                id, marker_id, message_id, start_offset, end_offset, selected_text, style, color,
+            })
+            .await
+    }
+
+    /// Remove a marker from a thread. Faithful to mcode `thread.marker.remove`.
+    pub async fn remove_marker(
+        &self,
+        id: EntityId,
+        marker_id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::RemoveMarker { id, marker_id })
+            .await
+    }
+
+    /// Set a marker's done flag. Faithful to mcode `thread.marker.done.set`.
+    pub async fn set_marker_done(
+        &self,
+        id: EntityId,
+        marker_id: EntityId,
+        done: bool,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::SetMarkerDone { id, marker_id, done })
+            .await
+    }
+
+    /// Set a marker's label. Faithful to mcode `thread.marker.label.set`.
+    pub async fn set_marker_label(
+        &self,
+        id: EntityId,
+        marker_id: EntityId,
+        label: Option<String>,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::SetMarkerLabel { id, marker_id, label })
+            .await
+    }
+
     // ─── Turn Command Use Cases ──────────────────────────────────
 
     /// Start a conversation turn.
@@ -1298,6 +1353,40 @@ mod tests {
         assert!(svc.remove_pinned_message(EntityId::new(), mid).await.is_err());
         assert!(svc.set_pinned_message_done(EntityId::new(), mid, true).await.is_err());
         assert!(svc.set_pinned_message_label(EntityId::new(), mid, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_marker_lifecycle_use_case() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let pid = proj.events[0].event.aggregate_id();
+        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let tid = thr.events[0].event.aggregate_id();
+        let mid = EntityId::new();
+        let msg = EntityId::new();
+
+        let r = svc.add_marker(tid, mid, msg, 0, 5, "hello".into(), "highlight".into(), "yellow".into()).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "MarkerAdded");
+
+        let r = svc.set_marker_done(tid, mid, true).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "MarkerDoneSet");
+
+        let r = svc.set_marker_label(tid, mid, Some("note".into())).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "MarkerLabelSet");
+
+        let r = svc.remove_marker(tid, mid).await.unwrap();
+        assert_eq!(r.events[0].event.event_type_name(), "MarkerRemoved");
+    }
+
+    #[tokio::test]
+    async fn test_marker_commands_unknown_thread_rejected() {
+        let svc = make_service();
+        let mid = EntityId::new();
+        let msg = EntityId::new();
+        assert!(svc.add_marker(EntityId::new(), mid, msg, 0, 1, "x".into(), "highlight".into(), "yellow".into()).await.is_err());
+        assert!(svc.remove_marker(EntityId::new(), mid).await.is_err());
+        assert!(svc.set_marker_done(EntityId::new(), mid, true).await.is_err());
+        assert!(svc.set_marker_label(EntityId::new(), mid, None).await.is_err());
     }
 
     #[tokio::test]

@@ -102,3 +102,23 @@ pub struct PinnedMessageView {
     pub pinned_at: String,
     pub updated_at: String,
 }
+
+// ─── Marker Read Model (thread sub-aggregate) ───────────────────
+
+/// Denormalized marker view for queries. A marker highlights a text range
+/// within a message (mcode `ThreadMarker`), keyed by marker_id within a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkerView {
+    pub thread_id: String,
+    pub marker_id: String,
+    pub message_id: String,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub selected_text: String,
+    pub style: String,
+    pub color: String,
+    pub label: Option<String>,
+    pub done: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}

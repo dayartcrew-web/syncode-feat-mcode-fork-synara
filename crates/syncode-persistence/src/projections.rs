@@ -128,6 +128,23 @@ impl ProjectionManager {
             );
             CREATE INDEX IF NOT EXISTS idx_pinned_messages_thread ON view_pinned_messages(thread_id);
 
+            CREATE TABLE IF NOT EXISTS view_markers (
+                thread_id     TEXT NOT NULL,
+                marker_id     TEXT NOT NULL,
+                message_id    TEXT NOT NULL,
+                start_offset  INTEGER NOT NULL DEFAULT 0,
+                end_offset    INTEGER NOT NULL DEFAULT 0,
+                selected_text TEXT NOT NULL DEFAULT '',
+                style         TEXT NOT NULL DEFAULT 'highlight',
+                color         TEXT NOT NULL DEFAULT 'yellow',
+                label         TEXT,
+                done          INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                PRIMARY KEY (thread_id, marker_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_markers_thread ON view_markers(thread_id);
+
             -- Track the last projected event ID so we can resume
             CREATE TABLE IF NOT EXISTS projection_watermark (
                 id         INTEGER PRIMARY KEY CHECK (id = 1),
@@ -433,6 +450,66 @@ impl ProjectionManager {
                 .await?;
             }
 
+            DomainEvent::MarkerAdded {
+                thread_id, marker_id, message_id, start_offset, end_offset,
+                selected_text, style, color, label, done, created_at, updated_at, ..
+            } => {
+                sqlx::query(
+                    r#"
+                    INSERT OR REPLACE INTO view_markers (thread_id, marker_id, message_id, start_offset, end_offset, selected_text, style, color, label, done, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(thread_id.to_string())
+                .bind(marker_id.to_string())
+                .bind(message_id.to_string())
+                .bind(*start_offset as i64)
+                .bind(*end_offset as i64)
+                .bind(selected_text)
+                .bind(style)
+                .bind(color)
+                .bind(label.as_deref())
+                .bind(*done as i64)
+                .bind(created_at.to_string())
+                .bind(updated_at.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::MarkerRemoved { thread_id, marker_id, .. } => {
+                sqlx::query(
+                    "DELETE FROM view_markers WHERE thread_id = ? AND marker_id = ?",
+                )
+                .bind(thread_id.to_string())
+                .bind(marker_id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::MarkerDoneSet { thread_id, marker_id, done, updated_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_markers SET done = ?, updated_at = ? WHERE thread_id = ? AND marker_id = ?",
+                )
+                .bind(*done as i64)
+                .bind(updated_at.to_string())
+                .bind(thread_id.to_string())
+                .bind(marker_id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
+            DomainEvent::MarkerLabelSet { thread_id, marker_id, label, updated_at, .. } => {
+                sqlx::query(
+                    "UPDATE view_markers SET label = ?, updated_at = ? WHERE thread_id = ? AND marker_id = ?",
+                )
+                .bind(label.as_deref())
+                .bind(updated_at.to_string())
+                .bind(thread_id.to_string())
+                .bind(marker_id.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
             DomainEvent::TurnStarted {
                 id, thread_id, sequence, user_input, created_at, ..
             } => {
@@ -598,6 +675,8 @@ impl ProjectionManager {
         // Drop projection tables
         sqlx::raw_sql(
             r#"
+            DROP TABLE IF EXISTS view_markers;
+            DROP TABLE IF EXISTS view_pinned_messages;
             DROP TABLE IF EXISTS view_activities;
             DROP TABLE IF EXISTS view_messages;
             DROP TABLE IF EXISTS view_turns;

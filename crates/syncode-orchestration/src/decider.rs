@@ -169,6 +169,34 @@ pub enum Command {
         message_id: EntityId,
         label: Option<String>,
     },
+    /// Add a marker to a thread message. Faithful to mcode `thread.marker.add`.
+    AddMarker {
+        id: EntityId,
+        marker_id: EntityId,
+        message_id: EntityId,
+        start_offset: u64,
+        end_offset: u64,
+        selected_text: String,
+        style: String,
+        color: String,
+    },
+    /// Remove a marker from a thread. Faithful to mcode `thread.marker.remove`.
+    RemoveMarker {
+        id: EntityId,
+        marker_id: EntityId,
+    },
+    /// Set a marker's done flag. Faithful to mcode `thread.marker.done.set`.
+    SetMarkerDone {
+        id: EntityId,
+        marker_id: EntityId,
+        done: bool,
+    },
+    /// Set a marker's label. Faithful to mcode `thread.marker.label.set`.
+    SetMarkerLabel {
+        id: EntityId,
+        marker_id: EntityId,
+        label: Option<String>,
+    },
 
     // ─── Turn Commands ────────────────────────────────────────────
     StartTurn {
@@ -364,6 +392,23 @@ impl Decider {
             }
             Command::SetPinnedMessageLabel { id, message_id, label } => {
                 Self::decide_set_pinned_message_label(id, current_state, message_id, label)
+            }
+            Command::AddMarker {
+                id, marker_id, message_id, start_offset, end_offset, selected_text, style, color,
+            } => {
+                Self::decide_add_marker(
+                    id, current_state, marker_id, message_id, start_offset, end_offset,
+                    selected_text, style, color,
+                )
+            }
+            Command::RemoveMarker { id, marker_id } => {
+                Self::decide_remove_marker(id, current_state, marker_id)
+            }
+            Command::SetMarkerDone { id, marker_id, done } => {
+                Self::decide_set_marker_done(id, current_state, marker_id, done)
+            }
+            Command::SetMarkerLabel { id, marker_id, label } => {
+                Self::decide_set_marker_label(id, current_state, marker_id, label)
             }
             Command::StartTurn { thread_id, sequence, user_input } => {
                 Self::decide_start_turn(thread_id, sequence, user_input)
@@ -831,6 +876,84 @@ impl Decider {
         Ok(vec![DomainEvent::PinnedMessageLabelSet {
             thread_id: id,
             message_id,
+            label,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    // ─── Marker Decisions ──────────────────────────────────────────
+
+    fn decide_add_marker(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        marker_id: EntityId,
+        message_id: EntityId,
+        start_offset: u64,
+        end_offset: u64,
+        selected_text: String,
+        style: String,
+        color: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. mcode caps markers at THREAD_MARKERS_MAX_COUNT
+        // and validates the offset range, style ("highlight"|"underline"), and color
+        // ("yellow"|"blue"|"green"|"pink") enums. Enforcing those needs the current
+        // marker set + enum validation, deferred (gap). We assert thread existence.
+        let _ = Self::extract_thread_status(state, &id)?;
+        let now = Timestamp::now();
+        Ok(vec![DomainEvent::MarkerAdded {
+            thread_id: id,
+            marker_id,
+            message_id,
+            start_offset,
+            end_offset,
+            selected_text,
+            style,
+            color,
+            label: None,
+            done: false,
+            created_at: now,
+            updated_at: now,
+        }])
+    }
+
+    fn decide_remove_marker(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        marker_id: EntityId,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::MarkerRemoved {
+            thread_id: id,
+            marker_id,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_set_marker_done(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        marker_id: EntityId,
+        done: bool,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::MarkerDoneSet {
+            thread_id: id,
+            marker_id,
+            done,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_set_marker_label(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        marker_id: EntityId,
+        label: Option<String>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::MarkerLabelSet {
+            thread_id: id,
+            marker_id,
             label,
             updated_at: Timestamp::now(),
         }])
@@ -1827,5 +1950,106 @@ mod tests {
         assert!(Decider::decide(Command::RemovePinnedMessage { id, message_id: mid }, None).is_err());
         assert!(Decider::decide(Command::SetPinnedMessageDone { id, message_id: mid, done: true }, None).is_err());
         assert!(Decider::decide(Command::SetPinnedMessageLabel { id, message_id: mid, label: None }, None).is_err());
+    }
+
+    // ─── Markers ─────────────────────────────────────────────────
+
+    fn add_marker_cmd(id: EntityId, marker_id: EntityId, message_id: EntityId) -> Command {
+        Command::AddMarker {
+            id,
+            marker_id,
+            message_id,
+            start_offset: 0,
+            end_offset: 5,
+            selected_text: "hello".to_string(),
+            style: "highlight".to_string(),
+            color: "yellow".to_string(),
+        }
+    }
+
+    #[test]
+    fn add_marker_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let msg = EntityId::new();
+        let events = Decider::decide(
+            add_marker_cmd(id, mid, msg),
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::MarkerAdded {
+                thread_id, marker_id, message_id, start_offset, end_offset,
+                selected_text, style, color, label, done, ..
+            } => {
+                assert_eq!(*thread_id, id);
+                assert_eq!(*marker_id, mid);
+                assert_eq!(*message_id, msg);
+                assert_eq!(*start_offset, 0);
+                assert_eq!(*end_offset, 5);
+                assert_eq!(selected_text, "hello");
+                assert_eq!(style, "highlight");
+                assert_eq!(color, "yellow");
+                assert!(label.is_none());
+                assert!(!*done);
+            }
+            _ => panic!("expected MarkerAdded"),
+        }
+    }
+
+    #[test]
+    fn remove_marker_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::RemoveMarker { id, marker_id: mid },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert!(matches!(events[0], DomainEvent::MarkerRemoved { .. }));
+    }
+
+    #[test]
+    fn set_marker_done_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::SetMarkerDone { id, marker_id: mid, done: true },
+            Some(&thread_state_active()),
+        ).unwrap();
+        match &events[0] {
+            DomainEvent::MarkerDoneSet { done, marker_id, .. } => {
+                assert!(*done);
+                assert_eq!(*marker_id, mid);
+            }
+            _ => panic!("expected MarkerDoneSet"),
+        }
+    }
+
+    #[test]
+    fn set_marker_label_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::SetMarkerLabel { id, marker_id: mid, label: Some("note".into()) },
+            Some(&thread_state_active()),
+        ).unwrap();
+        match &events[0] {
+            DomainEvent::MarkerLabelSet { label, marker_id, .. } => {
+                assert_eq!(label.as_deref(), Some("note"));
+                assert_eq!(*marker_id, mid);
+            }
+            _ => panic!("expected MarkerLabelSet"),
+        }
+    }
+
+    #[test]
+    fn marker_commands_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let msg = EntityId::new();
+        assert!(Decider::decide(add_marker_cmd(id, mid, msg), None).is_err());
+        assert!(Decider::decide(Command::RemoveMarker { id, marker_id: mid }, None).is_err());
+        assert!(Decider::decide(Command::SetMarkerDone { id, marker_id: mid, done: true }, None).is_err());
+        assert!(Decider::decide(Command::SetMarkerLabel { id, marker_id: mid, label: None }, None).is_err());
     }
 }
