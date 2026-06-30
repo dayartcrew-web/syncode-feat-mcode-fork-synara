@@ -13,7 +13,7 @@
 use syncode_core::EntityId;
 use syncode_provider::{
     ProviderEvent, ProviderRequest,
-    SessionContext, SessionManager,
+    SessionContext, SessionManager, SessionStateStatus,
 };
 
 use crate::decider::Command;
@@ -110,33 +110,73 @@ impl ProviderCommandReactor {
                 })
             }
 
-            Command::StopThreadSession { id: _ } => {
-                // Stop the thread's active provider session. SessionManager has no
-                // thread→session index yet, so stop all active sessions (same effect as
-                // CancelThread). A thread-scoped stop needs a session-by-thread lookup.
-                let active = self.session_manager.list_active_sessions().await;
-                for sid in active {
-                    let _ = self.session_manager.stop_session(adapter, &sid).await;
+            Command::StopThreadSession { id } => {
+                // Stop the active provider sessions backing THIS thread (not every
+                // thread's sessions). Uses the SessionManager's thread→session index;
+                // among a thread's sessions we stop the ones still active.
+                let mut handled = false;
+                let sessions = self.session_manager.get_sessions_by_thread(&id.as_str()).await;
+                for session in &sessions {
+                    if session.is_active() {
+                        let _ = self.session_manager.stop_session(adapter, &session.id).await;
+                        handled = true;
+                    }
                 }
                 Ok(CommandReaction {
-                    handled: !self.session_manager.list_active_sessions().await.is_empty(),
+                    handled,
                     session_id: None,
                     events: vec![],
                 })
             }
 
             // Provider-dispatch commands (T6 turn interactions). The Decider records
-            // the client's response/edits via Requested-style events, but the provider
-            // bridge for approval / user-input / edit-resend flows is not yet modeled,
-            // so these arms cannot dispatch to the provider (handled = false). Wiring
-            // the provider approval/user-input queues is the remaining gap.
-            Command::RespondThreadApproval { .. }
-            | Command::RespondThreadUserInput { .. }
-            | Command::EditAndResendThreadMessage { .. } => Ok(CommandReaction {
-                handled: false,
-                session_id: None,
-                events: vec![],
-            }),
+            // the client's response/edits via Requested-style events; these arms
+            // dispatch the actual response to the provider session currently
+            // Processing the thread. Faithful to mcode's approval/user-input
+            // response-requested dispatch. If no session is Processing the thread
+            // (nothing awaiting input), there is nothing to dispatch (handled = false).
+            Command::RespondThreadApproval { id, request_id, decision } => {
+                let payload = serde_json::json!({
+                    "request_id": request_id,
+                    "decision": decision,
+                });
+                let session_id = self
+                    .dispatch_to_thread_session(*id, "approval/respond", payload, adapter)
+                    .await?;
+                Ok(CommandReaction {
+                    handled: session_id.is_some(),
+                    session_id,
+                    events: vec![],
+                })
+            }
+            Command::RespondThreadUserInput { id, request_id, answers } => {
+                let payload = serde_json::json!({
+                    "request_id": request_id,
+                    "answers": answers,
+                });
+                let session_id = self
+                    .dispatch_to_thread_session(*id, "user-input/respond", payload, adapter)
+                    .await?;
+                Ok(CommandReaction {
+                    handled: session_id.is_some(),
+                    session_id,
+                    events: vec![],
+                })
+            }
+            Command::EditAndResendThreadMessage { id, message_id, text } => {
+                let payload = serde_json::json!({
+                    "message_id": message_id.as_str(),
+                    "text": text,
+                });
+                let session_id = self
+                    .dispatch_to_thread_session(*id, "message/edit-and-resend", payload, adapter)
+                    .await?;
+                Ok(CommandReaction {
+                    handled: session_id.is_some(),
+                    session_id,
+                    events: vec![],
+                })
+            }
 
             // Commands that don't need provider interaction
             Command::CreateProject { .. }
@@ -172,6 +212,56 @@ impl ProviderCommandReactor {
                 events: vec![],
             }),
         }
+    }
+
+    /// Find the id of the session currently Processing a thread, if any.
+    ///
+    /// Routes provider-dispatch commands (approval / user-input / edit-resend)
+    /// to the one session actively Processing the thread. Uses the
+    /// SessionManager's thread→session index; among a thread's sessions returns
+    /// the most recent one in the Processing state (the session awaiting input).
+    async fn active_session_id_for_thread(&self, thread_id: EntityId) -> Option<String> {
+        self.session_manager
+            .get_sessions_by_thread(&thread_id.as_str())
+            .await
+            .into_iter()
+            .filter(|s| s.is_active() && s.status() == SessionStateStatus::Processing)
+            .max_by_key(|s| s.created_at.timestamp_millis())
+            .map(|s| s.id.clone())
+    }
+
+    /// Dispatch a JSON-RPC request to a thread's active Processing session.
+    ///
+    /// Returns the targeted session id on success, or `None` if no session is
+    /// Processing the thread (nothing to dispatch to → `handled = false`). The
+    /// `session_id` is injected into the request params so the provider adapter
+    /// can correlate the response to its session (syncode's `send_request` is
+    /// session-agnostic by design).
+    async fn dispatch_to_thread_session(
+        &self,
+        thread_id: EntityId,
+        method: &str,
+        payload: serde_json::Value,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> Result<Option<String>, CommandReactorError> {
+        let Some(session_id) = self.active_session_id_for_thread(thread_id).await else {
+            return Ok(None);
+        };
+
+        let mut params = match payload {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        params.insert("session_id".to_string(), serde_json::Value::String(session_id.clone()));
+
+        let request = ProviderRequest::new(method, Some(serde_json::Value::Object(params)));
+        let guard = adapter.read().await;
+        guard
+            .send_request(request)
+            .await
+            .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
+
+        Ok(Some(session_id))
     }
 
     /// Handle StartTurn: create a provider session and send the initial request
@@ -327,7 +417,9 @@ mod tests {
     struct CmdTestMock {
         started_sessions: std::sync::Mutex<Vec<String>>,
         interrupted: std::sync::Mutex<Vec<String>>,
-        stopped: std::sync::Mutex<Vec<String>>,
+        stopped: Arc<std::sync::Mutex<Vec<String>>>,
+        /// (method, params) for every dispatched JSON-RPC request
+        requests: Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>,
     }
 
     impl CmdTestMock {
@@ -335,8 +427,28 @@ mod tests {
             Self {
                 started_sessions: std::sync::Mutex::new(Vec::new()),
                 interrupted: std::sync::Mutex::new(Vec::new()),
-                stopped: std::sync::Mutex::new(Vec::new()),
+                stopped: Arc::new(std::sync::Mutex::new(Vec::new())),
+                requests: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
+        }
+
+        /// Construct with shared recording handles the test can inspect directly
+        /// (the adapter is read back as a `dyn ProviderAdapter`, so its fields
+        /// are not reachable through the trait object).
+        fn new_with_handles() -> (
+            Self,
+            Arc<std::sync::Mutex<Vec<String>>>,
+            Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>,
+        ) {
+            let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let this = Self {
+                started_sessions: std::sync::Mutex::new(Vec::new()),
+                interrupted: std::sync::Mutex::new(Vec::new()),
+                stopped: Arc::clone(&stopped),
+                requests: Arc::clone(&requests),
+            };
+            (this, stopped, requests)
         }
     }
 
@@ -368,7 +480,8 @@ mod tests {
             Ok(())
         }
 
-        async fn send_request(&self, _request: ProviderRequest) -> Result<ProviderResponse, syncode_provider::ProviderAdapterError> {
+        async fn send_request(&self, request: ProviderRequest) -> Result<ProviderResponse, syncode_provider::ProviderAdapterError> {
+            self.requests.lock().unwrap().push((request.method.clone(), request.params.clone()));
             Ok(ProviderResponse {
                 jsonrpc: "2.0".to_string(),
                 id: Some(1),
@@ -386,6 +499,17 @@ mod tests {
 
     fn make_shared_test_mock() -> syncode_provider::registry::SharedAdapter {
         Arc::new(RwLock::new(CmdTestMock::new()))
+    }
+
+    /// Like `make_shared_test_mock` but also returns shared handles for the
+    /// recorded `stopped` session ids and dispatched `requests`.
+    fn make_recorded_test_mock() -> (
+        syncode_provider::registry::SharedAdapter,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>,
+    ) {
+        let (mock, stopped, requests) = CmdTestMock::new_with_handles();
+        (Arc::new(RwLock::new(mock)), stopped, requests)
     }
 
     #[tokio::test]
@@ -496,5 +620,169 @@ mod tests {
         }, &adapter, None).await.unwrap();
 
         assert!(!result.handled);
+    }
+
+    /// Helper: start a turn so a Processing session exists for the thread.
+    async fn start_turn(reactor: &ProviderCommandReactor, adapter: &syncode_provider::registry::SharedAdapter, thread_id: EntityId) {
+        reactor
+            .react(
+                &Command::StartTurn { thread_id, sequence: 1, user_input: "hi".to_string() },
+                adapter,
+                Some(EntityId::new()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn respond_approval_dispatches_to_session() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+        start_turn(&reactor, &adapter, thread_id).await;
+
+        let result = reactor
+            .react(
+                &Command::RespondThreadApproval {
+                    id: thread_id,
+                    request_id: "req-1".to_string(),
+                    decision: "approved".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.handled);
+        let session_id = result.session_id.clone().expect("session id");
+
+        let reqs = requests.lock().unwrap().clone();
+        // [0] = "chat" (StartTurn), [1] = approval/respond
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[1].0, "approval/respond");
+        let params = reqs[1].1.as_ref().expect("params");
+        assert_eq!(params["session_id"].as_str(), Some(session_id.as_str()));
+        assert_eq!(params["request_id"].as_str(), Some("req-1"));
+        assert_eq!(params["decision"].as_str(), Some("approved"));
+    }
+
+    #[tokio::test]
+    async fn respond_user_input_dispatches_to_session() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+        start_turn(&reactor, &adapter, thread_id).await;
+
+        let result = reactor
+            .react(
+                &Command::RespondThreadUserInput {
+                    id: thread_id,
+                    request_id: "req-2".to_string(),
+                    answers: "yes".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.handled);
+        let reqs = requests.lock().unwrap().clone();
+        assert_eq!(reqs.last().unwrap().0, "user-input/respond");
+        let params = reqs.last().unwrap().1.as_ref().expect("params");
+        assert_eq!(params["request_id"].as_str(), Some("req-2"));
+        assert_eq!(params["answers"].as_str(), Some("yes"));
+        assert!(params["session_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn edit_and_resend_dispatches_to_session() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+        start_turn(&reactor, &adapter, thread_id).await;
+        let message_id = EntityId::new();
+
+        let result = reactor
+            .react(
+                &Command::EditAndResendThreadMessage {
+                    id: thread_id,
+                    message_id,
+                    text: "edited".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.handled);
+        let reqs = requests.lock().unwrap().clone();
+        assert_eq!(reqs.last().unwrap().0, "message/edit-and-resend");
+        let params = reqs.last().unwrap().1.as_ref().expect("params");
+        assert_eq!(params["message_id"].as_str(), Some(message_id.as_str().as_str()));
+        assert_eq!(params["text"].as_str(), Some("edited"));
+    }
+
+    #[tokio::test]
+    async fn provider_dispatch_no_session_not_handled() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+
+        // No session was started for this thread → nothing to dispatch to.
+        let result = reactor
+            .react(
+                &Command::RespondThreadApproval {
+                    id: EntityId::new(),
+                    request_id: "req-x".to_string(),
+                    decision: "denied".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.handled);
+        assert!(result.session_id.is_none());
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_thread_session_stops_only_its_thread() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, stopped, _requests) = make_recorded_test_mock();
+        let thread_a = EntityId::new();
+        let thread_b = EntityId::new();
+
+        let a = start_turn_capture(&reactor, &adapter, thread_a).await;
+        let b = start_turn_capture(&reactor, &adapter, thread_b).await;
+
+        reactor
+            .react(&Command::StopThreadSession { id: thread_a }, &adapter, None)
+            .await
+            .unwrap();
+
+        let stopped = stopped.lock().unwrap().clone();
+        assert!(stopped.contains(&a), "thread A's session should be stopped");
+        assert!(!stopped.contains(&b), "thread B's session should be left running");
+    }
+
+    /// Like start_turn but returns the created session id (for stop-scoping assertions).
+    async fn start_turn_capture(
+        reactor: &ProviderCommandReactor,
+        adapter: &syncode_provider::registry::SharedAdapter,
+        thread_id: EntityId,
+    ) -> String {
+        let r = reactor
+            .react(
+                &Command::StartTurn { thread_id, sequence: 1, user_input: "hi".to_string() },
+                adapter,
+                Some(EntityId::new()),
+            )
+            .await
+            .unwrap();
+        r.session_id.expect("session id")
     }
 }
