@@ -407,7 +407,7 @@ impl From<syncode_provider::ProviderAdapterError> for CommandReactorError {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use syncode_provider::{ProviderAdapter, ProviderConfig, ProviderResponse, ProviderStatus};
     use std::sync::Arc;
@@ -497,13 +497,13 @@ mod tests {
         async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> { Ok(true) }
     }
 
-    fn make_shared_test_mock() -> syncode_provider::registry::SharedAdapter {
+    pub(crate) fn make_shared_test_mock() -> syncode_provider::registry::SharedAdapter {
         Arc::new(RwLock::new(CmdTestMock::new()))
     }
 
     /// Like `make_shared_test_mock` but also returns shared handles for the
     /// recorded `stopped` session ids and dispatched `requests`.
-    fn make_recorded_test_mock() -> (
+    pub(crate) fn make_recorded_test_mock() -> (
         syncode_provider::registry::SharedAdapter,
         Arc<std::sync::Mutex<Vec<String>>>,
         Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>,

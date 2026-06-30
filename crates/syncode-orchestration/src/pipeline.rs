@@ -70,6 +70,11 @@ pub struct Orchestrator {
     event_repo: Arc<dyn EventRepository>,
     /// Optional provider command reactor
     command_reactor: Option<Arc<ProviderCommandReactor>>,
+    /// Optional provider adapter. The reactor alone is inert — a provider
+    /// adapter must also be wired for provider-interaction commands to
+    /// actually dispatch (e.g. start a session on StartTurn, respond to an
+    /// approval/user-input request).
+    adapter: Option<syncode_provider::registry::SharedAdapter>,
 }
 
 impl Orchestrator {
@@ -79,10 +84,15 @@ impl Orchestrator {
             read_model: Arc::new(tokio::sync::RwLock::new(ReadModelStore::new())),
             event_repo,
             command_reactor: None,
+            adapter: None,
         }
     }
 
     /// Create with a command reactor for provider side effects.
+    ///
+    /// Note: without an adapter (see [`Self::with_reactor_and_adapter`]) the
+    /// reactor is present but cannot dispatch to any provider — provider
+    /// side effects stay inert.
     pub fn with_command_reactor(
         event_repo: Arc<dyn EventRepository>,
         command_reactor: Arc<ProviderCommandReactor>,
@@ -91,6 +101,25 @@ impl Orchestrator {
             read_model: Arc::new(tokio::sync::RwLock::new(ReadModelStore::new())),
             event_repo,
             command_reactor: Some(command_reactor),
+            adapter: None,
+        }
+    }
+
+    /// Create with a command reactor AND a provider adapter, fully arming the
+    /// pipeline's side effects. Provider-interaction commands (StartTurn,
+    /// RespondThreadApproval, EditAndResendThreadMessage, StopThreadSession, …)
+    /// dispatch through the reactor to the adapter — starting/stopping provider
+    /// sessions and responding to approval/user-input requests.
+    pub fn with_reactor_and_adapter(
+        event_repo: Arc<dyn EventRepository>,
+        command_reactor: Arc<ProviderCommandReactor>,
+        adapter: syncode_provider::registry::SharedAdapter,
+    ) -> Self {
+        Self {
+            read_model: Arc::new(tokio::sync::RwLock::new(ReadModelStore::new())),
+            event_repo,
+            command_reactor: Some(command_reactor),
+            adapter: Some(adapter),
         }
     }
 
@@ -103,6 +132,7 @@ impl Orchestrator {
             read_model,
             event_repo,
             command_reactor: None,
+            adapter: None,
         }
     }
 
@@ -164,14 +194,33 @@ impl Orchestrator {
 
         info!(count = envelopes.len(), "Events persisted and projected");
 
-        // 6. Trigger side effects (command reactor)
+        // 6. Trigger side effects (command reactor). When both a reactor and an
+        //    adapter are wired, provider-interaction commands actually dispatch
+        //    to the provider (start a session on StartTurn, respond to an
+        //    approval/user-input request, stop a thread's session, …). `handled`
+        //    reflects whether a provider side effect took effect. A reactor
+        //    without an adapter (or no provider-interaction command) stays inert.
         let side_effect_events = vec![];
         let mut side_effect_triggered = false;
 
-        if let Some(ref _reactor) = self.command_reactor {
-            side_effect_triggered = self.needs_provider_interaction(&command);
-            // In a full implementation, the reactor would produce provider events
-            // which we'd feed through the ingestion reactor.
+        if let (Some(reactor), Some(adapter)) = (&self.command_reactor, &self.adapter) {
+            if self.needs_provider_interaction(&command) {
+                // For StartTurn the reactor needs the freshly-assigned turn id
+                // (it registers the provider session against it). Derive it from
+                // the produced TurnStarted event; other commands ignore the hint.
+                let turn_id_hint = envelopes.iter().find_map(|env| {
+                    if let DomainEvent::TurnStarted { id, .. } = &env.event {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                });
+                let reaction = reactor
+                    .react(&command, adapter, turn_id_hint)
+                    .await
+                    .map_err(|e| OrchestrationError::CommandReactor(e.to_string()))?;
+                side_effect_triggered = reaction.handled;
+            }
         }
 
         Ok(CommandResult {
@@ -502,6 +551,7 @@ pub(crate) mod test_helpers {
 mod tests {
     use super::*;
     use super::test_helpers::InMemoryEventRepo;
+    use syncode_provider::SessionManager;
 
     fn make_orchestrator() -> Orchestrator {
         let repo = Arc::new(InMemoryEventRepo::new());
@@ -596,5 +646,66 @@ mod tests {
         // Read model should be populated
         let snap = orch.read_model_snapshot().await;
         assert_eq!(snap.projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_reactor_fires_on_provider_interaction_command() {
+        // Wire the orchestrator with a command reactor AND a recording mock
+        // adapter — this is what arms the pipeline's side effects.
+        let repo = Arc::new(InMemoryEventRepo::new());
+        let reactor = Arc::new(ProviderCommandReactor::new(SessionManager::new()));
+        let (adapter, _stopped, requests) =
+            crate::reactors::command::tests::make_recorded_test_mock();
+        let orch = Orchestrator::with_reactor_and_adapter(repo, reactor, adapter);
+
+        // StartTurn is a provider-interaction command: the reactor must create
+        // a provider session and dispatch the initial request.
+        let result = orch
+            .handle_command(Command::StartTurn {
+                thread_id: EntityId::new(),
+                sequence: 1,
+                user_input: "hello".to_string(),
+            })
+            .await
+            .expect("start turn");
+
+        // react() fired and propagated `handled`.
+        assert!(
+            result.side_effect_triggered,
+            "StartTurn should trigger a provider side effect"
+        );
+
+        // …and the reactor actually dispatched to the adapter (the initial
+        // "chat" request). The old inert stub would have left this empty even
+        // though it set side_effect_triggered = true.
+        let recorded = requests.lock().unwrap();
+        assert!(
+            recorded.iter().any(|(method, _)| method == "chat"),
+            "reactor should have dispatched the initial request, got {:?}",
+            recorded
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reactor_inert_without_adapter() {
+        // A reactor without an adapter must NOT fire any side effect, even for
+        // a provider-interaction command (previously the stub set the flag true).
+        let repo = Arc::new(InMemoryEventRepo::new());
+        let reactor = Arc::new(ProviderCommandReactor::new(SessionManager::new()));
+        let orch = Orchestrator::with_command_reactor(repo, reactor);
+
+        let result = orch
+            .handle_command(Command::StartTurn {
+                thread_id: EntityId::new(),
+                sequence: 1,
+                user_input: "hello".to_string(),
+            })
+            .await
+            .expect("start turn");
+
+        assert!(
+            !result.side_effect_triggered,
+            "without an adapter the reactor must stay inert"
+        );
     }
 }
