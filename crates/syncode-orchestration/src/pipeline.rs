@@ -238,9 +238,25 @@ impl Orchestrator {
                 // commands collect no events yet, so without a hint there is
                 // nothing to ingest (the events would be uncorrelated to a turn).
                 if let Some(turn_id) = turn_id_hint {
+                    // Capture the session id (if the reactor created one) before
+                    // moving reaction.events into the batch ingest below.
+                    let session_id = reaction.session_id.clone();
                     side_effect_events = self
                         .ingest_provider_events_batch(reaction.events, turn_id)
                         .await?;
+
+                    // Live bridge: for StartTurn the reactor created a provider
+                    // session. Spawn a detached consumer that forwards that
+                    // session's provider event stream back into the pipeline
+                    // (append + project) under the turn. Streaming output (tokens,
+                    // tool calls, completion) arrives here, not via react().
+                    if let Some(sid) = session_id
+                        && let Err(e) = self
+                            .spawn_provider_stream_consumer(sid, turn_id)
+                            .await
+                    {
+                        tracing::warn!(error = %e, "failed to spawn provider stream consumer");
+                    }
                 }
             }
         }
@@ -264,30 +280,9 @@ impl Orchestrator {
     ) -> Result<Vec<Envelope>, OrchestrationError> {
         let IngestionResult { events, consumed: _ } =
             ingest_provider_event(provider_event, turn_id);
-
-        if events.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Persist the new domain events
-        let aggregate_id = turn_id; // Turn events aggregate on the turn
-        let current_version = self.event_repo.current_version(aggregate_id).await.unwrap_or(0);
-        let _new_version = self.event_repo
-            .append_events(aggregate_id, events.clone(), current_version)
-            .await?;
-
-        // Project events to read model, then wrap in envelopes
-        let mut read_model = self.read_model.write().await;
-        Projector::project_many(&events, &mut read_model);
-        drop(read_model);
-
-        let envelopes: Vec<Envelope> = events
-            .into_iter()
-            .enumerate()
-            .map(|(i, event)| Envelope::new(event, current_version + 1 + i as u64))
-            .collect();
-
-        Ok(envelopes)
+        // Turn events aggregate on the turn; append + project is shared with the
+        // live stream consumer via the module-level `append_and_project` helper.
+        append_and_project(&self.event_repo, &self.read_model, turn_id, events).await
     }
 
     /// Ingest a batch of provider events collected by the command reactor and
@@ -310,6 +305,42 @@ impl Orchestrator {
             out.extend(envelopes);
         }
         Ok(out)
+    }
+
+    /// Spawn a detached background task that consumes a provider session's event
+    /// stream and ingests each event into the pipeline (append + project),
+    /// correlated to the session's turn. This is the live half of the provider
+    /// bridge — the synchronous `react()` path only handles request/response;
+    /// streaming output (tokens, tool calls, completion) arrives here and is fed
+    /// back as domain events.
+    ///
+    /// The task runs until the stream ends or errors, then self-terminates.
+    /// Requires an adapter to be wired (`OrchestrationError` otherwise). The
+    /// returned `JoinHandle` is detached by the pipeline; tests may await it.
+    pub async fn spawn_provider_stream_consumer(
+        &self,
+        session_id: String,
+        turn_id: EntityId,
+    ) -> Result<tokio::task::JoinHandle<()>, OrchestrationError> {
+        let adapter = self.adapter.clone().ok_or_else(|| {
+            OrchestrationError::CommandReactor(
+                "no provider adapter wired for stream consumption".to_string(),
+            )
+        })?;
+
+        let stream = {
+            let guard = adapter.read().await;
+            guard
+                .event_stream(&session_id)
+                .map_err(|e| OrchestrationError::CommandReactor(format!("event_stream: {e}")))?
+        };
+
+        let event_repo = Arc::clone(&self.event_repo);
+        let read_model = Arc::clone(&self.read_model);
+
+        Ok(tokio::spawn(async move {
+            consume_provider_stream(stream, event_repo, read_model, turn_id, session_id).await;
+        }))
     }
 
     /// Get a snapshot of the current read model
@@ -525,6 +556,78 @@ impl Orchestrator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Provider stream consumer — the live half of the provider bridge.
+// A session's ProviderEvent stream is driven to completion, with each event
+// ingested (append + project) under the session's turn.
+// ---------------------------------------------------------------------------
+
+/// Append domain events to an aggregate's stream and project them to the read
+/// model, returning the sequenced envelopes. Shared by
+/// [`Orchestrator::ingest_provider_event`] and the stream consumer so the
+/// append+project path is defined once.
+pub(crate) async fn append_and_project(
+    event_repo: &Arc<dyn EventRepository>,
+    read_model: &Arc<tokio::sync::RwLock<ReadModelStore>>,
+    aggregate_id: EntityId,
+    events: Vec<DomainEvent>,
+) -> Result<Vec<Envelope>, OrchestrationError> {
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let current_version = event_repo.current_version(aggregate_id).await.unwrap_or(0);
+    let _new_version = event_repo
+        .append_events(aggregate_id, events.clone(), current_version)
+        .await?;
+
+    {
+        let mut rm = read_model.write().await;
+        Projector::project_many(&events, &mut rm);
+    }
+
+    let envelopes: Vec<Envelope> = events
+        .into_iter()
+        .enumerate()
+        .map(|(i, event)| Envelope::new(event, current_version + 1 + i as u64))
+        .collect();
+    Ok(envelopes)
+}
+
+/// Drive a provider event stream to completion, ingesting each event into the
+/// pipeline (append + project) under the given turn. A stream error or an append
+/// error stops the consumer (logged). A free function so it is unit-testable
+/// with a synthetic stream, independent of `tokio::spawn`.
+pub(crate) async fn consume_provider_stream(
+    mut stream: syncode_provider::ProviderStream,
+    event_repo: Arc<dyn EventRepository>,
+    read_model: Arc<tokio::sync::RwLock<ReadModelStore>>,
+    turn_id: EntityId,
+    session_id: String,
+) {
+    use tokio_stream::StreamExt;
+
+    tracing::info!(%session_id, "provider stream consumer started");
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(provider_event) => {
+                let ingestion = ingest_provider_event(provider_event, turn_id);
+                if let Err(e) =
+                    append_and_project(&event_repo, &read_model, turn_id, ingestion.events).await
+                {
+                    tracing::error!(%session_id, error = %e, "stream consumer ingest failed; stopping");
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%session_id, error = %e, "provider stream error; stopping consumer");
+                return;
+            }
+        }
+    }
+    tracing::info!(%session_id, "provider stream consumer ended");
+}
+
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use super::*;
@@ -675,6 +778,64 @@ mod tests {
         // Monotonic sequencing on the turn's fresh stream (1, 2).
         let seqs: Vec<u64> = envelopes.iter().map(|e| e.sequence).collect();
         assert_eq!(seqs, vec![1, 2], "events should be sequenced 1, 2");
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_ingests_stream_events() {
+        // Exercise the live half of the provider bridge directly with a synthetic
+        // stream (no tokio::spawn / mock adapter): each provider event is ingested
+        // (append + project) under the turn. ToolCall -> ActivityLogged, Completed
+        // -> TurnCompleted; Started yields nothing.
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let turn_id = EntityId::new();
+
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
+            Ok(syncode_provider::ProviderEvent::ToolCall {
+                session_id: "s1".into(),
+                tool_name: "grep".into(),
+                tool_input: serde_json::json!({"q": "foo"}),
+            }),
+            Ok(syncode_provider::ProviderEvent::Completed {
+                session_id: "s1".into(),
+                output: "done".into(),
+                usage: None,
+            }),
+            Ok(syncode_provider::ProviderEvent::Started { session_id: "s1".into() }),
+        ]));
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        // Two domain events appended to the turn stream (ToolCall + Completed);
+        // Started produces none.
+        assert_eq!(
+            repo.current_version(turn_id).await.unwrap(),
+            2,
+            "two events should be appended to the turn stream"
+        );
+        // ToolCall projects one activity; Completed only updates an existing turn
+        // (none here — no TurnStarted), so it adds nothing to the read model.
+        let rm = read_model.read().await;
+        assert_eq!(rm.activities.len(), 1, "ToolCall should project one activity");
+        drop(rm);
+    }
+
+    #[tokio::test]
+    async fn spawn_provider_stream_consumer_errors_without_adapter() {
+        // Without an adapter wired there is no stream to subscribe to.
+        let orch = make_orchestrator();
+        let result = orch
+            .spawn_provider_stream_consumer("s1".into(), EntityId::new())
+            .await;
+        assert!(result.is_err(), "spawning without an adapter must error");
     }
 
     #[tokio::test]
