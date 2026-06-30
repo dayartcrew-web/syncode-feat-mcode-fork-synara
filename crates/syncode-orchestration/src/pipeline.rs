@@ -57,6 +57,28 @@ pub enum OrchestrationError {
 
     #[error("Thread not found: {0}")]
     ThreadNotFound(EntityId),
+
+    /// Optimistic-concurrency conflict that did not resolve within the retry
+    /// budget. A concurrent append kept racing ahead on the same aggregate.
+    #[error("optimistic-concurrency conflict after {attempts} attempts: expected version {expected}, actual {actual}")]
+    ConcurrencyConflictRetried {
+        expected: u64,
+        actual: u64,
+        attempts: usize,
+    },
+}
+
+/// Maximum number of decide+append attempts before an optimistic-concurrency
+/// conflict is surfaced as [`OrchestrationError::ConcurrencyConflictRetried`].
+const MAX_CONCURRENCY_ATTEMPTS: usize = 5;
+
+/// Outcome of one successful optimistic-concurrency attempt (see
+/// [`Orchestrator::decide_and_append_once`]).
+struct AppendedOutcome {
+    events: Vec<DomainEvent>,
+    aggregate_id: EntityId,
+    current_version: u64,
+    new_version: u64,
 }
 
 /// The Orchestrator is the central pipeline that processes commands.
@@ -151,42 +173,68 @@ impl Orchestrator {
     ) -> Result<CommandResult, OrchestrationError> {
         info!("Processing command");
 
-        // 1. Get current aggregate state from read model as JSON for the Decider
+        // 1. Optimistic-concurrency-controlled decide + append.
+        //
+        // Each attempt loads the aggregate's current state, runs the pure
+        // Decider, and appends the produced events at the stream's current
+        // version. If a concurrent append races ahead, `append_events` returns
+        // `ConcurrencyConflict` and we retry — re-loading state and re-deciding
+        // against the now-current version. Decider errors and non-concurrency
+        // port errors propagate immediately; only conflicts are retried, up to
+        // [`MAX_CONCURRENCY_ATTEMPTS`].
         let aggregate_id_hint = self.aggregate_id_for_command(&command);
-        let current_state = self.load_aggregate_state(&aggregate_id_hint, &command).await;
 
-        // Cross-aggregate invariant: CreateThread requires its parent project to
-        // exist. Handoff/Fork enforce this at the application layer, but
-        // CreateThread is reachable directly through the orchestrator (WS-RPC),
-        // so the engine guards it here — before the pure Decider runs.
-        if let Command::CreateThread { project_id, .. } = &command {
-            if current_state.is_none() {
-                return Err(OrchestrationError::ProjectNotFound(*project_id));
+        let mut appended: Option<AppendedOutcome> = None;
+        let mut last_conflict: Option<(u64, u64)> = None;
+        for _ in 0..MAX_CONCURRENCY_ATTEMPTS {
+            match self.decide_and_append_once(&command, &aggregate_id_hint).await {
+                Ok(None) => {
+                    info!("No events produced");
+                    return Ok(CommandResult {
+                        command,
+                        events: vec![],
+                        side_effect_triggered: false,
+                        side_effect_events: vec![],
+                    });
+                }
+                Ok(Some(outcome)) => {
+                    appended = Some(outcome);
+                    break;
+                }
+                Err(OrchestrationError::EventRepository(PortError::ConcurrencyConflict {
+                    expected,
+                    actual,
+                })) => {
+                    tracing::warn!(
+                        expected,
+                        actual,
+                        "optimistic-concurrency conflict on append; retrying decide+append"
+                    );
+                    last_conflict = Some((expected, actual));
+                }
+                Err(other) => return Err(other),
             }
         }
 
-        // 2. Run through Decider (pure logic)
-        let domain_events = Decider::decide(command.clone(), current_state.as_ref())?;
-
-        if domain_events.is_empty() {
-            info!("No events produced");
-            return Ok(CommandResult {
-                command,
-                events: vec![],
-                side_effect_triggered: false,
-                side_effect_events: vec![],
-            });
-        }
-
-        // 3. Determine aggregate ID from the first event (the Decider assigns IDs)
-        //    and get the current stream version for optimistic concurrency.
-        let aggregate_id = domain_events[0].aggregate_id();
-        let current_version = self.event_repo.current_version(aggregate_id).await.unwrap_or(0);
-
-        // 4. Persist events
-        let _new_version = self.event_repo
-            .append_events(aggregate_id, domain_events.clone(), current_version)
-            .await?;
+        let AppendedOutcome {
+            events: domain_events,
+            aggregate_id: _aggregate_id,
+            current_version,
+            new_version: _new_version,
+        } = match appended {
+            Some(outcome) => outcome,
+            None => {
+                // Retry budget exhausted: surface the last conflict rather than
+                // silently dropping the command.
+                let (expected, actual) =
+                    last_conflict.expect("retry loop exhausted without a recorded conflict");
+                return Err(OrchestrationError::ConcurrencyConflictRetried {
+                    expected,
+                    actual,
+                    attempts: MAX_CONCURRENCY_ATTEMPTS,
+                });
+            }
+        };
 
         // 5. Project raw domain events to in-memory read model, then wrap in envelopes
         let mut read_model = self.read_model.write().await;
@@ -267,6 +315,52 @@ impl Orchestrator {
             side_effect_triggered,
             side_effect_events,
         })
+    }
+
+    /// One attempt of the optimistic-concurrency loop: load the aggregate's
+    /// current state, run the pure Decider, and append the produced events at
+    /// the stream's current version. Returns `Ok(None)` when the Decider
+    /// produced no events. The `CreateThread` project-existence guard lives
+    /// here so each retry re-evaluates it against freshly-loaded state.
+    async fn decide_and_append_once(
+        &self,
+        command: &Command,
+        aggregate_id_hint: &Option<EntityId>,
+    ) -> Result<Option<AppendedOutcome>, OrchestrationError> {
+        let current_state = self.load_aggregate_state(aggregate_id_hint, command).await;
+
+        // Cross-aggregate invariant: CreateThread requires its parent project to
+        // exist. Handoff/Fork enforce this at the application layer, but
+        // CreateThread is reachable directly through the orchestrator (WS-RPC),
+        // so the engine guards it here — before the pure Decider runs.
+        if let Command::CreateThread { project_id, .. } = command {
+            if current_state.is_none() {
+                return Err(OrchestrationError::ProjectNotFound(*project_id));
+            }
+        }
+
+        let domain_events = Decider::decide(command.clone(), current_state.as_ref())?;
+        if domain_events.is_empty() {
+            return Ok(None);
+        }
+
+        let aggregate_id = domain_events[0].aggregate_id();
+        let current_version = self
+            .event_repo
+            .current_version(aggregate_id)
+            .await
+            .unwrap_or(0);
+        let new_version = self
+            .event_repo
+            .append_events(aggregate_id, domain_events.clone(), current_version)
+            .await?;
+
+        Ok(Some(AppendedOutcome {
+            events: domain_events,
+            aggregate_id,
+            current_version,
+            new_version,
+        }))
     }
 
     /// Ingest a provider event (from the provider stream) and produce domain events.
@@ -750,6 +844,146 @@ mod tests {
     fn make_orchestrator() -> Orchestrator {
         let repo = Arc::new(InMemoryEventRepo::new());
         Orchestrator::new(repo)
+    }
+
+    /// In-memory event-repo wrapper that fails the first `conflicts`
+    /// `append_events` calls with a `ConcurrencyConflict`, then delegates to
+    /// the inner repo. Used to exercise the optimistic-concurrency retry loop
+    /// in `handle_command` without real concurrency.
+    struct FlakyEventRepo {
+        inner: InMemoryEventRepo,
+        conflicts_remaining: std::sync::atomic::AtomicU32,
+        append_calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl FlakyEventRepo {
+        fn new(conflicts: u32) -> Self {
+            Self {
+                inner: InMemoryEventRepo::new(),
+                conflicts_remaining: std::sync::atomic::AtomicU32::new(conflicts),
+                append_calls: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn append_calls(&self) -> u32 {
+            self.append_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventRepository for FlakyEventRepo {
+        async fn append_events(
+            &self,
+            aggregate_id: EntityId,
+            events: Vec<DomainEvent>,
+            expected_version: u64,
+        ) -> Result<u64, PortError> {
+            self.append_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Atomically consume one conflict credit if any remain. Using an
+            // atomic (not a Mutex guard) keeps the future `Send`: no lock guard
+            // is held across the `.await` below.
+            let conflicted = self
+                .conflicts_remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |v| if v > 0 { Some(v - 1) } else { None },
+                )
+                .is_ok();
+            if conflicted {
+                return Err(PortError::ConcurrencyConflict {
+                    expected: expected_version,
+                    actual: expected_version + 1,
+                });
+            }
+            self.inner
+                .append_events(aggregate_id, events, expected_version)
+                .await
+        }
+
+        async fn replay_events(
+            &self,
+            aggregate_id: EntityId,
+        ) -> Result<Vec<Envelope>, PortError> {
+            self.inner.replay_events(aggregate_id).await
+        }
+
+        async fn load_snapshot(
+            &self,
+            aggregate_id: EntityId,
+        ) -> Result<Option<(serde_json::Value, u64)>, PortError> {
+            self.inner.load_snapshot(aggregate_id).await
+        }
+
+        async fn save_snapshot(
+            &self,
+            aggregate_id: EntityId,
+            state: serde_json::Value,
+            version: u64,
+        ) -> Result<(), PortError> {
+            self.inner.save_snapshot(aggregate_id, state, version).await
+        }
+
+        async fn replay_all_events(
+            &self,
+            since_sequence: Option<u64>,
+            limit: u32,
+        ) -> Result<Vec<Envelope>, PortError> {
+            self.inner.replay_all_events(since_sequence, limit).await
+        }
+
+        async fn current_version(&self, aggregate_id: EntityId) -> Result<u64, PortError> {
+            self.inner.current_version(aggregate_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_command_retries_concurrency_conflict_then_succeeds() {
+        // The repo fails the first append with a conflict, then succeeds on the
+        // retry. handle_command must re-load state + re-decide + re-append and
+        // ultimately return the produced events (ProjectCreated).
+        let repo = Arc::new(FlakyEventRepo::new(1));
+        let repo_handle = Arc::clone(&repo);
+        let orch = Orchestrator::new(repo);
+
+        let result = orch
+            .handle_command(Command::CreateProject {
+                name: "Retried".into(),
+                root_path: "/retried".into(),
+            })
+            .await
+            .expect("command should succeed after retry");
+
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].event.event_type_name(), "ProjectCreated");
+        // Initial attempt (conflicted) + one successful retry.
+        assert_eq!(repo_handle.append_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn handle_command_surfaces_conflict_after_retry_budget_exhausted() {
+        // The repo conflicts on every append. After MAX_CONCURRENCY_ATTEMPTS
+        // attempts the conflict is surfaced as ConcurrencyConflictRetried rather
+        // than retried indefinitely.
+        let repo = Arc::new(FlakyEventRepo::new(u32::MAX));
+        let repo_handle = Arc::clone(&repo);
+        let orch = Orchestrator::new(repo);
+
+        let result = orch
+            .handle_command(Command::CreateProject {
+                name: "Never".into(),
+                root_path: "/never".into(),
+            })
+            .await;
+
+        match result {
+            Err(OrchestrationError::ConcurrencyConflictRetried { attempts, .. }) => {
+                assert_eq!(attempts, MAX_CONCURRENCY_ATTEMPTS);
+            }
+            other => panic!("expected ConcurrencyConflictRetried, got: {other:?}"),
+        }
+        assert_eq!(repo_handle.append_calls(), MAX_CONCURRENCY_ATTEMPTS as u32);
     }
 
     #[tokio::test]
