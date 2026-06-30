@@ -345,14 +345,14 @@ impl Projector {
             }
 
             DomainEvent::ActivityLogged {
-                id, activity_type, description, created_at,
+                id, activity_type, description, thread_id, created_at,
             } => {
                 let view = ActivityView {
                     id: id.as_str(),
                     activity_type: activity_type.clone(),
                     description: description.clone(),
                     project_id: None,
-                    thread_id: None,
+                    thread_id: thread_id.map(|t| t.as_str()),
                     metadata: serde_json::Value::Object(serde_json::Map::new()),
                     created_at: created_at.to_string(),
                 };
@@ -549,12 +549,31 @@ mod tests {
             id: EntityId::new(),
             activity_type: "session_started".to_string(),
             description: "User started session".to_string(),
+            thread_id: None,
             created_at: Timestamp::now(),
         };
         let mut store = ReadModelStore::new();
         Projector::project(&event, &mut store);
         assert_eq!(store.activities.len(), 1);
         assert_eq!(store.activities[0].activity_type, "session_started");
+    }
+
+    #[test]
+    fn activity_logged_thread_scoped_projects_thread_id() {
+        // An ActivityLogged carrying a thread_id should populate the read-model view's
+        // thread_id, so activities can be filtered per thread.
+        let thread_id = EntityId::new();
+        let event = DomainEvent::ActivityLogged {
+            id: EntityId::new(),
+            activity_type: "session_started".to_string(),
+            description: "User started session".to_string(),
+            thread_id: Some(thread_id),
+            created_at: Timestamp::now(),
+        };
+        let mut store = ReadModelStore::new();
+        Projector::project(&event, &mut store);
+        assert_eq!(store.activities.len(), 1);
+        assert_eq!(store.activities[0].thread_id, Some(thread_id.as_str()));
     }
 
     #[test]

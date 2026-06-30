@@ -271,6 +271,10 @@ pub enum DomainEvent {
         id: EntityId,
         activity_type: String,
         description: String,
+        /// Thread this activity belongs to. `#[serde(default)]` keeps old persisted
+        /// events (which predate the field) deserializable as `None`.
+        #[serde(default)]
+        thread_id: Option<EntityId>,
         created_at: Timestamp,
     },
 }
@@ -438,7 +442,7 @@ mod tests {
             (DomainEvent::ThreadCreated { id, project_id: id, provider_id: "p".into(), model: "m".into(), created_at: Timestamp::now() }, "ThreadCreated"),
             (DomainEvent::TurnStarted { id, thread_id: id, sequence: 1, user_input: "hi".into(), created_at: Timestamp::now() }, "TurnStarted"),
             (DomainEvent::MessageAdded { id, turn_id: id, role: "user".into(), content: "msg".into(), created_at: Timestamp::now() }, "MessageAdded"),
-            (DomainEvent::ActivityLogged { id, activity_type: "session_started".into(), description: "d".into(), created_at: Timestamp::now() }, "ActivityLogged"),
+            (DomainEvent::ActivityLogged { id, activity_type: "session_started".into(), description: "d".into(), thread_id: None, created_at: Timestamp::now() }, "ActivityLogged"),
         ];
         for (ev, expected_name) in events {
             assert_eq!(ev.event_type_name(), expected_name);

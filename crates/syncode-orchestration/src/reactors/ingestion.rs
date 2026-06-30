@@ -61,6 +61,9 @@ pub fn ingest_provider_event(
                     id: EntityId::new(),
                     activity_type: "provider_tool_call".to_string(),
                     description,
+                    // Provider events only know the turn_id, not the owning thread;
+                    // resolving turn→thread is a separate concern, so leave unscoped.
+                    thread_id: None,
                     created_at: now,
                 }],
                 consumed: true,
@@ -82,6 +85,7 @@ pub fn ingest_provider_event(
                     id: EntityId::new(),
                     activity_type: "provider_tool_result".to_string(),
                     description,
+                    thread_id: None,
                     created_at: now,
                 }],
                 consumed: true,

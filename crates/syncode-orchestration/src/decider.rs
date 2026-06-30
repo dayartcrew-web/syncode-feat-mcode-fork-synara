@@ -827,15 +827,15 @@ impl Decider {
         activity_type: String,
         description: String,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
-        // Guard: thread must exist. Reuses the existing ActivityLogged event
-        // (faithful to mcode `thread.activity-appended` payload {threadId, activity};
-        // thread-scoping of the activity view is deferred — ActivityView.thread_id
-        // stays None since ActivityLogged carries no thread reference).
+        // Guard: thread must exist. Reuses the existing ActivityLogged event, now
+        // scoped to this thread (faithful to mcode `thread.activity-appended` payload
+        // {threadId, activity}). thread_id lets the activity read-model filter by thread.
         let _ = Self::extract_thread_status(state, &id)?;
         Ok(vec![DomainEvent::ActivityLogged {
             id: EntityId::new(),
             activity_type,
             description,
+            thread_id: Some(id),
             created_at: Timestamp::now(),
         }])
     }
