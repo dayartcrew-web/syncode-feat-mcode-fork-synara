@@ -33,9 +33,13 @@ pub struct IngestionResult {
 /// - `ProviderEvent::Completed` → `DomainEvent::TurnCompleted`
 /// - `ProviderEvent::Error` → `DomainEvent::TurnFailed`
 /// - `ProviderEvent::StatusChanged` → no domain event (infrastructure)
+///
+/// `thread_id` scopes any emitted `ActivityLogged` (ToolCall/ToolResult) to the
+/// turn's owning thread; pass `None` when the thread can't be resolved.
 pub fn ingest_provider_event(
     event: ProviderEvent,
     turn_id: EntityId,
+    thread_id: Option<EntityId>,
 ) -> IngestionResult {
     let now = Timestamp::now();
 
@@ -61,9 +65,8 @@ pub fn ingest_provider_event(
                     id: EntityId::new(),
                     activity_type: "provider_tool_call".to_string(),
                     description,
-                    // Provider events only know the turn_id, not the owning thread;
-                    // resolving turn→thread is a separate concern, so leave unscoped.
-                    thread_id: None,
+                    // Scope to the turn's owning thread (resolved by the caller).
+                    thread_id,
                     created_at: now,
                 }],
                 consumed: true,
@@ -85,7 +88,7 @@ pub fn ingest_provider_event(
                     id: EntityId::new(),
                     activity_type: "provider_tool_result".to_string(),
                     description,
-                    thread_id: None,
+                    thread_id,
                     created_at: now,
                 }],
                 consumed: true,
@@ -147,7 +150,7 @@ mod tests {
     #[test]
     fn ingest_started_produces_no_events() {
         let event = ProviderEvent::Started { session_id: "s1".to_string() };
-        let result = ingest_provider_event(event, make_turn_id());
+        let result = ingest_provider_event(event, make_turn_id(), None);
         assert!(result.events.is_empty());
         assert!(result.consumed);
     }
@@ -158,7 +161,7 @@ mod tests {
             session_id: "s1".to_string(),
             content: "hello".to_string(),
         };
-        let result = ingest_provider_event(event, make_turn_id());
+        let result = ingest_provider_event(event, make_turn_id(), None);
         assert!(result.events.is_empty());
     }
 
@@ -169,7 +172,7 @@ mod tests {
             tool_name: "read_file".to_string(),
             tool_input: serde_json::json!({"path": "/tmp/main.rs"}),
         };
-        let result = ingest_provider_event(event, make_turn_id());
+        let result = ingest_provider_event(event, make_turn_id(), None);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             DomainEvent::ActivityLogged { activity_type, .. } => {
@@ -186,7 +189,7 @@ mod tests {
             tool_name: "bash".to_string(),
             result: serde_json::json!({"exit_code": 0}),
         };
-        let result = ingest_provider_event(event, make_turn_id());
+        let result = ingest_provider_event(event, make_turn_id(), None);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             DomainEvent::ActivityLogged { activity_type, .. } => {
@@ -208,7 +211,7 @@ mod tests {
                 total_tokens: 150,
             }),
         };
-        let result = ingest_provider_event(event, turn_id);
+        let result = ingest_provider_event(event, turn_id, None);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             DomainEvent::TurnCompleted { id, assistant_output, duration_ms, .. } => {
@@ -228,7 +231,7 @@ mod tests {
             output: "response".to_string(),
             usage: None,
         };
-        let result = ingest_provider_event(event, turn_id);
+        let result = ingest_provider_event(event, turn_id, None);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             DomainEvent::TurnCompleted { duration_ms, .. } => {
@@ -246,7 +249,7 @@ mod tests {
             message: "Rate limit exceeded".to_string(),
             code: Some(429),
         };
-        let result = ingest_provider_event(event, turn_id);
+        let result = ingest_provider_event(event, turn_id, None);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             DomainEvent::TurnFailed { id, error, .. } => {
@@ -263,7 +266,7 @@ mod tests {
         let event = ProviderEvent::StatusChanged {
             status: syncode_provider::ProviderStatus::Busy,
         };
-        let result = ingest_provider_event(event, make_turn_id());
+        let result = ingest_provider_event(event, make_turn_id(), None);
         assert!(result.events.is_empty());
     }
 

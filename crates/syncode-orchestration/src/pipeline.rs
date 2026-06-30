@@ -278,8 +278,10 @@ impl Orchestrator {
         provider_event: syncode_provider::ProviderEvent,
         turn_id: EntityId,
     ) -> Result<Vec<Envelope>, OrchestrationError> {
+        // Scope provider-originated activities to the turn's owning thread.
+        let thread_id = thread_id_for_turn(&self.read_model, turn_id).await;
         let IngestionResult { events, consumed: _ } =
-            ingest_provider_event(provider_event, turn_id);
+            ingest_provider_event(provider_event, turn_id, thread_id);
         // Turn events aggregate on the turn; append + project is shared with the
         // live stream consumer via the module-level `append_and_project` helper.
         append_and_project(&self.event_repo, &self.read_model, turn_id, events).await
@@ -594,6 +596,22 @@ pub(crate) async fn append_and_project(
     Ok(envelopes)
 }
 
+/// Resolve the thread that owns a turn, from the read model. Used to scope
+/// provider-originated activities (ToolCall/ToolResult) to their thread when
+/// only the turn_id is known. `None` if the turn isn't projected yet (or its
+/// thread_id isn't a valid UUID).
+pub(crate) async fn thread_id_for_turn(
+    read_model: &tokio::sync::RwLock<ReadModelStore>,
+    turn_id: EntityId,
+) -> Option<EntityId> {
+    read_model
+        .read()
+        .await
+        .turns
+        .get(&turn_id.as_str())
+        .and_then(|t| EntityId::parse(&t.thread_id).ok())
+}
+
 /// Drive a provider event stream to completion, ingesting each event into the
 /// pipeline (append + project) under the given turn. A stream error or an append
 /// error stops the consumer (logged). A free function so it is unit-testable
@@ -607,11 +625,16 @@ pub(crate) async fn consume_provider_stream(
 ) {
     use tokio_stream::StreamExt;
 
+    // Resolve the turn's owning thread once; every event on this stream shares
+    // it (StartTurn emits TurnStarted before the consumer spawns, so the turn is
+    // normally already projected). None if not yet projected.
+    let thread_id = thread_id_for_turn(&read_model, turn_id).await;
+
     tracing::info!(%session_id, "provider stream consumer started");
     while let Some(result) = stream.next().await {
         match result {
             Ok(provider_event) => {
-                let ingestion = ingest_provider_event(provider_event, turn_id);
+                let ingestion = ingest_provider_event(provider_event, turn_id, thread_id);
                 if let Err(e) =
                     append_and_project(&event_repo, &read_model, turn_id, ingestion.events).await
                 {
@@ -826,6 +849,56 @@ mod tests {
         let rm = read_model.read().await;
         assert_eq!(rm.activities.len(), 1, "ToolCall should project one activity");
         drop(rm);
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_scopes_activities_to_thread() {
+        // Pre-project a TurnStarted so the turn→thread mapping exists in the read
+        // model. A provider ToolCall on that turn's stream should then produce an
+        // ActivityLogged scoped to the turn's thread (follow-up #3).
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let thread_id = EntityId::new();
+        let turn_id = EntityId::new();
+
+        {
+            let mut rm = read_model.write().await;
+            Projector::project(
+                &DomainEvent::TurnStarted {
+                    id: turn_id,
+                    thread_id,
+                    sequence: 1,
+                    user_input: "hi".into(),
+                    created_at: syncode_core::Timestamp::now(),
+                },
+                &mut rm,
+            );
+        }
+
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
+            Ok(syncode_provider::ProviderEvent::ToolCall {
+                session_id: "s1".into(),
+                tool_name: "grep".into(),
+                tool_input: serde_json::json!({"q": "foo"}),
+            }),
+        ]));
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        let rm = read_model.read().await;
+        assert_eq!(rm.activities.len(), 1, "ToolCall should produce one activity");
+        assert_eq!(
+            rm.activities[0].thread_id,
+            Some(thread_id.as_str()),
+            "provider activity should be scoped to the turn's thread"
+        );
     }
 
     #[tokio::test]
