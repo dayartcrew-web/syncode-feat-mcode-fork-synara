@@ -708,4 +708,114 @@ mod tests {
             "without an adapter the reactor must stay inert"
         );
     }
+
+    #[tokio::test]
+    async fn test_e2e_provider_bridge_routes_to_active_session() {
+        // Full armed pipeline: CreateProject → CreateThread → StartTurn (creates
+        // + registers a Processing session for the thread) → RespondThreadApproval
+        // dispatches `approval/respond` to that session; EditAndResendThreadMessage
+        // dispatches `message/edit-and-resend`. This is the end-to-end proof that
+        // the T6 provider bridge is wired through the orchestrator — T2's
+        // activation makes StartTurn actually arm a session that the follow-up
+        // turn-interaction commands dispatch into.
+        let repo = Arc::new(InMemoryEventRepo::new());
+        let reactor = Arc::new(ProviderCommandReactor::new(SessionManager::new()));
+        let (adapter, _stopped, requests) =
+            crate::reactors::command::tests::make_recorded_test_mock();
+        let orch = Orchestrator::with_reactor_and_adapter(repo, reactor, adapter);
+
+        // 1. Create project + thread (the decider assigns the thread id).
+        orch.handle_command(Command::CreateProject {
+            name: "E2E".into(),
+            root_path: "/e2e".into(),
+        })
+        .await
+        .expect("create project");
+
+        let thread_result = orch
+            .handle_command(Command::CreateThread {
+                project_id: EntityId::new(),
+                provider_id: "anthropic".into(),
+                model: "claude".into(),
+            })
+            .await
+            .expect("create thread");
+        let thread_id = thread_result
+            .events
+            .iter()
+            .find_map(|env| {
+                if let DomainEvent::ThreadCreated { id, .. } = &env.event {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .expect("ThreadCreated produced");
+
+        // 2. StartTurn — the reactor creates a Processing session for the thread.
+        let start = orch
+            .handle_command(Command::StartTurn {
+                thread_id,
+                sequence: 1,
+                user_input: "fix the bug".into(),
+            })
+            .await
+            .expect("start turn");
+        assert!(
+            start.side_effect_triggered,
+            "StartTurn should arm a provider session"
+        );
+
+        // 3. RespondThreadApproval — dispatched to the thread's active session.
+        let approval = orch
+            .handle_command(Command::RespondThreadApproval {
+                id: thread_id,
+                request_id: "req-123".into(),
+                decision: "approved".into(),
+            })
+            .await
+            .expect("respond approval");
+        assert!(
+            approval.side_effect_triggered,
+            "approval response should dispatch to the provider"
+        );
+
+        let reqs = requests.lock().unwrap().clone();
+        let approval_dispatch = reqs
+            .iter()
+            .find(|(m, _)| m.as_str() == "approval/respond")
+            .expect("approval/respond should have been dispatched");
+        let params = approval_dispatch
+            .1
+            .as_ref()
+            .expect("approval/respond params");
+        assert_eq!(params["request_id"].as_str(), Some("req-123"));
+        assert_eq!(params["decision"].as_str(), Some("approved"));
+        assert!(
+            params["session_id"].as_str().is_some(),
+            "dispatch should carry the target session id"
+        );
+
+        // 4. EditAndResendThreadMessage — dispatched as message/edit-and-resend.
+        let edit = orch
+            .handle_command(Command::EditAndResendThreadMessage {
+                id: thread_id,
+                message_id: EntityId::new(),
+                text: "edited".into(),
+            })
+            .await
+            .expect("edit and resend");
+        assert!(
+            edit.side_effect_triggered,
+            "edit-and-resend should dispatch to the provider"
+        );
+
+        let reqs = requests.lock().unwrap().clone();
+        let edit_dispatch = reqs
+            .iter()
+            .find(|(m, _)| m.as_str() == "message/edit-and-resend")
+            .expect("message/edit-and-resend should have been dispatched");
+        let params = edit_dispatch.1.as_ref().expect("edit-and-resend params");
+        assert!(params["session_id"].as_str().is_some());
+    }
 }
