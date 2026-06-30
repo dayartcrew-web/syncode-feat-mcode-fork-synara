@@ -634,17 +634,18 @@ impl ProjectionManager {
             }
 
             DomainEvent::ActivityLogged {
-                id, activity_type, description, created_at, ..
+                id, activity_type, description, thread_id, created_at,
             } => {
                 sqlx::query(
                     r#"
                     INSERT OR REPLACE INTO view_activities (id, activity_type, description, project_id, thread_id, metadata, created_at)
-                    VALUES (?, ?, ?, NULL, NULL, '{}', ?)
+                    VALUES (?, ?, ?, NULL, ?, '{}', ?)
                     "#,
                 )
                 .bind(id.to_string())
                 .bind(activity_type)
                 .bind(description)
+                .bind(thread_id.map(|t| t.to_string()))
                 .bind(created_at.to_string())
                 .execute(&self.pool)
                 .await?;
@@ -758,8 +759,62 @@ mod tests {
         .unwrap();
 
         assert!(row.is_some());
-        let (rid, name) = row.unwrap();
+        let (_rid, name) = row.unwrap();
         assert_eq!(name, "Test");
+    }
+
+    #[tokio::test]
+    async fn test_project_activity_logged_stores_thread_id() {
+        let mgr = setup().await;
+        let tid = EntityId::new();
+
+        // Thread-scoped activity: thread_id should be persisted.
+        let scoped = EntityId::new();
+        mgr.project_event_async(&Envelope::new(
+            DomainEvent::ActivityLogged {
+                id: scoped,
+                activity_type: "session_started".into(),
+                description: "User started session".into(),
+                thread_id: Some(tid),
+                created_at: Timestamp::now(),
+            },
+            1,
+        ))
+        .await
+        .expect("project scoped activity");
+
+        // Unscoped activity (e.g. provider-originated): thread_id should be NULL.
+        let bare = EntityId::new();
+        mgr.project_event_async(&Envelope::new(
+            DomainEvent::ActivityLogged {
+                id: bare,
+                activity_type: "provider_tool_call".into(),
+                description: "tool".into(),
+                thread_id: None,
+                created_at: Timestamp::now(),
+            },
+            2,
+        ))
+        .await
+        .expect("project bare activity");
+
+        let scoped_row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT thread_id FROM view_activities WHERE id = ?")
+                .bind(scoped.to_string())
+                .fetch_optional(mgr.pool())
+                .await
+                .unwrap();
+        let (scoped_thread,) = scoped_row.unwrap();
+        assert_eq!(scoped_thread, Some(tid.as_str()));
+
+        let bare_row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT thread_id FROM view_activities WHERE id = ?")
+                .bind(bare.to_string())
+                .fetch_optional(mgr.pool())
+                .await
+                .unwrap();
+        let (bare_thread,) = bare_row.unwrap();
+        assert_eq!(bare_thread, None);
     }
 
     #[tokio::test]
