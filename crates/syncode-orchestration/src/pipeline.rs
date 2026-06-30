@@ -155,6 +155,16 @@ impl Orchestrator {
         let aggregate_id_hint = self.aggregate_id_for_command(&command);
         let current_state = self.load_aggregate_state(&aggregate_id_hint, &command).await;
 
+        // Cross-aggregate invariant: CreateThread requires its parent project to
+        // exist. Handoff/Fork enforce this at the application layer, but
+        // CreateThread is reachable directly through the orchestrator (WS-RPC),
+        // so the engine guards it here — before the pure Decider runs.
+        if let Command::CreateThread { project_id, .. } = &command {
+            if current_state.is_none() {
+                return Err(OrchestrationError::ProjectNotFound(*project_id));
+            }
+        }
+
         // 2. Run through Decider (pure logic)
         let domain_events = Decider::decide(command.clone(), current_state.as_ref())?;
 
@@ -302,9 +312,14 @@ impl Orchestrator {
     /// the actual aggregate ID comes from the Decider's produced events.
     fn aggregate_id_for_command(&self, command: &Command) -> Option<EntityId> {
         match command {
+            // CreateThread references its parent project — return the project id
+            // so handle_command can load the project and enforce the cross-aggregate
+            // existence guard. The new thread's own id remains event-derived
+            // (`domain_events[0].aggregate_id()`), so persistence is unaffected.
+            Command::CreateThread { project_id, .. } => Some(*project_id),
+
             // Create commands: the Decider generates the ID
             Command::CreateProject { .. }
-            | Command::CreateThread { .. }
             | Command::HandoffCreateThread { .. }
             | Command::ForkCreateThread { .. }
             | Command::StartTurn { .. }
@@ -572,16 +587,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_thread_succeeds_without_state_validation() {
+    async fn test_create_thread_rejects_unknown_project() {
         let orch = make_orchestrator();
 
-        // CreateThread doesn't validate the project exists — it trusts the command.
-        // (Validation could be added later via invariants.)
+        // CreateThread now enforces the cross-aggregate invariant that its parent
+        // project must exist. A thread targeting an unknown project is rejected
+        // with ProjectNotFound before any event is produced.
         let result = orch.handle_command(Command::CreateThread {
             project_id: EntityId::new(),
             provider_id: "anthropic".into(),
             model: "claude-3".into(),
-        }).await.expect("create thread should succeed");
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(OrchestrationError::ProjectNotFound(_))),
+            "CreateThread on an unknown project must be rejected, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_thread_succeeds_for_existing_project() {
+        let orch = make_orchestrator();
+
+        let project = orch
+            .handle_command(Command::CreateProject {
+                name: "Guarded".into(),
+                root_path: "/guarded".into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = project
+            .events
+            .iter()
+            .find_map(|env| {
+                if let DomainEvent::ProjectCreated { id, .. } = &env.event {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .expect("ProjectCreated produced");
+
+        let result = orch
+            .handle_command(Command::CreateThread {
+                project_id,
+                provider_id: "anthropic".into(),
+                model: "claude-3".into(),
+            })
+            .await
+            .expect("create thread for existing project");
 
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0].event.event_type_name(), "ThreadCreated");
@@ -724,17 +779,31 @@ mod tests {
             crate::reactors::command::tests::make_recorded_test_mock();
         let orch = Orchestrator::with_reactor_and_adapter(repo, reactor, adapter);
 
-        // 1. Create project + thread (the decider assigns the thread id).
-        orch.handle_command(Command::CreateProject {
-            name: "E2E".into(),
-            root_path: "/e2e".into(),
-        })
-        .await
-        .expect("create project");
+        // 1. Create project + thread (the decider assigns the thread id). The
+        //    thread must reference the real project id — CreateThread now guards
+        //    the parent project's existence.
+        let project_result = orch
+            .handle_command(Command::CreateProject {
+                name: "E2E".into(),
+                root_path: "/e2e".into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = project_result
+            .events
+            .iter()
+            .find_map(|env| {
+                if let DomainEvent::ProjectCreated { id, .. } = &env.event {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .expect("ProjectCreated produced");
 
         let thread_result = orch
             .handle_command(Command::CreateThread {
-                project_id: EntityId::new(),
+                project_id,
                 provider_id: "anthropic".into(),
                 model: "claude".into(),
             })
