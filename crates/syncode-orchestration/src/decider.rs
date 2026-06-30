@@ -296,6 +296,18 @@ pub enum DeciderError {
 
     #[error("Invalid marker offset range: start_offset ({start_offset}) must be strictly less than end_offset ({end_offset})")]
     InvalidMarkerRange { start_offset: u64, end_offset: u64 },
+
+    #[error("Pinned-message limit reached ({limit} per thread)")]
+    PinnedMessageLimitReached { limit: usize },
+
+    #[error("Marker limit reached ({limit} per thread)")]
+    MarkerLimitReached { limit: usize },
+
+    #[error("Pinned message not found in thread: {0}")]
+    PinnedMessageNotFound(EntityId),
+
+    #[error("Marker not found in thread: {0}")]
+    MarkerNotFound(EntityId),
 }
 
 // ─── Decider ─────────────────────────────────────────────────────
@@ -833,9 +845,13 @@ impl Decider {
         state: Option<&serde_json::Value>,
         message_id: EntityId,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
-        // Guard: thread must exist. mcode caps pinned messages at 100
-        // (PINNED_MESSAGES_MAX_COUNT); enforcing the cap needs the current pin set, deferred.
+        // Guard: thread must exist, then enforce the mcode PINNED_MESSAGES_MAX_COUNT cap.
         let _ = Self::extract_thread_status(state, &id)?;
+        if Self::extract_pinned_message_ids(state).len() >= Self::MAX_PINNED_MESSAGES {
+            return Err(DeciderError::PinnedMessageLimitReached {
+                limit: Self::MAX_PINNED_MESSAGES,
+            });
+        }
         let now = Timestamp::now();
         Ok(vec![DomainEvent::PinnedMessageAdded {
             thread_id: id,
@@ -853,6 +869,9 @@ impl Decider {
         message_id: EntityId,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let _ = Self::extract_thread_status(state, &id)?;
+        if !Self::extract_pinned_message_ids(state).contains(&message_id.as_str()) {
+            return Err(DeciderError::PinnedMessageNotFound(message_id));
+        }
         Ok(vec![DomainEvent::PinnedMessageRemoved {
             thread_id: id,
             message_id,
@@ -867,6 +886,9 @@ impl Decider {
         done: bool,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let _ = Self::extract_thread_status(state, &id)?;
+        if !Self::extract_pinned_message_ids(state).contains(&message_id.as_str()) {
+            return Err(DeciderError::PinnedMessageNotFound(message_id));
+        }
         Ok(vec![DomainEvent::PinnedMessageDoneSet {
             thread_id: id,
             message_id,
@@ -882,6 +904,9 @@ impl Decider {
         label: Option<String>,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let _ = Self::extract_thread_status(state, &id)?;
+        if !Self::extract_pinned_message_ids(state).contains(&message_id.as_str()) {
+            return Err(DeciderError::PinnedMessageNotFound(message_id));
+        }
         Ok(vec![DomainEvent::PinnedMessageLabelSet {
             thread_id: id,
             message_id,
@@ -918,8 +943,13 @@ impl Decider {
             return Err(DeciderError::InvalidMarkerRange { start_offset, end_offset });
         }
 
-        // Guard: thread must exist.
+        // Guard: thread must exist, then enforce the mcode THREAD_MARKERS_MAX_COUNT cap.
         let _ = Self::extract_thread_status(state, &id)?;
+        if Self::extract_marker_ids(state).len() >= Self::MAX_MARKERS {
+            return Err(DeciderError::MarkerLimitReached {
+                limit: Self::MAX_MARKERS,
+            });
+        }
         let now = Timestamp::now();
         Ok(vec![DomainEvent::MarkerAdded {
             thread_id: id,
@@ -943,6 +973,9 @@ impl Decider {
         marker_id: EntityId,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let _ = Self::extract_thread_status(state, &id)?;
+        if !Self::extract_marker_ids(state).contains(&marker_id.as_str()) {
+            return Err(DeciderError::MarkerNotFound(marker_id));
+        }
         Ok(vec![DomainEvent::MarkerRemoved {
             thread_id: id,
             marker_id,
@@ -957,6 +990,9 @@ impl Decider {
         done: bool,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let _ = Self::extract_thread_status(state, &id)?;
+        if !Self::extract_marker_ids(state).contains(&marker_id.as_str()) {
+            return Err(DeciderError::MarkerNotFound(marker_id));
+        }
         Ok(vec![DomainEvent::MarkerDoneSet {
             thread_id: id,
             marker_id,
@@ -972,6 +1008,9 @@ impl Decider {
         label: Option<String>,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let _ = Self::extract_thread_status(state, &id)?;
+        if !Self::extract_marker_ids(state).contains(&marker_id.as_str()) {
+            return Err(DeciderError::MarkerNotFound(marker_id));
+        }
         Ok(vec![DomainEvent::MarkerLabelSet {
             thread_id: id,
             marker_id,
@@ -1122,6 +1161,37 @@ impl Decider {
             .ok_or_else(|| DeciderError::InvalidThreadStatus("unknown".to_string()))
     }
 
+    /// mcode PINNED_MESSAGES_MAX_COUNT: max pinned messages per thread.
+    const MAX_PINNED_MESSAGES: usize = 100;
+    /// Assumed mcode THREAD_MARKERS_MAX_COUNT: max markers per thread.
+    const MAX_MARKERS: usize = 100;
+
+    /// Pinned message ids currently in the thread (from the enriched state JSON).
+    fn extract_pinned_message_ids(state: Option<&serde_json::Value>) -> Vec<String> {
+        state
+            .and_then(|s| s.get("pinned_message_ids"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Marker ids currently in the thread (from the enriched state JSON).
+    fn extract_marker_ids(state: Option<&serde_json::Value>) -> Vec<String> {
+        state
+            .and_then(|s| s.get("marker_ids"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn extract_turn_status<'a>(
         state: Option<&'a serde_json::Value>,
         id: &EntityId,
@@ -1153,6 +1223,14 @@ mod tests {
     // Helper: build a fake state JSON
     fn thread_state_active() -> serde_json::Value {
         serde_json::json!({ "status": "active" })
+    }
+
+    fn thread_state_with_pinned(ids: Vec<String>) -> serde_json::Value {
+        serde_json::json!({ "status": "active", "pinned_message_ids": ids })
+    }
+
+    fn thread_state_with_markers(ids: Vec<String>) -> serde_json::Value {
+        serde_json::json!({ "status": "active", "marker_ids": ids })
     }
 
     fn thread_state_paused() -> serde_json::Value {
@@ -1930,7 +2008,7 @@ mod tests {
         let mid = EntityId::new();
         let events = Decider::decide(
             Command::RemovePinnedMessage { id, message_id: mid },
-            Some(&thread_state_active()),
+            Some(&thread_state_with_pinned(vec![mid.as_str()])),
         ).unwrap();
         assert!(matches!(events[0], DomainEvent::PinnedMessageRemoved { .. }));
     }
@@ -1941,7 +2019,7 @@ mod tests {
         let mid = EntityId::new();
         let events = Decider::decide(
             Command::SetPinnedMessageDone { id, message_id: mid, done: true },
-            Some(&thread_state_active()),
+            Some(&thread_state_with_pinned(vec![mid.as_str()])),
         ).unwrap();
         match &events[0] {
             DomainEvent::PinnedMessageDoneSet { done, .. } => assert!(*done),
@@ -1955,12 +2033,53 @@ mod tests {
         let mid = EntityId::new();
         let events = Decider::decide(
             Command::SetPinnedMessageLabel { id, message_id: mid, label: Some("todo".into()) },
-            Some(&thread_state_active()),
+            Some(&thread_state_with_pinned(vec![mid.as_str()])),
         ).unwrap();
         match &events[0] {
             DomainEvent::PinnedMessageLabelSet { label, .. } => assert_eq!(label.as_deref(), Some("todo")),
             _ => panic!("expected PinnedMessageLabelSet"),
         }
+    }
+
+    #[test]
+    fn add_pinned_message_rejects_at_cap() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        // State already holds the maximum number of pinned messages.
+        let full: Vec<String> = (0..Decider::MAX_PINNED_MESSAGES)
+            .map(|i| format!("p{i}"))
+            .collect();
+        let err = Decider::decide(
+            Command::AddPinnedMessage { id, message_id: mid },
+            Some(&thread_state_with_pinned(full)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DeciderError::PinnedMessageLimitReached { .. }),
+            "adding beyond the cap must be rejected, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pinned_remove_and_set_reject_missing() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let state = Some(&thread_state_with_pinned(vec!["other".to_string()]));
+        let err =
+            Decider::decide(Command::RemovePinnedMessage { id, message_id: mid }, state).unwrap_err();
+        assert!(
+            matches!(err, DeciderError::PinnedMessageNotFound(_)),
+            "removing a missing pin must be rejected, got: {err:?}"
+        );
+        let err = Decider::decide(
+            Command::SetPinnedMessageDone { id, message_id: mid, done: true },
+            state,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DeciderError::PinnedMessageNotFound(_)),
+            "set-done on a missing pin must be rejected, got: {err:?}"
+        );
     }
 
     #[test]
@@ -2072,7 +2191,7 @@ mod tests {
         let mid = EntityId::new();
         let events = Decider::decide(
             Command::RemoveMarker { id, marker_id: mid },
-            Some(&thread_state_active()),
+            Some(&thread_state_with_markers(vec![mid.as_str()])),
         ).unwrap();
         assert!(matches!(events[0], DomainEvent::MarkerRemoved { .. }));
     }
@@ -2083,7 +2202,7 @@ mod tests {
         let mid = EntityId::new();
         let events = Decider::decide(
             Command::SetMarkerDone { id, marker_id: mid, done: true },
-            Some(&thread_state_active()),
+            Some(&thread_state_with_markers(vec![mid.as_str()])),
         ).unwrap();
         match &events[0] {
             DomainEvent::MarkerDoneSet { done, marker_id, .. } => {
@@ -2100,7 +2219,7 @@ mod tests {
         let mid = EntityId::new();
         let events = Decider::decide(
             Command::SetMarkerLabel { id, marker_id: mid, label: Some("note".into()) },
-            Some(&thread_state_active()),
+            Some(&thread_state_with_markers(vec![mid.as_str()])),
         ).unwrap();
         match &events[0] {
             DomainEvent::MarkerLabelSet { label, marker_id, .. } => {
@@ -2120,5 +2239,43 @@ mod tests {
         assert!(Decider::decide(Command::RemoveMarker { id, marker_id: mid }, None).is_err());
         assert!(Decider::decide(Command::SetMarkerDone { id, marker_id: mid, done: true }, None).is_err());
         assert!(Decider::decide(Command::SetMarkerLabel { id, marker_id: mid, label: None }, None).is_err());
+    }
+
+    #[test]
+    fn add_marker_rejects_at_cap() {
+        let id = EntityId::new();
+        // State already holds the maximum number of markers.
+        let full: Vec<String> = (0..Decider::MAX_MARKERS).map(|i| format!("m{i}")).collect();
+        let err = Decider::decide(
+            add_marker_cmd(id, EntityId::new(), EntityId::new()),
+            Some(&thread_state_with_markers(full)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DeciderError::MarkerLimitReached { .. }),
+            "adding a marker beyond the cap must be rejected, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn marker_remove_and_set_reject_missing() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let state = Some(&thread_state_with_markers(vec!["other".to_string()]));
+        let err =
+            Decider::decide(Command::RemoveMarker { id, marker_id: mid }, state).unwrap_err();
+        assert!(
+            matches!(err, DeciderError::MarkerNotFound(_)),
+            "removing a missing marker must be rejected, got: {err:?}"
+        );
+        let err = Decider::decide(
+            Command::SetMarkerDone { id, marker_id: mid, done: true },
+            state,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DeciderError::MarkerNotFound(_)),
+            "set-done on a missing marker must be rejected, got: {err:?}"
+        );
     }
 }

@@ -418,7 +418,26 @@ impl Orchestrator {
             | Command::SetMarkerDone { .. }
             | Command::SetMarkerLabel { .. } => {
                 read_model.threads.get(&id.as_str()).map(|t| {
-                    serde_json::json!({"status": t.status})
+                    // Enrich with the thread's current pinned-message and marker id
+                    // sets so the Decider can enforce count caps + existence checks.
+                    let tid = id.as_str();
+                    let pinned_message_ids: Vec<&str> = read_model
+                        .pinned_messages
+                        .values()
+                        .filter(|p| p.thread_id == tid)
+                        .map(|p| p.message_id.as_str())
+                        .collect();
+                    let marker_ids: Vec<&str> = read_model
+                        .markers
+                        .values()
+                        .filter(|m| m.thread_id == tid)
+                        .map(|m| m.marker_id.as_str())
+                        .collect();
+                    serde_json::json!({
+                        "status": t.status,
+                        "pinned_message_ids": pinned_message_ids,
+                        "marker_ids": marker_ids,
+                    })
                 })
             }
 
