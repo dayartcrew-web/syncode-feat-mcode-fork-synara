@@ -4,12 +4,15 @@
 //! which runs the full CQRS pipeline:
 //!   Decider → Events → EventRepository persist → Projector → ReadModelStore
 
-use crate::{JsonRpcRequest, JsonRpcResponse, WsState};
+use crate::{ConnectionId, JsonRpcRequest, JsonRpcResponse, WsState};
 use serde_json::Value;
 use syncode_orchestration::Command;
 
-/// Handle an incoming JSON-RPC message
-pub async fn handle_rpc(state: &WsState, raw: &str) -> Option<String> {
+/// Handle an incoming JSON-RPC message.
+///
+/// `conn_id` identifies the connection the request originated from, so
+/// per-connection state (push subscriptions) can be mutated by the handler.
+pub async fn handle_rpc(state: &WsState, conn_id: ConnectionId, raw: &str) -> Option<String> {
     // Parse the request
     let request: JsonRpcRequest = match serde_json::from_str(raw) {
         Ok(req) => req,
@@ -26,7 +29,7 @@ pub async fn handle_rpc(state: &WsState, raw: &str) -> Option<String> {
     tracing::debug!(method = %request.method, "RPC request");
 
     // Dispatch to method handler
-    let response = dispatch_method(state, &request).await;
+    let response = dispatch_method(state, conn_id, &request).await;
 
     // Only respond if the request has an id (notifications don't get responses)
     if request.id.is_some() {
@@ -37,7 +40,7 @@ pub async fn handle_rpc(state: &WsState, raw: &str) -> Option<String> {
 }
 
 /// Dispatch to the appropriate method handler
-async fn dispatch_method(state: &WsState, request: &JsonRpcRequest) -> JsonRpcResponse {
+async fn dispatch_method(state: &WsState, conn_id: ConnectionId, request: &JsonRpcRequest) -> JsonRpcResponse {
     let id = request.id.clone().unwrap_or(Value::Null);
 
     match request.method.as_str() {
@@ -131,29 +134,9 @@ async fn dispatch_method(state: &WsState, request: &JsonRpcRequest) -> JsonRpcRe
         "turn/complete" => handle_turn_complete(state, id, &request.params).await,
 
         // ─── Push Subscription Methods ───────────────────────────
-        "push/subscribe" => {
-            let channel = request.params.get("channel").and_then(|v| v.as_str()).unwrap_or("");
-            if crate::channels::ChannelSubscription::is_valid(channel) {
-                JsonRpcResponse::success(id, serde_json::json!({
-                    "subscribed": true,
-                    "channel": channel,
-                }))
-            } else {
-                JsonRpcResponse::error(
-                    Some(id),
-                    crate::error_codes::INVALID_PARAMS,
-                    format!("Unknown channel: {}", channel),
-                )
-            }
-        }
+        "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
 
-        "push/unsubscribe" => {
-            let channel = request.params.get("channel").and_then(|v| v.as_str()).unwrap_or("");
-            JsonRpcResponse::success(id, serde_json::json!({
-                "unsubscribed": true,
-                "channel": channel,
-            }))
-        }
+        "push/unsubscribe" => handle_push_unsubscribe(state, conn_id, id, &request.params).await,
 
         // ─── Unknown ────────────────────────────────────────────
         method => {
@@ -165,6 +148,64 @@ async fn dispatch_method(state: &WsState, request: &JsonRpcRequest) -> JsonRpcRe
             )
         }
     }
+}
+
+// ─── Push Subscription Handlers ───────────────────────────────────
+
+/// Record a channel subscription for the originating connection. The "*"
+/// wildcard expands to all known channels. Subscriptions are opt-in: a
+/// connection receives no pushes until it subscribes. Idempotent — `added`
+/// reports whether this created a new subscription.
+async fn handle_push_subscribe(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let channel = match params.get("channel").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'channel' parameter",
+            )
+        }
+    };
+    if !crate::channels::ChannelSubscription::is_valid(channel) {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            format!("Unknown channel: {}", channel),
+        );
+    }
+    // Record against this connection. Returns false if the connection isn't
+    // registered (shouldn't happen for a live socket) or was already subscribed.
+    let added = state.subscriptions.write().await.subscribe(conn_id, channel);
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "subscribed": true, "channel": channel, "added": added }),
+    )
+}
+
+/// Remove a channel subscription for the originating connection. The "*"
+/// wildcard clears all subscriptions.
+async fn handle_push_unsubscribe(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let channel = params.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+    let removed = state
+        .subscriptions
+        .write()
+        .await
+        .unsubscribe(conn_id, channel);
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "unsubscribed": true, "channel": channel, "removed": removed }),
+    )
 }
 
 // ─── Project Handlers ────────────────────────────────────────────
@@ -460,7 +501,7 @@ mod tests {
             "method": "ping"
         });
 
-        let response = handle_rpc(&state, &request.to_string()).await;
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
         assert!(response.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&response.unwrap()).unwrap();
         assert!(resp.error.is_none());
@@ -476,7 +517,7 @@ mod tests {
             "method": "nonexistent/method"
         });
 
-        let response = handle_rpc(&state, &request.to_string()).await;
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
         assert!(response.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&response.unwrap()).unwrap();
         assert!(resp.error.is_some());
@@ -491,7 +532,7 @@ mod tests {
             "method": "ping"
         });
 
-        let response = handle_rpc(&state, &request.to_string()).await;
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
         assert!(response.is_none());
     }
 
@@ -506,7 +547,7 @@ mod tests {
             "method": "project/create",
             "params": { "name": "Test Project", "rootPath": "/tmp/test" }
         });
-        let response = handle_rpc(&state, &create_req.to_string()).await.unwrap();
+        let response = handle_rpc(&state, 1, &create_req.to_string()).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&response).unwrap();
         assert!(resp.error.is_none(), "Create failed: {:?}", resp.error);
         let project = resp.result.unwrap();
@@ -518,7 +559,7 @@ mod tests {
             "id": 2,
             "method": "project/list"
         });
-        let response = handle_rpc(&state, &list_req.to_string()).await.unwrap();
+        let response = handle_rpc(&state, 1, &list_req.to_string()).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&response).unwrap();
         let result = resp.result.unwrap();
         let projects = result["projects"].as_array().unwrap();
@@ -537,9 +578,71 @@ mod tests {
             "method": "project/create",
             "params": { "name": "   ", "rootPath": "/tmp" }
         });
-        let response = handle_rpc(&state, &req.to_string()).await.unwrap();
+        let response = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&response).unwrap();
         assert!(resp.error.is_some());
         assert!(resp.error.unwrap().message.contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_push_subscribe_records_subscription() {
+        let state = WsState::new_in_memory(16);
+        // Register connection 1 (subscribe requires a registered conn_id).
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "push/subscribe",
+            "params": { "channel": "orchestration" }
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["subscribed"], true);
+
+        // The registry now records conn 1 subscribed to orchestration.
+        let subs = state.subscriptions.read().await;
+        assert!(subs.get_subscription(1).unwrap().is_subscribed("orchestration"));
+        assert!(!subs.get_subscription(1).unwrap().is_subscribed("git"));
+    }
+
+    #[tokio::test]
+    async fn test_push_subscribe_rejects_unknown_channel() {
+        let state = WsState::new_in_memory(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "push/subscribe",
+            "params": { "channel": "bogus" }
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn test_push_unsubscribe_removes_subscription() {
+        let state = WsState::new_in_memory(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        // Subscribe then unsubscribe orchestration.
+        let sub = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "push/subscribe",
+            "params": { "channel": "orchestration" }
+        });
+        let _ = handle_rpc(&state, 1, &sub.to_string()).await;
+        let unsub = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "push/unsubscribe",
+            "params": { "channel": "orchestration" }
+        });
+        let resp = handle_rpc(&state, 1, &unsub.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert_eq!(resp.result.unwrap()["removed"], true);
+
+        let subs = state.subscriptions.read().await;
+        assert!(!subs.get_subscription(1).unwrap().is_subscribed("orchestration"));
     }
 }

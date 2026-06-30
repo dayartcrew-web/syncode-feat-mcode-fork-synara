@@ -1,7 +1,7 @@
 //! WebSocket server (axum)
 
 use crate::rpc::handle_rpc;
-use crate::WsState;
+use crate::{ConnectionId, WsState};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -41,24 +41,13 @@ async fn handle_connection(socket: WebSocket, state: Arc<WsState>) {
     let push_tx_clone = tx.clone();
     state.register(conn_id, tx).await;
 
-    // Subscribe to push events
-    let mut push_rx = state.push_tx.subscribe();
-
-    // Spawn a task to forward push events to this connection
-    let push_handle = tokio::spawn(async move {
-        while let Ok((channel, data)) = push_rx.recv().await {
-            let msg = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": format!("push/{}", channel),
-                "params": data,
-            });
-            if let Ok(msg_str) = serde_json::to_string(&msg) {
-                if push_tx_clone.send(msg_str).is_err() {
-                    break;
-                }
-            }
-        }
-    });
+    // Forward subscribed push-bus broadcasts to this connection (honors the
+    // connection's channel subscriptions; see run_push_delivery).
+    let push_handle = tokio::spawn(run_push_delivery(
+        Arc::clone(&state),
+        conn_id,
+        push_tx_clone,
+    ));
 
     // Spawn a task to send queued messages via WebSocket
     let send_handle = tokio::spawn(async move {
@@ -72,7 +61,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<WsState>) {
     // Receive messages from WebSocket and handle RPC
     while let Some(Ok(msg)) = ws_receiver.next().await {
         if let Message::Text(text) = msg {
-            let response = handle_rpc(&state, &text).await;
+            let response = handle_rpc(&state, conn_id, &text).await;
             if let Some(resp_str) = response {
                 if let Some(sender) = state.connections.read().await.get(&conn_id) {
                     let _ = sender.send(resp_str);
@@ -85,4 +74,130 @@ async fn handle_connection(socket: WebSocket, state: Arc<WsState>) {
     state.unregister(conn_id).await;
     push_handle.abort();
     send_handle.abort();
+}
+
+/// Forward push-bus broadcasts for `conn_id`'s subscribed channels to `tx`.
+///
+/// Subscribes to the push bus and, for each broadcast, forwards it to `tx` only
+/// if the connection is currently subscribed to that channel. Subscriptions are
+/// opt-in: a fresh connection receives nothing until it calls `push/subscribe`.
+/// Runs until the push bus closes or `tx` is dropped (connection gone). A
+/// standalone function (not a closure) so delivery/filtering is unit-testable
+/// without a live WebSocket.
+pub async fn run_push_delivery(
+    state: Arc<WsState>,
+    conn_id: ConnectionId,
+    tx: mpsc::UnboundedSender<String>,
+) {
+    let mut rx = state.push_tx.subscribe();
+    while let Ok((channel, data)) = rx.recv().await {
+        // Opt-in: only forward channels this connection has subscribed to.
+        let subscribed = state
+            .subscriptions
+            .read()
+            .await
+            .get_subscription(conn_id)
+            .is_some_and(|sub| sub.is_subscribed(&channel));
+        if !subscribed {
+            continue;
+        }
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": format!("push/{}", channel),
+            "params": data,
+        });
+        if let Ok(msg_str) = serde_json::to_string(&msg) {
+            if tx.send(msg_str).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn delivery_honors_subscriptions() {
+        // Cleaner: register conn, keep rx, spawn delivery with a cloned tx.
+        let state = Arc::new(WsState::new_in_memory(16));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.register(1, tx.clone()).await;
+        state.subscriptions.write().await.subscribe(1, "orchestration");
+
+        let _handle = tokio::spawn(run_push_delivery(Arc::clone(&state), 1, tx));
+
+        // Let the delivery task subscribe to the push bus before we publish
+        // (broadcast only reaches receivers that exist at send time).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Subscribed channel → delivered.
+        let _ = state.push_tx.send((
+            "orchestration".to_string(),
+            serde_json::json!({"event_type": "ProjectCreated"}),
+        ));
+        let received =
+            tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        assert!(received.is_ok(), "subscribed channel should be delivered");
+        let msg = received.unwrap().unwrap();
+        assert!(msg.contains("push/orchestration"));
+        assert!(msg.contains("ProjectCreated"));
+
+        // Unsubscribed channel → filtered out (recv times out).
+        let _ = state.push_tx.send((
+            "git".to_string(),
+            serde_json::json!({"event_type": "GitPushed"}),
+        ));
+        let filtered =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            filtered.is_err(),
+            "unsubscribed channel must NOT be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_isolates_connections() {
+        // Conn 1 subscribes to orchestration; conn 2 subscribes to git. Each
+        // receives only its own channel.
+        let state = Arc::new(WsState::new_in_memory(16));
+
+        let (tx1, mut rx1) = mpsc::unbounded_channel::<String>();
+        state.register(1, tx1.clone()).await;
+        state.subscriptions.write().await.subscribe(1, "orchestration");
+        let _h1 = tokio::spawn(run_push_delivery(Arc::clone(&state), 1, tx1));
+
+        let (tx2, mut rx2) = mpsc::unbounded_channel::<String>();
+        state.register(2, tx2.clone()).await;
+        state.subscriptions.write().await.subscribe(2, "git");
+        let _h2 = tokio::spawn(run_push_delivery(Arc::clone(&state), 2, tx2));
+
+        // Let both delivery tasks subscribe before publishing.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _ = state
+            .push_tx
+            .send(("orchestration".to_string(), serde_json::json!({})));
+        let _ = state
+            .push_tx
+            .send(("git".to_string(), serde_json::json!({})));
+
+        // Conn 1 gets orchestration, not git.
+        assert!(tokio::time::timeout(Duration::from_millis(200), rx1.recv())
+            .await
+            .is_ok());
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx1.recv())
+            .await
+            .is_err());
+
+        // Conn 2 gets git, not orchestration.
+        assert!(tokio::time::timeout(Duration::from_millis(200), rx2.recv())
+            .await
+            .is_ok());
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx2.recv())
+            .await
+            .is_err());
+    }
 }

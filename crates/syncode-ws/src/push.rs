@@ -4,11 +4,10 @@
 //! to WebSocket connections that are subscribed to the relevant channel.
 //! Each push event is a JSON-RPC notification (no id = no response expected).
 
-use crate::{ConnectionId, WsState, channels::ChannelSubscription};
+use crate::{ConnectionId, channels::ChannelSubscription};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use syncode_core::ports::{DomainEventPublisher, PortError};
-use tracing;
 
 /// Push event types that can be broadcast
 #[derive(Debug, Clone)]
@@ -159,42 +158,9 @@ impl SubscriptionRegistry {
     }
 }
 
-/// Format a push event as a JSON-RPC notification string
-fn format_push_notification(channel: &str, event_type: &str, data: &Value) -> String {
-    let notification = json!({
-        "jsonrpc": "2.0",
-        "method": format!("push/{}", channel),
-        "params": {
-            "channel": channel,
-            "event": event_type,
-            "data": data,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        }
-    });
-    serde_json::to_string(&notification).unwrap_or_default()
-}
-
-/// Deliver a push event to all subscribed connections via the state's sender map.
-/// This is called after the event has been broadcast on the push_tx channel.
-pub async fn deliver_push_event(
-    state: &WsState,
-    channel: &str,
-    event_type: &str,
-    data: &Value,
-    subscriptions: &SubscriptionRegistry,
-) {
-    let subscribers = subscriptions.subscribers_for(channel);
-    let message = format_push_notification(channel, event_type, data);
-
-    let connections = state.connections.read().await;
-    for conn_id in subscribers {
-        if let Some(tx) = connections.get(&conn_id) {
-            if tx.send(message.clone()).is_err() {
-                tracing::warn!(conn_id, "Failed to deliver push event — connection likely closed");
-            }
-        }
-    }
-}
+// Note: push delivery is performed per-connection by `run_push_delivery` in
+// `server.rs`, which subscribes to `push_tx` and forwards only the channels a
+// connection has opted into. There is no central dispatcher.
 
 #[cfg(test)]
 mod tests {
@@ -249,19 +215,6 @@ mod tests {
             is_error: false,
         };
         assert_eq!(ev.channel(), "terminal");
-    }
-
-    #[test]
-    fn format_push_notification_structure() {
-        let msg = format_push_notification("orchestration", "ThreadCreated", &json!({"id": "abc"}));
-        let parsed: Value = serde_json::from_str(&msg).unwrap();
-        assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["method"], "push/orchestration");
-        assert!(parsed.get("id").is_none()); // notification — no id
-        assert_eq!(parsed["params"]["channel"], "orchestration");
-        assert_eq!(parsed["params"]["event"], "ThreadCreated");
-        assert_eq!(parsed["params"]["data"]["id"], "abc");
-        assert!(parsed["params"]["timestamp"].is_string());
     }
 
     #[tokio::test]

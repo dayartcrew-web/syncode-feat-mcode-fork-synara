@@ -82,6 +82,10 @@ pub struct WsState {
     pub read_store: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>>,
     /// Orchestrator for the CQRS pipeline (command → event → persist → project)
     pub orchestrator: Arc<syncode_orchestration::Orchestrator>,
+    /// Per-connection channel subscriptions. The delivery loop consults this to
+    /// decide which push broadcasts to forward to each connection (opt-in: a
+    /// connection receives nothing until it subscribes via `push/subscribe`).
+    pub subscriptions: Arc<RwLock<crate::push::SubscriptionRegistry>>,
 }
 
 impl WsState {
@@ -105,6 +109,7 @@ impl WsState {
             next_connection_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             read_store,
             orchestrator: Arc::new(orchestrator),
+            subscriptions: Arc::new(RwLock::new(crate::push::SubscriptionRegistry::new())),
         }
     }
 
@@ -169,11 +174,13 @@ impl WsState {
 
     pub async fn register(&self, id: ConnectionId, tx: mpsc::UnboundedSender<String>) {
         self.connections.write().await.insert(id, tx);
+        self.subscriptions.write().await.register(id);
         tracing::info!(connection_id = id, "WebSocket client connected");
     }
 
     pub async fn unregister(&self, id: ConnectionId) {
         self.connections.write().await.remove(&id);
+        self.subscriptions.write().await.unregister(id);
         tracing::info!(connection_id = id, "WebSocket client disconnected");
     }
 }
