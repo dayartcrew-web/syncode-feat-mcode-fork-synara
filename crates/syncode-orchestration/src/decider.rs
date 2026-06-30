@@ -287,6 +287,15 @@ pub enum DeciderError {
 
     #[error("Invalid turn status for this operation: {0}")]
     InvalidTurnStatus(String),
+
+    #[error("Invalid marker style {0:?}: expected \"highlight\" or \"underline\"")]
+    InvalidMarkerStyle(String),
+
+    #[error("Invalid marker color {0:?}: expected one of \"yellow\", \"blue\", \"green\", \"pink\"")]
+    InvalidMarkerColor(String),
+
+    #[error("Invalid marker offset range: start_offset ({start_offset}) must be strictly less than end_offset ({end_offset})")]
+    InvalidMarkerRange { start_offset: u64, end_offset: u64 },
 }
 
 // ─── Decider ─────────────────────────────────────────────────────
@@ -894,10 +903,22 @@ impl Decider {
         style: String,
         color: String,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
-        // Guard: thread must exist. mcode caps markers at THREAD_MARKERS_MAX_COUNT
-        // and validates the offset range, style ("highlight"|"underline"), and color
-        // ("yellow"|"blue"|"green"|"pink") enums. Enforcing those needs the current
-        // marker set + enum validation, deferred (gap). We assert thread existence.
+        // Field validation (mcode-faithful enums + offset range). The marker-count
+        // cap (THREAD_MARKERS_MAX_COUNT) needs the current marker set and is enforced
+        // separately; style/color/range are pure input checks done here first.
+        match style.as_str() {
+            "highlight" | "underline" => {}
+            other => return Err(DeciderError::InvalidMarkerStyle(other.to_string())),
+        }
+        match color.as_str() {
+            "yellow" | "blue" | "green" | "pink" => {}
+            other => return Err(DeciderError::InvalidMarkerColor(other.to_string())),
+        }
+        if end_offset <= start_offset {
+            return Err(DeciderError::InvalidMarkerRange { start_offset, end_offset });
+        }
+
+        // Guard: thread must exist.
         let _ = Self::extract_thread_status(state, &id)?;
         let now = Timestamp::now();
         Ok(vec![DomainEvent::MarkerAdded {
@@ -1995,6 +2016,54 @@ mod tests {
             }
             _ => panic!("expected MarkerAdded"),
         }
+    }
+
+    #[test]
+    fn add_marker_rejects_invalid_style_color_and_range() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let msg = EntityId::new();
+        let state = thread_state_active();
+
+        let mk = |style: &str, color: &str, start: u64, end: u64| Command::AddMarker {
+            id,
+            marker_id: mid,
+            message_id: msg,
+            start_offset: start,
+            end_offset: end,
+            selected_text: "x".to_string(),
+            style: style.to_string(),
+            color: color.to_string(),
+        };
+
+        // Invalid style.
+        let err = Decider::decide(mk("bold", "yellow", 0, 5), Some(&state)).unwrap_err();
+        assert!(
+            matches!(err, DeciderError::InvalidMarkerStyle(ref s) if s.as_str() == "bold"),
+            "bad style must be rejected, got: {err:?}"
+        );
+
+        // Invalid color.
+        let err = Decider::decide(mk("highlight", "purple", 0, 5), Some(&state)).unwrap_err();
+        assert!(
+            matches!(err, DeciderError::InvalidMarkerColor(ref c) if c.as_str() == "purple"),
+            "bad color must be rejected, got: {err:?}"
+        );
+
+        // Invalid range: end == start, and end < start.
+        let err = Decider::decide(mk("highlight", "yellow", 5, 5), Some(&state)).unwrap_err();
+        assert!(
+            matches!(err, DeciderError::InvalidMarkerRange { start_offset: 5, end_offset: 5 }),
+            "equal offsets must be rejected, got: {err:?}"
+        );
+        let err = Decider::decide(mk("highlight", "yellow", 9, 3), Some(&state)).unwrap_err();
+        assert!(
+            matches!(err, DeciderError::InvalidMarkerRange { .. }),
+            "inverted offsets must be rejected, got: {err:?}"
+        );
+
+        // Sanity: a fully-valid marker still succeeds.
+        Decider::decide(mk("underline", "pink", 0, 1), Some(&state)).unwrap();
     }
 
     #[test]
