@@ -210,7 +210,7 @@ impl Orchestrator {
         //    approval/user-input request, stop a thread's session, …). `handled`
         //    reflects whether a provider side effect took effect. A reactor
         //    without an adapter (or no provider-interaction command) stays inert.
-        let side_effect_events = vec![];
+        let mut side_effect_events: Vec<Envelope> = Vec::new();
         let mut side_effect_triggered = false;
 
         if let (Some(reactor), Some(adapter)) = (&self.command_reactor, &self.adapter) {
@@ -230,6 +230,18 @@ impl Orchestrator {
                     .await
                     .map_err(|e| OrchestrationError::CommandReactor(e.to_string()))?;
                 side_effect_triggered = reaction.handled;
+
+                // Reverse bridge: feed any provider events the reactor collected
+                // back through the ingestion reactor (ProviderEvent -> DomainEvent
+                // -> append + project), correlated to the turn via turn_id_hint.
+                // Only StartTurn yields a hint today; other provider-interaction
+                // commands collect no events yet, so without a hint there is
+                // nothing to ingest (the events would be uncorrelated to a turn).
+                if let Some(turn_id) = turn_id_hint {
+                    side_effect_events = self
+                        .ingest_provider_events_batch(reaction.events, turn_id)
+                        .await?;
+                }
             }
         }
 
@@ -276,6 +288,28 @@ impl Orchestrator {
             .collect();
 
         Ok(envelopes)
+    }
+
+    /// Ingest a batch of provider events collected by the command reactor and
+    /// produce domain-event envelopes. This closes the reverse direction of the
+    /// provider bridge: a provider-interaction command may collect provider
+    /// events (e.g. a `Completed` event from a synchronous response), which we
+    /// turn back into domain events and append + project just like stream-sourced
+    /// events. All events are correlated to the given `turn_id`.
+    ///
+    /// Returns the resulting envelopes (may be empty — `Started`/`Token`/
+    /// `StatusChanged` produce no domain event).
+    pub async fn ingest_provider_events_batch(
+        &self,
+        provider_events: Vec<syncode_provider::ProviderEvent>,
+        turn_id: EntityId,
+    ) -> Result<Vec<Envelope>, OrchestrationError> {
+        let mut out = Vec::with_capacity(provider_events.len());
+        for event in provider_events {
+            let envelopes = self.ingest_provider_event(event, turn_id).await?;
+            out.extend(envelopes);
+        }
+        Ok(out)
     }
 
     /// Get a snapshot of the current read model
@@ -590,6 +624,57 @@ mod tests {
     fn make_orchestrator() -> Orchestrator {
         let repo = Arc::new(InMemoryEventRepo::new());
         Orchestrator::new(repo)
+    }
+
+    #[tokio::test]
+    async fn test_ingest_provider_events_batch_closes_reverse_bridge() {
+        // The command reactor's react() always returns events: vec![] today (its
+        // send_request is synchronous), so the reverse bridge is exercised
+        // directly: feed a batch of provider events for a turn and assert each
+        // becomes a persisted domain event with monotonic sequencing.
+        // Completed -> TurnCompleted; ToolCall -> ActivityLogged.
+        let orch = make_orchestrator();
+        let turn_id = EntityId::new();
+
+        let batch = vec![
+            syncode_provider::ProviderEvent::ToolCall {
+                session_id: "s1".into(),
+                tool_name: "grep".into(),
+                tool_input: serde_json::json!({"q": "foo"}),
+            },
+            syncode_provider::ProviderEvent::Completed {
+                session_id: "s1".into(),
+                output: "done".into(),
+                usage: Some(syncode_provider::UsageInfo {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    total_tokens: 30,
+                }),
+            },
+        ];
+
+        let envelopes = orch
+            .ingest_provider_events_batch(batch, turn_id)
+            .await
+            .expect("batch ingest");
+
+        // Both provider events yield exactly one domain event each.
+        assert_eq!(envelopes.len(), 2, "both provider events should be ingested");
+        assert!(
+            envelopes
+                .iter()
+                .any(|env| matches!(env.event, DomainEvent::TurnCompleted { .. })),
+            "Completed should produce a TurnCompleted for this turn"
+        );
+        assert!(
+            envelopes
+                .iter()
+                .any(|env| matches!(env.event, DomainEvent::ActivityLogged { .. })),
+            "ToolCall should produce an ActivityLogged"
+        );
+        // Monotonic sequencing on the turn's fresh stream (1, 2).
+        let seqs: Vec<u64> = envelopes.iter().map(|e| e.sequence).collect();
+        assert_eq!(seqs, vec![1, 2], "events should be sequenced 1, 2");
     }
 
     #[tokio::test]
