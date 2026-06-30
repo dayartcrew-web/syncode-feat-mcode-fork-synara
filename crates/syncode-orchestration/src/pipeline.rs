@@ -425,7 +425,7 @@ impl Orchestrator {
         // Scope provider-originated activities to the turn's owning thread.
         let thread_id = thread_id_for_turn(&self.read_model, turn_id).await;
         let IngestionResult { events, consumed: _ } =
-            ingest_provider_event(provider_event, turn_id, thread_id);
+            ingest_provider_event(provider_event, turn_id, thread_id, None);
         // Turn events aggregate on the turn; append + project is shared with the
         // live stream consumer via the module-level `append_and_project` helper.
         append_and_project(&self.event_repo, &self.read_model, turn_id, events).await
@@ -774,11 +774,19 @@ pub(crate) async fn consume_provider_stream(
     // normally already projected). None if not yet projected.
     let thread_id = thread_id_for_turn(&read_model, turn_id).await;
 
+    // Capture the turn's wall-clock start so TurnCompleted carries a real
+    // elapsed duration rather than the token-count heuristic.
+    let started_at = syncode_core::Timestamp::now();
     tracing::info!(%session_id, "provider stream consumer started");
     while let Some(result) = stream.next().await {
         match result {
             Ok(provider_event) => {
-                let ingestion = ingest_provider_event(provider_event, turn_id, thread_id);
+                let ingestion = ingest_provider_event(
+                    provider_event,
+                    turn_id,
+                    thread_id,
+                    Some(started_at),
+                );
                 if let Err(e) =
                     append_and_project(&event_repo, &read_model, turn_id, ingestion.events).await
                 {
