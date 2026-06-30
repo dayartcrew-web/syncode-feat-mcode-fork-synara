@@ -28,7 +28,7 @@ impl Project {
             root_path: root_path.into(),
             provider_id: None,
             default_model: None,
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
         }
     }

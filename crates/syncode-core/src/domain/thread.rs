@@ -58,7 +58,7 @@ impl Thread {
             title: None,
             git_checkpoint: None,
             turn_count: 0,
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
         }
     }
