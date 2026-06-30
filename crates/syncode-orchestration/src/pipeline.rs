@@ -81,6 +81,42 @@ struct AppendedOutcome {
     new_version: u64,
 }
 
+/// Persist an aggregate snapshot every N appended events, so long-lived streams
+/// can later be reconstructed from a snapshot + tail instead of full replay.
+const SNAPSHOT_INTERVAL: u64 = 50;
+
+/// Whether an aggregate that just reached `new_version` events should be
+/// snapshotted. Snapshots land on non-zero multiples of `interval`.
+fn should_snapshot(new_version: u64, interval: u64) -> bool {
+    interval > 0 && new_version > 0 && new_version % interval == 0
+}
+
+/// Serialize the read-model view for the given aggregate, searching the keyed
+/// read-model maps. Returns `None` for aggregates whose view is not keyed by id
+/// (e.g. activities, which are stored as a flat `Vec`).
+fn view_for_aggregate(read_model: &ReadModelStore, id: EntityId) -> Option<serde_json::Value> {
+    let key = id.as_str();
+    if let Some(view) = read_model.projects.get(&key) {
+        return serde_json::to_value(view).ok();
+    }
+    if let Some(view) = read_model.threads.get(&key) {
+        return serde_json::to_value(view).ok();
+    }
+    if let Some(view) = read_model.turns.get(&key) {
+        return serde_json::to_value(view).ok();
+    }
+    if let Some(view) = read_model.messages.get(&key) {
+        return serde_json::to_value(view).ok();
+    }
+    if let Some(view) = read_model.pinned_messages.get(&key) {
+        return serde_json::to_value(view).ok();
+    }
+    if let Some(view) = read_model.markers.get(&key) {
+        return serde_json::to_value(view).ok();
+    }
+    None
+}
+
 /// The Orchestrator is the central pipeline that processes commands.
 ///
 /// It depends on ports (traits) rather than concrete implementations,
@@ -218,9 +254,9 @@ impl Orchestrator {
 
         let AppendedOutcome {
             events: domain_events,
-            aggregate_id: _aggregate_id,
+            aggregate_id,
             current_version,
-            new_version: _new_version,
+            new_version,
         } = match appended {
             Some(outcome) => outcome,
             None => {
@@ -236,10 +272,24 @@ impl Orchestrator {
             }
         };
 
-        // 5. Project raw domain events to in-memory read model, then wrap in envelopes
+        // 5. Project raw domain events to in-memory read model, then wrap in envelopes.
         let mut read_model = self.read_model.write().await;
         Projector::project_many(&domain_events, &mut read_model);
+        // If this append crossed the snapshot interval, capture the aggregate's
+        // just-updated view (while we hold the lock) and persist it after the
+        // lock is released, so save_snapshot's await doesn't block read-model readers.
+        let snapshot_to_write = if should_snapshot(new_version, SNAPSHOT_INTERVAL) {
+            view_for_aggregate(&read_model, aggregate_id).map(|state| (state, new_version))
+        } else {
+            None
+        };
         drop(read_model);
+
+        if let Some((state, version)) = snapshot_to_write
+            && let Err(e) = self.event_repo.save_snapshot(aggregate_id, state, version).await
+        {
+            tracing::warn!(error = %e, aggregate = ?aggregate_id, version, "failed to save aggregate snapshot");
+        }
 
         let envelopes: Vec<Envelope> = domain_events
             .into_iter()
@@ -755,12 +805,14 @@ pub(crate) mod test_helpers {
     /// In-memory fake event repository for testing
     pub(crate) struct InMemoryEventRepo {
         events: Mutex<HashMap<String, Vec<Envelope>>>,
+        snapshots: Mutex<HashMap<String, (serde_json::Value, u64)>>,
     }
 
     impl InMemoryEventRepo {
         pub(crate) fn new() -> Self {
             Self {
                 events: Mutex::new(HashMap::new()),
+                snapshots: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -803,17 +855,20 @@ pub(crate) mod test_helpers {
 
         async fn load_snapshot(
             &self,
-            _aggregate_id: EntityId,
+            aggregate_id: EntityId,
         ) -> Result<Option<(serde_json::Value, u64)>, PortError> {
-            Ok(None)
+            let snapshots = self.snapshots.lock().unwrap();
+            Ok(snapshots.get(&aggregate_id.to_string()).cloned())
         }
 
         async fn save_snapshot(
             &self,
-            _aggregate_id: EntityId,
-            _state: serde_json::Value,
-            _version: u64,
+            aggregate_id: EntityId,
+            state: serde_json::Value,
+            version: u64,
         ) -> Result<(), PortError> {
+            let mut snapshots = self.snapshots.lock().unwrap();
+            snapshots.insert(aggregate_id.to_string(), (state, version));
             Ok(())
         }
 
@@ -984,6 +1039,98 @@ mod tests {
             other => panic!("expected ConcurrencyConflictRetried, got: {other:?}"),
         }
         assert_eq!(repo_handle.append_calls(), MAX_CONCURRENCY_ATTEMPTS as u32);
+    }
+
+    #[test]
+    fn should_snapshot_only_on_nonzero_interval_multiples() {
+        assert!(!should_snapshot(0, 50));
+        assert!(!should_snapshot(49, 50));
+        assert!(should_snapshot(50, 50));
+        assert!(should_snapshot(100, 50));
+        assert!(!should_snapshot(51, 50));
+        // A zero interval must never snapshot (guards against always-on / mod).
+        assert!(!should_snapshot(50, 0));
+    }
+
+    #[tokio::test]
+    async fn handle_command_writes_snapshot_when_aggregate_crosses_interval() {
+        // Grow a single thread stream to exactly SNAPSHOT_INTERVAL events by
+        // repeatedly setting its title (each appends one ThreadTitleSet). At the
+        // boundary the orchestrator must persist a snapshot of the thread view.
+        let orch = make_orchestrator();
+
+        let project = orch
+            .handle_command(Command::CreateProject {
+                name: "Snap".into(),
+                root_path: "/snap".into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = match &project.events[0].event {
+            DomainEvent::ProjectCreated { id, .. } => *id,
+            _ => unreachable!("CreateProject yields ProjectCreated"),
+        };
+
+        let thread = orch
+            .handle_command(Command::CreateThread {
+                project_id,
+                provider_id: "p".into(),
+                model: "m".into(),
+            })
+            .await
+            .expect("create thread");
+        let thread_id = match &thread.events[0].event {
+            DomainEvent::ThreadCreated { id, .. } => *id,
+            _ => unreachable!("CreateThread yields ThreadCreated"),
+        };
+
+        // Thread stream is at version 1 after creation; grow it to SNAPSHOT_INTERVAL.
+        for i in 1..SNAPSHOT_INTERVAL {
+            orch.handle_command(Command::SetThreadTitle {
+                id: thread_id,
+                title: format!("title-{i}"),
+            })
+            .await
+            .expect("set title");
+        }
+
+        let (state, version) = orch
+            .event_repo
+            .load_snapshot(thread_id)
+            .await
+            .expect("load_snapshot")
+            .expect("snapshot should exist at interval boundary");
+        assert_eq!(version, SNAPSHOT_INTERVAL);
+        // The snapshotted view carries the last title set.
+        let title = state
+            .get("title")
+            .and_then(|v| v.as_str())
+            .expect("snapshot state has a title");
+        assert_eq!(title, format!("title-{}", SNAPSHOT_INTERVAL - 1));
+    }
+
+    #[tokio::test]
+    async fn handle_command_does_not_snapshot_below_interval() {
+        // A version-1 aggregate is well below the interval and must not snapshot.
+        let orch = make_orchestrator();
+        let project = orch
+            .handle_command(Command::CreateProject {
+                name: "NoSnap".into(),
+                root_path: "/nosnap".into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = match &project.events[0].event {
+            DomainEvent::ProjectCreated { id, .. } => *id,
+            _ => unreachable!("CreateProject yields ProjectCreated"),
+        };
+
+        let snap = orch
+            .event_repo
+            .load_snapshot(project_id)
+            .await
+            .expect("load_snapshot");
+        assert!(snap.is_none(), "no snapshot expected below the interval");
     }
 
     #[tokio::test]
