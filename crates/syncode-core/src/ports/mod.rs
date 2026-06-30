@@ -84,6 +84,40 @@ pub trait EventRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Domain Event Publisher (outbound notification bus)
+// ---------------------------------------------------------------------------
+
+/// Port for publishing domain events to an outbound notification bus
+/// (e.g. a WebSocket push channel).
+///
+/// The orchestration layer calls this *after* events have been appended and
+/// projected, so connected clients can react to state changes in real time.
+/// Delivery is **best-effort**: a publish failure is advisory and must never
+/// fail the originating command — the events are already durably persisted.
+/// Implementations should be cheap and non-blocking (fan-out to an internal
+/// channel, not to clients directly).
+#[async_trait::async_trait]
+pub trait DomainEventPublisher: Send + Sync {
+    /// Publish a domain-event notification on `channel`.
+    ///
+    /// `event_type` is the domain event's type name, `aggregate_id` identifies
+    /// the aggregate the event belongs to, and `data` carries the serialized
+    /// event payload. `channel` is the subscriber-facing topic (typically the
+    /// aggregate kind, e.g. `"orchestration"`).
+    ///
+    /// Returns `Ok(())` even when there are no receivers (that is normal
+    /// before any client subscribes) — only surface an error when the bus
+    /// itself is unusable.
+    async fn publish(
+        &self,
+        channel: &str,
+        event_type: &str,
+        aggregate_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), PortError>;
+}
+
+// ---------------------------------------------------------------------------
 // Read Model Repository (query side — projections)
 // ---------------------------------------------------------------------------
 

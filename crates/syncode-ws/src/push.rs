@@ -7,8 +7,7 @@
 use crate::{ConnectionId, WsState, channels::ChannelSubscription};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use syncode_core::ports::{DomainEventPublisher, PortError};
 use tracing;
 
 /// Push event types that can be broadcast
@@ -58,6 +57,51 @@ impl PushEvent {
             Self::ProviderStatus { .. } => "provider",
             Self::TerminalOutput { .. } => "terminal",
         }
+    }
+}
+
+/// A [`DomainEventPublisher`] backed by the WebSocket push bus.
+///
+/// The orchestration pipeline calls [`DomainEventPublisher::publish`] after it
+/// appends and projects a domain event. Each published event is broadcast on
+/// `push_tx` as `(channel, data)`, where `data` packs the event type, aggregate
+/// id, and serialized event payload. The push delivery loop then fans the
+/// broadcast out to connections subscribed to `channel`.
+///
+/// Publishing is best-effort: if there are no receivers yet (normal before any
+/// client connects), `broadcast::send` returns `SendError`, which we treat as
+/// success — the event is still durably persisted and projected upstream, so the
+/// absence of a live subscriber is not a publish failure.
+#[derive(Clone)]
+pub struct WsDomainEventPublisher {
+    push_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
+}
+
+impl WsDomainEventPublisher {
+    /// Wrap a push-bus broadcast sender as a [`DomainEventPublisher`].
+    pub fn new(push_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>) -> Self {
+        Self { push_tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl DomainEventPublisher for WsDomainEventPublisher {
+    async fn publish(
+        &self,
+        channel: &str,
+        event_type: &str,
+        aggregate_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), PortError> {
+        let envelope = json!({
+            "event_type": event_type,
+            "aggregate_id": aggregate_id,
+            "data": data,
+        });
+        // No receivers is not an error — it is normal before any client
+        // subscribes. Only an unusable bus should surface as an error.
+        let _ = self.push_tx.send((channel.to_string(), envelope));
+        Ok(())
     }
 }
 
@@ -218,5 +262,47 @@ mod tests {
         assert_eq!(parsed["params"]["event"], "ThreadCreated");
         assert_eq!(parsed["params"]["data"]["id"], "abc");
         assert!(parsed["params"]["timestamp"].is_string());
+    }
+
+    #[tokio::test]
+    async fn ws_publisher_broadcasts_packed_envelope() {
+        // A published domain event is broadcast on push_tx as (channel, data),
+        // where data packs the event type, aggregate id, and payload — the shape
+        // a downstream push-delivery loop consumes.
+        let (push_tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, serde_json::Value)>(8);
+        let publisher = WsDomainEventPublisher::new(push_tx);
+
+        publisher
+            .publish(
+                "orchestration",
+                "ProjectCreated",
+                "agg-1",
+                json!({"id": "agg-1", "name": "Demo"}),
+            )
+            .await
+            .expect("publish should succeed");
+
+        let (channel, data) = rx.recv().await.expect("should receive the broadcast");
+        assert_eq!(channel, "orchestration");
+        assert_eq!(data["event_type"], "ProjectCreated");
+        assert_eq!(data["aggregate_id"], "agg-1");
+        assert_eq!(data["data"]["id"], "agg-1");
+        assert_eq!(data["data"]["name"], "Demo");
+    }
+
+    #[tokio::test]
+    async fn ws_publisher_succeeds_with_no_receivers() {
+        // Before any client subscribes there are no receivers. broadcast::send
+        // returns SendError in that case, but publish must still return Ok —
+        // the absence of a live subscriber is not a publish failure.
+        let (push_tx, _) =
+            tokio::sync::broadcast::channel::<(String, serde_json::Value)>(8);
+        let publisher = WsDomainEventPublisher::new(push_tx);
+
+        publisher
+            .publish("orchestration", "ThreadCreated", "agg-2", json!({}))
+            .await
+            .expect("publish with no receivers should succeed");
     }
 }

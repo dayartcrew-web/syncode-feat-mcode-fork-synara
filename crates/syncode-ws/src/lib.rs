@@ -91,6 +91,13 @@ impl WsState {
     /// can read the latest projected state.
     pub fn new(push_capacity: usize, orchestrator: syncode_orchestration::Orchestrator) -> Self {
         let (push_tx, _) = broadcast::channel(push_capacity);
+
+        // Feed domain events from the pipeline onto the push bus: wrap the push
+        // sender as a DomainEventPublisher and attach it to the orchestrator.
+        // Builder-style call consumes and returns the enriched orchestrator.
+        let publisher = crate::push::WsDomainEventPublisher::new(push_tx.clone());
+        let orchestrator = orchestrator.with_event_publisher(Arc::new(publisher));
+
         let read_store = orchestrator.read_model_ref();
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),

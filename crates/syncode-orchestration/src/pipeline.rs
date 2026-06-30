@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use syncode_core::{
     DomainEvent, Envelope, EntityId,
-    ports::{EventRepository, PortError},
+    ports::{DomainEventPublisher, EventRepository, PortError},
 };
 use tracing::{info, instrument};
 
@@ -117,6 +117,48 @@ fn view_for_aggregate(read_model: &ReadModelStore, id: EntityId) -> Option<serde
     None
 }
 
+/// Channel name used for outbound domain-event notifications. All domain events
+/// (project, thread, turn, message, activity, …) are published here so a client
+/// subscribed to the orchestration feed sees every state change.
+const PUSH_CHANNEL: &str = "orchestration";
+
+/// Best-effort fan-out of appended domain events to the outbound bus.
+///
+/// Each envelope is published with its type name, owning aggregate id, and
+/// serialized payload. Publishing failures (serialization or transport) are
+/// logged and never propagated — by the time we publish, the events are already
+/// durably appended and projected, so a push problem must not fail the command.
+async fn publish_events(
+    publisher: &Arc<dyn DomainEventPublisher>,
+    envelopes: &[Envelope],
+) {
+    for env in envelopes {
+        let event_type = env.event.event_type_name();
+        let aggregate_id = env.event.aggregate_id();
+        let data = match serde_json::to_value(&env.event) {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    event_type,
+                    "failed to serialize domain event for push; skipping"
+                );
+                continue;
+            }
+        };
+        if let Err(e) = publisher
+            .publish(PUSH_CHANNEL, event_type, &aggregate_id.to_string(), data)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                event_type,
+                "domain-event push failed; event remains persisted"
+            );
+        }
+    }
+}
+
 /// The Orchestrator is the central pipeline that processes commands.
 ///
 /// It depends on ports (traits) rather than concrete implementations,
@@ -133,6 +175,13 @@ pub struct Orchestrator {
     /// actually dispatch (e.g. start a session on StartTurn, respond to an
     /// approval/user-input request).
     adapter: Option<syncode_provider::registry::SharedAdapter>,
+    /// Optional outbound domain-event publisher. When wired, every appended
+    /// domain event (command- and provider-stream-sourced) is pushed to the
+    /// bus (e.g. a WebSocket push channel) after append+project, so connected
+    /// clients can react in real time. Publishing is best-effort: failures are
+    /// logged and never fail the originating command (events are already
+    /// persisted by the time we publish).
+    event_publisher: Option<Arc<dyn DomainEventPublisher>>,
 }
 
 impl Orchestrator {
@@ -143,6 +192,7 @@ impl Orchestrator {
             event_repo,
             command_reactor: None,
             adapter: None,
+            event_publisher: None,
         }
     }
 
@@ -160,6 +210,7 @@ impl Orchestrator {
             event_repo,
             command_reactor: Some(command_reactor),
             adapter: None,
+            event_publisher: None,
         }
     }
 
@@ -178,7 +229,19 @@ impl Orchestrator {
             event_repo,
             command_reactor: Some(command_reactor),
             adapter: Some(adapter),
+            event_publisher: None,
         }
+    }
+
+    /// Attach an outbound domain-event publisher (builder-style, consumes and
+    /// returns `self` so it chains after a constructor). When attached, every
+    /// appended domain event is pushed to the bus after append+project.
+    ///
+    /// Publishing is best-effort: a push failure is logged and never fails the
+    /// originating command (the events are already persisted by publish time).
+    pub fn with_event_publisher(mut self, publisher: Arc<dyn DomainEventPublisher>) -> Self {
+        self.event_publisher = Some(publisher);
+        self
     }
 
     /// Create with an existing read model store (e.g., pre-loaded).
@@ -191,6 +254,7 @@ impl Orchestrator {
             event_repo,
             command_reactor: None,
             adapter: None,
+            event_publisher: None,
         }
     }
 
@@ -301,6 +365,13 @@ impl Orchestrator {
             .collect();
 
         info!(count = envelopes.len(), "Events persisted and projected");
+
+        // 5b. Best-effort push of the just-appended command events to the
+        //     outbound bus (e.g. WebSocket). Provider-stream events take the
+        //     same path inside `append_and_project`. Never fails the command.
+        if let Some(publisher) = &self.event_publisher {
+            publish_events(publisher, &envelopes).await;
+        }
 
         // 6. Trigger side effects (command reactor). When both a reactor and an
         //    adapter are wired, provider-interaction commands actually dispatch
@@ -428,7 +499,14 @@ impl Orchestrator {
             ingest_provider_event(provider_event, turn_id, thread_id, None);
         // Turn events aggregate on the turn; append + project is shared with the
         // live stream consumer via the module-level `append_and_project` helper.
-        append_and_project(&self.event_repo, &self.read_model, turn_id, events).await
+        append_and_project(
+            &self.event_repo,
+            &self.read_model,
+            self.event_publisher.as_ref(),
+            turn_id,
+            events,
+        )
+        .await
     }
 
     /// Ingest a batch of provider events collected by the command reactor and
@@ -483,9 +561,18 @@ impl Orchestrator {
 
         let event_repo = Arc::clone(&self.event_repo);
         let read_model = Arc::clone(&self.read_model);
+        let event_publisher = self.event_publisher.clone();
 
         Ok(tokio::spawn(async move {
-            consume_provider_stream(stream, event_repo, read_model, turn_id, session_id).await;
+            consume_provider_stream(
+                stream,
+                event_repo,
+                read_model,
+                event_publisher,
+                turn_id,
+                session_id,
+            )
+            .await;
         }))
     }
 
@@ -715,6 +802,7 @@ impl Orchestrator {
 pub(crate) async fn append_and_project(
     event_repo: &Arc<dyn EventRepository>,
     read_model: &Arc<tokio::sync::RwLock<ReadModelStore>>,
+    event_publisher: Option<&Arc<dyn DomainEventPublisher>>,
     aggregate_id: EntityId,
     events: Vec<DomainEvent>,
 ) -> Result<Vec<Envelope>, OrchestrationError> {
@@ -737,6 +825,13 @@ pub(crate) async fn append_and_project(
         .enumerate()
         .map(|(i, event)| Envelope::new(event, current_version + 1 + i as u64))
         .collect();
+
+    // Best-effort push of provider-stream/batch-sourced events. Mirrors the
+    // command-event push in handle_command. Never fails the append.
+    if let Some(publisher) = event_publisher {
+        publish_events(publisher, &envelopes).await;
+    }
+
     Ok(envelopes)
 }
 
@@ -764,6 +859,7 @@ pub(crate) async fn consume_provider_stream(
     mut stream: syncode_provider::ProviderStream,
     event_repo: Arc<dyn EventRepository>,
     read_model: Arc<tokio::sync::RwLock<ReadModelStore>>,
+    event_publisher: Option<Arc<dyn DomainEventPublisher>>,
     turn_id: EntityId,
     session_id: String,
 ) {
@@ -787,8 +883,14 @@ pub(crate) async fn consume_provider_stream(
                     thread_id,
                     Some(started_at),
                 );
-                if let Err(e) =
-                    append_and_project(&event_repo, &read_model, turn_id, ingestion.events).await
+                if let Err(e) = append_and_project(
+                    &event_repo,
+                    &read_model,
+                    event_publisher.as_ref(),
+                    turn_id,
+                    ingestion.events,
+                )
+                .await
                 {
                     tracing::error!(%session_id, error = %e, "stream consumer ingest failed; stopping");
                     return;
@@ -1221,6 +1323,7 @@ mod tests {
             stream,
             Arc::clone(&repo),
             Arc::clone(&read_model),
+            None,
             turn_id,
             "s1".into(),
         )
@@ -1276,6 +1379,7 @@ mod tests {
             stream,
             Arc::clone(&repo),
             Arc::clone(&read_model),
+            None,
             turn_id,
             "s1".into(),
         )
@@ -1298,6 +1402,152 @@ mod tests {
             .spawn_provider_stream_consumer("s1".into(), EntityId::new())
             .await;
         assert!(result.is_err(), "spawning without an adapter must error");
+    }
+
+    /// A [`DomainEventPublisher`] fake that records every publish call. Used to
+    /// assert the pipeline fans appended events out to the bus.
+    struct RecordingPublisher {
+        calls: std::sync::Mutex<Vec<(String, String, String, serde_json::Value)>>,
+    }
+
+    impl RecordingPublisher {
+        fn new() -> Self {
+            Self { calls: std::sync::Mutex::new(Vec::new()) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DomainEventPublisher for RecordingPublisher {
+        async fn publish(
+            &self,
+            channel: &str,
+            event_type: &str,
+            aggregate_id: &str,
+            data: serde_json::Value,
+        ) -> Result<(), PortError> {
+            self.calls.lock().unwrap().push((
+                channel.to_string(),
+                event_type.to_string(),
+                aggregate_id.to_string(),
+                data,
+            ));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_command_pushes_domain_events_to_publisher() {
+        // When an event publisher is wired, the command's produced domain events
+        // must be pushed to the bus on the "orchestration" channel, in addition
+        // to being persisted and projected.
+        let repo = Arc::new(InMemoryEventRepo::new());
+        let recorder = Arc::new(RecordingPublisher::new());
+        let publisher: Arc<dyn DomainEventPublisher> = recorder.clone();
+        let orch = Orchestrator::new(repo).with_event_publisher(publisher);
+
+        let result = orch
+            .handle_command(Command::CreateProject {
+                name: "Push".into(),
+                root_path: "/push".into(),
+            })
+            .await
+            .expect("create project");
+        assert_eq!(result.events.len(), 1);
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the single ProjectCreated event should be pushed exactly once"
+        );
+        assert_eq!(calls[0].0, "orchestration", "pushed on the orchestration channel");
+        assert_eq!(calls[0].1, "ProjectCreated", "pushed with the event type name");
+        // The pushed aggregate id matches the produced event's aggregate id.
+        let pushed_agg = result.events[0].event.aggregate_id().to_string();
+        assert_eq!(calls[0].2, pushed_agg, "pushed aggregate id matches the event's");
+    }
+
+    #[tokio::test]
+    async fn handle_command_publish_failure_does_not_fail_command() {
+        // A publisher that always errors must NOT fail the command — publishing
+        // is best-effort; the events are already persisted.
+        struct FailingPublisher;
+        #[async_trait::async_trait]
+        impl DomainEventPublisher for FailingPublisher {
+            async fn publish(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<(), PortError> {
+                Err(PortError::Internal("bus down".into()))
+            }
+        }
+
+        let repo = Arc::new(InMemoryEventRepo::new());
+        let orch = Orchestrator::new(repo).with_event_publisher(Arc::new(FailingPublisher));
+
+        let result = orch
+            .handle_command(Command::CreateProject {
+                name: "Resilient".into(),
+                root_path: "/resilient".into(),
+            })
+            .await;
+
+        assert!(result.is_ok(), "command must succeed despite a publish failure");
+        assert_eq!(result.unwrap().events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_pushes_domain_events_to_publisher() {
+        // Provider-stream-sourced events take the same push path as command
+        // events: each ingested domain event is pushed on the orchestration
+        // channel (ToolCall -> ActivityLogged, Completed -> TurnCompleted).
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let recorder = Arc::new(RecordingPublisher::new());
+        let publisher: Arc<dyn DomainEventPublisher> = recorder.clone();
+        let turn_id = EntityId::new();
+
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
+            Ok(syncode_provider::ProviderEvent::ToolCall {
+                session_id: "s1".into(),
+                tool_name: "grep".into(),
+                tool_input: serde_json::json!({"q": "x"}),
+            }),
+            Ok(syncode_provider::ProviderEvent::Completed {
+                session_id: "s1".into(),
+                output: "done".into(),
+                usage: None,
+            }),
+        ]));
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            Some(publisher),
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "both stream events should be pushed");
+        assert!(
+            calls.iter().any(|(_, et, _, _)| et == "ActivityLogged"),
+            "ToolCall should push an ActivityLogged"
+        );
+        assert!(
+            calls.iter().any(|(_, et, _, _)| et == "TurnCompleted"),
+            "Completed should push a TurnCompleted"
+        );
+        assert!(
+            calls.iter().all(|(ch, _, _, _)| ch == "orchestration"),
+            "all stream events push on the orchestration channel"
+        );
     }
 
     #[tokio::test]
