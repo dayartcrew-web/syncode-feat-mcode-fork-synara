@@ -9,7 +9,6 @@
 //! - `*` — wildcard: subscribe to all channels
 
 use std::collections::HashSet;
-use crate::ConnectionId;
 
 /// Known push channels in the system
 pub const CHANNEL_ALL: &str = "*";

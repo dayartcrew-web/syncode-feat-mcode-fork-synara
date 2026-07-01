@@ -10,6 +10,7 @@ description = "WebSocket transport — JSON-RPC server, push bus, channels, conn
 syncode-core = { workspace = true }
 syncode-orchestration = { path = "../syncode-orchestration" }
 syncode-persistence = { path = "../syncode-persistence" }
+syncode-auth = { path = "../syncode-auth" }
 async-trait = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }

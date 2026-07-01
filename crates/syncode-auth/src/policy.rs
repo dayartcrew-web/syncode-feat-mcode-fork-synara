@@ -4,11 +4,11 @@
 //! for a future RBAC/ABAC engine; today it answers "is this permission allowed?"
 //! given an explicit allow-list and an overriding deny-list.
 
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Coarse-grained capabilities a principal may hold.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
     Read,
@@ -32,20 +32,32 @@ pub struct AuthPolicy {
 }
 
 impl AuthPolicy {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn allow(mut self, p: Permission) -> Self { self.allowed.insert(p); self }
-    pub fn deny(mut self, p: Permission) -> Self { self.denied.insert(p); self }
+    pub fn allow(mut self, p: Permission) -> Self {
+        self.allowed.insert(p);
+        self
+    }
+    pub fn deny(mut self, p: Permission) -> Self {
+        self.denied.insert(p);
+        self
+    }
 
     /// Evaluate: Deny if explicitly denied or not explicitly allowed.
     pub fn evaluate(&self, p: &Permission) -> PolicyDecision {
         if self.denied.contains(p) {
-            return PolicyDecision::Deny { reason: format!("{:?} explicitly denied", p) };
+            return PolicyDecision::Deny {
+                reason: format!("{:?} explicitly denied", p),
+            };
         }
         if self.allowed.contains(p) {
             return PolicyDecision::Allow;
         }
-        PolicyDecision::Deny { reason: format!("{:?} not in allow-list", p) }
+        PolicyDecision::Deny {
+            reason: format!("{:?} not in allow-list", p),
+        }
     }
 }
 
@@ -62,18 +74,29 @@ mod tests {
     #[test]
     fn deny_unlisted() {
         let policy = AuthPolicy::new().allow(Permission::Read);
-        assert!(matches!(policy.evaluate(&Permission::Write), PolicyDecision::Deny { .. }));
+        assert!(matches!(
+            policy.evaluate(&Permission::Write),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]
     fn deny_overrides_allow() {
-        let policy = AuthPolicy::new().allow(Permission::Admin).deny(Permission::Admin);
-        assert!(matches!(policy.evaluate(&Permission::Admin), PolicyDecision::Deny { .. }));
+        let policy = AuthPolicy::new()
+            .allow(Permission::Admin)
+            .deny(Permission::Admin);
+        assert!(matches!(
+            policy.evaluate(&Permission::Admin),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]
     fn empty_policy_denies_all() {
         let policy = AuthPolicy::new();
-        assert!(matches!(policy.evaluate(&Permission::Read), PolicyDecision::Deny { .. }));
+        assert!(matches!(
+            policy.evaluate(&Permission::Read),
+            PolicyDecision::Deny { .. }
+        ));
     }
 }

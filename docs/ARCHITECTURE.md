@@ -108,17 +108,17 @@ Defined in `syncode-core/src/ports/mod.rs` (async, `Send+Sync`):
 
 ## 8. Status: what's real vs stub
 
-**Implemented & tested (487 tests):** core domain (35 events), CQRS engine (38 Commands — all 28 MCode client commands ported; decider/projector/reactors/use-cases), SQLite persistence (7 projections), 2 HTTP provider adapters (Anthropic, OpenAI), git status/diff/branch/commit/checkpoint/worktree, terminal PTY + ack protocol, automation policies, auth credential/policy/secret-store types, WebSocket RPC + push bus, Tauri shell scaffolding.
+**Implemented & tested (~559 tests):** core domain (35 events), CQRS engine (38 Commands — all 28 MCode client commands ported; decider/projector/reactors/use-cases), SQLite persistence (7 projections), 2 HTTP provider adapters (Anthropic, OpenAI), git status/diff/branch/commit/checkpoint/worktree, terminal PTY + ack protocol, automation policies, **WS auth wired** (principal/session/authenticator + authz gate on RPC dispatch + `auth/bootstrap`·`auth/status`·`auth/logout`), WebSocket RPC + push bus, Tauri shell scaffolding.
 
 **Stubs / not wired:**
 - 8 subprocess provider adapters (claude/codex/cursor/gemini/grok/kilo/opencode/pi) — non-functional
-- `syncode-auth`, `syncode-http` — empty
+- `syncode-http` — empty
 - `ws/transport.rs` — connection state machine (no reconnect/rehydrate)
 - git `push`/`pull`/`CreatePR`, worktree `prune`
 - automation cron/interval due-evaluation, retry loop, execution, persistence
 - **Tauri shell does not compose the ws server or the orchestration engine** — desktop↔engine integration is incomplete; no IPC commands for project/thread/turn
 
-**Known risks:** no optimistic-concurrency retry; `duration_ms` heuristic (`tokens*10`); `CreateThread` doesn't validate project exists; no automatic snapshotting; no WS auth/rate-limiting.
+**Known risks:** no optimistic-concurrency retry; `duration_ms` heuristic (`tokens*10`); `CreateThread` doesn't validate project exists; no automatic snapshotting; **WS auth defaults to `UnsafeNoAuth` (backward-compat) — opt in via `WsState::new_with_auth(.., WsAuthConfig::remote(..)`**; no rate limiting/backpressure; auth sessions are in-memory (not persisted across restart).
 
 ## 9. MCode parity (porting fidelity)
 

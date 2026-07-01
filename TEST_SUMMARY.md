@@ -1,15 +1,15 @@
 # Syncode — Test Summary Report
 
-**Generated:** 2026-06-27 · **numbers refreshed 2026-06-30** (after the command-port, gaps-and-stubs, and provider-bridge workflows)
-**Total Tests:** ~487 (all passing, 0 failures, 1 ignored doc-test). NOTE: grew from 423 — the command-port workflow ported all 21 missing MCode client-orchestration commands (orchestration 57→129), the gaps-and-stubs workflow built out auth (+12), and the provider-bridge workflow wired provider dispatch (+8 orchestration). Per-crate counts below were verified by running each suite.
-**Total Rust LOC:** ~23,300 (80 source files across 12 internal crates + 1 integration-test package)
+**Generated:** 2026-06-27 · **numbers refreshed 2026-07-01** (after the command-port, gaps-and-stubs, provider-bridge, internal-commands, snapshot-coldstart, real-providers-acp, and ws-auth-wiring workflows)
+**Total Tests:** ~559 (all passing, 0 failures, 1 ignored doc-test). NOTE: grew from 487 — the ws-auth-wiring workflow connected `syncode-auth` into the WS transport (principal/session/authenticator + authz gate on RPC dispatch + `auth/bootstrap`·`auth/status`·`auth/logout`): auth 12→35, ws 14→37. Per-crate counts below were verified by running each suite.
+**Total Rust LOC:** ~24,900 (90+ source files across 12 internal crates + 1 integration-test package)
 
 ## Test Breakdown by Crate
 
 | Crate | Tests | Domain |
 |---|---|---|
 | `syncode-automation` | 38 | Scheduled agent runs, retry/misfire/completion policies |
-| `syncode-auth` | 12 | Credentials, secret store, auth policy |
+| `syncode-auth` | 35 | Credentials, secret store, auth policy, **principal/session/authenticator, AuthMode** |
 | `syncode-contracts` | 21 | Shared types, session/message views, TS bindings |
 | `syncode-core` | 45 | EntityId, Timestamp, Project, Thread, Turn, DomainEvent (35 variants), port traits |
 | `syncode-git` | 22 | Git operations, checkpoint, branch management |
@@ -20,8 +20,8 @@
 | `syncode-provider` | 174 | ProviderAdapter trait + 10 adapters |
 | `syncode-tauri` | — | Desktop tray, auto-updater (pre-existing build issues, excluded) |
 | `syncode-terminal` | 15 | OutputBuffer, ack protocol, chunk management, display |
-| `syncode-ws` | 14 | WebSocket server, JSON-RPC, connection lifecycle, push bus |
-| **TOTAL** | **~487** | |
+| `syncode-ws` | 37 | WebSocket server, JSON-RPC, connection lifecycle, push bus, **authz gate + auth RPC** |
+| **TOTAL** | **~559** | |
 
 ## CQRS / Event Sourcing Pipeline (New)
 
