@@ -17,7 +17,7 @@ This document records which providers are **real** (functional) versus
 | codex | ✅ Real (app-server) | stdio NDJSON JSON-RPC | `adapters::CodexAdapter` |
 | opencode | ✅ Real (HTTP+SSE) | local server REST+SSE | `adapters::OpenCodeAdapter` |
 | kilo | ✅ Real (HTTP+SSE) | local server REST+SSE | `adapters::KiloAdapter` |
-| pi | 🟡 Stub | — | `adapters::PiAdapter` |
+| pi | ✅ Real (RPC) | stdio JSON (`pi --mode rpc`) | `adapters::PiAdapter` |
 
 ## Real ACP providers (cursor, grok, gemini)
 
@@ -163,20 +163,48 @@ bytes — no binary and no live HTTP server required — and the adapter glue
 (session/model resolution, forwarder, turn→response mapping) is covered by the
 `adapters::opencode` / `adapters::kilo` unit tests.
 
-## Deferred provider (pi)
+## Real RPC provider (pi)
 
-This remains a **non-functional stub** (`spawn` sets flags; `send_request`
-echoes `{"stub": true}`). It is **not feasible** to port faithfully to Rust
-today because it depends on an in-process TS-only SDK with no Rust equivalent —
-neither the ACP, the Claude stream-json, nor the OpenCode HTTP/SSE foundation
-helps it.
+The `@earendil-works/pi-coding-agent` CLI ships a first-class headless RPC
+mode (`pi --mode rpc`) — a JSON-over-stdio protocol explicitly designed for
+non-Node embedding (documented at the SDK's `docs/rpc.md`, with a reference TS
+client). mcode drives pi via the in-process TS SDK, but that is mcode's choice,
+not pi's limitation; the RPC mode is the recommended path for non-Node drivers.
 
-| Provider | mcode mechanism | Blocker |
-|----------|-----------------|---------|
-| pi | in-process `@earendil-works/pi-coding-agent` SDK | No Rust SDK; in-process TS SDK (no subprocess/HTTP wire protocol, native Node dep) — see `.masday/research/custom-providers.md` §5 |
+Because pi speaks its own `{"type":"<cmd>"}` / `{"type":"response"}` / event
+framing (NOT JSON-RPC 2.0), it does **not** reuse `JsonRpcTransport` — the
+existing reader classifies by `id`+`method` and would silently drop pi frames.
+Instead it has a dedicated [`PiClient`](src/pi_rpc.rs) with a `type`-keyed
+reader: responses route to awaiters by string id; everything else forwards as
+an agent event. The NDJSON framing (one JSON object per `\n`, LF-only) is
+identical.
 
-Restoring it requires either an official Rust client or a faithful
-reimplementation of the in-process SDK, which is out of scope for this workflow.
+| Provider | Spawn form | Optional flags (config) |
+|----------|------------|-------------------------|
+| pi | `pi --mode rpc [--provider <p>] [--model <m>]` | `PiConfig.provider`, `PiConfig.model`, `PiConfig.extra_args`, `PiConfig.bin_path` |
+
+Lifecycle mapping (trait → pi RPC): `spawn` = launch `pi --mode rpc`;
+`start_session` = mint a local session id (pi's default session is implicit);
+`send_request` = `prompt` (submit, then drain events to terminal `agent_end`);
+`interrupt` = `abort`; `health_check` = child liveness; `shutdown` = kill child.
+
+Event mapping: `message_update` text/thinking deltas → `ProviderEvent::Token`;
+`tool_execution_start/end` → `ToolCall`/`ToolResult`; `agent_end` (stopReason
+`stop`/`length`/`toolUse`) → `Completed`, else → `Error`. The terminal signal
+is `agent_end` (NOT `turn_end` — a multi-step turn emits multiple `turn_end`
+before the single `agent_end`).
+
+Auth: pi owns its credentials (`~/.pi/agent/auth.json` or `pi` run once
+interactively); the spawned process inherits them. No auth on the stdio channel.
+
+### Verifying with real binaries
+
+Spawn requires the `pi` CLI installed (and model-provider credentials), so the
+E2E test is gated behind `SYNICODE_PI_E2E=1` in `tests/pi_e2e.rs` (skips
+without the gate). The full protocol lifecycle is covered by `pi_rpc` unit
+tests, which drive the client over an in-process `tokio::io::duplex` with a
+fake pi peer emitting canned event sequences (text deltas → agent_end; tool
+cycle; error stop-reason) — no real binary required.
 
 ## Factory
 

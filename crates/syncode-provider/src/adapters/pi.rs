@@ -1,114 +1,120 @@
-//! Pi adapter — **non-functional stub** (infeasible to port to Rust).
+//! Pi adapter — drives the `pi` CLI in headless RPC mode (`pi --mode rpc`).
 //!
-//! Unlike the real adapters (ACP `cursor`/`grok`/`gemini`, app-server `codex`,
-//! HTTP `anthropic`/`openai`), Pi has **no wire protocol to drive**: mcode runs
-//! Pi entirely in-process via the TypeScript SDK
-//! `@earendil-works/pi-coding-agent` (`SessionManager::create`,
-//! `createAgentSessionRuntime`, `session.subscribe/prompt/...`). There is no
-//! `pi` CLI, no subprocess, and no HTTP server to spawn or connect to.
+//! Pi (@earendil-works/pi-coding-agent) is a coding-agent CLI that ships a
+//! first-class JSON-over-stdio RPC protocol explicitly designed for non-Node
+//! embedding. Unlike the ACP/codex providers (JSON-RPC 2.0, reuse
+//! [`JsonRpcTransport`](crate::subprocess::JsonRpcTransport)), pi speaks its own
+//! `{"type":"<cmd>"}` / `{"type":"response"}` / event framing, so it uses a
+//! dedicated [`PiClient`](crate::pi_rpc::PiClient) with a `type`-keyed reader.
 //!
-//! # Why this stays a stub
+//! ## Lifecycle mapping (trait → pi RPC)
 //!
-//! - **In-process TS SDK only.** The agent loop (model registry, tool
-//!   dispatcher, extension loader, TUI framework) lives inside the Node process
-//!   — a Rust port would mean reimplementing the entire SDK.
-//! - **Native Node dependency** (a clipboard module) makes the SDK impossible to
-//!   `require()` from a non-Node host.
-//! - **No public spec.** Even mcode no-ops ~15 `ExtensionUIContext` methods,
-//!   assuming a TUI mcode itself does not provide.
+//! | trait method | pi RPC |
+//! |---|---|
+//! | `spawn` | launch `pi --mode rpc` |
+//! | `start_session` | mint a local session id (pi's default session is implicit) |
+//! | `send_request` | `prompt` (submit, then drain events to terminal `agent_end`) |
+//! | `interrupt` | `abort` |
+//! | `health_check` | child liveness |
+//! | `shutdown` | kill child |
 //!
-//! `PiAdapter` therefore keeps its trait shape and config (`PiConfig`) so the
-//! registry can list it, but `send_request` echoes `{"stub": true}` — it cannot
-//! produce real output. Pi will remain a stub until the upstream project ships
-//! an official Rust SDK or an HTTP/subprocess server mode. See the feasibility
-//! verdict in `.masday/research/custom-providers.md` §5.
+//! ## Event mapping
+//!
+//! pi `message_update` text/thinking deltas → `ProviderEvent::Token`;
+//! `tool_execution_start/end` → `ToolCall`/`ToolResult`;
+//! `agent_end` (stopReason ok) → `Completed`, else → `Error`.
+//!
+//! Auth: pi owns its credentials (`~/.pi/agent/auth.json` or `pi` run once
+//! interactively); the spawned process inherits them. No auth on the stdio
+//! channel — same model as codex/claude.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
+use super::super::pi_rpc::{PiClient, PromptStatus};
+use super::super::subprocess::SubprocessSpec;
 use super::super::trait_def::*;
-use crate::session::SessionState;
 
-/// Pi-specific configuration
+/// Pi-specific configuration. Mirrors the codex-style config shape.
 #[derive(Debug, Clone)]
 pub struct PiConfig {
-    /// Path to the pi CLI binary (default: "pi")
+    /// Path to the `pi` CLI binary (default: `"pi"`).
     pub bin_path: String,
-    /// Pi API key (if not set, reads PI_API_KEY env var)
-    pub api_key: Option<String>,
-    /// Pi API base URL (default: "https://api.pi.ai")
-    pub base_url: String,
-    /// Default Pi model
-    pub model: String,
+    /// Extra CLI args appended after `--mode rpc` (e.g. `["--provider","anthropic"]`).
+    pub extra_args: Vec<String>,
+    /// Optional `--provider` override (else pi's settings.json default).
+    pub provider: Option<String>,
+    /// Optional `--model` override (else pi's default).
+    pub model: Option<String>,
 }
 
 impl Default for PiConfig {
     fn default() -> Self {
         Self {
             bin_path: "pi".to_string(),
-            api_key: std::env::var("PI_API_KEY").ok(),
-            base_url: "https://api.pi.ai".to_string(),
-            model: "pi-3".to_string(),
+            extra_args: Vec::new(),
+            provider: None,
+            model: None,
         }
     }
 }
 
-/// The Pi provider adapter
+impl PiConfig {
+    /// Build the subprocess spec for `pi --mode rpc`.
+    fn spec(&self, cwd: &str) -> SubprocessSpec {
+        let mut spec = SubprocessSpec::new(&self.bin_path)
+            .args(["--mode", "rpc"])
+            .cwd(cwd);
+        if let Some(provider) = &self.provider {
+            spec = spec.args(["--provider", provider]);
+        }
+        if let Some(model) = &self.model {
+            spec = spec.args(["--model", model]);
+        }
+        if !self.extra_args.is_empty() {
+            spec = spec.args(self.extra_args.clone());
+        }
+        spec
+    }
+}
+
+/// The Pi provider adapter.
 pub struct PiAdapter {
     config: Option<ProviderConfig>,
     pi_config: PiConfig,
+    /// The pi RPC client (set on spawn).
+    client: Mutex<Option<PiClient>>,
     status: AtomicU64,
-    sessions: Mutex<HashMap<String, Arc<SessionState>>>,
+    /// The active session id (pi has one implicit session per process).
+    current_session: Mutex<Option<String>>,
     event_tx: broadcast::Sender<ProviderEvent>,
     spawned: AtomicBool,
-    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
-    next_req_id: AtomicU64,
 }
 
 impl PiAdapter {
-    /// Create a new Pi adapter with default settings
+    /// Create a new Pi adapter with default settings.
     pub fn new() -> Self {
-        let (event_tx, _) = broadcast::channel(256);
-        Self {
-            config: None,
-            pi_config: PiConfig::default(),
-            status: AtomicU64::new(ProviderStatus::Disconnected.into()),
-            sessions: Mutex::new(HashMap::new()),
-            event_tx,
-            spawned: AtomicBool::new(false),
-            next_req_id: AtomicU64::new(1),
-        }
+        Self::with_pi_config(PiConfig::default())
     }
 
-    /// Create a new Pi adapter with custom pi-specific config
+    /// Create a new Pi adapter with custom pi-specific config.
     pub fn with_pi_config(pi_config: PiConfig) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
             config: None,
             pi_config,
+            client: Mutex::new(None),
             status: AtomicU64::new(ProviderStatus::Disconnected.into()),
-            sessions: Mutex::new(HashMap::new()),
+            current_session: Mutex::new(None),
             event_tx,
             spawned: AtomicBool::new(false),
-            next_req_id: AtomicU64::new(1),
         }
-    }
-
-    /// Check if the Pi API key is configured
-    pub fn has_api_key(&self) -> bool {
-        self.pi_config.api_key.is_some() || std::env::var("PI_API_KEY").is_ok()
     }
 
     fn set_status(&self, status: ProviderStatus) {
         self.status.store(status.into(), Ordering::Release);
-    }
-
-    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
-    fn next_request_id(&self) -> u64 {
-        self.next_req_id.fetch_add(1, Ordering::Relaxed)
+        let _ = self.event_tx.send(ProviderEvent::StatusChanged { status });
     }
 
     fn generate_session_id() -> String {
@@ -143,7 +149,10 @@ impl ProviderAdapter for PiAdapter {
     }
 
     fn available_models(&self) -> Vec<String> {
-        vec!["pi-3".to_string(), "pi-3-turbo".to_string()]
+        // pi resolves models at runtime via get_available_models; expose a
+        // sensible default list. The actual model used is whatever pi's
+        // settings.json / --model resolves to.
+        vec!["default".to_string()]
     }
 
     // -- Lifecycle ---------------------------------------------------------
@@ -155,25 +164,21 @@ impl ProviderAdapter for PiAdapter {
             ));
         }
 
-        let has_key = config.api_key.is_some() || self.has_api_key();
-        if !has_key {
-            tracing::warn!(
-                provider = PROVIDER_PI,
-                "No Pi API key found. Set PI_API_KEY env var or pass api_key in config."
-            );
-        }
+        let cwd = config
+            .extra
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+        let spec = self.pi_config.spec(cwd);
 
+        let client = PiClient::spawn(&spec).await?;
+
+        *self.client.lock().await = Some(client);
         self.config = Some(config);
         self.spawned.store(true, Ordering::Release);
         self.set_status(ProviderStatus::Idle);
 
-        tracing::info!(
-            provider = PROVIDER_PI,
-            model = %self.pi_config.model,
-            has_api_key = has_key,
-            "Pi adapter spawned (process stub)"
-        );
-
+        tracing::info!(provider = PROVIDER_PI, "Pi adapter spawned (pi --mode rpc)");
         Ok(())
     }
 
@@ -181,95 +186,58 @@ impl ProviderAdapter for PiAdapter {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
-
         self.set_status(ProviderStatus::ShuttingDown);
 
-        let sessions = self.sessions.lock().await;
-        for session_id in sessions.keys() {
-            let _ = self.interrupt(session_id).await;
+        if let Some(client) = self.client.lock().await.take() {
+            let _ = client.transport().shutdown().await;
         }
-        drop(sessions);
-
-        let mut sessions = self.sessions.lock().await;
-        sessions.clear();
+        *self.current_session.lock().await = None;
 
         self.spawned.store(false, Ordering::Release);
         self.set_status(ProviderStatus::Disconnected);
-
         tracing::info!(provider = PROVIDER_PI, "Pi adapter shut down");
         Ok(())
     }
 
-    async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let sessions = self.sessions.lock().await;
-        if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
-        }
-        tracing::info!(provider = PROVIDER_PI, session_id, "Interrupting session");
-        Ok(())
+    async fn interrupt(&self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+        let client = self.client.lock().await;
+        let Some(client) = client.as_ref() else {
+            return Err(ProviderAdapterError::NotSpawned);
+        };
+        client.abort().await
     }
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
+    async fn start_session(
+        &mut self,
+        _ctx: SessionContext,
+    ) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
-
         let session_id = Self::generate_session_id();
-
+        *self.current_session.lock().await = Some(session_id.clone());
         let _ = self.event_tx.send(ProviderEvent::Started {
             session_id: session_id.clone(),
         });
-
-        let session = Arc::new(SessionState::new(
-            session_id.clone(),
-            ctx.thread_id,
-            ctx.turn_id,
-            ctx.working_dir,
-        ));
-
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), session);
-        self.set_status(ProviderStatus::Busy);
-
-        tracing::info!(
-            provider = PROVIDER_PI,
-            session_id = %session_id,
-            "Session started"
-        );
-
+        self.set_status(ProviderStatus::Idle);
+        tracing::info!(provider = PROVIDER_PI, session_id = %session_id, "Session started");
         Ok(session_id)
     }
 
-    async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let sessions = self.sessions.lock().await;
-        if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
-        }
-        tracing::info!(provider = PROVIDER_PI, session_id, "Session resumed");
+    async fn resume_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+        // pi sessions are stateful server-side (persisted to ~/.pi/agent/sessions);
+        // resuming is a no-op at the adapter level — the same process continues.
         Ok(())
     }
 
     async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let mut sessions = self.sessions.lock().await;
-        if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
+        let mut current = self.current_session.lock().await;
+        if current.as_deref() == Some(session_id) {
+            *current = None;
+            self.set_status(ProviderStatus::Idle);
         }
-
-        let _ = self.event_tx.send(ProviderEvent::StatusChanged {
-            status: ProviderStatus::Idle,
-        });
-
-        tracing::info!(provider = PROVIDER_PI, session_id, "Session stopped");
         Ok(())
     }
 
@@ -283,39 +251,86 @@ impl ProviderAdapter for PiAdapter {
             return Err(ProviderAdapterError::NotSpawned);
         }
 
-        tracing::debug!(
-            provider = PROVIDER_PI,
-            method = %request.method,
-            id = request.id,
-            "Sending JSON-RPC request to Pi (stub)"
-        );
+        // Resolve the session id (from params, else the active session).
+        let current_session = self.current_session.lock().await.clone();
+        let session_id = request
+            .params
+            .as_ref()
+            .and_then(|p| p.get("session_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or(current_session)
+            .ok_or_else(|| ProviderAdapterError::SessionNotFound("no active pi session".into()))?;
 
-        Ok(ProviderResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(request.id),
-            result: Some(serde_json::json!({
-                "status": "ok",
-                "provider": PROVIDER_PI,
-                "stub": true
-            })),
-            error: None,
-        })
+        let message = request
+            .params
+            .as_ref()
+            .and_then(|p| p.get("input").or_else(|| p.get("message")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // mpsc → broadcast forwarder: the prompt's live events flow onto the
+        // shared bus while send_request returns a single response (same pattern
+        // as codex). Drop the sender + await the forwarder so every event is
+        // published before return.
+        let (fwd_tx, mut fwd_rx) = mpsc::channel::<ProviderEvent>(64);
+        let bus = self.event_tx.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(ev) = fwd_rx.recv().await {
+                let _ = bus.send(ev);
+            }
+        });
+
+        // Drive the prompt to terminal agent_end.
+        let result = {
+            let client_guard = self.client.lock().await;
+            let Some(client) = client_guard.as_ref() else {
+                drop(fwd_tx);
+                return Err(ProviderAdapterError::NotSpawned);
+            };
+            client.prompt(message, &session_id, &fwd_tx).await
+        };
+
+        drop(fwd_tx);
+        let _ = forwarder.await;
+
+        let result = result?;
+        match result.status {
+            PromptStatus::Completed => Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(request.id),
+                result: Some(serde_json::json!({
+                    "output": result.output,
+                    "session_id": session_id,
+                })),
+                error: None,
+            }),
+            PromptStatus::Failed => Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(request.id),
+                result: None,
+                error: Some(ProviderError {
+                    code: -1,
+                    message: result.output,
+                    data: None,
+                }),
+            }),
+        }
     }
 
     fn event_stream(&self, session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
         let rx = self.event_tx.subscribe();
         let sid = session_id.to_string();
-
         let stream = async_stream::stream! {
             let mut rx = rx;
             while let Ok(event) = rx.recv().await {
                 match &event {
-                    ProviderEvent::Started { session_id } |
-                    ProviderEvent::Token { session_id, .. } |
-                    ProviderEvent::ToolCall { session_id, .. } |
-                    ProviderEvent::ToolResult { session_id, .. } |
-                    ProviderEvent::Completed { session_id, .. } |
-                    ProviderEvent::Error { session_id, .. } => {
+                    ProviderEvent::Started { session_id }
+                    | ProviderEvent::Token { session_id, .. }
+                    | ProviderEvent::ToolCall { session_id, .. }
+                    | ProviderEvent::ToolResult { session_id, .. }
+                    | ProviderEvent::Completed { session_id, .. }
+                    | ProviderEvent::Error { session_id, .. } => {
                         if session_id == &sid {
                             yield Ok(event);
                         }
@@ -326,17 +341,17 @@ impl ProviderAdapter for PiAdapter {
                 }
             }
         };
-
         Ok(Box::pin(stream))
     }
 
     // -- Utility -----------------------------------------------------------
 
     async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
-        if !self.spawned.load(Ordering::Acquire) {
-            return Ok(false);
+        let client = self.client.lock().await;
+        match client.as_ref() {
+            Some(c) => Ok(c.transport().is_alive().await),
+            None => Ok(false),
         }
-        Ok(self.status() != ProviderStatus::Disconnected && self.status() != ProviderStatus::Error)
     }
 }
 
@@ -364,8 +379,28 @@ mod tests {
     fn pi_config_defaults() {
         let config = PiConfig::default();
         assert_eq!(config.bin_path, "pi");
-        assert_eq!(config.model, "pi-3");
-        assert_eq!(config.base_url, "https://api.pi.ai");
+        assert!(config.extra_args.is_empty());
+        assert!(config.provider.is_none());
+        assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn pi_config_spec_builds_rpc_mode() {
+        let config = PiConfig {
+            bin_path: "/usr/local/bin/pi".into(),
+            extra_args: vec!["--verbose".into()],
+            provider: Some("anthropic".into()),
+            model: Some("claude-sonnet-4".into()),
+        };
+        let spec = config.spec("/tmp/proj");
+        assert_eq!(spec.command, "/usr/local/bin/pi");
+        assert!(spec.args.contains(&"--mode".to_string()));
+        assert!(spec.args.contains(&"rpc".to_string()));
+        assert!(spec.args.contains(&"--provider".to_string()));
+        assert!(spec.args.contains(&"anthropic".to_string()));
+        assert!(spec.args.contains(&"--model".to_string()));
+        assert!(spec.args.contains(&"--verbose".to_string()));
+        assert_eq!(spec.cwd.as_deref(), Some(std::path::Path::new("/tmp/proj")));
     }
 
     #[tokio::test]
@@ -377,87 +412,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pi_adapter_spawn_and_shutdown() {
-        let mut adapter = PiAdapter::new();
-        let config = ProviderConfig {
-            provider_id: PROVIDER_PI.to_string(),
-            model: "pi-3".to_string(),
-            ..Default::default()
-        };
-
-        assert!(adapter.spawn(config).await.is_ok());
-        assert_eq!(adapter.status(), ProviderStatus::Idle);
-        assert!(adapter.spawned.load(Ordering::Acquire));
-
-        assert!(adapter.shutdown().await.is_ok());
-        assert_eq!(adapter.status(), ProviderStatus::Disconnected);
-    }
-
-    #[tokio::test]
-    async fn pi_adapter_double_spawn_fails() {
-        let mut adapter = PiAdapter::new();
-        assert!(adapter.spawn(ProviderConfig::default()).await.is_ok());
-        let result = adapter.spawn(ProviderConfig::default()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already spawned"));
-    }
-
-    #[tokio::test]
     async fn pi_adapter_shutdown_not_spawned_fails() {
         let mut adapter = PiAdapter::new();
         let result = adapter.shutdown().await;
         assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
-    }
-
-    #[tokio::test]
-    async fn pi_adapter_session_lifecycle() {
-        let mut adapter = PiAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-
-        let session_id = adapter.start_session(make_ctx()).await.unwrap();
-        assert!(session_id.starts_with("pi-"));
-        assert_eq!(adapter.status(), ProviderStatus::Busy);
-
-        assert!(adapter.resume_session(&session_id).await.is_ok());
-        assert!(adapter.stop_session(&session_id).await.is_ok());
-
-        let result = adapter.stop_session("nonexistent").await;
-        assert!(result.is_err());
-        matches!(
+        assert!(matches!(
             result.unwrap_err(),
-            ProviderAdapterError::SessionNotFound(_)
-        );
-    }
-
-    #[tokio::test]
-    async fn pi_adapter_session_without_spawn_fails() {
-        let mut adapter = PiAdapter::new();
-        let result = adapter.start_session(make_ctx()).await;
-        assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
-    }
-
-    #[tokio::test]
-    async fn pi_adapter_send_request_echo() {
-        let mut adapter = PiAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-
-        let req = ProviderRequest::new("initialize", Some(serde_json::json!({"key": "val"})));
-        let resp = adapter.send_request(req).await.unwrap();
-        assert_eq!(resp.jsonrpc, "2.0");
-        assert!(resp.result.is_some());
-        assert!(resp.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn pi_adapter_health_check() {
-        let adapter = PiAdapter::new();
-        assert!(!adapter.health_check().await.unwrap());
-
-        let mut adapter = PiAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-        assert!(adapter.health_check().await.unwrap());
+            ProviderAdapterError::NotSpawned
+        ));
     }
 
     #[tokio::test]
@@ -466,6 +428,7 @@ mod tests {
         let caps = adapter.capabilities();
         assert!(caps.contains(&ProviderCapability::Streaming));
         assert!(caps.contains(&ProviderCapability::ToolUse));
+        assert!(caps.contains(&ProviderCapability::SystemPrompt));
     }
 
     #[tokio::test]
@@ -473,20 +436,46 @@ mod tests {
         let adapter = PiAdapter::new();
         let models = adapter.available_models();
         assert!(!models.is_empty());
-        assert!(models.contains(&"pi-3".to_string()));
-        assert!(models.contains(&"pi-3-turbo".to_string()));
     }
 
     #[tokio::test]
     async fn pi_adapter_with_custom_config() {
         let pi_config = PiConfig {
-            bin_path: "/custom/pi".to_string(),
-            api_key: Some("test-key".to_string()),
-            base_url: "https://custom.pi.ai".to_string(),
-            model: "pi-custom".to_string(),
+            bin_path: "/custom/pi".into(),
+            provider: Some("openai".into()),
+            model: Some("gpt-4o".into()),
+            extra_args: vec![],
         };
         let adapter = PiAdapter::with_pi_config(pi_config);
-        assert!(adapter.has_api_key());
         assert_eq!(adapter.provider_id(), PROVIDER_PI);
+    }
+
+    #[tokio::test]
+    async fn pi_adapter_health_check_unspawned() {
+        let adapter = PiAdapter::new();
+        assert!(!adapter.health_check().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn pi_adapter_session_without_spawn_fails() {
+        let mut adapter = PiAdapter::new();
+        let result = adapter.start_session(make_ctx()).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderAdapterError::NotSpawned
+        ));
+    }
+
+    #[tokio::test]
+    async fn pi_adapter_send_request_without_spawn_fails() {
+        let adapter = PiAdapter::new();
+        let req = ProviderRequest::new("chat", Some(serde_json::json!({"input": "hi"})));
+        let result = adapter.send_request(req).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderAdapterError::NotSpawned
+        ));
     }
 }
