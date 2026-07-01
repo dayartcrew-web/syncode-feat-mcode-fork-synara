@@ -15,8 +15,8 @@ This document records which providers are **real** (functional) versus
 | openai | ✅ Real (HTTP) | reqwest POST | `adapters::OpenAIAdapter` |
 | claude | ✅ Real (CLI stream-json) | subprocess NDJSON (SDKMessage) | `adapters::ClaudeAdapter` |
 | codex | ✅ Real (app-server) | stdio NDJSON JSON-RPC | `adapters::CodexAdapter` |
-| opencode | 🟡 Stub | — | `adapters::OpenCodeAdapter` |
-| kilo | 🟡 Stub | — | `adapters::KiloAdapter` |
+| opencode | ✅ Real (HTTP+SSE) | local server REST+SSE | `adapters::OpenCodeAdapter` |
+| kilo | ✅ Real (HTTP+SSE) | local server REST+SSE | `adapters::KiloAdapter` |
 | pi | 🟡 Stub | — | `adapters::PiAdapter` |
 
 ## Real ACP providers (cursor, grok, gemini)
@@ -119,23 +119,64 @@ without the gate). The full stream-decoding path is covered by the
 assistant tool blocks, terminal result variants, malformed lines) without any
 real binary.
 
-## Deferred providers (opencode, kilo, pi)
+## Real HTTP/SSE providers (opencode, kilo)
 
-These remain as **non-functional stubs** (`spawn` sets flags; `send_request`
-echoes `{"stub": true}`). They are **not feasible** to port faithfully to Rust
-today because each depends on a TS-only SDK or managed HTTP app-server with no
-Rust equivalent — neither the ACP nor the Claude stream-json foundation helps
-them.
+OpenCode and Kilo are driven through a **local HTTP/SSE server**: the adapter
+spawns `{opencode|kilo} serve --hostname 127.0.0.1 --port <ephemeral>`, waits for
+the `<prefix> server listening on http://…` ready line, then talks REST
+(`POST /session`, `POST /session/{id}/prompt_async`, `POST /session/{id}/abort`,
+`POST /permission/{id}/reply`) and consumes the streaming `GET /event` SSE
+channel. There is no JSON-RPC over stdio here — the two providers share one
+Rust transport, [`OpenCodeServerClient`](src/opencode_server.rs), parameterized
+by an [`OpenCodeCompatibleCliSpec`] so Kilo is a single registration that
+differs from OpenCode only in spawn form and identity (binary, ready-line prefix,
+default agent).
+
+| Provider | Spawn form | Default agent | Optional flags (config) |
+|----------|------------|---------------|-------------------------|
+| opencode | `opencode serve --hostname 127.0.0.1 --port <p>` | `build` | `OpenCodeConfig.full_auto`, `OpenCodeConfig.agent`, `OpenCodeConfig.bin_path`, `OpenCodeConfig.extra_args` |
+| kilo | `kilo serve --hostname 127.0.0.1 --port <p>` | `code` | `KiloConfig.full_auto`, `KiloConfig.agent`, `KiloConfig.bin_path`, `KiloConfig.extra_args` |
+
+Lifecycle mapping (trait → OpenCode session/turn model, identical for both):
+`spawn` = launch + wait for ready line; `start_session` = `POST /session` rooted
+at the spawn cwd → session id; `send_request` = `prompt_async` + drain SSE
+(`message.part.delta` / `session.next.text.delta` → `Token`, tool lifecycle →
+`ToolCall`/`ToolResult`, ends on `session.status` idle / `session.idle`);
+`interrupt` = `POST /session/{id}/abort`; `health_check` = spawned-server
+liveness; `shutdown` = kill the spawned server.
+
+By default `OpenCodeConfig::full_auto`/`KiloConfig::full_auto` creates the
+session with a blanket `*/* → allow` permission rule, and the SSE drain
+auto-approves any `permission.asked` request mid-turn (`"once"`), so a headless
+adapter never deadlocks on the first permission prompt. A locally-spawned server
+runs **without** auth (mcode never sends a password to a server it started); HTTP
+Basic auth is applied only for an externally-managed server (see `OpenCodeAuth`).
+
+### Verifying with real binaries
+
+Spawn requires the `opencode` / `kilo` CLI installed (and model-provider
+credentials), so the E2E tests are gated behind `SYNICODE_OPENCODE_E2E=1` /
+`SYNICODE_KILO_E2E=1` in `tests/opencode_e2e.rs` / `tests/kilo_e2e.rs` (skip
+without the gate). The full SSE→`ProviderEvent` decoding path is covered by the
+`opencode_server` unit tests, which drive pure decoder functions with fake SSE
+bytes — no binary and no live HTTP server required — and the adapter glue
+(session/model resolution, forwarder, turn→response mapping) is covered by the
+`adapters::opencode` / `adapters::kilo` unit tests.
+
+## Deferred provider (pi)
+
+This remains a **non-functional stub** (`spawn` sets flags; `send_request`
+echoes `{"stub": true}`). It is **not feasible** to port faithfully to Rust
+today because it depends on an in-process TS-only SDK with no Rust equivalent —
+neither the ACP, the Claude stream-json, nor the OpenCode HTTP/SSE foundation
+helps it.
 
 | Provider | mcode mechanism | Blocker |
 |----------|-----------------|---------|
-| opencode | HTTP/SSE to a spawned `opencode` app-server (OpenCode SDK) | TS-only SDK; app-server contract undocumented for Rust |
-| kilo | shares the OpenCode adapter (same SDK/path) | Same as opencode |
 | pi | in-process `@earendil-works/pi-coding-agent` SDK | No Rust SDK; in-process TS SDK (no subprocess/HTTP wire protocol, native Node dep) — see `.masday/research/custom-providers.md` §5 |
 
-Restoring any of these requires either an official Rust client or a faithful
-reimplementation of the SDK/app-server contract, which is out of scope for this
-workflow.
+Restoring it requires either an official Rust client or a faithful
+reimplementation of the in-process SDK, which is out of scope for this workflow.
 
 ## Factory
 

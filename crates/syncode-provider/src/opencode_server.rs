@@ -168,26 +168,39 @@ pub struct OpenCodeServerClient {
 
 impl OpenCodeServerClient {
     /// Spawn the local `{binary} serve` server described by `spec`, wait for its
-    /// ready line, and return a client rooted at `cwd`.
+    /// ready line, and return a client rooted at `cwd`. Uses the spec's default
+    /// binary path and no extra args.
     pub async fn spawn(
         spec: &OpenCodeCompatibleCliSpec,
         cwd: &str,
     ) -> Result<Self, ProviderAdapterError> {
-        Self::spawn_with(spec, cwd, None, DEFAULT_SERVER_TIMEOUT_MS).await
+        Self::spawn_with(
+            spec,
+            spec.default_binary_path,
+            &[],
+            cwd,
+            None,
+            DEFAULT_SERVER_TIMEOUT_MS,
+        )
+        .await
     }
 
-    /// Like [`spawn`](Self::spawn) with an explicit auth + startup timeout
-    /// (used by tests / external-server wiring).
+    /// Like [`spawn`](Self::spawn) but with an explicit `binary` (override the
+    /// spec's default), trailing `extra_args` (appended after the standard
+    /// `serve --hostname … --port …`), optional auth, and a startup timeout.
     pub async fn spawn_with(
         spec: &OpenCodeCompatibleCliSpec,
+        binary: &str,
+        extra_args: &[String],
         cwd: &str,
         auth: Option<OpenCodeAuth>,
         timeout_ms: u64,
     ) -> Result<Self, ProviderAdapterError> {
         let port = free_port().await?;
         let port_str = port.to_string();
-        let mut cmd = tokio::process::Command::new(spec.default_binary_path);
+        let mut cmd = tokio::process::Command::new(binary);
         cmd.args(["serve", "--hostname", "127.0.0.1", "--port", port_str.as_str()])
+            .args(extra_args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -238,7 +251,7 @@ impl OpenCodeServerClient {
                         return Err(ProviderAdapterError::ProcessExited(format!(
                             "{} server exited before startup completed\ncommand: {} serve --hostname 127.0.0.1 --port {}\nready prefix: {:?}\nstdout:\n{}\nstderr:\n{}",
                             spec.display_name,
-                            spec.default_binary_path,
+                            binary,
                             port,
                             spec.server_ready_prefix,
                             stdout_capture.trim(),
@@ -268,8 +281,11 @@ impl OpenCodeServerClient {
                 return Err(ProviderAdapterError::Timeout(timeout_ms));
             }
         };
-        // Server is up: let the detached stderr drain finish when the child exits.
-        let _ = stderr_buf_task;
+        // Server is up: the stderr drain task is intentionally detached — it
+        // runs until the child closes stderr (i.e. exits). Dropping the handle
+        // here would cancel it, so keep it alive by binding it for the remainder
+        // of this function via the guard below.
+        let _detached_drain = stderr_buf_task;
 
         // No per-request timeout: a turn's SSE stream is long-lived. Connection
         // establishment is bounded by the OS; a turn is bounded by the caller.
@@ -314,10 +330,10 @@ impl OpenCodeServerClient {
             .request(method, &url)
             .query(&[("directory", self.directory.as_str())])
             .header("x-opencode-directory", &self.directory);
-        if let Some(auth) = &self.auth {
-            if let Some(pw) = &auth.password {
-                rb = rb.basic_auth(&auth.username, Some(pw));
-            }
+        if let Some(auth) = &self.auth
+            && let Some(pw) = &auth.password
+        {
+            rb = rb.basic_auth(&auth.username, Some(pw));
         }
         rb
     }
@@ -456,6 +472,7 @@ impl OpenCodeServerClient {
     /// `event_tx` live; the returned [`TurnOutcome`] reflects the terminal
     /// event. Inbound `permission.asked` requests are auto-approved
     /// (`"once"`) so the agent never blocks mid-turn.
+    #[allow(clippy::too_many_arguments)] // mirrors the prompt_async surface
     pub async fn start_turn(
         &self,
         session_id: &str,
@@ -579,10 +596,10 @@ fn parse_events_from_buffer(
                     .get("properties")
                     .and_then(|p| p.get("sessionID"))
                     .and_then(|v| v.as_str());
-                if let Some(sid) = props_session {
-                    if sid != session_id {
-                        continue;
-                    }
+                if let Some(sid) = props_session
+                    && sid != session_id
+                {
+                    continue;
                 }
                 let outcome = map_event(&event, session_id, usage);
                 batch.events.extend(outcome.events);
@@ -646,10 +663,10 @@ fn map_event(event: &Value, session_id: &str, usage: &mut Option<UsageInfo>) -> 
     match ty {
         // ---- streamed text / reasoning deltas ----
         "message.part.delta" | "session.next.text.delta" | "session.next.reasoning.delta" => {
-            if let Some(delta) = props.get("delta").and_then(|v| v.as_str()) {
-                if let Some(token) = token(session_id, delta) {
-                    out.events.push(token);
-                }
+            if let Some(delta) = props.get("delta").and_then(|v| v.as_str())
+                && let Some(token) = token(session_id, delta)
+            {
+                out.events.push(token);
             }
         }
 
@@ -701,10 +718,10 @@ fn map_event(event: &Value, session_id: &str, usage: &mut Option<UsageInfo>) -> 
             }
         }
         "message.updated" => {
-            if let Some(info) = props.get("info") {
-                if let Some(u) = parse_usage(info) {
-                    *usage = Some(u);
-                }
+            if let Some(info) = props.get("info")
+                && let Some(u) = parse_usage(info)
+            {
+                *usage = Some(u);
             }
         }
 
@@ -763,10 +780,10 @@ fn map_part_updated(props: &Value, session_id: &str) -> Vec<ProviderEvent> {
     let ty = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match ty {
         "text" | "reasoning" => {
-            if let Some(content) = part.get("text").and_then(|v| v.as_str()) {
-                if let Some(t) = token(session_id, content) {
-                    return vec![t];
-                }
+            if let Some(content) = part.get("text").and_then(|v| v.as_str())
+                && let Some(t) = token(session_id, content)
+            {
+                return vec![t];
             }
             Vec::new()
         }
@@ -1096,18 +1113,12 @@ mod tests {
 
     #[test]
     fn map_part_updated_text_token() {
-        let ev = vec![
-            ProviderEvent::Token {
-                session_id: "s1".into(),
-                content: "x".into(),
-            },
-        ];
-        // sanity: map_part_updated of a text part returns one token
+        // map_part_updated of a text part returns exactly one token.
         let got = map_part_updated(
             &json!({ "part": { "type": "text", "text": "hi" } }),
             "s1",
         );
-        assert_eq!(got.len(), ev.len());
+        assert_eq!(got.len(), 1);
         assert!(matches!(&got[0], ProviderEvent::Token { content, .. } if content == "hi"));
     }
 
