@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod rpc;
 pub mod snapshots;
 
 // ─── Primitives ────────────────────────────────────────────────────────
@@ -385,5 +386,33 @@ mod tests {
         snapshots::ShellSnapshot::export().expect("export ShellSnapshot");
         snapshots::ThreadDetailSnapshot::export().expect("export ThreadDetailSnapshot");
         snapshots::FullSnapshot::export().expect("export FullSnapshot");
+
+        // Tier 1 RPC DTOs (served-method request/result shapes). See
+        // `src/rpc.rs`. Type aliases (ProjectGetResult etc.) share a TS file
+        // with their base snapshot type, so only the concrete structs export
+        // their own .ts files.
+        rpc::ListMethodsResult::export().expect("export ListMethodsResult");
+        rpc::PingResult::export().expect("export PingResult");
+        rpc::ProjectListResult::export().expect("export ProjectListResult");
+        rpc::ProjectGetParams::export().expect("export ProjectGetParams");
+        rpc::ProjectCreateParams::export().expect("export ProjectCreateParams");
+        rpc::ThreadListParams::export().expect("export ThreadListParams");
+        rpc::ThreadListResult::export().expect("export ThreadListResult");
+        rpc::ThreadGetParams::export().expect("export ThreadGetParams");
+        rpc::ThreadCreateParams::export().expect("export ThreadCreateParams");
+        rpc::ThreadLifecycleParams::export().expect("export ThreadLifecycleParams");
+        rpc::TurnListParams::export().expect("export TurnListParams");
+        rpc::TurnListResult::export().expect("export TurnListResult");
+        rpc::TurnGetParams::export().expect("export TurnGetParams");
+        rpc::TurnStartParams::export().expect("export TurnStartParams");
+        rpc::TurnCompleteParams::export().expect("export TurnCompleteParams");
+        rpc::AuthBootstrapParams::export().expect("export AuthBootstrapParams");
+        rpc::AuthBootstrapResult::export().expect("export AuthBootstrapResult");
+        rpc::AuthStatusResult::export().expect("export AuthStatusResult");
+        rpc::AuthLogoutResult::export().expect("export AuthLogoutResult");
+        rpc::PushSubscribeParams::export().expect("export PushSubscribeParams");
+        rpc::PushSubscribeResult::export().expect("export PushSubscribeResult");
+        rpc::PushUnsubscribeParams::export().expect("export PushUnsubscribeParams");
+        rpc::PushUnsubscribeResult::export().expect("export PushUnsubscribeResult");
     }
 }

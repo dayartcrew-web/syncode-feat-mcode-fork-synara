@@ -17,3 +17,29 @@ export type { JsonRpcRequestView } from "./JsonRpcRequestView";
 export type { JsonRpcResponseView } from "./JsonRpcResponseView";
 export type { JsonRpcErrorView } from "./JsonRpcErrorView";
 export type { PushEvent } from "./PushEvent";
+
+// Tier 1 RPC DTOs (served-method request/result shapes).
+// Regenerate alongside the others via test_generate_ts_types.
+export type { ListMethodsResult } from "./ListMethodsResult";
+export type { PingResult } from "./PingResult";
+export type { ProjectListResult } from "./ProjectListResult";
+export type { ProjectGetParams } from "./ProjectGetParams";
+export type { ProjectCreateParams } from "./ProjectCreateParams";
+export type { ThreadListParams } from "./ThreadListParams";
+export type { ThreadListResult } from "./ThreadListResult";
+export type { ThreadGetParams } from "./ThreadGetParams";
+export type { ThreadCreateParams } from "./ThreadCreateParams";
+export type { ThreadLifecycleParams } from "./ThreadLifecycleParams";
+export type { TurnListParams } from "./TurnListParams";
+export type { TurnListResult } from "./TurnListResult";
+export type { TurnGetParams } from "./TurnGetParams";
+export type { TurnStartParams } from "./TurnStartParams";
+export type { TurnCompleteParams } from "./TurnCompleteParams";
+export type { AuthBootstrapParams } from "./AuthBootstrapParams";
+export type { AuthBootstrapResult } from "./AuthBootstrapResult";
+export type { AuthStatusResult } from "./AuthStatusResult";
+export type { AuthLogoutResult } from "./AuthLogoutResult";
+export type { PushSubscribeParams } from "./PushSubscribeParams";
+export type { PushSubscribeResult } from "./PushSubscribeResult";
+export type { PushUnsubscribeParams } from "./PushUnsubscribeParams";
+export type { PushUnsubscribeResult } from "./PushUnsubscribeResult";
