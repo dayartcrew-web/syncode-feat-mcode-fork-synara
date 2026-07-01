@@ -91,7 +91,7 @@ const SNAPSHOT_INTERVAL: u64 = 50;
 /// Whether an aggregate that just reached `new_version` events should be
 /// snapshotted. Snapshots land on non-zero multiples of `interval`.
 fn should_snapshot(new_version: u64, interval: u64) -> bool {
-    interval > 0 && new_version > 0 && new_version % interval == 0
+    interval > 0 && new_version > 0 && new_version.is_multiple_of(interval)
 }
 
 /// Serialize the read-model view for the given aggregate, searching the keyed
@@ -473,48 +473,48 @@ impl Orchestrator {
         let mut side_effect_events: Vec<Envelope> = Vec::new();
         let mut side_effect_triggered = false;
 
-        if let (Some(reactor), Some(adapter)) = (&self.command_reactor, &self.adapter) {
-            if self.needs_provider_interaction(&command) {
-                // For StartTurn the reactor needs the freshly-assigned turn id
-                // (it registers the provider session against it). Derive it from
-                // the produced TurnStarted event; other commands ignore the hint.
-                let turn_id_hint = envelopes.iter().find_map(|env| {
-                    if let DomainEvent::TurnStarted { id, .. } = &env.event {
-                        Some(*id)
-                    } else {
-                        None
-                    }
-                });
-                let reaction = reactor
-                    .react(&command, adapter, turn_id_hint)
-                    .await
-                    .map_err(|e| OrchestrationError::CommandReactor(e.to_string()))?;
-                side_effect_triggered = reaction.handled;
+        if let (Some(reactor), Some(adapter)) = (&self.command_reactor, &self.adapter)
+            && self.needs_provider_interaction(&command)
+        {
+            // For StartTurn the reactor needs the freshly-assigned turn id
+            // (it registers the provider session against it). Derive it from
+            // the produced TurnStarted event; other commands ignore the hint.
+            let turn_id_hint = envelopes.iter().find_map(|env| {
+                if let DomainEvent::TurnStarted { id, .. } = &env.event {
+                    Some(*id)
+                } else {
+                    None
+                }
+            });
+            let reaction = reactor
+                .react(&command, adapter, turn_id_hint)
+                .await
+                .map_err(|e| OrchestrationError::CommandReactor(e.to_string()))?;
+            side_effect_triggered = reaction.handled;
 
-                // Reverse bridge: feed any provider events the reactor collected
-                // back through the ingestion reactor (ProviderEvent -> DomainEvent
-                // -> append + project), correlated to the turn via turn_id_hint.
-                // Only StartTurn yields a hint today; other provider-interaction
-                // commands collect no events yet, so without a hint there is
-                // nothing to ingest (the events would be uncorrelated to a turn).
-                if let Some(turn_id) = turn_id_hint {
-                    // Capture the session id (if the reactor created one) before
-                    // moving reaction.events into the batch ingest below.
-                    let session_id = reaction.session_id.clone();
-                    side_effect_events = self
-                        .ingest_provider_events_batch(reaction.events, turn_id)
-                        .await?;
+            // Reverse bridge: feed any provider events the reactor collected
+            // back through the ingestion reactor (ProviderEvent -> DomainEvent
+            // -> append + project), correlated to the turn via turn_id_hint.
+            // Only StartTurn yields a hint today; other provider-interaction
+            // commands collect no events yet, so without a hint there is
+            // nothing to ingest (the events would be uncorrelated to a turn).
+            if let Some(turn_id) = turn_id_hint {
+                // Capture the session id (if the reactor created one) before
+                // moving reaction.events into the batch ingest below.
+                let session_id = reaction.session_id.clone();
+                side_effect_events = self
+                    .ingest_provider_events_batch(reaction.events, turn_id)
+                    .await?;
 
-                    // Live bridge: for StartTurn the reactor created a provider
-                    // session. Spawn a detached consumer that forwards that
-                    // session's provider event stream back into the pipeline
-                    // (append + project) under the turn. Streaming output (tokens,
-                    // tool calls, completion) arrives here, not via react().
-                    if let Some(sid) = session_id
-                        && let Err(e) = self.spawn_provider_stream_consumer(sid, turn_id).await
-                    {
-                        tracing::warn!(error = %e, "failed to spawn provider stream consumer");
-                    }
+                // Live bridge: for StartTurn the reactor created a provider
+                // session. Spawn a detached consumer that forwards that
+                // session's provider event stream back into the pipeline
+                // (append + project) under the turn. Streaming output (tokens,
+                // tool calls, completion) arrives here, not via react().
+                if let Some(sid) = session_id
+                    && let Err(e) = self.spawn_provider_stream_consumer(sid, turn_id).await
+                {
+                    tracing::warn!(error = %e, "failed to spawn provider stream consumer");
                 }
             }
         }
@@ -543,10 +543,10 @@ impl Orchestrator {
         // exist. Handoff/Fork enforce this at the application layer, but
         // CreateThread is reachable directly through the orchestrator (WS-RPC),
         // so the engine guards it here — before the pure Decider runs.
-        if let Command::CreateThread { project_id, .. } = command {
-            if current_state.is_none() {
-                return Err(OrchestrationError::ProjectNotFound(*project_id));
-            }
+        if let Command::CreateThread { project_id, .. } = command
+            && current_state.is_none()
+        {
+            return Err(OrchestrationError::ProjectNotFound(*project_id));
         }
 
         let domain_events = Decider::decide(command.clone(), current_state.as_ref())?;
@@ -715,11 +715,11 @@ impl Orchestrator {
         let mut tail: Vec<DomainEvent> = Vec::with_capacity(envelopes.len());
         for env in &envelopes {
             let aid = env.event.aggregate_id();
-            if let Some(remaining) = skip.get_mut(&aid) {
-                if *remaining > 0 {
-                    *remaining -= 1;
-                    continue;
-                }
+            if let Some(remaining) = skip.get_mut(&aid)
+                && *remaining > 0
+            {
+                *remaining -= 1;
+                continue;
             }
             tail.push(env.event.clone());
         }

@@ -319,7 +319,7 @@ impl ProviderCommandReactor {
         user_input: &str,
         adapter: &syncode_provider::registry::SharedAdapter,
     ) -> Result<CommandReaction, CommandReactorError> {
-        let turn_id = turn_id.unwrap_or_else(EntityId::new);
+        let turn_id = turn_id.unwrap_or_default();
 
         // Check if a session already exists for this turn
         if let Some(existing) = self
@@ -477,13 +477,16 @@ pub(crate) mod tests {
     use syncode_provider::{ProviderAdapter, ProviderConfig, ProviderResponse, ProviderStatus};
     use tokio::sync::RwLock;
 
+    /// Recorded (method, params) dispatch log shared between the mock and tests.
+    type RecordedRequests = Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>;
+
     /// Mock adapter for command reactor tests
     struct CmdTestMock {
         started_sessions: std::sync::Mutex<Vec<String>>,
         interrupted: std::sync::Mutex<Vec<String>>,
         stopped: Arc<std::sync::Mutex<Vec<String>>>,
         /// (method, params) for every dispatched JSON-RPC request
-        requests: Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>,
+        requests: RecordedRequests,
     }
 
     impl CmdTestMock {
@@ -499,11 +502,7 @@ pub(crate) mod tests {
         /// Construct with shared recording handles the test can inspect directly
         /// (the adapter is read back as a `dyn ProviderAdapter`, so its fields
         /// are not reachable through the trait object).
-        fn new_with_handles() -> (
-            Self,
-            Arc<std::sync::Mutex<Vec<String>>>,
-            Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>,
-        ) {
+        fn new_with_handles() -> (Self, Arc<std::sync::Mutex<Vec<String>>>, RecordedRequests) {
             let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
             let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
             let this = Self {
@@ -614,7 +613,7 @@ pub(crate) mod tests {
     pub(crate) fn make_recorded_test_mock() -> (
         syncode_provider::registry::SharedAdapter,
         Arc<std::sync::Mutex<Vec<String>>>,
-        Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>,
+        RecordedRequests,
     ) {
         let (mock, stopped, requests) = CmdTestMock::new_with_handles();
         (Arc::new(RwLock::new(mock)), stopped, requests)

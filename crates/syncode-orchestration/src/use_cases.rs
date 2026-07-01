@@ -1271,8 +1271,7 @@ mod tests {
         assert!(!start.events.is_empty());
 
         // Complete turn
-        let complete = svc
-            .complete_turn(turn_id, "Hello human!".into(), 1200)
+        svc.complete_turn(turn_id, "Hello human!".into(), 1200)
             .await
             .unwrap();
 

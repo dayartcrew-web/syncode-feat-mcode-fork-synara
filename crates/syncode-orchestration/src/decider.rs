@@ -1202,6 +1202,7 @@ impl Decider {
 
     // ─── Marker Decisions ──────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)] // domain decider: a marker carries many fields
     fn decide_add_marker(
         id: EntityId,
         state: Option<&serde_json::Value>,
@@ -1600,8 +1601,8 @@ impl Decider {
 
     // ─── Helpers ─────────────────────────────────────────────────
 
-    fn extract_thread_status<'a>(
-        state: Option<&'a serde_json::Value>,
+    fn extract_thread_status(
+        state: Option<&serde_json::Value>,
         id: &EntityId,
     ) -> Result<String, DeciderError> {
         let state = state.ok_or(DeciderError::ThreadNotFound(*id))?;
@@ -1643,8 +1644,8 @@ impl Decider {
             .unwrap_or_default()
     }
 
-    fn extract_turn_status<'a>(
-        state: Option<&'a serde_json::Value>,
+    fn extract_turn_status(
+        state: Option<&serde_json::Value>,
         id: &EntityId,
     ) -> Result<String, DeciderError> {
         let state = state.ok_or(DeciderError::TurnNotFound(*id))?;
