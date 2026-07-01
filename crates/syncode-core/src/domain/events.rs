@@ -143,6 +143,33 @@ pub enum DomainEvent {
         text: String,
         edited_at: Timestamp,
     },
+    /// A thread's provider session state was set. Faithful to mcode
+    /// `thread.session-set` {threadId, session: OrchestrationSession}. mcode nests
+    /// the session under a `session` object; syncode flattens its fields onto the
+    /// event (the established convention here — events carry typed primitives).
+    /// The session models provider-session lifecycle: status, the active turn, the
+    /// last error, and the mode it is running under.
+    ThreadSessionSet {
+        id: EntityId,
+        status: String,
+        provider_name: Option<String>,
+        runtime_mode: String,
+        active_turn_id: Option<EntityId>,
+        last_error: Option<String>,
+        updated_at: Timestamp,
+    },
+    /// A request to dispatch a queued turn to the provider for a thread. Faithful
+    /// to mcode `thread.turn.dispatch-queued` → `thread.turn-start-requested`. The
+    /// "Requested" naming mirrors mcode: the actual turn dispatch is an async side
+    /// effect handled by the command reactor.
+    TurnDispatchRequested {
+        id: EntityId,
+        message_id: EntityId,
+        runtime_mode: String,
+        interaction_mode: String,
+        dispatch_mode: String,
+        requested_at: Timestamp,
+    },
 
     // ─── Pinned Message Events (thread sub-aggregate) ───────────────────
     /// A message was pinned to a thread. Faithful to mcode
@@ -300,6 +327,8 @@ impl DomainEvent {
             | Self::ThreadApprovalResponded { id, .. }
             | Self::ThreadUserInputResponded { id, .. }
             | Self::ThreadMessageEditedAndResent { id, .. }
+            | Self::ThreadSessionSet { id, .. }
+            | Self::TurnDispatchRequested { id, .. }
             | Self::TurnStarted { id, .. }
             | Self::TurnCompleted { id, .. }
             | Self::TurnFailed { id, .. }
@@ -344,6 +373,8 @@ impl DomainEvent {
             Self::ThreadApprovalResponded { .. } => "ThreadApprovalResponded",
             Self::ThreadUserInputResponded { .. } => "ThreadUserInputResponded",
             Self::ThreadMessageEditedAndResent { .. } => "ThreadMessageEditedAndResent",
+            Self::ThreadSessionSet { .. } => "ThreadSessionSet",
+            Self::TurnDispatchRequested { .. } => "TurnDispatchRequested",
             Self::PinnedMessageAdded { .. } => "PinnedMessageAdded",
             Self::PinnedMessageRemoved { .. } => "PinnedMessageRemoved",
             Self::PinnedMessageDoneSet { .. } => "PinnedMessageDoneSet",

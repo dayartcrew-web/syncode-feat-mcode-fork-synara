@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use syncode_core::domain::events::DomainEvent;
 use crate::read_model::{
-    ProjectView, ThreadView, TurnView, MessageView, ActivityView, PinnedMessageView, MarkerView,
+    ProjectView, ThreadView, ThreadSessionView, TurnView, MessageView, ActivityView, PinnedMessageView, MarkerView,
 };
 
 /// In-memory read model store maintained by the Projector.
@@ -89,6 +89,7 @@ impl Projector {
                     turn_count: 0,
                     created_at: created_at.to_string(),
                     updated_at: created_at.to_string(),
+                    session: None,
                 };
                 store.threads.insert(view.id.clone(), view);
                 // Increment thread count on parent project
@@ -178,6 +179,27 @@ impl Projector {
             | DomainEvent::ThreadMessageEditedAndResent { .. } => {
                 // Transient provider-response records; the actual provider dispatch is
                 // a reactor side effect (not yet wired). No read-model mutation needed.
+            }
+
+            DomainEvent::ThreadSessionSet {
+                id, status, provider_name, runtime_mode, active_turn_id, last_error, updated_at,
+            } => {
+                if let Some(thread) = store.threads.get_mut(&id.as_str()) {
+                    thread.session = Some(ThreadSessionView {
+                        status: status.clone(),
+                        provider_name: provider_name.clone(),
+                        runtime_mode: runtime_mode.clone(),
+                        active_turn_id: active_turn_id.map(|t| t.as_str()),
+                        last_error: last_error.clone(),
+                        updated_at: updated_at.to_string(),
+                    });
+                    thread.updated_at = updated_at.to_string();
+                }
+            }
+
+            DomainEvent::TurnDispatchRequested { .. } => {
+                // Transient dispatch request; the actual turn dispatch is a reactor
+                // side effect. No read-model mutation needed.
             }
 
             DomainEvent::PinnedMessageAdded {

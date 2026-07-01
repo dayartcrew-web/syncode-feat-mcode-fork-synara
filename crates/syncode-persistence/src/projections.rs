@@ -650,6 +650,14 @@ impl ProjectionManager {
                 .execute(&self.pool)
                 .await?;
             }
+
+            // In-memory-only / transient events: no SQLite projection (deferred).
+            // ThreadSessionSet materializes onto the in-memory ThreadView.session
+            // only; persisting the session blob to view_threads is deferred.
+            DomainEvent::ThreadSessionSet { .. }
+            // TurnDispatchRequested is a transient dispatch request (reactor side
+            // effect); no durable read-model row.
+            | DomainEvent::TurnDispatchRequested { .. } => {}
         }
 
         // Update watermark

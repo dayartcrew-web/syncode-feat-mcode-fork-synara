@@ -24,6 +24,21 @@ pub struct ImportedMessage {
     pub text: String,
 }
 
+/// A provider session's state, set on a thread. Faithful to mcode's
+/// `OrchestrationSession` ({ threadId, status, providerName?, runtimeMode,
+/// activeTurnId?, lastError?, updatedAt }). `status` is the mcode
+/// `OrchestrationSessionStatus` ("idle"|"starting"|"running"|"ready"|
+/// "interrupted"|"stopped"|"error"); like runtime/interaction modes, the Decider
+/// trusts the supplied value rather than re-validating the enum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadSession {
+    pub status: String,
+    pub provider_name: Option<String>,
+    pub runtime_mode: String,
+    pub active_turn_id: Option<EntityId>,
+    pub last_error: Option<String>,
+}
+
 // ─── Commands ─────────────────────────────────────────────────────
 
 /// All commands in the orchestration bounded context.
@@ -139,6 +154,22 @@ pub enum Command {
         id: EntityId,
         message_id: EntityId,
         text: String,
+    },
+    /// Set a thread's provider session state. Faithful to mcode
+    /// `thread.session.set` {session: OrchestrationSession}.
+    SetThreadSession {
+        id: EntityId,
+        session: ThreadSession,
+    },
+    /// Dispatch a queued turn to the provider for a thread. Faithful to mcode
+    /// `thread.turn.dispatch-queued` {messageId, runtimeMode, interactionMode,
+    /// dispatchMode}. The Decider records the request; the reactor dispatches it.
+    DispatchQueuedTurn {
+        id: EntityId,
+        message_id: EntityId,
+        runtime_mode: String,
+        interaction_mode: String,
+        dispatch_mode: String,
     },
     /// Append an activity entry to a thread. Faithful to mcode
     /// `thread.activity.append` {activity} → activity-appended payload.
@@ -398,6 +429,16 @@ impl Decider {
             }
             Command::EditAndResendThreadMessage { id, message_id, text } => {
                 Self::decide_edit_and_resend_thread_message(id, current_state, message_id, text)
+            }
+            Command::SetThreadSession { id, session } => {
+                Self::decide_set_thread_session(id, current_state, session)
+            }
+            Command::DispatchQueuedTurn {
+                id, message_id, runtime_mode, interaction_mode, dispatch_mode,
+            } => {
+                Self::decide_dispatch_queued_turn(
+                    id, current_state, message_id, runtime_mode, interaction_mode, dispatch_mode,
+                )
             }
             Command::AppendThreadActivity { id, activity_type, description } => {
                 Self::decide_append_thread_activity(id, current_state, activity_type, description)
@@ -818,6 +859,49 @@ impl Decider {
             message_id,
             text,
             edited_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_set_thread_session(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        session: ThreadSession,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The session is a free-form lifecycle/config
+        // record (mcode OrchestrationSession: status, provider, active turn, last
+        // error) — like runtime/interaction modes, the Decider trusts the supplied
+        // values rather than re-validating the status enum.
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::ThreadSessionSet {
+            id,
+            status: session.status,
+            provider_name: session.provider_name,
+            runtime_mode: session.runtime_mode,
+            active_turn_id: session.active_turn_id,
+            last_error: session.last_error,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_dispatch_queued_turn(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        message_id: EntityId,
+        runtime_mode: String,
+        interaction_mode: String,
+        dispatch_mode: String,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. The queued-turn dispatch is an async provider
+        // side effect handled by the command reactor; this records the request
+        // (Requested-style event, consistent with ThreadSessionStopRequested).
+        let _ = Self::extract_thread_status(state, &id)?;
+        Ok(vec![DomainEvent::TurnDispatchRequested {
+            id,
+            message_id,
+            runtime_mode,
+            interaction_mode,
+            dispatch_mode,
+            requested_at: Timestamp::now(),
         }])
     }
 
@@ -1874,6 +1958,94 @@ mod tests {
             Command::SetThreadInteractionMode {
                 id,
                 interaction_mode: "default".to_string(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    // ─── Session set / queued-turn dispatch ────────────────────────
+
+    fn session(status: &str) -> ThreadSession {
+        ThreadSession {
+            status: status.to_string(),
+            provider_name: Some("anthropic".to_string()),
+            runtime_mode: "full-access".to_string(),
+            active_turn_id: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn set_thread_session_success() {
+        let id = EntityId::new();
+        let events = Decider::decide(
+            Command::SetThreadSession { id, session: session("running") },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadSessionSet {
+                status, provider_name, runtime_mode, active_turn_id, last_error, ..
+            } => {
+                assert_eq!(status, "running");
+                assert_eq!(provider_name.as_deref(), Some("anthropic"));
+                assert_eq!(runtime_mode, "full-access");
+                assert!(active_turn_id.is_none());
+                assert!(last_error.is_none());
+            }
+            _ => panic!("expected ThreadSessionSet"),
+        }
+    }
+
+    #[test]
+    fn set_thread_session_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let result = Decider::decide(
+            Command::SetThreadSession { id, session: session("idle") },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn dispatch_queued_turn_success() {
+        let id = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::DispatchQueuedTurn {
+                id,
+                message_id: mid,
+                runtime_mode: "approval-required".to_string(),
+                interaction_mode: "plan".to_string(),
+                dispatch_mode: "queue".to_string(),
+            },
+            Some(&thread_state_active()),
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::TurnDispatchRequested {
+                message_id, runtime_mode, interaction_mode, dispatch_mode, ..
+            } => {
+                assert_eq!(*message_id, mid);
+                assert_eq!(runtime_mode, "approval-required");
+                assert_eq!(interaction_mode, "plan");
+                assert_eq!(dispatch_mode, "queue");
+            }
+            _ => panic!("expected TurnDispatchRequested"),
+        }
+    }
+
+    #[test]
+    fn dispatch_queued_turn_unknown_thread_rejected() {
+        let id = EntityId::new();
+        let result = Decider::decide(
+            Command::DispatchQueuedTurn {
+                id,
+                message_id: id,
+                runtime_mode: "full-access".to_string(),
+                interaction_mode: "default".to_string(),
+                dispatch_mode: "queue".to_string(),
             },
             None,
         );

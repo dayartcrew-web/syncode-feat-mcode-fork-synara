@@ -773,6 +773,8 @@ impl Orchestrator {
             | Command::RespondThreadApproval { id, .. }
             | Command::RespondThreadUserInput { id, .. }
             | Command::EditAndResendThreadMessage { id, .. }
+            | Command::SetThreadSession { id, .. }
+            | Command::DispatchQueuedTurn { id, .. }
             | Command::AppendThreadActivity { id, .. }
             | Command::AddPinnedMessage { id, .. }
             | Command::RemovePinnedMessage { id, .. }
@@ -837,6 +839,8 @@ impl Orchestrator {
             | Command::RespondThreadApproval { .. }
             | Command::RespondThreadUserInput { .. }
             | Command::EditAndResendThreadMessage { .. }
+            | Command::SetThreadSession { .. }
+            | Command::DispatchQueuedTurn { .. }
             | Command::AppendThreadActivity { .. }
             | Command::AddPinnedMessage { .. }
             | Command::RemovePinnedMessage { .. }
@@ -916,6 +920,7 @@ impl Orchestrator {
             | Command::RespondThreadApproval { .. }
             | Command::RespondThreadUserInput { .. }
             | Command::EditAndResendThreadMessage { .. }
+            | Command::DispatchQueuedTurn { .. }
         )
     }
 }

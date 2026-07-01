@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use syncode_core::EntityId;
 
-use crate::decider::{Command, ImportedMessage};
+use crate::decider::{Command, ImportedMessage, ThreadSession};
 use crate::pipeline::{CommandResult, Orchestrator, OrchestrationError};
 use crate::read_model::{
     ActivityView, MessageView, ProjectView, ThreadView, TurnView,
@@ -316,6 +316,42 @@ impl ApplicationService {
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
             .handle_command(Command::SetThreadInteractionMode { id, interaction_mode })
+            .await
+    }
+
+    /// Set a thread's provider session state. Faithful to mcode
+    /// `thread.session.set` {session: OrchestrationSession}. The Decider guards
+    /// thread existence; the session is materialized onto the thread read model.
+    pub async fn set_thread_session(
+        &self,
+        id: EntityId,
+        session: ThreadSession,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::SetThreadSession { id, session })
+            .await
+    }
+
+    /// Dispatch a queued turn to the provider for a thread. Faithful to mcode
+    /// `thread.turn.dispatch-queued` {messageId, runtimeMode, interactionMode,
+    /// dispatchMode}. Records the request; the provider dispatch is handled by
+    /// the command reactor when wired.
+    pub async fn dispatch_queued_turn(
+        &self,
+        id: EntityId,
+        message_id: EntityId,
+        runtime_mode: String,
+        interaction_mode: String,
+        dispatch_mode: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::DispatchQueuedTurn {
+                id,
+                message_id,
+                runtime_mode,
+                interaction_mode,
+                dispatch_mode,
+            })
             .await
     }
 

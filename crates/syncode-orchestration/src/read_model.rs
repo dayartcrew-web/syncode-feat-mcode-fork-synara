@@ -40,6 +40,23 @@ pub struct ThreadView {
     pub turn_count: u32,
     pub created_at: String,
     pub updated_at: String,
+    /// The thread's provider-session state, set by `thread.session.set`
+    /// (mcode OrchestrationSession). `None` until a session is set. `#[serde(default)]`
+    /// keeps older persisted snapshots (which predate the field) deserializable.
+    #[serde(default)]
+    pub session: Option<ThreadSessionView>,
+}
+
+/// A provider session's state, materialized onto the thread read model. Faithful
+/// to mcode's `OrchestrationSession`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadSessionView {
+    pub status: String,
+    pub provider_name: Option<String>,
+    pub runtime_mode: String,
+    pub active_turn_id: Option<String>,
+    pub last_error: Option<String>,
+    pub updated_at: String,
 }
 
 // ─── Turn Read Model ─────────────────────────────────────────────

@@ -177,6 +177,29 @@ impl ProviderCommandReactor {
                     events: vec![],
                 })
             }
+            Command::DispatchQueuedTurn {
+                id, message_id, runtime_mode, interaction_mode, dispatch_mode,
+            } => {
+                // Dispatch the queued turn to the thread's active Processing session,
+                // if any (faithful to mcode `thread.turn.dispatch-queued` → provider
+                // dispatch). The full queued-turn lifecycle (resolving the message
+                // body, model selection, spawning a fresh session) is deferred; this
+                // reuses the existing session-dispatch path.
+                let payload = serde_json::json!({
+                    "message_id": message_id.as_str(),
+                    "runtime_mode": runtime_mode,
+                    "interaction_mode": interaction_mode,
+                    "dispatch_mode": dispatch_mode,
+                });
+                let session_id = self
+                    .dispatch_to_thread_session(*id, "turn/dispatch-queued", payload, adapter)
+                    .await?;
+                Ok(CommandReaction {
+                    handled: session_id.is_some(),
+                    session_id,
+                    events: vec![],
+                })
+            }
 
             // Commands that don't need provider interaction
             Command::CreateProject { .. }
@@ -191,6 +214,7 @@ impl ProviderCommandReactor {
             | Command::DeleteThread { .. }
             | Command::SetThreadRuntimeMode { .. }
             | Command::SetThreadInteractionMode { .. }
+            | Command::SetThreadSession { .. }
             | Command::AppendThreadActivity { .. }
             | Command::AddPinnedMessage { .. }
             | Command::RemovePinnedMessage { .. }
