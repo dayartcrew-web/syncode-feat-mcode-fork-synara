@@ -5,14 +5,14 @@ Quick reference for all 12 internal crates. For full detail (files, API surface,
 | Crate | Layer | Purpose | LOC | Tests | Status |
 |---|---|---|---|---|---|
 | [`syncode-core`](../.masday/intel/crates/syncode-core.md) | L0 | Domain kernel — entities, 35 events, 4 port traits | 1842 | 45 | ✅ |
-| [`syncode-contracts`](../.masday/intel/crates/syncode-contracts.md) | L0 | Shared DTOs + ts-rs → `frontend/src/types/` | 265 | 21 | ✅ |
+| [`syncode-contracts`](../.masday/intel/crates/syncode-contracts.md) | L0 | Shared DTOs + ts-rs → `frontend/src/types/` + **snapshot DTOs** | ~520 | 34 | ✅ |
 | [`syncode-orchestration`](../.masday/intel/crates/syncode-orchestration.md) | L2 | CQRS engine — 38 Commands, Decider, Projector, Reactors, ApplicationService (48 use cases) | 6199 | 129 | ✅ |
 | [`syncode-provider`](../.masday/intel/crates/syncode-provider.md) | L1 | `ProviderAdapter` trait + 10 adapters + SessionManager + registry | 7210 | 174 | ⚠️ 8/10 stubs |
 | [`syncode-persistence`](../.masday/intel/crates/syncode-persistence.md) | L1 | SQLite event store + 7 projections + snapshots | 2095 | 17 | ✅ |
 | [`syncode-git`](../.masday/intel/crates/syncode-git.md) | L1 | git2 — status/diff/branch/commit/checkpoint/worktree/stacked | 1201 | 22 | ⚠️ push/pull/PR stub |
 | [`syncode-terminal`](../.masday/intel/crates/syncode-terminal.md) | L1 | portable-pty PTY + ack-buffered output + sessions | 714 | 15 | ✅ |
 | [`syncode-automation`](../.masday/intel/crates/syncode-automation.md) | L1 | Scheduler + retry/misfire/completion policies | 1101 | 38 | ⚠️ cron/retry/exec stub |
-| [`syncode-ws`](../.masday/intel/crates/syncode-ws.md) | L3 | WebSocket JSON-RPC server + push bus + channels + **authz gate** | ~1620 | 37 | ⚠️ transport stub |
+| [`syncode-ws`](../.masday/intel/crates/syncode-ws.md) | L3 | WebSocket JSON-RPC server + push bus + channels + **authz gate** + **snapshot-then-stream** | ~1990 | 42 | ✅ transport reframed |
 | [`syncode-tauri`](../.masday/intel/crates/syncode-tauri.md) | L4 | Tauri desktop binary — tray, updater, IPC | 1129 | 0† | ⚠️ engine not wired |
 | [`syncode-auth`](../.masday/intel/crates/syncode-auth.md) | L1 | Credentials, auth policy, secret store, **principal/session/authenticator** | ~840 | 35 | ✅ wired into WS (opt-in) |
 | [`syncode-http`](../.masday/intel/crates/syncode-http.md) | L1 | Future REST surface | 12 | 0 | 🚧 stub |

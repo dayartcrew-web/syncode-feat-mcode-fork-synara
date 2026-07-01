@@ -7,6 +7,7 @@
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useProviderStream } from "../hooks/useProviderStream";
+import type { PushEvent } from "../hooks/useWebSocket";
 
 export interface TurnItem {
   id: string;
@@ -33,7 +34,7 @@ interface ChatViewProps {
   rpc: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>;
   threadId: string | null;
   onRefresh: () => void;
-  onPush: (callback: (params: { channel: string; event: string; data: unknown }) => void) => () => void;
+  onPush: (callback: (event: PushEvent) => void) => () => void;
 }
 
 export default function ChatView({ rpc, threadId, onRefresh, onPush }: ChatViewProps) {

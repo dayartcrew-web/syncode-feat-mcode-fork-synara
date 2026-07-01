@@ -22,5 +22,8 @@ fn main() {
     std::fs::create_dir_all(&frontend_types).ok();
 
     println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rustc-env=TS_RS_EXPORT_DIR={}", frontend_types.display());
+    println!(
+        "cargo:rustc-env=TS_RS_EXPORT_DIR={}",
+        frontend_types.display()
+    );
 }

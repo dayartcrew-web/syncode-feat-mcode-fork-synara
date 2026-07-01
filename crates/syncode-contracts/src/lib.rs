@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod snapshots;
+
 // ─── Primitives ────────────────────────────────────────────────────────
 
 /// Unique entity identifier (UUID string in JSON)
@@ -18,11 +20,15 @@ impl EntityId {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Default for EntityId {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// ISO 8601 timestamp string
@@ -35,7 +41,9 @@ impl Timestamp {
     pub fn now() -> Self {
         Self(chrono::Utc::now().to_rfc3339())
     }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 // ─── Provider Types ────────────────────────────────────────────────────
@@ -218,10 +226,12 @@ mod tests {
     #[test]
     fn test_provider_config_roundtrip() {
         let config = ProviderConfig {
-            id: "claude".into(), api_key: "sk-xxx".into(),
+            id: "claude".into(),
+            api_key: "sk-xxx".into(),
             base_url: Some("https://api.anthropic.com".into()),
             model: Some("claude-sonnet-4".into()),
-            max_tokens: Some(8192), temperature: Some(0.7),
+            max_tokens: Some(8192),
+            temperature: Some(0.7),
         };
         let json = serde_json::to_string(&config).unwrap();
         let decoded: ProviderConfig = serde_json::from_str(&json).unwrap();
@@ -231,10 +241,12 @@ mod tests {
     #[test]
     fn test_session_view_roundtrip() {
         let session = SessionView {
-            id: EntityId::new(), provider_id: "claude".into(),
+            id: EntityId::new(),
+            provider_id: "claude".into(),
             model: "claude-sonnet-4".into(),
             working_directory: Some("/tmp/project".into()),
-            created_at: Timestamp::now(), status: SessionStatus::Idle,
+            created_at: Timestamp::now(),
+            status: SessionStatus::Idle,
         };
         let json = serde_json::to_string(&session).unwrap();
         let decoded: SessionView = serde_json::from_str(&json).unwrap();
@@ -261,5 +273,16 @@ mod tests {
         JsonRpcResponseView::export().expect("export JsonRpcResponseView");
         JsonRpcErrorView::export().expect("export JsonRpcErrorView");
         PushEvent::export().expect("export PushEvent");
+
+        // Snapshot DTOs (snapshot-then-stream subscriptions).
+        snapshots::ProjectSummary::export().expect("export ProjectSummary");
+        snapshots::ThreadSummary::export().expect("export ThreadSummary");
+        snapshots::TurnSummary::export().expect("export TurnSummary");
+        snapshots::MessageSummary::export().expect("export MessageSummary");
+        snapshots::ActivitySummary::export().expect("export ActivitySummary");
+        snapshots::SnapshotScope::export().expect("export SnapshotScope");
+        snapshots::ShellSnapshot::export().expect("export ShellSnapshot");
+        snapshots::ThreadDetailSnapshot::export().expect("export ThreadDetailSnapshot");
+        snapshots::FullSnapshot::export().expect("export FullSnapshot");
     }
 }
