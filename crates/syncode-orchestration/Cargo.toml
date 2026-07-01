@@ -18,3 +18,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 async-trait = "0.1"
 tokio-stream = "0.1"
+
+[dev-dependencies]
+syncode-persistence = { path = "../syncode-persistence" }
+syncode-contracts = { path = "../syncode-contracts" }
+tempfile = "3"
+sqlx = { workspace = true }
