@@ -70,6 +70,7 @@ struct OpenAIChatMessage {
 
 /// Response from the OpenAI Chat Completions API (simplified)
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)] // models the OpenAI API response shape; not all fields are read
 struct OpenAIChatResponse {
     id: String,
     object: String,
@@ -82,6 +83,7 @@ struct OpenAIChatResponse {
 
 /// A choice in the OpenAI response
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)] // models the OpenAI API response shape; not all fields are read
 struct OpenAIChoice {
     index: u32,
     message: OpenAIChatMessage,
@@ -107,6 +109,7 @@ struct OpenAIErrorResponse {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)] // models the OpenAI error shape; not all fields are read
 struct OpenAIErrorDetail {
     #[serde(default)]
     message: String,
@@ -132,6 +135,7 @@ pub struct OpenAIAdapter {
     sessions: Mutex<HashMap<String, Arc<SessionState>>>,
     event_tx: broadcast::Sender<ProviderEvent>,
     spawned: AtomicBool,
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     next_req_id: AtomicU64,
     client: Option<reqwest::Client>,
 }
@@ -181,6 +185,7 @@ impl OpenAIAdapter {
         self.status.store(status.into(), Ordering::Release);
     }
 
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     fn next_request_id(&self) -> u64 {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -282,10 +287,10 @@ impl ProviderAdapter for OpenAIAdapter {
         if let Some(max_tokens) = config.max_tokens {
             self.openai_config.max_tokens = max_tokens;
         }
-        if let Some(org_id) = config.extra.get("organization_id") {
-            if let Some(org) = org_id.as_str() {
-                self.openai_config.organization_id = Some(org.to_string());
-            }
+        if let Some(org_id) = config.extra.get("organization_id")
+            && let Some(org) = org_id.as_str()
+        {
+            self.openai_config.organization_id = Some(org.to_string());
         }
 
         self.config = Some(config);
@@ -491,13 +496,13 @@ impl ProviderAdapter for OpenAIAdapter {
 
         if !status.is_success() {
             // Try to parse OpenAI error format
-            if let Ok(err_resp) = serde_json::from_str::<OpenAIErrorResponse>(&response_body) {
-                if let Some(err) = err_resp.error {
-                    return Err(ProviderAdapterError::RpcError {
-                        code: status.as_u16() as i64,
-                        message: err.message,
-                    });
-                }
+            if let Ok(err_resp) = serde_json::from_str::<OpenAIErrorResponse>(&response_body)
+                && let Some(err) = err_resp.error
+            {
+                return Err(ProviderAdapterError::RpcError {
+                    code: status.as_u16() as i64,
+                    message: err.message,
+                });
             }
             return Err(ProviderAdapterError::RpcError {
                 code: status.as_u16() as i64,
@@ -506,8 +511,8 @@ impl ProviderAdapter for OpenAIAdapter {
         }
 
         // Parse successful response
-        let openai_resp: OpenAIChatResponse = serde_json::from_str(&response_body)
-            .map_err(|e| ProviderAdapterError::Serialization(e))?;
+        let openai_resp: OpenAIChatResponse =
+            serde_json::from_str(&response_body).map_err(ProviderAdapterError::Serialization)?;
 
         // Extract the assistant's message from the first choice
         let text_content = openai_resp
@@ -740,11 +745,11 @@ mod tests {
     #[tokio::test]
     async fn openai_adapter_health_check() {
         let adapter = OpenAIAdapter::new();
-        assert_eq!(adapter.health_check().await.unwrap(), false);
+        assert!(!adapter.health_check().await.unwrap());
 
         let mut adapter = OpenAIAdapter::new();
         adapter.spawn(make_spawn_config()).await.unwrap();
-        assert_eq!(adapter.health_check().await.unwrap(), true);
+        assert!(adapter.health_check().await.unwrap());
     }
 
     #[tokio::test]

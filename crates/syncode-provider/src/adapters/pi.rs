@@ -44,6 +44,7 @@ pub struct PiAdapter {
     sessions: Mutex<HashMap<String, Arc<SessionState>>>,
     event_tx: broadcast::Sender<ProviderEvent>,
     spawned: AtomicBool,
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     next_req_id: AtomicU64,
 }
 
@@ -85,6 +86,7 @@ impl PiAdapter {
         self.status.store(status.into(), Ordering::Release);
     }
 
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     fn next_request_id(&self) -> u64 {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -431,11 +433,11 @@ mod tests {
     #[tokio::test]
     async fn pi_adapter_health_check() {
         let adapter = PiAdapter::new();
-        assert_eq!(adapter.health_check().await.unwrap(), false);
+        assert!(!adapter.health_check().await.unwrap());
 
         let mut adapter = PiAdapter::new();
         adapter.spawn(ProviderConfig::default()).await.unwrap();
-        assert_eq!(adapter.health_check().await.unwrap(), true);
+        assert!(adapter.health_check().await.unwrap());
     }
 
     #[tokio::test]

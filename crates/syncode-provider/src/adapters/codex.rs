@@ -43,7 +43,14 @@ pub struct CodexAdapter {
     event_tx: broadcast::Sender<ProviderEvent>,
     spawned: AtomicBool,
     /// Incrementing request ID
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     next_req_id: AtomicU64,
+}
+
+impl Default for CodexAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CodexAdapter {
@@ -79,6 +86,7 @@ impl CodexAdapter {
         self.status.store(status.into(), Ordering::Release);
     }
 
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     fn next_request_id(&self) -> u64 {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -446,11 +454,11 @@ mod tests {
     async fn codex_adapter_health_check() {
         let adapter = CodexAdapter::new();
         // Not spawned → false
-        assert_eq!(adapter.health_check().await.unwrap(), false);
+        assert!(!adapter.health_check().await.unwrap());
 
         let mut adapter = CodexAdapter::new();
         adapter.spawn(ProviderConfig::default()).await.unwrap();
-        assert_eq!(adapter.health_check().await.unwrap(), true);
+        assert!(adapter.health_check().await.unwrap());
     }
 
     #[tokio::test]

@@ -411,6 +411,7 @@ mod tests {
     /// Wire up a transport against an in-process fake peer using two duplexes:
     ///   - client_writer → peer_reader   (our requests reach the peer)
     ///   - peer_writer   → client_reader (peer's responses reach us)
+    ///
     /// Returns (transport, incoming_rx, peer_reader, peer_writer).
     fn harness() -> (
         JsonRpcTransport,

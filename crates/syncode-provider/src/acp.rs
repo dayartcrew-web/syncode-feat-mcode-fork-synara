@@ -315,10 +315,10 @@ fn extract_text(content: Option<&Value>) -> Option<String> {
     let items = content?.as_array()?;
     let mut text = String::new();
     for item in items {
-        if item.get("type").and_then(|v| v.as_str()) == Some("text") {
-            if let Some(part) = item.get("text").and_then(|v| v.as_str()) {
-                text.push_str(part);
-            }
+        if item.get("type").and_then(|v| v.as_str()) == Some("text")
+            && let Some(part) = item.get("text").and_then(|v| v.as_str())
+        {
+            text.push_str(part);
         }
     }
     if text.is_empty() { None } else { Some(text) }

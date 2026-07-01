@@ -70,6 +70,7 @@ struct AnthropicMessage {
 
 /// Response from the Anthropic Messages API (simplified)
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)] // models the Anthropic API response shape; not all fields are read
 struct AnthropicMessagesResponse {
     id: String,
     #[serde(rename = "type")]
@@ -83,6 +84,7 @@ struct AnthropicMessagesResponse {
 
 /// A content block in the Anthropic response
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)] // models the Anthropic API response shape; not all fields are read
 struct AnthropicContentBlock {
     #[serde(rename = "type")]
     block_type: String,
@@ -105,6 +107,7 @@ struct AnthropicErrorResponse {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)] // models the Anthropic error shape; not all fields are read
 struct AnthropicErrorDetail {
     #[serde(default)]
     r#type: String,
@@ -128,6 +131,7 @@ pub struct AnthropicAdapter {
     sessions: Mutex<HashMap<String, Arc<SessionState>>>,
     event_tx: broadcast::Sender<ProviderEvent>,
     spawned: AtomicBool,
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     next_req_id: AtomicU64,
     client: Option<reqwest::Client>,
 }
@@ -177,6 +181,7 @@ impl AnthropicAdapter {
         self.status.store(status.into(), Ordering::Release);
     }
 
+    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
     fn next_request_id(&self) -> u64 {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -466,13 +471,13 @@ impl ProviderAdapter for AnthropicAdapter {
 
         if !status.is_success() {
             // Try to parse Anthropic error format
-            if let Ok(err_resp) = serde_json::from_str::<AnthropicErrorResponse>(&response_body) {
-                if let Some(err) = err_resp.error {
-                    return Err(ProviderAdapterError::RpcError {
-                        code: status.as_u16() as i64,
-                        message: err.message,
-                    });
-                }
+            if let Ok(err_resp) = serde_json::from_str::<AnthropicErrorResponse>(&response_body)
+                && let Some(err) = err_resp.error
+            {
+                return Err(ProviderAdapterError::RpcError {
+                    code: status.as_u16() as i64,
+                    message: err.message,
+                });
             }
             return Err(ProviderAdapterError::RpcError {
                 code: status.as_u16() as i64,
@@ -481,8 +486,8 @@ impl ProviderAdapter for AnthropicAdapter {
         }
 
         // Parse successful response
-        let anthropic_resp: AnthropicMessagesResponse = serde_json::from_str(&response_body)
-            .map_err(|e| ProviderAdapterError::Serialization(e))?;
+        let anthropic_resp: AnthropicMessagesResponse =
+            serde_json::from_str(&response_body).map_err(ProviderAdapterError::Serialization)?;
 
         // Extract text content from response blocks
         let text_content: String = anthropic_resp
@@ -717,11 +722,11 @@ mod tests {
     #[tokio::test]
     async fn anthropic_adapter_health_check() {
         let adapter = AnthropicAdapter::new();
-        assert_eq!(adapter.health_check().await.unwrap(), false);
+        assert!(!adapter.health_check().await.unwrap());
 
         let mut adapter = AnthropicAdapter::new();
         adapter.spawn(make_spawn_config()).await.unwrap();
-        assert_eq!(adapter.health_check().await.unwrap(), true);
+        assert!(adapter.health_check().await.unwrap());
     }
 
     #[tokio::test]
