@@ -198,6 +198,34 @@ pub enum ProviderStatus {
     ShuttingDown,
 }
 
+// Conversions to/from `u64` so adapters can store status in an `AtomicU64`.
+// Centralized here (next to the type) rather than in a single adapter file, so
+// every adapter shares one canonical mapping.
+impl From<u64> for ProviderStatus {
+    fn from(v: u64) -> Self {
+        match v {
+            0 => ProviderStatus::Idle,
+            1 => ProviderStatus::Busy,
+            2 => ProviderStatus::Disconnected,
+            3 => ProviderStatus::Error,
+            4 => ProviderStatus::ShuttingDown,
+            _ => ProviderStatus::Error,
+        }
+    }
+}
+
+impl From<ProviderStatus> for u64 {
+    fn from(s: ProviderStatus) -> Self {
+        match s {
+            ProviderStatus::Idle => 0,
+            ProviderStatus::Busy => 1,
+            ProviderStatus::Disconnected => 2,
+            ProviderStatus::Error => 3,
+            ProviderStatus::ShuttingDown => 4,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session context passed when creating a session
 // ---------------------------------------------------------------------------

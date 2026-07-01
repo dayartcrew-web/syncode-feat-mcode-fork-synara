@@ -8,11 +8,13 @@
 //! - `trait_def` — `ProviderAdapter` trait, JSON-RPC types, session context
 //! - `session` — `SessionState` tracking per-turn lifecycle
 //! - `registry` — Provider discovery, configuration, status aggregation
+//! - `subprocess` — NDJSON JSON-RPC subprocess transport (foundation for ACP providers)
 //! - `adapters` — Per-provider implementations (Codex is the reference)
 
 pub mod adapters;
 pub mod registry;
 pub mod session;
+pub mod subprocess;
 pub mod trait_def;
 
 // Re-exports for convenience
