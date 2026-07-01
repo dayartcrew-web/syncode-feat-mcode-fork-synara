@@ -292,6 +292,24 @@ pub enum DomainEvent {
         content: String,
         created_at: Timestamp,
     },
+    /// `thread.message.assistant.delta` → append a chunk to a streamed assistant
+    /// message (creating it on the first delta). Syncode-native modeling: mcode
+    /// reuses `thread.message-sent` with a streaming flag; syncode uses a
+    /// dedicated append event so the create-vs-append decision lives in the
+    /// projector (mirroring pinned-message / marker materialization). The message
+    /// id is caller-supplied (the active turn's assistant message id), unlike
+    /// [`DomainEvent::MessageAdded`] which self-generates one.
+    MessageDeltaAppended {
+        id: EntityId,
+        turn_id: EntityId,
+        delta: String,
+        created_at: Timestamp,
+    },
+    /// `thread.message.assistant.complete` → finalize a streamed assistant message.
+    MessageStreamingFinalized {
+        id: EntityId,
+        finalized_at: Timestamp,
+    },
 
     // ─── Activity Events ────────────────────────────────────────────────
     ActivityLogged {
@@ -337,6 +355,8 @@ impl DomainEvent {
             | Self::TurnFilesModified { id, .. }
             | Self::TurnCheckpointSet { id, .. }
             | Self::MessageAdded { id, .. }
+            | Self::MessageDeltaAppended { id, .. }
+            | Self::MessageStreamingFinalized { id, .. }
             | Self::ActivityLogged { id, .. } => *id,
 
             // Events keyed by a differently-named aggregate field (thread sub-aggregates).
@@ -391,6 +411,8 @@ impl DomainEvent {
             Self::TurnFilesModified { .. } => "TurnFilesModified",
             Self::TurnCheckpointSet { .. } => "TurnCheckpointSet",
             Self::MessageAdded { .. } => "MessageAdded",
+            Self::MessageDeltaAppended { .. } => "MessageDeltaAppended",
+            Self::MessageStreamingFinalized { .. } => "MessageStreamingFinalized",
             Self::ActivityLogged { .. } => "ActivityLogged",
         }
     }

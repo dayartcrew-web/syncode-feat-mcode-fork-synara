@@ -788,6 +788,11 @@ impl Orchestrator {
             // Revert targets the thread's checkpoint stream
             Command::RevertToCheckpoint { thread_id, .. } => Some(*thread_id),
 
+            // Streaming assistant messages target the thread (existence guard);
+            // the produced event persists under the caller-supplied message id.
+            Command::AppendAssistantDelta { thread_id, .. }
+            | Command::FinalizeAssistantMessage { thread_id, .. } => Some(*thread_id),
+
             // Turn-level commands
             Command::CompleteTurn { id, .. }
             | Command::FailTurn { id, .. }
@@ -841,6 +846,8 @@ impl Orchestrator {
             | Command::EditAndResendThreadMessage { .. }
             | Command::SetThreadSession { .. }
             | Command::DispatchQueuedTurn { .. }
+            | Command::AppendAssistantDelta { .. }
+            | Command::FinalizeAssistantMessage { .. }
             | Command::AppendThreadActivity { .. }
             | Command::AddPinnedMessage { .. }
             | Command::RemovePinnedMessage { .. }

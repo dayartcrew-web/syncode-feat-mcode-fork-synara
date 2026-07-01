@@ -230,7 +230,9 @@ impl ProviderCommandReactor {
             | Command::CompleteTurn { .. }
             | Command::RecordTurnFiles { .. }
             | Command::SetTurnCheckpoint { .. }
-            | Command::AddMessage { .. } => Ok(CommandReaction {
+            | Command::AddMessage { .. }
+            | Command::AppendAssistantDelta { .. }
+            | Command::FinalizeAssistantMessage { .. } => Ok(CommandReaction {
                 handled: false,
                 session_id: None,
                 events: vec![],

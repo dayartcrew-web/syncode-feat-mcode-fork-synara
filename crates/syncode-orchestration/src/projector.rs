@@ -362,8 +362,46 @@ impl Projector {
                     tool_name: None,
                     tool_call_id: None,
                     created_at: created_at.to_string(),
+                    is_streaming: false,
                 };
                 store.messages.insert(view.id.clone(), view);
+            }
+
+            // Streamed assistant message: create on the first delta, append on
+            // subsequent deltas (mcode `thread.message.assistant.delta`).
+            DomainEvent::MessageDeltaAppended {
+                id, turn_id, delta, created_at,
+            } => {
+                let key = id.as_str();
+                match store.messages.get_mut(&key) {
+                    Some(msg) => {
+                        msg.content.push_str(delta);
+                        msg.is_streaming = true;
+                    }
+                    None => {
+                        let view = MessageView {
+                            id: key,
+                            turn_id: turn_id.as_str(),
+                            role: "assistant".to_string(),
+                            content: delta.clone(),
+                            content_type: "text".to_string(),
+                            token_count: None,
+                            tool_name: None,
+                            tool_call_id: None,
+                            created_at: created_at.to_string(),
+                            is_streaming: true,
+                        };
+                        store.messages.insert(view.id.clone(), view);
+                    }
+                }
+            }
+
+            // Finalize a streamed assistant message (mcode `thread.message.assistant.complete`).
+            DomainEvent::MessageStreamingFinalized { id, .. } => {
+                let key = id.as_str();
+                if let Some(msg) = store.messages.get_mut(&key) {
+                    msg.is_streaming = false;
+                }
             }
 
             DomainEvent::ActivityLogged {

@@ -266,6 +266,23 @@ pub enum Command {
         role: String,
         content: String,
     },
+    /// `thread.message.assistant.delta` — stream a chunk of an assistant message.
+    /// Faithful to mcode (orchestration.ts:1257-1266): {threadId, messageId,
+    /// delta, turnId}. The message id is caller-supplied (the active turn's
+    /// assistant message); create-vs-append is decided by the projector.
+    AppendAssistantDelta {
+        thread_id: EntityId,
+        message_id: EntityId,
+        turn_id: EntityId,
+        delta: String,
+    },
+    /// `thread.message.assistant.complete` — finalize a streamed assistant
+    /// message. Faithful to mcode (orchestration.ts:1268-1272): {threadId,
+    /// messageId, turnId}.
+    FinalizeAssistantMessage {
+        thread_id: EntityId,
+        message_id: EntityId,
+    },
 }
 
 // ─── Decider Errors ──────────────────────────────────────────────
@@ -495,6 +512,17 @@ impl Decider {
             }
             Command::AddMessage { turn_id, role, content } => {
                 Self::decide_add_message(turn_id, role, content)
+            }
+            Command::AppendAssistantDelta {
+                thread_id,
+                message_id,
+                turn_id,
+                delta,
+            } => Self::decide_append_assistant_delta(
+                thread_id, message_id, turn_id, delta, current_state,
+            ),
+            Command::FinalizeAssistantMessage { thread_id, message_id } => {
+                Self::decide_finalize_assistant_message(thread_id, message_id, current_state)
             }
         }
     }
@@ -1228,6 +1256,41 @@ impl Decider {
             role,
             content,
             created_at: now,
+        }])
+    }
+
+    /// Append a streamed assistant-message chunk (mcode
+    /// `thread.message.assistant.delta`). The message id is caller-supplied;
+    /// the create-vs-append materialization is the projector's concern, so the
+    /// decider only enforces thread existence and emits the append event.
+    fn decide_append_assistant_delta(
+        thread_id: EntityId,
+        message_id: EntityId,
+        turn_id: EntityId,
+        delta: String,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        let now = Timestamp::now();
+        Ok(vec![DomainEvent::MessageDeltaAppended {
+            id: message_id,
+            turn_id,
+            delta,
+            created_at: now,
+        }])
+    }
+
+    /// Finalize a streamed assistant message (mcode
+    /// `thread.message.assistant.complete`). Only enforces thread existence.
+    fn decide_finalize_assistant_message(
+        thread_id: EntityId,
+        message_id: EntityId,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        Ok(vec![DomainEvent::MessageStreamingFinalized {
+            id: message_id,
+            finalized_at: Timestamp::now(),
         }])
     }
 
@@ -2046,6 +2109,79 @@ mod tests {
                 runtime_mode: "full-access".to_string(),
                 interaction_mode: "default".to_string(),
                 dispatch_mode: "queue".to_string(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn append_assistant_delta_success() {
+        let tid = EntityId::new();
+        let mid = EntityId::new();
+        let turn = EntityId::new();
+        let events = Decider::decide(
+            Command::AppendAssistantDelta {
+                thread_id: tid,
+                message_id: mid,
+                turn_id: turn,
+                delta: "Hello".to_string(),
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::MessageDeltaAppended { id, turn_id, delta, .. } => {
+                assert_eq!(*id, mid);
+                assert_eq!(*turn_id, turn);
+                assert_eq!(delta, "Hello");
+            }
+            _ => panic!("expected MessageDeltaAppended"),
+        }
+    }
+
+    #[test]
+    fn append_assistant_delta_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::AppendAssistantDelta {
+                thread_id: tid,
+                message_id: tid,
+                turn_id: tid,
+                delta: "x".to_string(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn finalize_assistant_message_success() {
+        let tid = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::FinalizeAssistantMessage {
+                thread_id: tid,
+                message_id: mid,
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::MessageStreamingFinalized { id, .. } => assert_eq!(*id, mid),
+            _ => panic!("expected MessageStreamingFinalized"),
+        }
+    }
+
+    #[test]
+    fn finalize_assistant_message_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::FinalizeAssistantMessage {
+                thread_id: tid,
+                message_id: tid,
             },
             None,
         );

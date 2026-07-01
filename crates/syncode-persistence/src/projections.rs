@@ -633,6 +633,28 @@ impl ProjectionManager {
                 .await?;
             }
 
+            // Streamed assistant message: first delta inserts, subsequent deltas
+            // append (SQLite ON CONFLICT concatenates excluded.content). There is
+            // no `is_streaming` column in view_messages (deferred, like the
+            // in-memory-only session blob), so finalization is a no-op here.
+            DomainEvent::MessageDeltaAppended {
+                id, turn_id, delta, created_at, ..
+            } => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO view_messages (id, turn_id, role, content, content_type, token_count, tool_name, tool_call_id, created_at)
+                    VALUES (?, ?, 'assistant', ?, 'text', NULL, NULL, NULL, ?)
+                    ON CONFLICT(id) DO UPDATE SET content = view_messages.content || excluded.content
+                    "#,
+                )
+                .bind(id.to_string())
+                .bind(turn_id.to_string())
+                .bind(delta)
+                .bind(created_at.to_string())
+                .execute(&self.pool)
+                .await?;
+            }
+
             DomainEvent::ActivityLogged {
                 id, activity_type, description, thread_id, created_at,
             } => {
@@ -657,7 +679,10 @@ impl ProjectionManager {
             DomainEvent::ThreadSessionSet { .. }
             // TurnDispatchRequested is a transient dispatch request (reactor side
             // effect); no durable read-model row.
-            | DomainEvent::TurnDispatchRequested { .. } => {}
+            | DomainEvent::TurnDispatchRequested { .. }
+            // MessageStreamingFinalized flips the in-memory `is_streaming` flag
+            // only; view_messages has no streaming column (deferred).
+            | DomainEvent::MessageStreamingFinalized { .. } => {}
         }
 
         // Update watermark

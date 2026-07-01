@@ -355,6 +355,43 @@ impl ApplicationService {
             .await
     }
 
+    /// Stream a chunk of an assistant message. Faithful to mcode
+    /// `thread.message.assistant.delta` {threadId, messageId, delta, turnId}.
+    /// The first delta creates the message; subsequent deltas append. Issued by
+    /// the provider stream consumer as deltas arrive.
+    pub async fn append_assistant_delta(
+        &self,
+        thread_id: EntityId,
+        message_id: EntityId,
+        turn_id: EntityId,
+        delta: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::AppendAssistantDelta {
+                thread_id,
+                message_id,
+                turn_id,
+                delta,
+            })
+            .await
+    }
+
+    /// Finalize a streamed assistant message. Faithful to mcode
+    /// `thread.message.assistant.complete` {threadId, messageId, turnId}. Flips
+    /// the message's `is_streaming` flag to false.
+    pub async fn finalize_assistant_message(
+        &self,
+        thread_id: EntityId,
+        message_id: EntityId,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::FinalizeAssistantMessage {
+                thread_id,
+                message_id,
+            })
+            .await
+    }
+
     /// Respond to a pending provider approval request for a thread. Faithful to
     /// mcode `thread.approval.respond`. Records the response; the provider
     /// dispatch is handled by the command reactor when wired.

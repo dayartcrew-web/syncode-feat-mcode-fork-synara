@@ -91,6 +91,11 @@ pub struct MessageView {
     pub tool_name: Option<String>,
     pub tool_call_id: Option<String>,
     pub created_at: String,
+    /// `true` while an assistant message is being streamed (deltas appended);
+    /// flipped to `false` on `thread.message.assistant.complete`. `#[serde(default)]`
+    /// so messages persisted before this field deserialize as non-streaming.
+    #[serde(default)]
+    pub is_streaming: bool,
 }
 
 // ─── Activity Read Model ────────────────────────────────────────
