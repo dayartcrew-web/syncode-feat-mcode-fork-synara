@@ -1,5 +1,5 @@
 # syncode-auth
-> Authentication & authorization — credential mgmt, auth policies, secret storage, principals, sessions, authenticators. **L1** · ~840 LOC · 35 tests
+> Authentication & authorization — credential mgmt, auth policies, secret storage, principals, sessions, authenticators. **L1** · 1203 LOC · 39 tests
 - **Depends on (internal):** `core`.
 - **External:** tokio, serde, serde_json, thiserror, tracing, chrono, async-trait.
 - **Consumed by:** `syncode-ws` (authz gate + `auth/*` RPC methods).

@@ -1,5 +1,5 @@
 # syncode-ws
-> WebSocket JSON-RPC 2.0 server — the primary runtime API into the CQRS engine. **L3** · ~1990 LOC · 42 tests
+> WebSocket JSON-RPC 2.0 server — the primary runtime API into the CQRS engine. **L3** · 3007 LOC · 47 tests
 - **Depends on (internal):** `core`, `contracts`, `orchestration`, `persistence`, `auth`.
 - **External:** axum 0.8 (ws), tokio, tokio-tungstenite, serde, futures-util.
 

@@ -1,5 +1,5 @@
 # syncode-git
-> Git integration via git2 + CLI shelling-out — status, diff, branch, commit, checkpoints, worktrees, stacked actions, push/pull/CreatePR. **L1** · ~1550 LOC · 34 tests
+> Git integration via git2 + CLI shelling-out — status, diff, branch, commit, checkpoints, worktrees, stacked actions, push/pull/CreatePR. **L1** · 1958 LOC · 40 tests
 - **Depends on (internal):** `core`.
 - **External:** git2 0.20, tokio, serde, thiserror, tracing, which 7, tempfile 3.
 

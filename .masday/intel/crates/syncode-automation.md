@@ -1,5 +1,5 @@
 # syncode-automation
-> Scheduler engine for scheduled agent runs — schedules, retry/misfire/completion policies, run lifecycle, **execution engine**. **L1** · ~2050 LOC · 65 tests
+> Scheduler engine for scheduled agent runs — schedules, retry/misfire/completion policies, run lifecycle, **execution engine**. **L1** · 2292 LOC · 67 tests
 - **Depends on (internal):** `core` (ports: `AutomationRepository`, `RunExecutor`).
 - **External:** tokio, serde, chrono, uuid, thiserror, tracing, **cron 0.15**, async-trait.
 

@@ -1,5 +1,5 @@
 # syncode-contracts
-> Shared DTOs with ts-rs TypeScript codegen (Rust↔frontend bridge). **L0** · ~520 LOC · 34 tests · `lib.rs` + `snapshots.rs`
+> Shared DTOs with ts-rs TypeScript codegen (Rust↔frontend bridge). **L0** · 571 LOC · 34 tests · `lib.rs` + `snapshots.rs`
 - **Depends on (internal):** none.
 - **External:** serde, serde_json, ts-rs 10, uuid, chrono.
 - **Consumed by:** `syncode-ws` (snapshot DTOs for snapshot-then-stream subscriptions).

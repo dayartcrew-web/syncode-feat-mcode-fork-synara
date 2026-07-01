@@ -1,15 +1,15 @@
 # syncode-tauri
-> Tauri v2 desktop shell — native window, tray, auto-updater, IPC commands. **L4** · 1129 LOC · 0 workspace tests (excluded, build issues) · has `main.rs` (the binary)
+> Tauri v2 desktop shell — native window, tray, auto-updater, IPC commands. **L4** · 1224 LOC · 0 workspace tests (excluded, build issues) · has `main.rs` (the binary)
 - **Depends on (internal):** `core`, `git`, `terminal`, `ws`.
 - **External:** tauri 2, serde, tokio, chrono, uuid, tracing-subscriber.
 
 ## Files
 - `main.rs` (44 LOC) — Tauri app builder + command registration.
-- `commands.rs` (152 LOC) — core IPC (`AppInfo`, `ProviderRegistryState`, `SessionStoreState`).
-- `git_commands.rs` (174 LOC) — git ops wrapping `syncode-git::Git2Service`.
+- `commands.rs` (211 LOC) — core IPC (`AppInfo`, `ProviderRegistryState`, `SessionStoreState`).
+- `git_commands.rs` (190 LOC) — git ops wrapping `syncode-git::Git2Service`.
 - `terminal_commands.rs` (251 LOC) — PTY mgmt via `syncode-terminal` `SharedSessionManager`.
-- `tray.rs` (237 LOC) — tray menu + `TrayAction`.
-- `updater.rs` (261 LOC) — `UpdateStatus` state machine + semver compare.
+- `tray.rs` (244 LOC) — tray menu + `TrayAction`.
+- `updater.rs` (274 LOC) — `UpdateStatus` state machine + semver compare.
 
 ## Public API (Tauri IPC commands)
 - **Core (6):** `get_app_info`, `get_version`, `list_providers`, `get_provider_status`, `list_sessions`, `create_session`.

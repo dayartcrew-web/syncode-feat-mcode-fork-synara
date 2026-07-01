@@ -1,13 +1,13 @@
 # syncode-terminal
-> PTY process management via portable-pty — spawn, resize, write, ack-buffered output, session lifecycle. **L1** · 714 LOC · 38 tests
+> PTY process management via portable-pty — spawn, resize, write, ack-buffered output, session lifecycle. **L1** · 699 LOC · 20 tests
 - **Depends on (internal):** `core`.
 - **External:** portable-pty 0.9, tokio, serde, thiserror, tracing, chrono, uuid.
 
 ## Files
 - `lib.rs` (12 LOC) — barrel exports.
-- `pty.rs` (242 LOC) — `PtyError`, `PtyProcessInfo`, `PtyHandle` (spawn/resize/write/read).
-- `output.rs` (221 LOC) — `OutputChunk`, `OutputBuffer` (ring buffer + ack protocol).
-- `session.rs` (239 LOC) — `TerminalSession`, `SessionManager`, `SessionInfo`.
+- `pty.rs` (244 LOC) — `PtyError`, `PtyProcessInfo`, `PtyHandle` (spawn/resize/write/read).
+- `output.rs` (217 LOC) — `OutputChunk`, `OutputBuffer` (ring buffer + ack protocol).
+- `session.rs` (226 LOC) — `TerminalSession`, `SessionManager`, `SessionInfo`.
 
 ## Public API
 - `PtyHandle` wraps portable-pty `MasterPty` behind `Arc<Mutex<>>` (thread-safe async). `spawn()` → native PTY, `TERM=xterm-256color`, reader/writer halves; `resize`/`write`/`read_output`.

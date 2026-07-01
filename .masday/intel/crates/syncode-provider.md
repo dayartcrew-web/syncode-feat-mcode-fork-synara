@@ -1,5 +1,5 @@
 # syncode-provider
-> Multi-LLM-provider abstraction — `ProviderAdapter` trait, 10 adapters, SessionManager, Registry. **L1** · 7210 LOC · 174 tests (largest crate)
+> Multi-LLM-provider abstraction — `ProviderAdapter` trait, 10 adapters, SessionManager, Registry. **L1** · 13525 LOC · 276 tests (largest crate)
 - **Depends on (internal):** `core`.
 - **External:** tokio, serde, reqwest (HTTP adapters), async-trait, thiserror, tracing, futures.
 
@@ -17,11 +17,10 @@
 
 ## Adapters
 - **HTTP (real):** `anthropic` (`AnthropicConfig`: api_key/base_url/model/max_tokens/api_version — Bedrock/Vertex/proxies), `openai` (`OpenAIConfig`: +organization_id — Azure/vLLM/Ollama).
-- **Subprocess (ALL STUBS):** claude/codex/cursor/gemini/grok/kilo/opencode/pi — `spawn()` sets flags only, `send_request()` returns `{"stub":true}` echo, `interrupt()`/`health_check()` no-ops. Real stdin/stdout JSON-RPC unimplemented.
+- **Subprocess (ALL REAL):** `cursor`/`grok`/`gemini` (ACP — JSON-RPC 2.0 over stdio NDJSON, shared `AcpProvider`/`AcpClient`), `codex` (app-server JSON-RPC via `CodexAppServerClient`), `claude` (one-shot `stream-json` per turn), `opencode`/`kilo` (local HTTP server + SSE via shared `OpenCodeServerClient`), `pi` (`pi --mode rpc` via dedicated `PiClient`). Each maps the provider wire format to `ProviderEvent`/`TurnOutcome`; gated real-binary E2E tests (`SYNICODE_*_E2E=1`).
 
 ## Stubs / risks
-- **8 subprocess adapters are non-functional stubs** — only anthropic+openai make real calls.
-- No real subprocess/HTTP/streaming/concurrent-session integration tests (174 tests use `MockSessionAdapter`).
+- ~~8 subprocess adapters are non-functional stubs~~ — **all 10 adapters now make real calls** (see `crates/syncode-provider/PROVIDERS.md`); unit suites drive in-process fakes, real-binary interop covered by gated E2E tests (`SYNICODE_*_E2E=1`).
 - No session timeout/cleanup — abandoned sessions linger in maps.
 - No subprocess reaper / SIGCHLD handling; `ProcessExited` error defined but never thrown.
 - **Trait change breaks all 10 adapters + orchestration reactors.**
