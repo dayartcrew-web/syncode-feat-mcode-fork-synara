@@ -232,7 +232,9 @@ impl ProviderCommandReactor {
             | Command::SetTurnCheckpoint { .. }
             | Command::AddMessage { .. }
             | Command::AppendAssistantDelta { .. }
-            | Command::FinalizeAssistantMessage { .. } => Ok(CommandReaction {
+            | Command::FinalizeAssistantMessage { .. }
+            | Command::UpsertProposedPlan { .. }
+            | Command::CompleteTurnDiff { .. } => Ok(CommandReaction {
                 handled: false,
                 session_id: None,
                 events: vec![],

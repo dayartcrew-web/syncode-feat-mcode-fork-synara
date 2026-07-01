@@ -311,6 +311,35 @@ pub enum DomainEvent {
         finalized_at: Timestamp,
     },
 
+    // ─── Proposed Plan & Checkpoint Events (thread sub-aggregates) ──────
+    /// `thread.proposed-plan.upsert` → upsert a proposed plan on a thread.
+    /// Faithful to mcode (orchestration.ts:1274-1280, decider.ts:1521-1540):
+    /// guards thread existence and echoes the plan. The projector dedups by
+    /// `thread_id:plan_id` (upsert semantics). mcode enforces no count cap here.
+    ProposedPlanUpserted {
+        thread_id: EntityId,
+        plan_id: String,
+        turn_id: Option<EntityId>,
+        plan_markdown: String,
+        implemented_at: Option<String>,
+        implementation_thread_id: Option<EntityId>,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+    },
+    /// `thread.turn.diff.complete` → record a turn's diff checkpoint summary.
+    /// Faithful to mcode (orchestration.ts:1282-1294, decider.ts:1542-1570).
+    /// The projector dedups by `thread_id:turn_id` (one checkpoint per turn).
+    TurnDiffCompleted {
+        thread_id: EntityId,
+        turn_id: EntityId,
+        checkpoint_turn_count: u32,
+        checkpoint_ref: String,
+        status: String,
+        files: Vec<CheckpointFile>,
+        assistant_message_id: Option<EntityId>,
+        completed_at: Timestamp,
+    },
+
     // ─── Activity Events ────────────────────────────────────────────────
     ActivityLogged {
         id: EntityId,
@@ -322,6 +351,15 @@ pub enum DomainEvent {
         thread_id: Option<EntityId>,
         created_at: Timestamp,
     },
+}
+
+/// A file in a turn-diff checkpoint summary (mcode OrchestrationCheckpointFile).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointFile {
+    pub path: String,
+    pub kind: String,
+    pub additions: u32,
+    pub deletions: u32,
 }
 
 impl DomainEvent {
@@ -368,7 +406,9 @@ impl DomainEvent {
             | Self::MarkerAdded { thread_id, .. }
             | Self::MarkerRemoved { thread_id, .. }
             | Self::MarkerDoneSet { thread_id, .. }
-            | Self::MarkerLabelSet { thread_id, .. } => *thread_id,
+            | Self::MarkerLabelSet { thread_id, .. }
+            | Self::ProposedPlanUpserted { thread_id, .. }
+            | Self::TurnDiffCompleted { thread_id, .. } => *thread_id,
         }
     }
 
@@ -413,6 +453,8 @@ impl DomainEvent {
             Self::MessageAdded { .. } => "MessageAdded",
             Self::MessageDeltaAppended { .. } => "MessageDeltaAppended",
             Self::MessageStreamingFinalized { .. } => "MessageStreamingFinalized",
+            Self::ProposedPlanUpserted { .. } => "ProposedPlanUpserted",
+            Self::TurnDiffCompleted { .. } => "TurnDiffCompleted",
             Self::ActivityLogged { .. } => "ActivityLogged",
         }
     }

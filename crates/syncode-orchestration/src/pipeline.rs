@@ -791,7 +791,9 @@ impl Orchestrator {
             // Streaming assistant messages target the thread (existence guard);
             // the produced event persists under the caller-supplied message id.
             Command::AppendAssistantDelta { thread_id, .. }
-            | Command::FinalizeAssistantMessage { thread_id, .. } => Some(*thread_id),
+            | Command::FinalizeAssistantMessage { thread_id, .. }
+            | Command::UpsertProposedPlan { thread_id, .. }
+            | Command::CompleteTurnDiff { thread_id, .. } => Some(*thread_id),
 
             // Turn-level commands
             Command::CompleteTurn { id, .. }
@@ -848,6 +850,8 @@ impl Orchestrator {
             | Command::DispatchQueuedTurn { .. }
             | Command::AppendAssistantDelta { .. }
             | Command::FinalizeAssistantMessage { .. }
+            | Command::UpsertProposedPlan { .. }
+            | Command::CompleteTurnDiff { .. }
             | Command::AppendThreadActivity { .. }
             | Command::AddPinnedMessage { .. }
             | Command::RemovePinnedMessage { .. }

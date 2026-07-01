@@ -5,7 +5,7 @@
 //! of the CQRS/Event Sourcing architecture.
 
 use syncode_core::{
-    EntityId, Timestamp,
+    EntityId, Timestamp, CheckpointFile,
     domain::events::DomainEvent,
 };
 use thiserror::Error;
@@ -283,6 +283,33 @@ pub enum Command {
         thread_id: EntityId,
         message_id: EntityId,
     },
+    /// `thread.proposed-plan.upsert` — upsert a proposed plan on a thread.
+    /// Faithful to mcode (orchestration.ts:1274-1280): {threadId, proposedPlan}.
+    /// mcode enforces no count cap; the projector dedups by `thread:plan`.
+    UpsertProposedPlan {
+        thread_id: EntityId,
+        plan_id: String,
+        turn_id: Option<EntityId>,
+        plan_markdown: String,
+        implemented_at: Option<String>,
+        implementation_thread_id: Option<EntityId>,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+    },
+    /// `thread.turn.diff.complete` — record a turn's diff checkpoint summary.
+    /// Faithful to mcode (orchestration.ts:1282-1294): {threadId, turnId,
+    /// checkpointTurnCount, checkpointRef, status, files, assistantMessageId,
+    /// completedAt}. The projector dedups by `thread:turn`.
+    CompleteTurnDiff {
+        thread_id: EntityId,
+        turn_id: EntityId,
+        checkpoint_turn_count: u32,
+        checkpoint_ref: String,
+        status: String,
+        files: Vec<CheckpointFile>,
+        assistant_message_id: Option<EntityId>,
+        completed_at: Timestamp,
+    },
 }
 
 // ─── Decider Errors ──────────────────────────────────────────────
@@ -524,6 +551,46 @@ impl Decider {
             Command::FinalizeAssistantMessage { thread_id, message_id } => {
                 Self::decide_finalize_assistant_message(thread_id, message_id, current_state)
             }
+            Command::UpsertProposedPlan {
+                thread_id,
+                plan_id,
+                turn_id,
+                plan_markdown,
+                implemented_at,
+                implementation_thread_id,
+                created_at,
+                updated_at,
+            } => Self::decide_upsert_proposed_plan(
+                thread_id,
+                plan_id,
+                turn_id,
+                plan_markdown,
+                implemented_at,
+                implementation_thread_id,
+                created_at,
+                updated_at,
+                current_state,
+            ),
+            Command::CompleteTurnDiff {
+                thread_id,
+                turn_id,
+                checkpoint_turn_count,
+                checkpoint_ref,
+                status,
+                files,
+                assistant_message_id,
+                completed_at,
+            } => Self::decide_complete_turn_diff(
+                thread_id,
+                turn_id,
+                checkpoint_turn_count,
+                checkpoint_ref,
+                status,
+                files,
+                assistant_message_id,
+                completed_at,
+                current_state,
+            ),
         }
     }
 
@@ -1291,6 +1358,60 @@ impl Decider {
         Ok(vec![DomainEvent::MessageStreamingFinalized {
             id: message_id,
             finalized_at: Timestamp::now(),
+        }])
+    }
+
+    /// Upsert a proposed plan (mcode `thread.proposed-plan.upsert`). Guards
+    /// thread existence and echoes the plan; the projector dedups by id.
+    #[allow(clippy::too_many_arguments)]
+    fn decide_upsert_proposed_plan(
+        thread_id: EntityId,
+        plan_id: String,
+        turn_id: Option<EntityId>,
+        plan_markdown: String,
+        implemented_at: Option<String>,
+        implementation_thread_id: Option<EntityId>,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        Ok(vec![DomainEvent::ProposedPlanUpserted {
+            thread_id,
+            plan_id,
+            turn_id,
+            plan_markdown,
+            implemented_at,
+            implementation_thread_id,
+            created_at,
+            updated_at,
+        }])
+    }
+
+    /// Record a turn's diff checkpoint (mcode `thread.turn.diff.complete`).
+    /// Guards thread existence and echoes the checkpoint summary.
+    #[allow(clippy::too_many_arguments)]
+    fn decide_complete_turn_diff(
+        thread_id: EntityId,
+        turn_id: EntityId,
+        checkpoint_turn_count: u32,
+        checkpoint_ref: String,
+        status: String,
+        files: Vec<CheckpointFile>,
+        assistant_message_id: Option<EntityId>,
+        completed_at: Timestamp,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        Ok(vec![DomainEvent::TurnDiffCompleted {
+            thread_id,
+            turn_id,
+            checkpoint_turn_count,
+            checkpoint_ref,
+            status,
+            files,
+            assistant_message_id,
+            completed_at,
         }])
     }
 
@@ -2182,6 +2303,114 @@ mod tests {
             Command::FinalizeAssistantMessage {
                 thread_id: tid,
                 message_id: tid,
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn upsert_proposed_plan_success() {
+        let tid = EntityId::new();
+        let now = Timestamp::now();
+        let events = Decider::decide(
+            Command::UpsertProposedPlan {
+                thread_id: tid,
+                plan_id: "plan-1".to_string(),
+                turn_id: None,
+                plan_markdown: "# Plan".to_string(),
+                implemented_at: None,
+                implementation_thread_id: None,
+                created_at: now,
+                updated_at: now,
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ProposedPlanUpserted {
+                thread_id, plan_id, plan_markdown, ..
+            } => {
+                assert_eq!(*thread_id, tid);
+                assert_eq!(plan_id, "plan-1");
+                assert_eq!(plan_markdown, "# Plan");
+            }
+            _ => panic!("expected ProposedPlanUpserted"),
+        }
+    }
+
+    #[test]
+    fn upsert_proposed_plan_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::UpsertProposedPlan {
+                thread_id: tid,
+                plan_id: "plan-1".to_string(),
+                turn_id: None,
+                plan_markdown: "# Plan".to_string(),
+                implemented_at: None,
+                implementation_thread_id: None,
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn complete_turn_diff_success() {
+        let tid = EntityId::new();
+        let turn = EntityId::new();
+        let now = Timestamp::now();
+        let events = Decider::decide(
+            Command::CompleteTurnDiff {
+                thread_id: tid,
+                turn_id: turn,
+                checkpoint_turn_count: 3,
+                checkpoint_ref: "abc123".to_string(),
+                status: "ready".to_string(),
+                files: vec![CheckpointFile {
+                    path: "src/main.rs".to_string(),
+                    kind: "modify".to_string(),
+                    additions: 10,
+                    deletions: 2,
+                }],
+                assistant_message_id: None,
+                completed_at: now,
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::TurnDiffCompleted {
+                turn_id, checkpoint_ref, status, files, ..
+            } => {
+                assert_eq!(*turn_id, turn);
+                assert_eq!(checkpoint_ref, "abc123");
+                assert_eq!(status, "ready");
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].additions, 10);
+            }
+            _ => panic!("expected TurnDiffCompleted"),
+        }
+    }
+
+    #[test]
+    fn complete_turn_diff_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::CompleteTurnDiff {
+                thread_id: tid,
+                turn_id: tid,
+                checkpoint_turn_count: 0,
+                checkpoint_ref: "abc".to_string(),
+                status: "ready".to_string(),
+                files: vec![],
+                assistant_message_id: None,
+                completed_at: Timestamp::now(),
             },
             None,
         );

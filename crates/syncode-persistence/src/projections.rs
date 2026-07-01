@@ -682,7 +682,13 @@ impl ProjectionManager {
             | DomainEvent::TurnDispatchRequested { .. }
             // MessageStreamingFinalized flips the in-memory `is_streaming` flag
             // only; view_messages has no streaming column (deferred).
-            | DomainEvent::MessageStreamingFinalized { .. } => {}
+            | DomainEvent::MessageStreamingFinalized { .. }
+            // Proposed plans and turn checkpoints are materialized into the
+            // in-memory read model only; persisting them to SQLite
+            // (view_proposed_plans / view_checkpoints) is deferred (like the
+            // session blob and the streaming flag).
+            | DomainEvent::ProposedPlanUpserted { .. }
+            | DomainEvent::TurnDiffCompleted { .. } => {}
         }
 
         // Update watermark

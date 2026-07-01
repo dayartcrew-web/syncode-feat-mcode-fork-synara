@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use syncode_core::domain::events::DomainEvent;
 use crate::read_model::{
-    ProjectView, ThreadView, ThreadSessionView, TurnView, MessageView, ActivityView, PinnedMessageView, MarkerView,
+    ProjectView, ThreadView, ThreadSessionView, TurnView, MessageView, ActivityView, PinnedMessageView, MarkerView, ProposedPlanView, CheckpointView,
 };
 
 /// In-memory read model store maintained by the Projector.
@@ -21,6 +21,8 @@ pub struct ReadModelStore {
     pub activities: Vec<ActivityView>,
     pub pinned_messages: HashMap<String, PinnedMessageView>,
     pub markers: HashMap<String, MarkerView>,
+    pub proposed_plans: HashMap<String, ProposedPlanView>,
+    pub checkpoints: HashMap<String, CheckpointView>,
 }
 
 impl ReadModelStore {
@@ -402,6 +404,49 @@ impl Projector {
                 if let Some(msg) = store.messages.get_mut(&key) {
                     msg.is_streaming = false;
                 }
+            }
+
+            // Upsert a proposed plan, deduped by `thread_id:plan_id`. On update
+            // the original `created_at` is preserved (mcode `proposedPlan.createdAt`).
+            DomainEvent::ProposedPlanUpserted {
+                thread_id, plan_id, turn_id, plan_markdown,
+                implemented_at, implementation_thread_id, created_at, updated_at,
+            } => {
+                let key = format!("{}:{}", thread_id.as_str(), plan_id);
+                let created_at = store
+                    .proposed_plans
+                    .get(&key)
+                    .map(|p| p.created_at.clone())
+                    .unwrap_or_else(|| created_at.to_string());
+                store.proposed_plans.insert(key, ProposedPlanView {
+                    thread_id: thread_id.as_str(),
+                    plan_id: plan_id.clone(),
+                    turn_id: turn_id.map(|t| t.as_str()),
+                    plan_markdown: plan_markdown.clone(),
+                    implemented_at: implemented_at.clone(),
+                    implementation_thread_id: implementation_thread_id.map(|t| t.as_str()),
+                    created_at,
+                    updated_at: updated_at.to_string(),
+                });
+            }
+
+            // Record a turn's diff checkpoint, deduped by `thread_id:turn_id`
+            // (one checkpoint per turn; upsert overwrites).
+            DomainEvent::TurnDiffCompleted {
+                thread_id, turn_id, checkpoint_turn_count, checkpoint_ref,
+                status, files, assistant_message_id, completed_at,
+            } => {
+                let key = format!("{}:{}", thread_id.as_str(), turn_id.as_str());
+                store.checkpoints.insert(key, CheckpointView {
+                    thread_id: thread_id.as_str(),
+                    turn_id: turn_id.as_str(),
+                    checkpoint_turn_count: *checkpoint_turn_count,
+                    checkpoint_ref: checkpoint_ref.clone(),
+                    status: status.clone(),
+                    files: files.clone(),
+                    assistant_message_id: assistant_message_id.map(|m| m.as_str()),
+                    completed_at: completed_at.to_string(),
+                });
             }
 
             DomainEvent::ActivityLogged {

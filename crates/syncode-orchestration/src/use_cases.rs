@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 use syncode_core::EntityId;
+use syncode_core::{Timestamp, CheckpointFile};
 
 use crate::decider::{Command, ImportedMessage, ThreadSession};
 use crate::pipeline::{CommandResult, Orchestrator, OrchestrationError};
@@ -388,6 +389,65 @@ impl ApplicationService {
             .handle_command(Command::FinalizeAssistantMessage {
                 thread_id,
                 message_id,
+            })
+            .await
+    }
+
+    /// Upsert a proposed plan on a thread. Faithful to mcode
+    /// `thread.proposed-plan.upsert` {threadId, proposedPlan}. Deduped by
+    /// plan id in the read model; mcode enforces no count cap.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_proposed_plan(
+        &self,
+        thread_id: EntityId,
+        plan_id: String,
+        turn_id: Option<EntityId>,
+        plan_markdown: String,
+        implemented_at: Option<String>,
+        implementation_thread_id: Option<EntityId>,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::UpsertProposedPlan {
+                thread_id,
+                plan_id,
+                turn_id,
+                plan_markdown,
+                implemented_at,
+                implementation_thread_id,
+                created_at,
+                updated_at,
+            })
+            .await
+    }
+
+    /// Record a turn's diff checkpoint summary. Faithful to mcode
+    /// `thread.turn.diff.complete` {threadId, turnId, checkpointTurnCount,
+    /// checkpointRef, status, files, assistantMessageId, completedAt}. One
+    /// checkpoint per turn (upsert overwrites).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_turn_diff(
+        &self,
+        thread_id: EntityId,
+        turn_id: EntityId,
+        checkpoint_turn_count: u32,
+        checkpoint_ref: String,
+        status: String,
+        files: Vec<CheckpointFile>,
+        assistant_message_id: Option<EntityId>,
+        completed_at: Timestamp,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::CompleteTurnDiff {
+                thread_id,
+                turn_id,
+                checkpoint_turn_count,
+                checkpoint_ref,
+                status,
+                files,
+                assistant_message_id,
+                completed_at,
             })
             .await
     }

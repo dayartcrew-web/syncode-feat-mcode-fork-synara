@@ -4,6 +4,7 @@
 //! They are optimized for read access patterns in the frontend.
 
 use serde::{Deserialize, Serialize};
+use syncode_core::CheckpointFile;
 
 // ─── Project Read Model ──────────────────────────────────────────
 
@@ -143,4 +144,39 @@ pub struct MarkerView {
     pub done: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+// ─── Proposed Plan Read Model (thread sub-aggregate) ─────────────
+
+/// A proposed plan attached to a thread (mcode OrchestrationProposedPlan),
+/// keyed by `thread_id:plan_id`. Upsert semantics: re-upserting a plan id
+/// updates it (the projector preserves the original `created_at`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposedPlanView {
+    pub thread_id: String,
+    pub plan_id: String,
+    pub turn_id: Option<String>,
+    pub plan_markdown: String,
+    pub implemented_at: Option<String>,
+    pub implementation_thread_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// ─── Turn Checkpoint Read Model (thread sub-aggregate) ───────────
+
+/// A turn's diff-checkpoint summary (mcode OrchestrationCheckpointSummary),
+/// keyed by `thread_id:turn_id` (one checkpoint per turn; upsert overwrites).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointView {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub checkpoint_turn_count: u32,
+    pub checkpoint_ref: String,
+    /// `ready` | `missing` | `error` (mcode OrchestrationCheckpointStatus).
+    /// Stored as a free-form string, consistent with runtime/interaction modes.
+    pub status: String,
+    pub files: Vec<CheckpointFile>,
+    pub assistant_message_id: Option<String>,
+    pub completed_at: String,
 }
