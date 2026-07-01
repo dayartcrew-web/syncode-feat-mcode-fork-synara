@@ -7,6 +7,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import type { PushEvent } from "./useWebSocket";
 
 /** Provider event types that can arrive via WebSocket push */
 export type ProviderStreamEvent =
@@ -38,7 +39,7 @@ export interface StreamState {
 
 interface UseProviderStreamOptions {
   /** The onPush callback from useWebSocket */
-  onPush: (callback: (params: { channel: string; event: string; data: unknown }) => void) => () => void;
+  onPush: (callback: (event: PushEvent) => void) => () => void;
   /** Session ID to filter events for (null = all) */
   sessionId?: string | null;
   /** Maximum events to keep in the buffer */
@@ -72,12 +73,12 @@ export function useProviderStream({
   }, []);
 
   useEffect(() => {
-    const unsub = onPush((params) => {
+    const unsub = onPush((pushEvent) => {
       // Filter by channel
-      if (params.channel !== "provider") return;
+      if (pushEvent.channel !== "provider") return;
 
       try {
-        const data = params.data as Record<string, unknown>;
+        const data = pushEvent.data as Record<string, unknown>;
         const eventSessionId = (data.session_id as string) ?? "";
 
         // Filter by session if specified
@@ -85,7 +86,7 @@ export function useProviderStream({
 
         let streamEvent: ProviderStreamEvent | null = null;
 
-        switch (params.event) {
+        switch (pushEvent.eventType) {
           case "token": {
             const token = (data.token as string) ?? "";
             streamEvent = { type: "token", session_id: eventSessionId, token };

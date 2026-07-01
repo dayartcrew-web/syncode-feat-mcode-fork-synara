@@ -8,7 +8,7 @@ import TerminalView from "./components/TerminalView";
 const WS_URL = "ws://127.0.0.1:8080/ws";
 
 export default function App() {
-  const { connected, rpc, onPush } = useWebSocket(WS_URL);
+  const { connected, status, rpc, onPush, subscribe } = useWebSocket(WS_URL);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
@@ -17,11 +17,16 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState("claude-sonnet-4-20250514");
   const [showTerminal, setShowTerminal] = useState(false);
 
-  // Create initial project if none exists
+  // Create initial project if none exists, and subscribe to the orchestration
+  // channel so we receive a snapshot + live deltas (snapshot-then-stream).
   useEffect(() => {
     if (!connected || !rpc) return;
     (async () => {
       try {
+        // Subscribe to orchestration pushes (server emits a shell snapshot).
+        await subscribe("orchestration").catch(() => {
+          /* server may not be running; tolerate */
+        });
         const result = await rpc<{ projects: Array<{ id: string }> }>("project/list");
         const projects = result.projects ?? [];
         if (projects.length > 0 && projects[0]) {
@@ -38,13 +43,16 @@ export default function App() {
         console.warn("[App] Project init failed (expected if WS not running):", err);
       }
     })();
-  }, [connected, rpc]);
+  }, [connected, rpc, subscribe]);
 
-  // Listen for push events to auto-refresh
+  // Listen for push events to auto-refresh. Both snapshots (initial state) and
+  // live deltas on the orchestration channel trigger a refresh — the simplest
+  // reconciliation that re-reads the current projected state.
   useEffect(() => {
-    const unsub = onPush((params) => {
-      console.log("[App] Push event:", params.channel, params.event);
-      if (params.channel === "orchestration") {
+    const unsub = onPush((event) => {
+      if (event.channel === "orchestration") {
+        // A snapshot seeds state; a live delta updates it. Either way, bump
+        // the refresh trigger so ThreadList/ChatView re-read current state.
         setRefreshTrigger((n) => n + 1);
       }
     });
@@ -87,10 +95,10 @@ export default function App() {
           <span style={{
             marginLeft: "auto",
             width: 8, height: 8, borderRadius: "50%",
-            background: connected ? "#4caf50" : "#f44336",
+            background: status === "open" ? "#4caf50" : status === "reconnecting" ? "#ff9800" : "#f44336",
           }} />
           <span style={{ fontSize: 10, color: "#666" }}>
-            {connected ? "connected" : "offline"}
+            {status === "open" ? "connected" : status === "reconnecting" ? "reconnecting" : "offline"}
           </span>
         </div>
 
