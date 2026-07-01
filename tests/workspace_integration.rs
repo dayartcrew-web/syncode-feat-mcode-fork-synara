@@ -241,7 +241,7 @@ async fn automation_scheduler_crud() {
         "echo hi".to_string(),
         ScheduleType::Manual,
     );
-    let id = def.id.clone();
+    let id = def.id;
     let id_str = id.as_str();
     scheduler.register(def).await.unwrap();
 
