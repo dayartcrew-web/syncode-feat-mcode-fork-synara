@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use syncode_core::EntityId;
 use syncode_provider::adapters::opencode::{OpenCodeAdapter, OpenCodeConfig};
 use syncode_provider::{
-    ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest, SessionContext,
-    PROVIDER_OPENCODE,
+    PROVIDER_OPENCODE, ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest,
+    SessionContext,
 };
 use tokio_stream::StreamExt;
 

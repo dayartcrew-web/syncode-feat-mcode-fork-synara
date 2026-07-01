@@ -17,7 +17,9 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use super::super::trait_def::*;
-use crate::opencode_server::{KILO_CLI_SPEC, ModelRef, OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnStatus};
+use crate::opencode_server::{
+    KILO_CLI_SPEC, ModelRef, OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnStatus,
+};
 
 /// Startup-wait timeout for the local `kilo serve` server (mcode uses 20s).
 const SERVER_TIMEOUT_MS: u64 = 20_000;
@@ -302,10 +304,7 @@ impl ProviderAdapter for KiloAdapter {
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -688,14 +687,20 @@ mod tests {
 
         let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));
         let m = adapter.model_ref_for(&req).unwrap();
-        assert_eq!((m.provider_id.as_str(), m.id.as_str()), ("anthropic", "claude-opus-4-1"));
+        assert_eq!(
+            (m.provider_id.as_str(), m.id.as_str()),
+            ("anthropic", "claude-opus-4-1")
+        );
 
         let req = ProviderRequest::new(
             "chat",
             Some(json!({ "input": "x", "model": "google/gemini-2.5-pro" })),
         );
         let m = adapter.model_ref_for(&req).unwrap();
-        assert_eq!((m.provider_id.as_str(), m.id.as_str()), ("google", "gemini-2.5-pro"));
+        assert_eq!(
+            (m.provider_id.as_str(), m.id.as_str()),
+            ("google", "gemini-2.5-pro")
+        );
 
         adapter.config = None;
         let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));

@@ -50,7 +50,9 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use super::super::trait_def::*;
-use crate::opencode_server::{ModelRef, OPENCODE_CLI_SPEC, OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnStatus};
+use crate::opencode_server::{
+    ModelRef, OPENCODE_CLI_SPEC, OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnStatus,
+};
 
 /// Startup-wait timeout for the local `opencode serve` server (mcode uses 20s).
 const SERVER_TIMEOUT_MS: u64 = 20_000;
@@ -158,9 +160,7 @@ impl OpenCodeAdapter {
                     .map(|c| c.model.clone())
                     .filter(|m| !m.is_empty())
             })
-            .or_else(|| {
-                (!self.oc_config.model.is_empty()).then(|| self.oc_config.model.clone())
-            })?;
+            .or_else(|| (!self.oc_config.model.is_empty()).then(|| self.oc_config.model.clone()))?;
         model_ref(&m)
     }
 
@@ -171,9 +171,7 @@ impl OpenCodeAdapter {
             .as_ref()
             .map(|c| c.model.clone())
             .filter(|m| !m.is_empty())
-            .or_else(|| {
-                (!self.oc_config.model.is_empty()).then(|| self.oc_config.model.clone())
-            })?;
+            .or_else(|| (!self.oc_config.model.is_empty()).then(|| self.oc_config.model.clone()))?;
         model_ref(&m)
     }
 
@@ -343,10 +341,7 @@ impl ProviderAdapter for OpenCodeAdapter {
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -358,7 +353,12 @@ impl ProviderAdapter for OpenCodeAdapter {
             return Err(ProviderAdapterError::NotSpawned);
         };
         let session_id = client
-            .create_session("syncode", model.as_ref(), Some(&agent), self.oc_config.full_auto)
+            .create_session(
+                "syncode",
+                model.as_ref(),
+                Some(&agent),
+                self.oc_config.full_auto,
+            )
             .await?;
         drop(guard);
 
@@ -737,7 +737,10 @@ mod tests {
         // No request model → spawn config model.
         let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));
         let m = adapter.model_ref_for(&req).unwrap();
-        assert_eq!((m.provider_id.as_str(), m.id.as_str()), ("anthropic", "claude-opus-4-1"));
+        assert_eq!(
+            (m.provider_id.as_str(), m.id.as_str()),
+            ("anthropic", "claude-opus-4-1")
+        );
 
         // Request model wins.
         let req = ProviderRequest::new(
@@ -745,7 +748,10 @@ mod tests {
             Some(json!({ "input": "x", "model": "google/gemini-2.5-pro" })),
         );
         let m = adapter.model_ref_for(&req).unwrap();
-        assert_eq!((m.provider_id.as_str(), m.id.as_str()), ("google", "gemini-2.5-pro"));
+        assert_eq!(
+            (m.provider_id.as_str(), m.id.as_str()),
+            ("google", "gemini-2.5-pro")
+        );
 
         // No config model → oc_config default.
         adapter.config = None;

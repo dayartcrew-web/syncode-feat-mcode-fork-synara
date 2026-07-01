@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use syncode_core::EntityId;
 use syncode_provider::adapters::kilo::{KiloAdapter, KiloConfig};
 use syncode_provider::{
-    ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest, SessionContext, PROVIDER_KILO,
+    PROVIDER_KILO, ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest, SessionContext,
 };
 use tokio_stream::StreamExt;
 

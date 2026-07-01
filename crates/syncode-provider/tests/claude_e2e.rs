@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 use syncode_core::EntityId;
 use syncode_provider::adapters::claude::ClaudeAdapter;
 use syncode_provider::{
-    ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest, SessionContext, PROVIDER_CLAUDE,
+    PROVIDER_CLAUDE, ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest,
+    SessionContext,
 };
 use tokio_stream::StreamExt;
 
@@ -53,7 +54,9 @@ fn e2e_enabled() -> bool {
 #[tokio::test]
 async fn claude_real_binary_one_turn_completes() {
     if !e2e_enabled() {
-        eprintln!("[skip] claude E2E: set SYNICODE_CLAUDE_E2E=1 and install the `claude` CLI to run");
+        eprintln!(
+            "[skip] claude E2E: set SYNICODE_CLAUDE_E2E=1 and install the `claude` CLI to run"
+        );
         return;
     }
 

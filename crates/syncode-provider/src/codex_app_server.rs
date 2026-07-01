@@ -98,10 +98,7 @@ pub struct CodexAppServerClient {
 
 impl CodexAppServerClient {
     /// Wrap an already-constructed transport + incoming channel.
-    pub fn new(
-        transport: JsonRpcTransport,
-        incoming: mpsc::Receiver<IncomingMessage>,
-    ) -> Self {
+    pub fn new(transport: JsonRpcTransport, incoming: mpsc::Receiver<IncomingMessage>) -> Self {
         Self {
             transport,
             incoming,
@@ -487,7 +484,9 @@ fn parse_turn_status(status: &str) -> TurnStatus {
 /// emitted both); reads `last_token_usage.{input,output}_tokens` and
 /// `total_token_usage.total_tokens`.
 fn parse_token_usage(params: &Value) -> Option<UsageInfo> {
-    let token_usage = params.get("tokenUsage").or_else(|| params.get("token_usage"))?;
+    let token_usage = params
+        .get("tokenUsage")
+        .or_else(|| params.get("token_usage"))?;
     let last = token_usage
         .get("last_token_usage")
         .or_else(|| token_usage.get("lastTokenUsage"));
@@ -549,11 +548,7 @@ fn map_item_event(method: &str, params: &Value, thread_id: &str) -> Vec<Provider
         .unwrap_or("");
     let is_tool = matches!(
         kind,
-        "command_execution"
-            | "file_change"
-            | "mcp_tool_call"
-            | "dynamic_tool_call"
-            | "web_search"
+        "command_execution" | "file_change" | "mcp_tool_call" | "dynamic_tool_call" | "web_search"
     );
     if !is_tool {
         return Vec::new();
@@ -569,7 +564,11 @@ fn map_item_event(method: &str, params: &Value, thread_id: &str) -> Vec<Provider
                 .join(" ")
         })
         .filter(|s| !s.is_empty())
-        .or_else(|| item.get("title").and_then(|v| v.as_str()).map(str::to_owned))
+        .or_else(|| {
+            item.get("title")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
         .unwrap_or_else(|| kind.to_string());
 
     if method.ends_with("completed") {
@@ -688,11 +687,20 @@ mod tests {
             // initialized notification (no id)
             let note = peer_read(&mut reader).await;
             assert_eq!(note["method"], "initialized");
-            assert!(note.get("id").is_none(), "initialized must be a notification");
+            assert!(
+                note.get("id").is_none(),
+                "initialized must be a notification"
+            );
         });
 
-        let result = client.initialize("syncode", "0.1.0").await.expect("initialize");
-        assert!(result.is_object(), "initialize result should be an object: {result}");
+        let result = client
+            .initialize("syncode", "0.1.0")
+            .await
+            .expect("initialize");
+        assert!(
+            result.is_object(),
+            "initialize result should be an object: {result}"
+        );
 
         server.await.unwrap();
         client.shutdown().await.unwrap();
@@ -718,7 +726,12 @@ mod tests {
         });
 
         let thread_id = client
-            .start_thread(Some("gpt-5.5"), "/tmp/proj", "on-request", "workspace-write")
+            .start_thread(
+                Some("gpt-5.5"),
+                "/tmp/proj",
+                "on-request",
+                "workspace-write",
+            )
             .await
             .expect("start_thread");
         assert_eq!(thread_id, "thr-1");
@@ -815,7 +828,10 @@ mod tests {
         assert_eq!(result.turn_id.as_deref(), Some("turn-1"));
         assert_eq!(result.stop_reason.as_deref(), Some("end_turn"));
         let usage = result.usage.expect("usage");
-        assert_eq!((usage.input_tokens, usage.output_tokens, usage.total_tokens), (10, 7, 42));
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (10, 7, 42)
+        );
 
         drop(event_tx);
         let mut events = Vec::new();
@@ -858,7 +874,13 @@ mod tests {
         });
 
         let result = client
-            .start_turn("thr-1", vec![json!({ "type": "text", "text": "x" })], None, true, &event_tx)
+            .start_turn(
+                "thr-1",
+                vec![json!({ "type": "text", "text": "x" })],
+                None,
+                true,
+                &event_tx,
+            )
             .await
             .expect("start_turn");
         assert_eq!(result.status, TurnStatus::Cancelled);
@@ -890,7 +912,13 @@ mod tests {
         });
 
         let result = client
-            .start_turn("thr-1", vec![json!({ "type": "text", "text": "x" })], None, true, &event_tx)
+            .start_turn(
+                "thr-1",
+                vec![json!({ "type": "text", "text": "x" })],
+                None,
+                true,
+                &event_tx,
+            )
             .await
             .expect("start_turn");
         assert_eq!(result.status, TurnStatus::Failed);
@@ -939,7 +967,13 @@ mod tests {
         });
 
         let result = client
-            .start_turn("thr-1", vec![json!({ "type": "text", "text": "x" })], None, true, &event_tx)
+            .start_turn(
+                "thr-1",
+                vec![json!({ "type": "text", "text": "x" })],
+                None,
+                true,
+                &event_tx,
+            )
             .await
             .expect("start_turn");
         assert_eq!(result.status, TurnStatus::Completed);
@@ -1006,7 +1040,10 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!((snake.input_tokens, snake.output_tokens, snake.total_tokens), (30, 20, 100));
+        assert_eq!(
+            (snake.input_tokens, snake.output_tokens, snake.total_tokens),
+            (30, 20, 100)
+        );
 
         let camel = parse_token_usage(&json!({
             "tokenUsage": {
@@ -1015,18 +1052,23 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!((camel.input_tokens, camel.output_tokens, camel.total_tokens), (2, 1, 5));
+        assert_eq!(
+            (camel.input_tokens, camel.output_tokens, camel.total_tokens),
+            (2, 1, 5)
+        );
     }
 
     #[test]
     fn token_usage_all_zero_is_none() {
-        assert!(parse_token_usage(&json!({
-            "tokenUsage": {
-                "total_token_usage": { "total_tokens": 0 },
-                "last_token_usage": { "input_tokens": 0, "output_tokens": 0 }
-            }
-        }))
-        .is_none());
+        assert!(
+            parse_token_usage(&json!({
+                "tokenUsage": {
+                    "total_token_usage": { "total_tokens": 0 },
+                    "last_token_usage": { "input_tokens": 0, "output_tokens": 0 }
+                }
+            }))
+            .is_none()
+        );
     }
 
     #[test]
@@ -1061,12 +1103,14 @@ mod tests {
 
     #[test]
     fn map_item_non_tool_is_skipped() {
-        assert!(map_item_event(
-            "item/started",
-            &json!({ "item": { "type": "reasoning" } }),
-            "thr-1"
-        )
-        .is_empty());
+        assert!(
+            map_item_event(
+                "item/started",
+                &json!({ "item": { "type": "reasoning" } }),
+                "thr-1"
+            )
+            .is_empty()
+        );
         assert!(map_item_event("item/started", &json!({}), "thr-1").is_empty());
     }
 }

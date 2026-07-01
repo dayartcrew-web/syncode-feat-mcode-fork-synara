@@ -160,12 +160,10 @@ impl CodexAdapter {
             .as_ref()
             .map(|c| c.model.clone())
             .filter(|m| !m.is_empty());
-        extra_model
-            .or(cfg_model)
-            .or_else(|| {
-                let m = &self.codex_config.model;
-                (!m.is_empty()).then(|| m.clone())
-            })
+        extra_model.or(cfg_model).or_else(|| {
+            let m = &self.codex_config.model;
+            (!m.is_empty()).then(|| m.clone())
+        })
     }
 
     /// Resolve the thread id (our session id) for a request. An explicit
@@ -252,7 +250,11 @@ impl ProviderAdapter for CodexAdapter {
             .get("cwd")
             .and_then(|v| v.as_str())
             .map(str::to_owned)
-            .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".to_string()));
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| ".".to_string())
+            });
         let spec = self.codex_config.spec(&cwd);
         let mut client = CodexAppServerClient::spawn(&spec).await?;
         client
@@ -307,10 +309,7 @@ impl ProviderAdapter for CodexAdapter {
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -323,7 +322,9 @@ impl ProviderAdapter for CodexAdapter {
             .as_ref()
             .map(|c| c.model.clone())
             .filter(|m| !m.is_empty())
-            .or_else(|| (!self.codex_config.model.is_empty()).then(|| self.codex_config.model.clone()));
+            .or_else(|| {
+                (!self.codex_config.model.is_empty()).then(|| self.codex_config.model.clone())
+            });
         let thread_id = client
             .start_thread(
                 model.as_deref(),
@@ -872,7 +873,10 @@ mod tests {
         };
         let spec = config.spec("/tmp/work");
         assert_eq!(spec.command, "/usr/local/bin/codex");
-        assert_eq!(spec.args, vec!["app-server".to_string(), "--foo".to_string()]);
+        assert_eq!(
+            spec.args,
+            vec!["app-server".to_string(), "--foo".to_string()]
+        );
         assert_eq!(spec.cwd.as_deref(), Some(std::path::Path::new("/tmp/work")));
     }
 

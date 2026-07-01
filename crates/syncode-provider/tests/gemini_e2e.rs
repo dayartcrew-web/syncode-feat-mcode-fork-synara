@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 use syncode_core::EntityId;
 use syncode_provider::adapters::gemini;
 use syncode_provider::{
-    ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest, SessionContext,
-    PROVIDER_GEMINI,
+    PROVIDER_GEMINI, ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest,
+    SessionContext,
 };
 use tokio_stream::StreamExt;
 
@@ -55,9 +55,7 @@ fn e2e_enabled() -> bool {
 #[tokio::test]
 async fn gemini_real_binary_one_turn_completes() {
     if !e2e_enabled() {
-        eprintln!(
-            "[skip] gemini E2E: set SYNICODE_ACP_E2E=1 and install the `gemini` CLI to run"
-        );
+        eprintln!("[skip] gemini E2E: set SYNICODE_ACP_E2E=1 and install the `gemini` CLI to run");
         return;
     }
 

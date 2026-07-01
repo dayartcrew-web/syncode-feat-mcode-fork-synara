@@ -49,8 +49,8 @@ use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::StreamExt;
 
-use crate::trait_def::{ProviderAdapterError, ProviderEvent, UsageInfo};
 use crate::trait_def::{PROVIDER_KILO, PROVIDER_OPENCODE};
+use crate::trait_def::{ProviderAdapterError, ProviderEvent, UsageInfo};
 
 /// Spec parameterizing an OpenCode-compatible CLI/server. Mirrors mcode's
 /// `OpenCodeCompatibleCliSpec`: the only differences between OpenCode and Kilo
@@ -199,13 +199,19 @@ impl OpenCodeServerClient {
         let port = free_port().await?;
         let port_str = port.to_string();
         let mut cmd = tokio::process::Command::new(binary);
-        cmd.args(["serve", "--hostname", "127.0.0.1", "--port", port_str.as_str()])
-            .args(extra_args)
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+        cmd.args([
+            "serve",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            port_str.as_str(),
+        ])
+        .args(extra_args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
         // Inherit the parent env so the server finds its config/credentials.
         let mut child = cmd.spawn().map_err(ProviderAdapterError::Io)?;
         let stdout = child
@@ -381,9 +387,7 @@ impl OpenCodeServerClient {
             .and_then(|v| v.as_str())
             .map(str::to_owned)
             .ok_or_else(|| {
-                ProviderAdapterError::Internal(format!(
-                    "session.create response missing id: {val}"
-                ))
+                ProviderAdapterError::Internal(format!("session.create response missing id: {val}"))
             })
     }
 
@@ -529,12 +533,12 @@ impl OpenCodeServerClient {
                 Some(Err(e)) => {
                     return Err(ProviderAdapterError::Internal(format!(
                         "event stream read error: {e}"
-                    )))
+                    )));
                 }
                 None => {
                     return Err(ProviderAdapterError::ProcessExited(
                         "opencode event stream closed mid-turn".to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -794,10 +798,7 @@ fn map_part_updated(props: &Value, session_id: &str) -> Vec<ProviderEvent> {
                 .unwrap_or("tool")
                 .to_string();
             let state = part.get("state").unwrap_or(&Value::Null);
-            let status = state
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let status = state.get("status").and_then(|v| v.as_str()).unwrap_or("");
             match status {
                 "completed" => vec![ProviderEvent::ToolResult {
                     session_id: session_id.to_string(),
@@ -936,7 +937,11 @@ mod tests {
     #[test]
     fn parse_ready_url_opencode() {
         assert_eq!(
-            parse_ready_url("opencode server listening on http://127.0.0.1:41239", "opencode server listening").as_deref(),
+            parse_ready_url(
+                "opencode server listening on http://127.0.0.1:41239",
+                "opencode server listening"
+            )
+            .as_deref(),
             Some("http://127.0.0.1:41239"),
         );
     }
@@ -944,16 +949,28 @@ mod tests {
     #[test]
     fn parse_ready_url_kilo_https() {
         assert_eq!(
-            parse_ready_url("kilo server listening on https://127.0.0.1:9000", "kilo server listening").as_deref(),
+            parse_ready_url(
+                "kilo server listening on https://127.0.0.1:9000",
+                "kilo server listening"
+            )
+            .as_deref(),
             Some("https://127.0.0.1:9000"),
         );
     }
 
     #[test]
     fn parse_ready_url_rejects_wrong_prefix_and_no_url() {
-        assert!(parse_ready_url("opencode server listening", "opencode server listening").is_none());
+        assert!(
+            parse_ready_url("opencode server listening", "opencode server listening").is_none()
+        );
         assert!(parse_ready_url("some other line", "opencode server listening").is_none());
-        assert!(parse_ready_url("opencode server listening on ftp://x", "opencode server listening").is_none());
+        assert!(
+            parse_ready_url(
+                "opencode server listening on ftp://x",
+                "opencode server listening"
+            )
+            .is_none()
+        );
     }
 
     // ---- SSE block + event parsing ----
@@ -993,7 +1010,12 @@ mod tests {
         json!({ "type": "__test__", "properties": obj })
     }
 
-    fn map(props_obj: Value, ty: &str, session_id: &str, usage: &mut Option<UsageInfo>) -> EventOutcome {
+    fn map(
+        props_obj: Value,
+        ty: &str,
+        session_id: &str,
+        usage: &mut Option<UsageInfo>,
+    ) -> EventOutcome {
         let event = json!({ "type": ty, "properties": props_obj });
         map_event(&event, session_id, usage)
     }
@@ -1001,23 +1023,40 @@ mod tests {
     #[test]
     fn map_text_delta_to_token() {
         let mut usage = None;
-        let out = map(json!({ "delta": "Hello" }), "message.part.delta", "s1", &mut usage);
+        let out = map(
+            json!({ "delta": "Hello" }),
+            "message.part.delta",
+            "s1",
+            &mut usage,
+        );
         assert_eq!(out.events.len(), 1);
-        assert!(matches!(&out.events[0], ProviderEvent::Token { content, .. } if content == "Hello"));
+        assert!(
+            matches!(&out.events[0], ProviderEvent::Token { content, .. } if content == "Hello")
+        );
         assert!(out.terminal.is_none());
     }
 
     #[test]
     fn map_empty_delta_emits_nothing() {
         let mut usage = None;
-        let out = map(json!({ "delta": "" }), "session.next.text.delta", "s1", &mut usage);
+        let out = map(
+            json!({ "delta": "" }),
+            "session.next.text.delta",
+            "s1",
+            &mut usage,
+        );
         assert!(out.events.is_empty());
     }
 
     #[test]
     fn map_session_idle_is_terminal_completed() {
         let mut usage = None;
-        let out = map(json!({ "sessionID": "s1" }), "session.idle", "s1", &mut usage);
+        let out = map(
+            json!({ "sessionID": "s1" }),
+            "session.idle",
+            "s1",
+            &mut usage,
+        );
         assert_eq!(out.terminal, Some(TurnStatus::Completed));
     }
 
@@ -1056,7 +1095,9 @@ mod tests {
         );
         assert_eq!(out.terminal, Some(TurnStatus::Failed));
         assert_eq!(out.events.len(), 1);
-        assert!(matches!(&out.events[0], ProviderEvent::Error { message, .. } if message == "boom"));
+        assert!(
+            matches!(&out.events[0], ProviderEvent::Error { message, .. } if message == "boom")
+        );
     }
 
     #[test]
@@ -1075,8 +1116,15 @@ mod tests {
     #[test]
     fn map_tool_called_and_ended() {
         let mut usage = None;
-        let call = map(json!({ "sessionID": "s1", "tool": "edit_file" }), "session.next.tool.called", "s1", &mut usage);
-        assert!(matches!(&call.events[0], ProviderEvent::ToolCall { tool_name, .. } if tool_name == "edit_file"));
+        let call = map(
+            json!({ "sessionID": "s1", "tool": "edit_file" }),
+            "session.next.tool.called",
+            "s1",
+            &mut usage,
+        );
+        assert!(
+            matches!(&call.events[0], ProviderEvent::ToolCall { tool_name, .. } if tool_name == "edit_file")
+        );
 
         let ended = map(
             json!({ "sessionID": "s1", "tool": "edit_file", "output": "ok" }),
@@ -1084,7 +1132,9 @@ mod tests {
             "s1",
             &mut usage,
         );
-        assert!(matches!(&ended.events[0], ProviderEvent::ToolResult { result, .. } if result["output"] == "ok"));
+        assert!(
+            matches!(&ended.events[0], ProviderEvent::ToolResult { result, .. } if result["output"] == "ok")
+        );
 
         let failed = map(
             json!({ "sessionID": "s1", "tool": "edit_file", "error": "denied" }),
@@ -1092,7 +1142,9 @@ mod tests {
             "s1",
             &mut usage,
         );
-        assert!(matches!(&failed.events[0], ProviderEvent::ToolResult { result, .. } if result["error"] == "denied"));
+        assert!(
+            matches!(&failed.events[0], ProviderEvent::ToolResult { result, .. } if result["error"] == "denied")
+        );
     }
 
     #[test]
@@ -1106,7 +1158,10 @@ mod tests {
         );
         assert!(out.events.is_empty());
         let u = usage.expect("usage captured");
-        assert_eq!((u.input_tokens, u.output_tokens, u.total_tokens), (30, 20, 50));
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (30, 20, 50)
+        );
     }
 
     // ---- part-updated mapping ----
@@ -1114,10 +1169,7 @@ mod tests {
     #[test]
     fn map_part_updated_text_token() {
         // map_part_updated of a text part returns exactly one token.
-        let got = map_part_updated(
-            &json!({ "part": { "type": "text", "text": "hi" } }),
-            "s1",
-        );
+        let got = map_part_updated(&json!({ "part": { "type": "text", "text": "hi" } }), "s1");
         assert_eq!(got.len(), 1);
         assert!(matches!(&got[0], ProviderEvent::Token { content, .. } if content == "hi"));
     }
@@ -1129,7 +1181,9 @@ mod tests {
             &json!({ "part": { "type": "tool", "tool": "bash", "state": { "status": "running", "input": {"command":"ls"} } } }),
             "s1",
         );
-        assert!(matches!(&call[0], ProviderEvent::ToolCall { tool_name, tool_input, .. } if tool_name == "bash" && tool_input["command"] == "ls"));
+        assert!(
+            matches!(&call[0], ProviderEvent::ToolCall { tool_name, tool_input, .. } if tool_name == "bash" && tool_input["command"] == "ls")
+        );
 
         // completed → ToolResult(output)
         let done = map_part_updated(
@@ -1143,7 +1197,9 @@ mod tests {
             &json!({ "part": { "type": "tool", "tool": "bash", "state": { "status": "error", "error": "nope" } } }),
             "s1",
         );
-        assert!(matches!(&err[0], ProviderEvent::ToolResult { result, .. } if result["error"] == "nope"));
+        assert!(
+            matches!(&err[0], ProviderEvent::ToolResult { result, .. } if result["error"] == "nope")
+        );
     }
 
     // ---- buffer drain (parse_events_from_buffer) ----
@@ -1159,8 +1215,12 @@ mod tests {
         let batch = parse_events_from_buffer(sse, "s1", &mut usage);
         assert_eq!(batch.consumed, sse.len());
         assert_eq!(batch.events.len(), 2);
-        assert!(matches!(&batch.events[0], ProviderEvent::Token { content, .. } if content == "Hello "));
-        assert!(matches!(&batch.events[1], ProviderEvent::Token { content, .. } if content == "world"));
+        assert!(
+            matches!(&batch.events[0], ProviderEvent::Token { content, .. } if content == "Hello ")
+        );
+        assert!(
+            matches!(&batch.events[1], ProviderEvent::Token { content, .. } if content == "world")
+        );
         assert_eq!(batch.terminal.unwrap().0, TurnStatus::Completed);
     }
 
@@ -1184,7 +1244,11 @@ mod tests {
         );
         let mut usage = None;
         let batch = parse_events_from_buffer(sse, "s1", &mut usage);
-        assert!(batch.events.is_empty(), "other-session delta must be filtered: {:?}", batch.events);
+        assert!(
+            batch.events.is_empty(),
+            "other-session delta must be filtered: {:?}",
+            batch.events
+        );
         assert_eq!(batch.terminal.unwrap().0, TurnStatus::Completed);
     }
 
@@ -1194,7 +1258,10 @@ mod tests {
         let sse = "data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"s1\"}}\n\ndata: {\"type\":\"message.part.delta\",\"properties\":{\"delta\":\"x\"}}";
         let mut usage = None;
         let batch = parse_events_from_buffer(sse, "s1", &mut usage);
-        assert!(batch.consumed < sse.len(), "partial block must remain buffered");
+        assert!(
+            batch.consumed < sse.len(),
+            "partial block must remain buffered"
+        );
         assert_eq!(batch.terminal.unwrap().0, TurnStatus::Completed);
         assert!(batch.events.is_empty());
     }
@@ -1216,7 +1283,10 @@ mod tests {
     fn opencode_spec_identity() {
         assert_eq!(OPENCODE_CLI_SPEC.provider_id, PROVIDER_OPENCODE);
         assert_eq!(OPENCODE_CLI_SPEC.default_binary_path, "opencode");
-        assert_eq!(OPENCODE_CLI_SPEC.server_ready_prefix, "opencode server listening");
+        assert_eq!(
+            OPENCODE_CLI_SPEC.server_ready_prefix,
+            "opencode server listening"
+        );
         assert_eq!(OPENCODE_CLI_SPEC.server_auth_username, "opencode");
     }
 

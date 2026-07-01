@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use syncode_core::EntityId;
 use syncode_provider::adapters::codex::CodexAdapter;
 use syncode_provider::{
-    ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest, SessionContext, PROVIDER_CODEX,
+    PROVIDER_CODEX, ProviderAdapter, ProviderConfig, ProviderEvent, ProviderRequest, SessionContext,
 };
 use tokio_stream::StreamExt;
 

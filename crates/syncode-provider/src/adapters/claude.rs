@@ -49,8 +49,8 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -155,7 +155,11 @@ fn map_sdk_message(msg: &Value, session_id: &str) -> SdkEmission {
         // Anthropic SSE delta wrapped by the CLI — text deltas and tool-use starts.
         "stream_event" => {
             let event = msg.get("event").or_else(|| msg.get("payload"));
-            SdkEmission::Events(event.map(|e| map_stream_event(e, session_id)).unwrap_or_default())
+            SdkEmission::Events(
+                event
+                    .map(|e| map_stream_event(e, session_id))
+                    .unwrap_or_default(),
+            )
         }
         // Assembled message — text already streamed via `stream_event`, so only
         // its tool blocks are surfaced here (best-effort tool fidelity).
@@ -235,7 +239,10 @@ fn map_message_blocks(msg: &Value, session_id: &str) -> Vec<ProviderEvent> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("tool")
                     .to_string(),
-                result: block.get("content").cloned().unwrap_or_else(|| block.clone()),
+                result: block
+                    .get("content")
+                    .cloned()
+                    .unwrap_or_else(|| block.clone()),
             }),
             _ => {}
         }
@@ -247,7 +254,10 @@ fn map_message_blocks(msg: &Value, session_id: &str) -> Vec<ProviderEvent> {
 /// the last observed usage, which the `result` message also carries).
 fn decode_result(msg: &Value) -> TurnOutcome {
     let subtype = msg.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
-    let is_error = msg.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_error = msg
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let output = msg
         .get("result")
         .and_then(|v| v.as_str())
@@ -273,7 +283,10 @@ fn extract_usage(msg: &Value) -> Option<UsageInfo> {
     let usage = msg
         .get("usage")
         .or_else(|| msg.get("message").and_then(|m| m.get("usage")))?;
-    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let input = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
     let output = usage
         .get("output_tokens")
         .and_then(|v| v.as_u64())
@@ -417,9 +430,9 @@ impl ClaudeAdapter {
             .as_ref()
             .map(|c| c.model.clone())
             .filter(|m| !m.is_empty());
-        req_model
-            .or(cfg_model)
-            .or_else(|| (!self.claude_config.model.is_empty()).then(|| self.claude_config.model.clone()))
+        req_model.or(cfg_model).or_else(|| {
+            (!self.claude_config.model.is_empty()).then(|| self.claude_config.model.clone())
+        })
     }
 
     /// Resolve the session id for a request: explicit `params.session_id`
@@ -876,18 +889,22 @@ mod tests {
 
     #[test]
     fn stream_event_empty_text_emits_nothing() {
-        assert!(map_stream_event(
-            &json!({ "type": "content_block_delta", "delta": { "text": "" } }),
-            "s1"
-        )
-        .is_empty());
+        assert!(
+            map_stream_event(
+                &json!({ "type": "content_block_delta", "delta": { "text": "" } }),
+                "s1"
+            )
+            .is_empty()
+        );
         // Non-text deltas (e.g. tool input streaming) are ignored here.
-        assert!(map_stream_event(
-            &json!({ "type": "content_block_delta",
+        assert!(
+            map_stream_event(
+                &json!({ "type": "content_block_delta",
                 "delta": { "type": "input_json_delta", "partial_json": "{" } }),
-            "s1"
-        )
-        .is_empty());
+                "s1"
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -971,15 +988,23 @@ mod tests {
             "type": "result", "usage": { "input_tokens": 10, "output_tokens": 4 }
         }))
         .unwrap();
-        assert_eq!((u.input_tokens, u.output_tokens, u.total_tokens), (10, 4, 14));
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (10, 4, 14)
+        );
 
         let u = extract_usage(&json!({
             "message": { "usage": { "input_tokens": 7, "output_tokens": 3, "total_tokens": 99 } }
         }))
         .unwrap();
-        assert_eq!((u.input_tokens, u.output_tokens, u.total_tokens), (7, 3, 99));
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (7, 3, 99)
+        );
 
-        assert!(extract_usage(&json!({ "usage": { "input_tokens": 0, "output_tokens": 0 } })).is_none());
+        assert!(
+            extract_usage(&json!({ "usage": { "input_tokens": 0, "output_tokens": 0 } })).is_none()
+        );
         assert!(extract_usage(&json!({ "type": "system" })).is_none());
     }
 
@@ -994,7 +1019,10 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
         {
             match recv {
-                Ok(ProviderEvent::Token { content, session_id }) if session_id == sid => {
+                Ok(ProviderEvent::Token {
+                    content,
+                    session_id,
+                }) if session_id == sid => {
                     tokens.push(content);
                 }
                 _ => break,
@@ -1007,11 +1035,16 @@ mod tests {
     async fn run_turn_streams_tokens_and_completes() {
         let (event_tx, _rx) = broadcast::channel::<ProviderEvent>(256);
         let lines = concat!(
-            r#"{"type":"system","subtype":"init","session_id":"abc"}"#, "\n",
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello "}}}"#, "\n",
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}}"#, "\n",
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}],"usage":{"input_tokens":5,"output_tokens":2}}}"#, "\n",
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"Hello world","usage":{"input_tokens":5,"output_tokens":2}}"#, "\n",
+            r#"{"type":"system","subtype":"init","session_id":"abc"}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello "}}}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}],"usage":{"input_tokens":5,"output_tokens":2}}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Hello world","usage":{"input_tokens":5,"output_tokens":2}}"#,
+            "\n",
         );
 
         // Subscribe BEFORE the turn so broadcast buffers every emitted event.
@@ -1032,8 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn run_turn_failed_result_is_failed() {
         let (event_tx, _rx) = broadcast::channel::<ProviderEvent>(64);
-        let lines =
-            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#;
+        let lines = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#;
         let outcome = run_turn(BufReader::new(lines.as_bytes()), "s2", &event_tx)
             .await
             .expect("run_turn");
@@ -1060,7 +1092,8 @@ mod tests {
         // A garbage line is skipped; the turn still completes on the result.
         let lines = concat!(
             "this is not json\n",
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#,
+            "\n",
         );
         let outcome = run_turn(BufReader::new(lines.as_bytes()), "s4", &event_tx)
             .await
@@ -1202,11 +1235,18 @@ mod tests {
         assert_eq!(argv[0], "claude");
         assert!(argv.iter().any(|a| a == "-p"));
         assert!(argv.windows(2).any(|w| w[0] == "-p" && w[1] == "hello"));
-        assert!(argv.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
-        assert!(argv.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
-        assert!(argv
-            .windows(2)
-            .any(|w| w[0] == "--append-system-prompt" && w[1] == "Be terse."));
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--output-format" && w[1] == "stream-json")
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "sonnet")
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--append-system-prompt" && w[1] == "Be terse.")
+        );
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 
@@ -1273,6 +1313,9 @@ mod tests {
         // No config model → claude_config default.
         adapter.config = None;
         let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));
-        assert_eq!(adapter.model_for(&req.params).as_deref(), Some("default-model"));
+        assert_eq!(
+            adapter.model_for(&req.params).as_deref(),
+            Some("default-model")
+        );
     }
 }
