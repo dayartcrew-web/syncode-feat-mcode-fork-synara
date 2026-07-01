@@ -13,7 +13,7 @@ This document records which providers are **real** (functional) versus
 | **gemini** | ✅ Real (ACP) | stdio NDJSON JSON-RPC | `adapters::gemini::create()` |
 | anthropic | ✅ Real (HTTP) | reqwest POST | `adapters::AnthropicAdapter` |
 | openai | ✅ Real (HTTP) | reqwest POST | `adapters::OpenAIAdapter` |
-| claude | 🟡 Stub | — | `adapters::ClaudeAdapter` |
+| claude | ✅ Real (CLI stream-json) | subprocess NDJSON (SDKMessage) | `adapters::ClaudeAdapter` |
 | codex | ✅ Real (app-server) | stdio NDJSON JSON-RPC | `adapters::CodexAdapter` |
 | opencode | 🟡 Stub | — | `adapters::OpenCodeAdapter` |
 | kilo | 🟡 Stub | — | `adapters::KiloAdapter` |
@@ -80,16 +80,55 @@ Codex spawn requires the `codex` CLI installed, so it is gated behind
 protocol lifecycle is covered by `codex_app_server` / `adapters::codex` unit
 tests using an in-process duplex fake server (no real binary needed).
 
-## Deferred providers (claude, opencode, kilo, pi)
+## Real stream-json provider (claude)
+
+The Anthropic Claude Code CLI is driven in `stream-json` mode. Unlike the ACP and
+codex providers (long-lived JSON-RPC subprocesses), the Claude CLI is a
+**one-shot streaming producer**: each turn spawns
+`claude -p <prompt> --output-format stream-json` and emits one JSON `SDKMessage`
+per line on stdout until it terminates with a `result` message. There is no
+request/response correlation, so [`ClaudeAdapter`](src/adapters/claude.rs) does
+**not** use `JsonRpcTransport` — it spawns a fresh
+[`tokio::process::Command`] per turn and decodes the NDJSON stream directly
+(path 1 of the feasibility verdict in `.masday/research/custom-providers.md` §2).
+
+| Provider | Spawn form | Optional flags (config) |
+|----------|------------|-------------------------|
+| claude | `claude -p <prompt> --output-format stream-json` | `ClaudeConfig.full_auto` (`--dangerously-skip-permissions`), `ClaudeConfig.model` (`--model`), `--append-system-prompt` |
+
+Lifecycle mapping (trait → Claude): `spawn` = store config (no subprocess yet);
+`start_session` = record `(working_dir, system_prompt)`; `send_request` = spawn
+the CLI rooted at the session cwd and stream `SDKMessage` deltas →
+`ProviderEvent`, ending on the terminal `result` (`success` → `Completed`,
+`error_during_execution`/`is_error` → `Error`); `interrupt` = `start_kill()` the
+in-flight turn subprocess (stream-only: killing the CLI is the only interrupt
+path — there is no mid-turn RPC, and a mid-turn interrupt therefore restarts the
+turn); `health_check` = spawned flag; `shutdown` = kill any in-flight turns.
+
+By default `ClaudeConfig.full_auto` passes `--dangerously-skip-permissions` so a
+headless adapter never deadlocks on the first permission prompt. Auth flows via
+`ANTHROPIC_API_KEY` (injected from config/env) or the CLI's own OAuth login.
+
+### Verifying with real binaries
+
+Claude spawn requires the `claude` CLI installed (and Anthropic credentials), so
+it is gated behind `SYNICODE_CLAUDE_E2E=1` in `tests/claude_e2e.rs` (skips
+without the gate). The full stream-decoding path is covered by the
+`adapters::claude` unit tests, which drive a fake `SDKMessage` reader through
+`run_turn` and exercise every mapping branch (text deltas, tool-use starts,
+assistant tool blocks, terminal result variants, malformed lines) without any
+real binary.
+
+## Deferred providers (opencode, kilo, pi)
 
 These remain as **non-functional stubs** (`spawn` sets flags; `send_request`
 echoes `{"stub": true}`). They are **not feasible** to port faithfully to Rust
 today because each depends on a TS-only SDK or managed HTTP app-server with no
-Rust equivalent — the ACP foundation does not help them.
+Rust equivalent — neither the ACP nor the Claude stream-json foundation helps
+them.
 
 | Provider | mcode mechanism | Blocker |
 |----------|-----------------|---------|
-| claude | in-process `@anthropic-ai/claude-agent-sdk` (AsyncIterable) | No Rust SDK; spawns the `claude` CLI internally |
 | opencode | HTTP/SSE to a spawned `opencode` app-server (OpenCode SDK) | TS-only SDK; app-server contract undocumented for Rust |
 | kilo | shares the OpenCode adapter (same SDK/path) | Same as opencode |
 | pi | in-process `@earendil-works/pi-coding-agent` SDK | No Rust SDK; in-process TS SDK (no subprocess/HTTP wire protocol, native Node dep) — see `.masday/research/custom-providers.md` §5 |
