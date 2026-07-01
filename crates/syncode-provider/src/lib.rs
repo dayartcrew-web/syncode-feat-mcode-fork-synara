@@ -16,6 +16,7 @@
 pub mod acp;
 pub mod acp_provider;
 pub mod adapters;
+pub mod codex_app_server;
 pub mod registry;
 pub mod session;
 pub mod subprocess;
@@ -24,6 +25,7 @@ pub mod trait_def;
 // Re-exports for convenience
 pub use acp::{AcpClient, PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, PromptResult};
 pub use acp_provider::{AcpProvider, AcpProviderConfig};
+pub use codex_app_server::{CodexAppServerClient, TurnResult as CodexTurnResult, TurnStatus as CodexTurnStatus};
 pub use session::{SessionManager, SessionState, SessionStateStatus, SessionTransitionError};
 pub use trait_def::{
     ALL_PROVIDERS, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE, PROVIDER_CODEX, PROVIDER_CURSOR,

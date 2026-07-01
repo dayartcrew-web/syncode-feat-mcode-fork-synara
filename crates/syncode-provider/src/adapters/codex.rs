@@ -1,50 +1,117 @@
-//! Codex adapter — reference implementation
+//! Codex adapter — real `codex app-server` provider.
 //!
-//! OpenAI Codex CLI adapter. Spawns `codex` as a subprocess and communicates
-//! via JSON-RPC over stdin/stdout. This serves as the reference adapter that
-//! all other adapters follow.
+//! Wraps a [`CodexAppServerClient`] behind the [`ProviderAdapter`] trait so the
+//! OpenAI Codex CLI (driven via its `app-server` JSON-RPC subprocess) plugs into
+//! syncode's provider registry like any other adapter. The protocol client lives
+//! in [`crate::codex_app_server`]; this module owns Codex's subprocess spec and
+//! the trait wiring.
+//!
+//! Lifecycle mapping (Codex thread/turn model → trait):
+//!
+//! | trait method     | Codex operation                                       |
+//! |------------------|-------------------------------------------------------|
+//! | `spawn`          | launch `codex app-server` + `initialize` handshake    |
+//! | `start_session`  | `thread/start` rooted at `ctx.working_dir` → thread id|
+//! | `send_request`   | `turn/start` → streamed events + terminal `turn/...`  |
+//! | `interrupt`      | `turn/interrupt` (notification)                       |
+//! | `event_stream`   | subscribe to the broadcast event bus                  |
+//! | `health_check`   | child liveness via the transport                      |
+//! | `shutdown`       | kill child + tear down transport                      |
+//!
+//! # Streaming bridge
+//!
+//! The trait is request/response on the surface, but a Codex turn streams
+//! `item/*` deltas *while* the `turn/start` response is pending and only ends on
+//! a later `turn/completed` notification. [`CodexAdapter::send_request`]
+//! therefore runs the turn under a short-lived `mpsc`→`broadcast` forwarder:
+//! each `item/*`-derived [`ProviderEvent`] is pushed onto the shared broadcast
+//! bus live, so any [`ProviderAdapter::event_stream`] subscriber observes tokens
+//! / tool calls in real time, then a terminal [`ProviderEvent::Completed`] once
+//! the turn's terminal notification arrives.
+//!
+//! # Approval policy
+//!
+//! By default `CodexConfig::full_auto` auto-approves every command/file-change
+//! approval Codex requests mid-turn (matching Codex's own `approvalPolicy:
+//! "never"` + `sandbox: "workspace-write"` full-auto mode). This keeps a headless
+//! adapter from deadlocking on the first approval prompt. Set `full_auto = false`
+//! to auto-*decline* approvals instead (the agent then surfaces the refusal and
+//! proceeds within sandbox limits).
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::{Mutex, broadcast};
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use super::super::trait_def::*;
-use crate::session::SessionState;
+use crate::codex_app_server::{CodexAppServerClient, TurnStatus};
+use crate::subprocess::SubprocessSpec;
 
-/// Codex-specific configuration extensions
+/// Codex-specific configuration.
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
-    /// Path to the codex CLI binary (default: "codex")
+    /// Path to the `codex` CLI binary (default `"codex"`).
     pub bin_path: String,
-    /// Whether to run in "full-auto" mode (no user confirmation needed)
+    /// Extra args appended after `app-server` (default empty).
+    pub extra_args: Vec<String>,
+    /// Full-auto mode: auto-approve command/file-change approvals mid-turn and
+    /// run with `approvalPolicy: "never"` + `sandbox: "workspace-write"`. When
+    /// `false`, approvals are auto-*declined* and the policy is `on-request`.
     pub full_auto: bool,
-    /// Default model override
+    /// Default model passed to `thread/start` when `ProviderConfig.model` is empty.
     pub model: String,
+    /// Sandbox level: `read-only` / `workspace-write` / `danger-full-access`
+    /// (default `workspace-write`).
+    pub sandbox: String,
 }
 
 impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             bin_path: "codex".to_string(),
+            extra_args: Vec::new(),
             full_auto: true,
-            model: "o4-mini".to_string(),
+            model: "gpt-5.1".to_string(),
+            sandbox: "workspace-write".to_string(),
         }
     }
 }
 
-/// The Codex provider adapter
+impl CodexConfig {
+    /// The `approvalPolicy` value sent to `thread/start`.
+    fn approval_policy(&self) -> &'static str {
+        if self.full_auto {
+            "never"
+        } else {
+            "on-request"
+        }
+    }
+
+    /// Build the subprocess spec for `codex app-server [<extra_args>]`.
+    fn spec(&self, cwd: &str) -> SubprocessSpec {
+        let mut args = vec!["app-server".to_string()];
+        args.extend(self.extra_args.iter().cloned());
+        SubprocessSpec::new(&self.bin_path)
+            .args(args)
+            .cwd(cwd)
+            // Codex self-authenticates from its own config / env; inherit the
+            // parent environment so it can find those credentials.
+            .env("RUST_LOG", "info")
+    }
+}
+
+/// The Codex provider adapter.
 pub struct CodexAdapter {
     config: Option<ProviderConfig>,
     codex_config: CodexConfig,
-    status: AtomicU64, // ProviderStatus as u64
-    sessions: Mutex<HashMap<String, Arc<SessionState>>>,
-    event_tx: broadcast::Sender<ProviderEvent>,
+    client: Mutex<Option<CodexAppServerClient>>,
+    status: AtomicU64,
     spawned: AtomicBool,
-    /// Incrementing request ID
-    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
-    next_req_id: AtomicU64,
+    /// Codex thread id of the most recently opened thread (our session id).
+    current_thread: Mutex<Option<String>>,
+    /// Active turn id (for `turn/interrupt`); set when a turn starts.
+    active_turn: Mutex<Option<String>>,
+    event_tx: broadcast::Sender<ProviderEvent>,
 }
 
 impl Default for CodexAdapter {
@@ -54,31 +121,23 @@ impl Default for CodexAdapter {
 }
 
 impl CodexAdapter {
-    /// Create a new Codex adapter with default settings
+    /// Create a new Codex adapter with default settings.
     pub fn new() -> Self {
-        let (event_tx, _) = broadcast::channel(256);
-        Self {
-            config: None,
-            codex_config: CodexConfig::default(),
-            status: AtomicU64::new(ProviderStatus::Disconnected.into()),
-            sessions: Mutex::new(HashMap::new()),
-            event_tx,
-            spawned: AtomicBool::new(false),
-            next_req_id: AtomicU64::new(1),
-        }
+        Self::with_codex_config(CodexConfig::default())
     }
 
-    /// Create a new Codex adapter with custom codex-specific config
+    /// Create a new Codex adapter with custom codex-specific config.
     pub fn with_codex_config(codex_config: CodexConfig) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
             config: None,
             codex_config,
+            client: Mutex::new(None),
             status: AtomicU64::new(ProviderStatus::Disconnected.into()),
-            sessions: Mutex::new(HashMap::new()),
-            event_tx,
             spawned: AtomicBool::new(false),
-            next_req_id: AtomicU64::new(1),
+            current_thread: Mutex::new(None),
+            active_turn: Mutex::new(None),
+            event_tx,
         }
     }
 
@@ -86,13 +145,60 @@ impl CodexAdapter {
         self.status.store(status.into(), Ordering::Release);
     }
 
-    #[allow(dead_code)] // JSON-RPC request-id seam (reserved for future real subprocess impls)
-    fn next_request_id(&self) -> u64 {
-        self.next_req_id.fetch_add(1, Ordering::Relaxed)
+    /// Resolve the model to pass to `thread/start`/`turn/start`: an explicit
+    /// `extra.model` wins, else the spawn-time `ProviderConfig.model`, else the
+    /// `CodexConfig.model` default.
+    fn model_for(&self, request: &ProviderRequest) -> Option<String> {
+        let extra_model = request
+            .params
+            .as_ref()
+            .and_then(|p| p.get("model"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let cfg_model = self
+            .config
+            .as_ref()
+            .map(|c| c.model.clone())
+            .filter(|m| !m.is_empty());
+        extra_model
+            .or(cfg_model)
+            .or_else(|| {
+                let m = &self.codex_config.model;
+                (!m.is_empty()).then(|| m.clone())
+            })
     }
 
-    fn generate_session_id() -> String {
-        format!("codex-{}", uuid::Uuid::new_v4().hyphenated())
+    /// Resolve the thread id (our session id) for a request. An explicit
+    /// `params.session_id` (injected by the command reactor's dispatcher) wins;
+    /// otherwise the thread opened by the last `start_session`.
+    async fn resolve_thread(&self, params: &Option<Value>) -> Option<String> {
+        if let Some(id) = params
+            .as_ref()
+            .and_then(|p| p.get("session_id").and_then(|v| v.as_str()))
+        {
+            return Some(id.to_string());
+        }
+        self.current_thread.lock().await.clone()
+    }
+
+    /// Build the Codex `input` array for a turn from a request's params.
+    ///
+    /// Prefers `params.input` (the orchestrator's `StartTurn` convention); falls
+    /// back to a textual rendering of the params object so a turn is never
+    /// silently empty. The result is always a single `text` content block.
+    fn turn_input(params: &Option<Value>) -> Vec<Value> {
+        let text = params
+            .as_ref()
+            .and_then(|p| match p {
+                Value::Null => None,
+                other => p
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .or_else(|| Some(other.to_string())),
+            })
+            .unwrap_or_default();
+        vec![json!({ "type": "text", "text": text })]
     }
 }
 
@@ -120,9 +226,11 @@ impl ProviderAdapter for CodexAdapter {
 
     fn available_models(&self) -> Vec<String> {
         vec![
+            "gpt-5.1".to_string(),
+            "gpt-5.1-codex".to_string(),
+            "gpt-5.1-mini".to_string(),
             "o4-mini".to_string(),
             "o3".to_string(),
-            "o3-mini".to_string(),
             "gpt-4.1".to_string(),
             "gpt-4.1-mini".to_string(),
             "gpt-4.1-nano".to_string(),
@@ -138,16 +246,33 @@ impl ProviderAdapter for CodexAdapter {
             ));
         }
 
+        // Launch `codex app-server` rooted at the config's working dir (or cwd).
+        let cwd = config
+            .extra
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".to_string()));
+        let spec = self.codex_config.spec(&cwd);
+        let mut client = CodexAppServerClient::spawn(&spec).await?;
+        client
+            .initialize(&self.codex_config.bin_path, env!("CARGO_PKG_VERSION"))
+            .await?;
+
+        *self.client.lock().await = Some(client);
         self.config = Some(config);
         self.spawned.store(true, Ordering::Release);
         self.set_status(ProviderStatus::Idle);
-
+        let _ = self.event_tx.send(ProviderEvent::StatusChanged {
+            status: ProviderStatus::Idle,
+        });
         tracing::info!(
             provider = PROVIDER_CODEX,
-            model = %self.codex_config.model,
-            "Codex adapter spawned (process stub — real implementation spawns subprocess)"
+            binary = %self.codex_config.bin_path,
+            full_auto = self.codex_config.full_auto,
+            sandbox = %self.codex_config.sandbox,
+            "Codex adapter spawned + initialize handshake complete",
         );
-
         Ok(())
     }
 
@@ -155,107 +280,104 @@ impl ProviderAdapter for CodexAdapter {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
-
         self.set_status(ProviderStatus::ShuttingDown);
 
-        // Stop all active sessions
-        let sessions = self.sessions.lock().await;
-        for session_id in sessions.keys() {
-            let _ = self.interrupt(session_id).await;
+        if let Some(client) = self.client.lock().await.take() {
+            let _ = client.shutdown().await;
         }
-        drop(sessions);
-
-        // Clear sessions
-        let mut sessions = self.sessions.lock().await;
-        sessions.clear();
-
+        *self.current_thread.lock().await = None;
+        *self.active_turn.lock().await = None;
         self.spawned.store(false, Ordering::Release);
         self.set_status(ProviderStatus::Disconnected);
-
+        let _ = self.event_tx.send(ProviderEvent::StatusChanged {
+            status: ProviderStatus::Disconnected,
+        });
         tracing::info!(provider = PROVIDER_CODEX, "Codex adapter shut down");
         Ok(())
     }
 
     async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let sessions = self.sessions.lock().await;
-        if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
-        }
-        tracing::info!(
-            provider = PROVIDER_CODEX,
-            session_id,
-            "Interrupting session"
-        );
-        // In real implementation: send SIGINT to subprocess
-        Ok(())
+        let guard = self.client.lock().await;
+        let Some(client) = guard.as_ref() else {
+            return Err(ProviderAdapterError::NotSpawned);
+        };
+        let turn_id = self.active_turn.lock().await.clone();
+        client.interrupt(session_id, turn_id.as_deref()).await
     }
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
+    async fn start_session(
+        &mut self,
+        ctx: SessionContext,
+    ) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
+        let mut guard = self.client.lock().await;
+        let Some(client) = guard.as_mut() else {
+            return Err(ProviderAdapterError::NotSpawned);
+        };
+        let model = self
+            .config
+            .as_ref()
+            .map(|c| c.model.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| (!self.codex_config.model.is_empty()).then(|| self.codex_config.model.clone()));
+        let thread_id = client
+            .start_thread(
+                model.as_deref(),
+                &ctx.working_dir,
+                self.codex_config.approval_policy(),
+                &self.codex_config.sandbox,
+            )
+            .await?;
+        drop(guard);
 
-        let session_id = Self::generate_session_id();
-
-        // Broadcast started event
-        let _ = self.event_tx.send(ProviderEvent::Started {
-            session_id: session_id.clone(),
-        });
-
-        let session = Arc::new(SessionState::new(
-            session_id.clone(),
-            ctx.thread_id,
-            ctx.turn_id,
-            ctx.working_dir,
-        ));
-
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), session);
+        *self.current_thread.lock().await = Some(thread_id.clone());
         self.set_status(ProviderStatus::Busy);
-
+        let _ = self.event_tx.send(ProviderEvent::Started {
+            session_id: thread_id.clone(),
+        });
         tracing::info!(
             provider = PROVIDER_CODEX,
-            session_id = %session_id,
-            thread_id = %ctx.thread_id.as_str(),
+            codex_thread_id = %thread_id,
+            syncode_thread_id = %ctx.thread_id.as_str(),
             turn_id = %ctx.turn_id.as_str(),
-            "Session started"
+            "Codex thread opened",
         );
-
-        Ok(session_id)
+        Ok(thread_id)
     }
 
-    async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let sessions = self.sessions.lock().await;
-        if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
+    async fn resume_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+        // Codex threads are stateful server-side: sending another `turn/start`
+        // on the same thread id resumes it. No client-side resume RPC exists.
+        if !self.spawned.load(Ordering::Acquire) {
+            return Err(ProviderAdapterError::NotSpawned);
         }
-        tracing::info!(provider = PROVIDER_CODEX, session_id, "Session resumed");
         Ok(())
     }
 
     async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let mut sessions = self.sessions.lock().await;
-        if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(
+        let mut cur = self.current_thread.lock().await;
+        if cur.as_deref() == Some(session_id) {
+            *cur = None;
+            *self.active_turn.lock().await = None;
+            self.set_status(ProviderStatus::Idle);
+            let _ = self.event_tx.send(ProviderEvent::StatusChanged {
+                status: ProviderStatus::Idle,
+            });
+            tracing::info!(
+                provider = PROVIDER_CODEX,
+                thread_id = session_id,
+                "Codex thread stopped",
+            );
+            Ok(())
+        } else {
+            Err(ProviderAdapterError::SessionNotFound(
                 session_id.to_string(),
-            ));
+            ))
         }
-
-        // Broadcast completion
-        let _ = self.event_tx.send(ProviderEvent::StatusChanged {
-            status: ProviderStatus::Idle,
-        });
-
-        tracing::info!(provider = PROVIDER_CODEX, session_id, "Session stopped");
-        Ok(())
     }
 
     // -- Communication -----------------------------------------------------
@@ -267,56 +389,107 @@ impl ProviderAdapter for CodexAdapter {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
+        let thread_id = self.resolve_thread(&request.params).await.ok_or_else(|| {
+            ProviderAdapterError::SessionNotFound(
+                "send_request has no session_id — call start_session first".to_string(),
+            )
+        })?;
+        let input = Self::turn_input(&request.params);
+        let model = self.model_for(&request);
+        let auto_approve = self.codex_config.full_auto;
 
-        // In real implementation: serialize request → write to subprocess stdin
-        // → read response from subprocess stdout → parse as ProviderResponse
-        tracing::debug!(
-            provider = PROVIDER_CODEX,
-            method = %request.method,
-            id = request.id,
-            "Sending JSON-RPC request to provider (stub)"
-        );
+        // Bridge the turn's mpsc events onto the shared broadcast bus so
+        // event_stream subscribers observe streaming output live. The forwarder
+        // is awaited before we return, guaranteeing every streamed event is
+        // published (and buffered by the broadcast channel) before completion.
+        let (fwd_tx, mut fwd_rx) = mpsc::channel::<ProviderEvent>(64);
+        let bus = self.event_tx.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = fwd_rx.recv().await {
+                let _ = bus.send(event);
+            }
+        });
 
-        // Stub: echo back a success response
+        self.set_status(ProviderStatus::Busy);
+        *self.active_turn.lock().await = None;
+        let turn_result = {
+            let mut guard = self.client.lock().await;
+            let Some(client) = guard.as_mut() else {
+                return Err(ProviderAdapterError::NotSpawned);
+            };
+            client
+                .start_turn(&thread_id, input, model.as_deref(), auto_approve, &fwd_tx)
+                .await
+        };
+        drop(fwd_tx); // close → forwarder drains remaining events and exits
+        let _ = forwarder.await;
+        let turn = turn_result?;
+        *self.active_turn.lock().await = turn.turn_id.clone();
+
+        // Terminal completion for this session, carrying the raw turn payload.
+        let _ = self.event_tx.send(ProviderEvent::Completed {
+            session_id: thread_id.clone(),
+            output: turn.raw.to_string(),
+            usage: turn.usage.clone(),
+        });
+        self.set_status(ProviderStatus::Idle);
+
+        // Surface a failed turn as a JSON-RPC error so callers can distinguish
+        // it from a clean completion.
+        let error = if turn.status == TurnStatus::Failed {
+            let message = turn
+                .raw
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("codex turn failed")
+                .to_string();
+            let _ = self.event_tx.send(ProviderEvent::Error {
+                session_id: thread_id.clone(),
+                message: message.clone(),
+                code: None,
+            });
+            Some(ProviderError {
+                code: -32000,
+                message,
+                data: Some(turn.raw.clone()),
+            })
+        } else {
+            None
+        };
+
         Ok(ProviderResponse {
             jsonrpc: "2.0".to_string(),
             id: Some(request.id),
-            result: Some(serde_json::json!({
-                "status": "ok",
-                "stub": true
-            })),
-            error: None,
+            result: if error.is_some() {
+                None
+            } else {
+                Some(turn.raw)
+            },
+            error,
         })
     }
 
     fn event_stream(&self, session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
-        // In real implementation: subscribe to subprocess stdout parsing
         let rx = self.event_tx.subscribe();
         let sid = session_id.to_string();
-
         let stream = async_stream::stream! {
             let mut rx = rx;
             while let Ok(event) = rx.recv().await {
-                // Filter events for this session
-                match &event {
-                    ProviderEvent::Started { session_id } |
-                    ProviderEvent::Token { session_id, .. } |
-                    ProviderEvent::ToolCall { session_id, .. } |
-                    ProviderEvent::ToolResult { session_id, .. } |
-                    ProviderEvent::Completed { session_id, .. } |
-                    ProviderEvent::Error { session_id, .. } => {
-                        if session_id == &sid {
-                            yield Ok(event);
-                        }
-                    }
-                    ProviderEvent::StatusChanged { .. } => {
-                        // Status changes are broadcast to all subscribers
-                        yield Ok(event);
-                    }
+                let owned = match &event {
+                    ProviderEvent::Started { session_id }
+                    | ProviderEvent::Token { session_id, .. }
+                    | ProviderEvent::ToolCall { session_id, .. }
+                    | ProviderEvent::ToolResult { session_id, .. }
+                    | ProviderEvent::Completed { session_id, .. }
+                    | ProviderEvent::Error { session_id, .. } => session_id == &sid,
+                    ProviderEvent::StatusChanged { .. } => true,
+                };
+                if owned {
+                    yield Ok(event);
                 }
             }
         };
-
         Ok(Box::pin(stream))
     }
 
@@ -326,8 +499,11 @@ impl ProviderAdapter for CodexAdapter {
         if !self.spawned.load(Ordering::Acquire) {
             return Ok(false);
         }
-        // In real implementation: check if subprocess is still running
-        Ok(self.status() != ProviderStatus::Disconnected && self.status() != ProviderStatus::Error)
+        let guard = self.client.lock().await;
+        let Some(client) = guard.as_ref() else {
+            return Ok(false);
+        };
+        Ok(client.transport().is_alive().await)
     }
 }
 
@@ -338,21 +514,80 @@ impl ProviderAdapter for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_app_server::CodexAppServerClient;
+    use crate::subprocess::JsonRpcTransport;
     use syncode_core::EntityId;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_stream::StreamExt;
+
+    /// Wire a [`CodexAdapter`] (already "spawned") to an in-process fake *server*
+    /// over two duplexes, mirroring `acp_provider::tests::provider_harness`.
+    fn codex_harness() -> (
+        CodexAdapter,
+        tokio::io::DuplexStream, // server reads our requests
+        tokio::io::DuplexStream, // server writes responses/notifications
+    ) {
+        let (client_writer, server_reader) = tokio::io::duplex(8192);
+        let (server_writer, client_reader) = tokio::io::duplex(8192);
+        let (transport, incoming) =
+            JsonRpcTransport::from_streams(Box::new(client_writer), Box::new(client_reader));
+        let client = CodexAppServerClient::new(transport, incoming);
+        let (event_tx, _) = broadcast::channel(256);
+        let provider = CodexAdapter {
+            config: None,
+            codex_config: CodexConfig::default(),
+            client: Mutex::new(Some(client)),
+            status: AtomicU64::new(ProviderStatus::Idle.into()),
+            spawned: AtomicBool::new(true),
+            current_thread: Mutex::new(None),
+            active_turn: Mutex::new(None),
+            event_tx,
+        };
+        (provider, server_reader, server_writer)
+    }
+
+    async fn peer_read(reader: &mut BufReader<tokio::io::DuplexStream>) -> serde_json::Value {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).await.unwrap() > 0, "server EOF");
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    async fn peer_write(writer: &mut tokio::io::DuplexStream, value: &serde_json::Value) {
+        writer
+            .write_all(format!("{}\n", value).as_bytes())
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+    }
 
     fn make_ctx() -> SessionContext {
         SessionContext {
             thread_id: EntityId::new(),
             turn_id: EntityId::new(),
-            working_dir: "/tmp/test-project".to_string(),
+            working_dir: "/tmp/proj".to_string(),
             system_prompt: Some("Be helpful.".to_string()),
-            user_input: "Fix the bug in main.rs".to_string(),
+            user_input: "fix the bug".to_string(),
             context_files: vec![],
         }
     }
 
+    /// A fake server that answers `thread/start` with a fixed thread id.
+    async fn fake_thread_start(
+        reader: &mut BufReader<tokio::io::DuplexStream>,
+        writer: &mut tokio::io::DuplexStream,
+        thread_id: &str,
+    ) {
+        let req = peer_read(reader).await;
+        assert_eq!(req["method"], "thread/start");
+        peer_write(
+            writer,
+            &json!({ "jsonrpc": "2.0", "id": req["id"], "result": { "thread": { "id": thread_id } } }),
+        )
+        .await;
+    }
+
     #[tokio::test]
-    async fn codex_adapter_not_spawned_initially() {
+    async fn adapter_not_spawned_initially() {
         let adapter = CodexAdapter::new();
         assert_eq!(adapter.provider_id(), PROVIDER_CODEX);
         assert_eq!(adapter.status(), ProviderStatus::Disconnected);
@@ -360,130 +595,330 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_adapter_spawn_and_shutdown() {
-        let mut adapter = CodexAdapter::new();
-        let config = ProviderConfig {
-            provider_id: PROVIDER_CODEX.to_string(),
-            model: "o4-mini".to_string(),
-            ..Default::default()
-        };
-
-        assert!(adapter.spawn(config).await.is_ok());
-        assert_eq!(adapter.status(), ProviderStatus::Idle);
-        assert!(adapter.spawned.load(Ordering::Acquire));
-
-        assert!(adapter.shutdown().await.is_ok());
-        assert_eq!(adapter.status(), ProviderStatus::Disconnected);
-    }
-
-    #[tokio::test]
-    async fn codex_adapter_double_spawn_fails() {
-        let mut adapter = CodexAdapter::new();
-        let config = ProviderConfig::default();
-
-        assert!(adapter.spawn(config).await.is_ok());
-        let result = adapter.spawn(ProviderConfig::default()).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("already spawned"));
-    }
-
-    #[tokio::test]
-    async fn codex_adapter_shutdown_not_spawned_fails() {
-        let mut adapter = CodexAdapter::new();
-        let result = adapter.shutdown().await;
-        assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
-    }
-
-    #[tokio::test]
-    async fn codex_adapter_session_lifecycle() {
-        let mut adapter = CodexAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-
-        let ctx = make_ctx();
-        let session_id = adapter.start_session(ctx).await.unwrap();
-        assert!(session_id.starts_with("codex-"));
-        assert_eq!(adapter.status(), ProviderStatus::Busy);
-
-        // Resume should work
-        assert!(adapter.resume_session(&session_id).await.is_ok());
-
-        // Stop the session
-        assert!(adapter.stop_session(&session_id).await.is_ok());
-
-        // Stopping non-existent session should fail
-        let result = adapter.stop_session("nonexistent").await;
-        assert!(result.is_err());
-        matches!(
-            result.unwrap_err(),
-            ProviderAdapterError::SessionNotFound(_)
+    async fn double_spawn_is_rejected_before_subprocess_launch() {
+        // A harness-built adapter is already spawned; calling spawn() must hit the
+        // guard and error WITHOUT attempting to launch a real `codex` binary.
+        let (mut provider, _r, _w) = codex_harness();
+        let err = provider.spawn(ProviderConfig::default()).await.unwrap_err();
+        assert!(
+            matches!(err, ProviderAdapterError::ConfigError(ref m) if m.contains("already spawned")),
+            "got {err:?}"
         );
     }
 
     #[tokio::test]
-    async fn codex_adapter_session_without_spawn_fails() {
+    async fn operations_before_spawn_error() {
         let mut adapter = CodexAdapter::new();
-        let result = adapter.start_session(make_ctx()).await;
-        assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
+        assert_eq!(adapter.status(), ProviderStatus::Disconnected);
+        assert!(matches!(
+            adapter.start_session(make_ctx()).await.unwrap_err(),
+            ProviderAdapterError::NotSpawned
+        ));
+        assert!(matches!(
+            adapter.shutdown().await.unwrap_err(),
+            ProviderAdapterError::NotSpawned
+        ));
     }
 
     #[tokio::test]
-    async fn codex_adapter_send_request_not_spawned_fails() {
-        let adapter = CodexAdapter::new();
-        let req = ProviderRequest::new("test", None);
-        let result = adapter.send_request(req).await;
-        assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
+    async fn shutdown_not_spawned_fails() {
+        let mut adapter = CodexAdapter::new();
+        assert!(matches!(
+            adapter.shutdown().await.unwrap_err(),
+            ProviderAdapterError::NotSpawned
+        ));
     }
 
     #[tokio::test]
-    async fn codex_adapter_send_request_echo() {
-        let mut adapter = CodexAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
+    async fn send_request_without_session_errors() {
+        let (provider, _r, _w) = codex_harness();
+        let req = ProviderRequest::new("chat", Some(json!({ "input": "hi" })));
+        let err = provider.send_request(req).await.unwrap_err();
+        assert!(
+            matches!(err, ProviderAdapterError::SessionNotFound(ref m) if m.contains("session_id")),
+            "got {err:?}"
+        );
+    }
 
-        let req = ProviderRequest::new("initialize", Some(serde_json::json!({"key": "val"})));
-        let resp = adapter.send_request(req).await.unwrap();
-        assert_eq!(resp.jsonrpc, "2.0");
+    #[tokio::test]
+    async fn start_session_opens_thread_and_remembers_it() {
+        let (mut provider, server_reader, server_writer) = codex_harness();
+
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(server_reader);
+            let mut writer = server_writer;
+            fake_thread_start(&mut reader, &mut writer, "codex-thr-1").await;
+        });
+
+        let session_id = provider
+            .start_session(make_ctx())
+            .await
+            .expect("start_session");
+        assert_eq!(session_id, "codex-thr-1");
+        assert_eq!(provider.status(), ProviderStatus::Busy);
+        assert_eq!(
+            provider.current_thread.lock().await.as_deref(),
+            Some("codex-thr-1")
+        );
+
+        server.await.unwrap();
+        provider.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_request_streams_tokens_and_completes() {
+        let (mut provider, server_reader, server_writer) = codex_harness();
+
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(server_reader);
+            let mut writer = server_writer;
+            fake_thread_start(&mut reader, &mut writer, "codex-thr-2").await;
+
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "turn/start");
+            assert_eq!(req["params"]["threadId"], "codex-thr-2");
+            assert_eq!(req["params"]["input"][0]["text"], "hello");
+            let id = req["id"].clone();
+
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "method": "item/agentMessage/delta",
+                    "params": { "delta": "Hi back" } }),
+            )
+            .await;
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "id": id, "result": { "turn": { "id": "turn-2" } } }),
+            )
+            .await;
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "method": "turn/completed",
+                    "params": { "turn": { "status": "completed", "stopReason": "end_turn" } } }),
+            )
+            .await;
+        });
+
+        provider.start_session(make_ctx()).await.unwrap();
+
+        // Subscribe AFTER start_session (so Started isn't captured) but BEFORE
+        // send_request, so the streamed Token + Completed are buffered for us.
+        let stream = provider.event_stream("codex-thr-2").expect("event_stream");
+        tokio::pin!(stream);
+
+        let req = ProviderRequest::new(
+            "chat",
+            Some(json!({ "input": "hello", "session_id": "codex-thr-2" })),
+        );
+        let resp = provider.send_request(req).await.expect("send_request");
+        assert!(resp.id.is_some());
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["stopReason"], "end_turn");
+        assert_eq!(provider.status(), ProviderStatus::Idle);
+
+        // Collect streamed events: expect Token("Hi back") then Completed.
+        let mut events = Vec::new();
+        while let Ok(Some(Ok(ev))) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await
+        {
+            events.push(ev);
+            if events.len() >= 2 {
+                break;
+            }
+        }
+        assert!(events.len() >= 2, "expected >=2 events, got {events:?}");
+        assert!(
+            matches!(&events[0], ProviderEvent::Token { content, .. } if content == "Hi back"),
+            "{events:?}"
+        );
+        assert!(
+            matches!(&events[1], ProviderEvent::Completed { .. }),
+            "{events:?}"
+        );
+
+        server.await.unwrap();
+        provider.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn codex_adapter_health_check() {
-        let adapter = CodexAdapter::new();
-        // Not spawned → false
-        assert!(!adapter.health_check().await.unwrap());
+    async fn failed_turn_surfaces_rpc_error_and_error_event() {
+        let (mut provider, server_reader, server_writer) = codex_harness();
 
-        let mut adapter = CodexAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-        assert!(adapter.health_check().await.unwrap());
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(server_reader);
+            let mut writer = server_writer;
+            fake_thread_start(&mut reader, &mut writer, "codex-thr-3").await;
+            let req = peer_read(&mut reader).await;
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "id": req["id"], "result": { "turn": { "id": "t" } } }),
+            )
+            .await;
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "method": "turn/completed",
+                    "params": { "turn": { "status": "failed", "error": { "message": "kaboom" } } } }),
+            )
+            .await;
+        });
+
+        provider.start_session(make_ctx()).await.unwrap();
+        let stream = provider.event_stream("codex-thr-3").unwrap();
+        tokio::pin!(stream);
+
+        let req = ProviderRequest::new(
+            "chat",
+            Some(json!({ "input": "x", "session_id": "codex-thr-3" })),
+        );
+        let resp = provider.send_request(req).await.expect("send_request");
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("error");
+        assert_eq!(err.code, -32000);
+        assert_eq!(err.message, "kaboom");
+
+        // An Error event must also reach the bus.
+        let mut saw_error = false;
+        while let Ok(Some(Ok(ev))) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await
+        {
+            if matches!(ev, ProviderEvent::Error { .. }) {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(saw_error, "expected an Error event for the failed turn");
+
+        server.await.unwrap();
+        provider.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn codex_adapter_capabilities() {
+    async fn interrupt_sends_turn_interrupt_notification() {
+        let (mut provider, server_reader, _server_writer) = codex_harness();
+        provider
+            .active_turn
+            .lock()
+            .await
+            .replace("turn-9".to_string());
+
+        let handle = tokio::spawn(async move {
+            let mut reader = BufReader::new(server_reader);
+            peer_read(&mut reader).await
+        });
+
+        provider.interrupt("codex-thr-9").await.expect("interrupt");
+        let note = handle.await.unwrap();
+        assert_eq!(note["method"], "turn/interrupt");
+        assert_eq!(note["params"]["threadId"], "codex-thr-9");
+        assert_eq!(note["params"]["turnId"], "turn-9");
+        assert!(note.get("id").is_none());
+        provider.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_session_unknown_errors() {
+        let (mut provider, _r, _w) = codex_harness();
+        assert!(matches!(
+            provider.stop_session("nope").await.unwrap_err(),
+            ProviderAdapterError::SessionNotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_check_no_child_returns_false() {
+        // Harness built via from_streams → no child → is_alive false.
+        let (mut provider, _r, _w) = codex_harness();
+        assert!(!provider.health_check().await.unwrap());
+        provider.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capabilities_and_models() {
         let adapter = CodexAdapter::new();
         let caps = adapter.capabilities();
         assert!(caps.contains(&ProviderCapability::Streaming));
         assert!(caps.contains(&ProviderCapability::ToolUse));
-        assert!(caps.contains(&ProviderCapability::FileSystem));
-    }
-
-    #[tokio::test]
-    async fn codex_adapter_available_models() {
-        let adapter = CodexAdapter::new();
         let models = adapter.available_models();
         assert!(!models.is_empty());
-        assert!(models.contains(&"o4-mini".to_string()));
     }
+
+    // --- pure helpers ---
 
     #[test]
     fn codex_config_defaults() {
         let config = CodexConfig::default();
         assert_eq!(config.bin_path, "codex");
         assert!(config.full_auto);
-        assert_eq!(config.model, "o4-mini");
+        assert_eq!(config.sandbox, "workspace-write");
+        assert_eq!(config.approval_policy(), "never");
+    }
+
+    #[test]
+    fn codex_config_not_full_auto_uses_on_request() {
+        let config = CodexConfig {
+            full_auto: false,
+            ..CodexConfig::default()
+        };
+        assert_eq!(config.approval_policy(), "on-request");
+    }
+
+    #[test]
+    fn codex_config_spec_appends_app_server_and_cwd() {
+        let config = CodexConfig {
+            bin_path: "/usr/local/bin/codex".to_string(),
+            extra_args: vec!["--foo".to_string()],
+            ..CodexConfig::default()
+        };
+        let spec = config.spec("/tmp/work");
+        assert_eq!(spec.command, "/usr/local/bin/codex");
+        assert_eq!(spec.args, vec!["app-server".to_string(), "--foo".to_string()]);
+        assert_eq!(spec.cwd.as_deref(), Some(std::path::Path::new("/tmp/work")));
+    }
+
+    #[test]
+    fn turn_input_uses_input_field() {
+        let input = CodexAdapter::turn_input(&Some(json!({ "input": "hi", "sequence": 2 })));
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "text");
+        assert_eq!(input[0]["text"], "hi");
+    }
+
+    #[test]
+    fn turn_input_falls_back_to_params_rendering() {
+        let input = CodexAdapter::turn_input(&Some(json!({ "foo": "bar" })));
+        assert!(input[0]["text"].as_str().unwrap().contains("foo"));
+    }
+
+    #[test]
+    fn turn_input_empty_when_null() {
+        let input = CodexAdapter::turn_input(&None);
+        assert_eq!(input[0]["text"], "");
+    }
+
+    #[test]
+    fn model_resolution_prefers_request_then_config() {
+        let mut adapter = CodexAdapter::with_codex_config(CodexConfig {
+            model: "default-model".to_string(),
+            ..CodexConfig::default()
+        });
+        adapter.config = Some(ProviderConfig {
+            model: "cfg-model".to_string(),
+            ..ProviderConfig::default()
+        });
+
+        // No request model → falls back to spawn config model.
+        let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));
+        assert_eq!(adapter.model_for(&req).as_deref(), Some("cfg-model"));
+
+        // Request model wins.
+        let req = ProviderRequest::new("chat", Some(json!({ "input": "x", "model": "req-model" })));
+        assert_eq!(adapter.model_for(&req).as_deref(), Some("req-model"));
+
+        // No config model → codex_config default.
+        adapter.config = None;
+        let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));
+        assert_eq!(adapter.model_for(&req).as_deref(), Some("default-model"));
     }
 
     #[test]
