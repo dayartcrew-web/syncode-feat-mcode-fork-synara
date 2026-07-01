@@ -283,6 +283,19 @@ impl JsonRpcTransport {
         Ok(())
     }
 
+    /// Whether the spawned child process is still running.
+    ///
+    /// Returns `false` when there is no child (constructed via
+    /// [`from_streams`](Self::from_streams), or after [`shutdown`](Self::shutdown)
+    /// took it) or once the child has exited. Does not block: uses `try_wait`.
+    pub async fn is_alive(&self) -> bool {
+        let mut guard = self.child.lock().await;
+        match guard.as_mut() {
+            None => false,
+            Some(child) => child.try_wait().map(|exit| exit.is_none()).unwrap_or(false),
+        }
+    }
+
     /// Tear down: kill the child (if any) and abort the reader task. Idempotent.
     pub async fn shutdown(&self) -> Result<(), ProviderAdapterError> {
         if let Some(mut child) = self.child.lock().await.take() {

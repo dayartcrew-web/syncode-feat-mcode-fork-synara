@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::acp_provider::{AcpProvider, AcpProviderConfig};
 use crate::trait_def::*;
 
 /// A shared adapter instance wrapped for async access
@@ -195,6 +196,79 @@ impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// ACP factory — construct an adapter by provider id
+// ---------------------------------------------------------------------------
+
+/// Construct a fresh (un-spawned) adapter for a known provider id.
+///
+/// The three ACP-speaking providers — [`PROVIDER_CURSOR`], [`PROVIDER_GROK`],
+/// [`PROVIDER_GEMINI`] — are built as [`AcpProvider`]s configured with their
+/// ACP subprocess spec. Returns `None` for any other id (HTTP providers and the
+/// remaining stubs are constructed directly by their owners, not via this
+/// factory). The caller is expected to `register_shared` the result.
+pub fn create_by_id(provider_id: &str) -> Option<SharedAdapter> {
+    let config = acp_config_for(provider_id)?;
+    Some(Arc::new(RwLock::new(AcpProvider::new(config))))
+}
+
+/// Build the [`AcpProviderConfig`] for an ACP provider id, or `None` if `id`
+/// is not one of the three ACP providers.
+///
+/// Command specs follow the mcode ACP integration:
+/// - cursor: `cursor-agent acp`
+/// - grok: `grok agent --no-leader stdio`
+/// - gemini: `gemini --acp`
+///
+/// Provider-specific flags/env (endpoints, model, reasoning effort) are layered
+/// on by the adapter owners; this captures the baseline that speaks ACP.
+pub fn acp_config_for(id: &str) -> Option<AcpProviderConfig> {
+    use crate::subprocess::SubprocessSpec;
+    let (provider_id, spec, capabilities, available_models) = match id {
+        PROVIDER_CURSOR => (
+            PROVIDER_CURSOR,
+            SubprocessSpec::new("cursor-agent").args(["acp"]),
+            vec![
+                ProviderCapability::Streaming,
+                ProviderCapability::ToolUse,
+                ProviderCapability::FileSystem,
+                ProviderCapability::SystemPrompt,
+            ],
+            vec!["cursor-default".to_string()],
+        ),
+        PROVIDER_GROK => (
+            PROVIDER_GROK,
+            SubprocessSpec::new("grok").args(["agent", "--no-leader", "stdio"]),
+            vec![
+                ProviderCapability::Streaming,
+                ProviderCapability::ToolUse,
+                ProviderCapability::SystemPrompt,
+            ],
+            vec!["grok-default".to_string()],
+        ),
+        PROVIDER_GEMINI => (
+            PROVIDER_GEMINI,
+            SubprocessSpec::new("gemini").args(["--acp"]),
+            vec![
+                ProviderCapability::Streaming,
+                ProviderCapability::ToolUse,
+                ProviderCapability::Vision,
+                ProviderCapability::FileSystem,
+                ProviderCapability::SystemPrompt,
+            ],
+            vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
+        ),
+        _ => return None,
+    };
+    Some(AcpProviderConfig {
+        provider_id: provider_id.to_string(),
+        spec,
+        capabilities,
+        available_models,
+        client_name: "syncode".to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +524,50 @@ mod tests {
     async fn registry_with_custom_default() {
         let registry = ProviderRegistry::with_default(PROVIDER_CODEX);
         assert_eq!(registry.default_provider_id(), PROVIDER_CODEX);
+    }
+
+    // --- ACP factory -------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_by_id_builds_acp_providers() {
+        for id in [PROVIDER_CURSOR, PROVIDER_GROK, PROVIDER_GEMINI] {
+            let adapter = create_by_id(id).unwrap_or_else(|| panic!("no adapter for {id}"));
+            let guard = adapter.read().await;
+            assert_eq!(guard.provider_id(), id, "identity mismatch for {id}");
+            assert_eq!(guard.status(), ProviderStatus::Disconnected);
+            assert!(!guard.capabilities().is_empty());
+            assert!(!guard.available_models().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn create_by_id_unknown_returns_none() {
+        assert!(create_by_id("nonexistent").is_none());
+        // HTTP providers and stubs are not ACP — not produced by this factory.
+        assert!(create_by_id(PROVIDER_OPENAI).is_none());
+        assert!(create_by_id(PROVIDER_CODEX).is_none());
+    }
+
+    #[test]
+    fn acp_config_for_specs_match_mcode_acp_integration() {
+        let cursor = acp_config_for(PROVIDER_CURSOR).unwrap();
+        assert_eq!(cursor.provider_id, PROVIDER_CURSOR);
+        assert_eq!(cursor.spec.command, "cursor-agent");
+        assert_eq!(cursor.spec.args, vec!["acp".to_string()]);
+
+        let grok = acp_config_for(PROVIDER_GROK).unwrap();
+        assert_eq!(grok.spec.command, "grok");
+        assert_eq!(
+            grok.spec.args,
+            vec!["agent", "--no-leader", "stdio"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+
+        let gemini = acp_config_for(PROVIDER_GEMINI).unwrap();
+        assert_eq!(gemini.spec.command, "gemini");
+        assert_eq!(gemini.spec.args, vec!["--acp".to_string()]);
     }
 
     #[test]
