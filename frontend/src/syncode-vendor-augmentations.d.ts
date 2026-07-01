@@ -42,8 +42,19 @@ declare module "effect/unstable/socket/Socket" {
   export default _default;
 }
 
-// `cookieStore` — the Cookie Store API global. Not yet in TS's lib.dom.d.ts
-// (TS lib < 5.7 gap); used by shadcn sidebar.tsx for persistence.
+// `cookieStore` — the Cookie Store API global.
+//
+// B3 fix: TS 5.7's lib.dom.d.ts does NOT declare the Cookie Store API
+// (it's behind a `lib.dom.async` / future-lib gate). The vendored shadcn
+// `sidebar.tsx` uses the global `cookieStore` directly (no null-guard) and
+// expects it to be defined. The prior T2 declaration declared the global as
+// `cookieStore: CookieStore | undefined`, which surfaced as a
+// `cookieStore is possibly 'undefined'` (TS18048) error at every call site.
+//
+// Fix: keep the `CookieStore` interface declaration (lib.dom doesn't ship
+// it), and declare the global as the NON-optional `CookieStore` — the form
+// the vendored UI expects. This removes the false-positive undefined check
+// while still modeling the type accurately.
 interface CookieStore {
   get(name: string): Promise<{ value: string } | null>;
   set(details: {
@@ -59,4 +70,4 @@ interface Window {
   cookieStore?: CookieStore;
 }
 
-declare const cookieStore: CookieStore | undefined;
+declare const cookieStore: CookieStore;
