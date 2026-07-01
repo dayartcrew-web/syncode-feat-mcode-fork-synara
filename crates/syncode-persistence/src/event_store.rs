@@ -231,12 +231,16 @@ impl EventToAppend {
     }
 }
 
+/// Raw row tuple for the `domain_events` SELECT projection
+/// (id, aggregate_id, event_type, sequence, data, timestamp, metadata, created_at).
+type EventRow = (i64, String, String, i64, String, String, String, String);
+
 /// Replay all events for an aggregate
 pub async fn replay_events(
     pool: &SqlitePool,
     aggregate_id: &str,
 ) -> Result<Vec<PersistedEvent>, EventStoreError> {
-    let rows: Vec<(i64, String, String, i64, String, String, String, String)> = sqlx::query_as(
+    let rows: Vec<EventRow> = sqlx::query_as(
         r#"
         SELECT id, aggregate_id, event_type, sequence, data, timestamp, metadata, created_at
         FROM domain_events
@@ -269,7 +273,7 @@ pub async fn replay_all_events(
     since_sequence: Option<u64>,
     limit: u32,
 ) -> Result<Vec<PersistedEvent>, EventStoreError> {
-    let rows: Vec<(i64, String, String, i64, String, String, String, String)> =
+    let rows: Vec<EventRow> =
         if let Some(since) = since_sequence {
             sqlx::query_as(
                 r#"
