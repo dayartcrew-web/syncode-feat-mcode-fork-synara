@@ -16,8 +16,9 @@
 //! JSON-RPC parse) rather than its shared ACP session runtime, which hints that
 //! Gemini's ACP surface may have quirks (e.g. non-standard `initialize` params
 //! or `session/*` behavior). syncode routes Gemini through the standard
-//! [`AcpClient`]; real-binary E2E validation (gated behind `SYNICODE_ACP_E2E`)
-//! is required to confirm interop and surface any provider-specific handling.
+//! [`AcpClient`]; real-binary interop is exercised by the gated E2E test at
+//! `tests/gemini_e2e.rs` (run with `SYNICODE_ACP_E2E=1`), which surfaces any
+//! provider-specific handling by driving a full real turn.
 
 use crate::acp_provider::{AcpProvider, AcpProviderConfig};
 use crate::subprocess::SubprocessSpec;
