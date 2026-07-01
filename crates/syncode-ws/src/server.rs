@@ -211,4 +211,63 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn domain_event_reaches_subscribed_connection_e2e() {
+        // End-to-end "live consumer" proof: orchestrator command -> domain event
+        // published via the WsDomainEventPublisher -> push_tx -> run_push_delivery
+        // forwards it to a connection subscribed to the orchestration channel.
+        // This closes the deferred robustness-hardening gap (a real consumer for
+        // the publisher's push_tx feed) by asserting the whole loop is wired.
+        let state = Arc::new(WsState::new_in_memory(16));
+
+        // Register a connection and opt it into the orchestration channel.
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.register(1, tx.clone()).await;
+        state
+            .subscriptions
+            .write()
+            .await
+            .subscribe(1, "orchestration");
+
+        // Spawn the per-connection push delivery consumer.
+        let _handle = tokio::spawn(run_push_delivery(Arc::clone(&state), 1, tx));
+
+        // Let the delivery task subscribe to the push bus BEFORE the command
+        // runs — broadcast only reaches receivers that exist at send time.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Issue a command -> the pipeline appends + projects a ProjectCreated
+        // event, then best-effort publishes it to push_tx.
+        let cmd = syncode_orchestration::Command::CreateProject {
+            name: "PushDemo".into(),
+            root_path: "/tmp/push-demo".into(),
+        };
+        state
+            .orchestrator
+            .handle_command(cmd)
+            .await
+            .expect("command should succeed");
+
+        // The subscribed connection should receive a push/orchestration
+        // notification carrying the just-published ProjectCreated event.
+        let received = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
+        assert!(
+            received.is_ok(),
+            "subscribed connection should receive the pushed domain event"
+        );
+        let msg = received.unwrap().unwrap();
+        assert!(
+            msg.contains("push/orchestration"),
+            "method should be push/orchestration: {msg}"
+        );
+        assert!(
+            msg.contains("ProjectCreated"),
+            "should carry the ProjectCreated event type: {msg}"
+        );
+        assert!(
+            msg.contains("PushDemo"),
+            "should carry the serialized event payload (project name): {msg}"
+        );
+    }
 }
