@@ -52,6 +52,48 @@ export type { ShellSnapshot } from "../types/ShellSnapshot";
 export type { ThreadDetailSnapshot } from "../types/ThreadDetailSnapshot";
 export type { FullSnapshot } from "../types/FullSnapshot";
 
+// ─── Tier 1: RPC served-method DTOs (from crates/syncode-contracts/src/rpc.rs) ─
+// 23 concrete structs (type aliases like ProjectGetResult reuse the snapshot
+// summary types above and have no dedicated .ts file). See CONTRACTS-BRIDGE-DESIGN.md §4.
+export type { ListMethodsResult } from "../types/ListMethodsResult";
+export type { PingResult } from "../types/PingResult";
+export type { ProjectListResult } from "../types/ProjectListResult";
+export type { ProjectGetParams } from "../types/ProjectGetParams";
+export type { ProjectCreateParams } from "../types/ProjectCreateParams";
+export type { ThreadListParams } from "../types/ThreadListParams";
+export type { ThreadListResult } from "../types/ThreadListResult";
+export type { ThreadGetParams } from "../types/ThreadGetParams";
+export type { ThreadCreateParams } from "../types/ThreadCreateParams";
+export type { ThreadLifecycleParams } from "../types/ThreadLifecycleParams";
+export type { TurnListParams } from "../types/TurnListParams";
+export type { TurnListResult } from "../types/TurnListResult";
+export type { TurnGetParams } from "../types/TurnGetParams";
+export type { TurnStartParams } from "../types/TurnStartParams";
+export type { TurnCompleteParams } from "../types/TurnCompleteParams";
+export type { AuthBootstrapParams } from "../types/AuthBootstrapParams";
+export type { AuthBootstrapResult } from "../types/AuthBootstrapResult";
+export type { AuthStatusResult } from "../types/AuthStatusResult";
+export type { AuthLogoutResult } from "../types/AuthLogoutResult";
+export type { PushSubscribeParams } from "../types/PushSubscribeParams";
+export type { PushSubscribeResult } from "../types/PushSubscribeResult";
+export type { PushUnsubscribeParams } from "../types/PushUnsubscribeParams";
+export type { PushUnsubscribeResult } from "../types/PushUnsubscribeResult";
+
+// ─── Tier 1: RPC method registry (the keystone) ────────────────────────
+// Typed SERVED_RPC (21 served methods) + UNSERVED_RPC (~80 MCode methods
+// returning MethodNotFound). Surfaces ServedRpcMethod/ServedRpcRequest/
+// ServedRpcResult, UnservedRpcMethod, AnyRpcMethod, IsServed<M>.
+export {
+  SERVED_RPC,
+  UNSERVED_RPC,
+  type ServedRpcMethod,
+  type ServedRpcRequest,
+  type ServedRpcResult,
+  type UnservedRpcMethod,
+  type AnyRpcMethod,
+  type IsServed,
+} from "./rpc";
+
 // ─── Hand-written bridge modules ───────────────────────────────────────
 // Branded IDs (ThreadId, ProjectId, …) — replaces MCode baseSchemas.ts brand set.
 export type {
