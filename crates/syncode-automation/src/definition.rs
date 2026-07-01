@@ -68,6 +68,15 @@ pub struct AutomationDef {
     pub checkpoint_before: bool,
     /// Whether to auto-commit changes after running
     pub auto_commit_after: bool,
+    /// Scheduling pointer — the next time this automation should fire.
+    /// Mirrors MCode's `next_run_at` column (the single source of truth for
+    /// due-evaluation). `None` means not yet scheduled / no future fire.
+    #[serde(default)]
+    pub next_run_at: Option<String>,
+    /// Heartbeat target — when `Some`, runs append a turn to this thread
+    /// instead of creating a new one (MCode `mode: "heartbeat"`).
+    #[serde(default)]
+    pub target_thread_id: Option<String>,
 }
 
 impl AutomationDef {
@@ -96,6 +105,8 @@ impl AutomationDef {
             prompt_template: None,
             checkpoint_before: false,
             auto_commit_after: false,
+            next_run_at: None,
+            target_thread_id: None,
         }
     }
 

@@ -11,7 +11,7 @@ Quick reference for all 12 internal crates. For full detail (files, API surface,
 | [`syncode-persistence`](../.masday/intel/crates/syncode-persistence.md) | L1 | SQLite event store + 7 projections + snapshots | 2095 | 17 | ✅ |
 | [`syncode-git`](../.masday/intel/crates/syncode-git.md) | L1 | git2 + CLI — status/diff/branch/commit/checkpoint/worktree + **push/pull/CreatePR** (`git`/`gh` shelling-out) | ~1550 | 34 | ✅ |
 | [`syncode-terminal`](../.masday/intel/crates/syncode-terminal.md) | L1 | portable-pty PTY + ack-buffered output + sessions | 714 | 15 | ✅ |
-| [`syncode-automation`](../.masday/intel/crates/syncode-automation.md) | L1 | Scheduler + retry/misfire/completion policies | 1101 | 38 | ⚠️ cron/retry/exec stub |
+| [`syncode-automation`](../.masday/intel/crates/syncode-automation.md) | L1 | Scheduler + retry/misfire/completion policies + **execution engine** (cron/interval due-eval, retry loop, RunExecutor dispatch) | ~2050 | 65 | ✅ engine ready (not hosted) |
 | [`syncode-ws`](../.masday/intel/crates/syncode-ws.md) | L3 | WebSocket JSON-RPC server + push bus + channels + **authz gate** + **snapshot-then-stream** | ~1990 | 42 | ✅ transport reframed |
 | [`syncode-tauri`](../.masday/intel/crates/syncode-tauri.md) | L4 | Tauri desktop binary — tray, updater, IPC | 1129 | 0† | ⚠️ engine not wired |
 | [`syncode-auth`](../.masday/intel/crates/syncode-auth.md) | L1 | Credentials, auth policy, secret store, **principal/session/authenticator** | ~840 | 35 | ✅ wired into WS (opt-in) |
