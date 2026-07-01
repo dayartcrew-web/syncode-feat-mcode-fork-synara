@@ -4,4 +4,4 @@
  * An activity log entry in a full snapshot. Faithful to
  * `syncode_orchestration::ActivityView`.
  */
-export type ActivitySummary = { id: string, activity_type: string, description: string, project_id: string | null, thread_id: string | null, metadata: Record<string, unknown>, created_at: string, };
+export type ActivitySummary = { id: string, activityType: string, description: string, projectId: string | null, threadId: string | null, metadata: Record<string, unknown>, createdAt: string, };

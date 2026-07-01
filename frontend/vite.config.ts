@@ -9,6 +9,10 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Path-identical shim: `@t3tools/contracts` resolves to the local bridge
+      // package so a cloned MCode UI keeps its imports verbatim.
+      // See docs/CONTRACTS-BRIDGE-DESIGN.md §3.1.
+      "@t3tools/contracts": path.resolve(__dirname, "./src/contracts"),
     },
   },
   clearScreen: false,

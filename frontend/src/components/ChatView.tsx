@@ -11,23 +11,23 @@ import type { PushEvent } from "../hooks/useWebSocket";
 
 export interface TurnItem {
   id: string;
-  thread_id: string;
+  threadId: string;
   sequence: number;
-  user_input: string;
-  assistant_output: string | null;
+  userInput: string;
+  assistantOutput: string | null;
   status: string;
-  duration_ms: number | null;
-  files_modified: string[];
+  durationMs: number | null;
+  filesModified: string[];
 }
 
 export interface MessageItem {
   id: string;
-  turn_id: string;
+  turnId: string;
   role: string;
   content: string;
-  content_type: string;
-  token_count: number | null;
-  created_at: string;
+  contentType: string;
+  tokenCount: number | null;
+  createdAt: string;
 }
 
 interface ChatViewProps {
@@ -159,7 +159,7 @@ export default function ChatView({ rpc, threadId, onRefresh, onPush }: ChatViewP
                 lineHeight: 1.5,
                 whiteSpace: "pre-wrap",
               }}>
-                {turn.user_input}
+                {turn.userInput}
               </div>
             </div>
 
@@ -192,7 +192,7 @@ export default function ChatView({ rpc, threadId, onRefresh, onPush }: ChatViewP
             )}
 
             {/* Assistant response */}
-            {turn.assistant_output && (
+            {turn.assistantOutput && (
               <div style={{ display: "flex", justifyContent: "flex-start" }}>
                 <div style={{
                   maxWidth: "70%",
@@ -206,10 +206,10 @@ export default function ChatView({ rpc, threadId, onRefresh, onPush }: ChatViewP
                   lineHeight: 1.5,
                   whiteSpace: "pre-wrap",
                 }}>
-                  {turn.assistant_output}
-                  {turn.files_modified.length > 0 && (
+                  {turn.assistantOutput}
+                  {turn.filesModified.length > 0 && (
                     <div style={{ marginTop: 8, fontSize: 11, color: "#888" }}>
-                      📁 Modified: {turn.files_modified.join(", ")}
+                      📁 Modified: {turn.filesModified.join(", ")}
                     </div>
                   )}
                 </div>
@@ -219,7 +219,7 @@ export default function ChatView({ rpc, threadId, onRefresh, onPush }: ChatViewP
             {/* Turn metadata */}
             <div style={{ fontSize: 10, color: "#444", textAlign: "center" }}>
               Turn #{turn.sequence}
-              {turn.duration_ms != null && ` · ${turn.duration_ms}ms`}
+              {turn.durationMs != null && ` · ${turn.durationMs}ms`}
               {turn.status === "running" && " · ⏳ Processing..."}
             </div>
           </div>

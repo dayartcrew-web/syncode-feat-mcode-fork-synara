@@ -26,7 +26,8 @@ use ts_rs::TS;
 /// `syncode_orchestration::ProjectView` (slimmed to the fields a client needs
 /// for shell/list views).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct ProjectSummary {
     pub id: String,
     pub name: String,
@@ -41,7 +42,8 @@ pub struct ProjectSummary {
 /// A thread's key fields, as carried in a snapshot. Faithful to
 /// `syncode_orchestration::ThreadView`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct ThreadSummary {
     pub id: String,
     pub project_id: String,
@@ -60,7 +62,8 @@ pub struct ThreadSummary {
 /// A turn's key fields, as carried in a thread-detail snapshot. Faithful to
 /// `syncode_orchestration::TurnView`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct TurnSummary {
     pub id: String,
     pub thread_id: String,
@@ -70,6 +73,11 @@ pub struct TurnSummary {
     pub status: String,
     pub git_checkpoint: Option<String>,
     pub files_modified: Vec<String>,
+    // NOTE: `u64` would emit `bigint` in TS but JSON parses as `number`. The
+    // `#[ts(type = "number | null")]` below pins the TS type so wire (`number`
+    // after JSON.parse) and type agree. (kept as a `//` comment, not `///`, so
+    // ts-rs doesn't emit it into the generated `.ts` as a field doc.)
+    #[ts(type = "number | null")]
     pub duration_ms: Option<u64>,
     pub created_at: String,
     pub completed_at: Option<String>,
@@ -79,7 +87,8 @@ pub struct TurnSummary {
 /// `syncode_orchestration::MessageView` (NOT the contracts `MessageView`, which
 /// is a different, session-oriented type).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct MessageSummary {
     pub id: String,
     pub turn_id: String,
@@ -97,7 +106,8 @@ pub struct MessageSummary {
 /// An activity log entry in a full snapshot. Faithful to
 /// `syncode_orchestration::ActivityView`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct ActivitySummary {
     pub id: String,
     pub activity_type: String,
@@ -128,7 +138,8 @@ pub enum SnapshotScope {
 /// Shell-channel snapshot — projects + threads. Sent on `orchestration`
 /// channel subscribe (when no `threadId` is given).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct ShellSnapshot {
     pub scope: SnapshotScope,
     pub projects: Vec<ProjectSummary>,
@@ -140,7 +151,8 @@ pub struct ShellSnapshot {
 /// Thread-detail snapshot — one thread + its turns + messages. Sent on
 /// `orchestration` channel subscribe when a `threadId` is given.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct ThreadDetailSnapshot {
     pub scope: SnapshotScope,
     pub thread: ThreadSummary,
@@ -151,7 +163,8 @@ pub struct ThreadDetailSnapshot {
 
 /// Full-store snapshot — every collection. Sent on `*` wildcard subscribe.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct FullSnapshot {
     pub scope: SnapshotScope,
     pub projects: Vec<ProjectSummary>,
@@ -231,6 +244,70 @@ mod tests {
         );
         let back: SnapshotScope = serde_json::from_str("\"full\"").unwrap();
         assert_eq!(back, SnapshotScope::Full);
+    }
+
+    /// Wire-parity guard: the contracts surface must serialize **camelCase**
+    /// field names so the JSON wire and the ts-rs-generated TS types agree
+    /// (the latter is `#[ts(rename_all = "camelCase")]`). If this test fails,
+    /// serde + ts-rs casing drifted apart.
+    #[test]
+    fn snapshot_dtos_serialize_camel_case() {
+        // ProjectSummary: root_path, provider_id, default_model, thread_count
+        let json = serde_json::to_string(&ProjectSummary {
+            id: "p1".into(),
+            name: "n".into(),
+            root_path: "/".into(),
+            provider_id: None,
+            default_model: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            thread_count: 0,
+        })
+        .unwrap();
+        assert!(json.contains("\"rootPath\""), "ProjectSummary camelCase: {json}");
+        assert!(json.contains("\"providerId\""));
+        assert!(json.contains("\"defaultModel\""));
+        assert!(json.contains("\"threadCount\""));
+        assert!(!json.contains("\"root_path\""), "snake leaked: {json}");
+
+        // TurnSummary: thread_id, user_input, duration_ms, files_modified
+        let json = serde_json::to_string(&turn_summary("t1")).unwrap();
+        assert!(json.contains("\"threadId\""), "TurnSummary camelCase: {json}");
+        assert!(json.contains("\"userInput\""));
+        assert!(json.contains("\"durationMs\""));
+        assert!(json.contains("\"filesModified\""));
+        assert!(!json.contains("\"thread_id\""));
+
+        // MessageSummary: turn_id, content_type, token_count, tool_call_id, is_streaming
+        let json = serde_json::to_string(&message_summary("m1")).unwrap();
+        assert!(json.contains("\"turnId\""), "MessageSummary camelCase: {json}");
+        assert!(json.contains("\"contentType\""));
+        assert!(json.contains("\"tokenCount\""));
+        assert!(json.contains("\"toolCallId\""));
+        assert!(json.contains("\"isStreaming\""));
+
+        // ShellSnapshot: snapshot_at
+        let snap = ShellSnapshot {
+            scope: SnapshotScope::Shell,
+            projects: vec![],
+            threads: vec![],
+            snapshot_at: "t".into(),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"snapshotAt\""), "ShellSnapshot camelCase: {json}");
+
+        // ActivitySummary: activity_type
+        let act = ActivitySummary {
+            id: "a1".into(),
+            activity_type: "x".into(),
+            description: "d".into(),
+            project_id: None,
+            thread_id: None,
+            metadata: serde_json::Value::Null,
+            created_at: "t".into(),
+        };
+        let json = serde_json::to_string(&act).unwrap();
+        assert!(json.contains("\"activityType\""), "ActivitySummary camelCase: {json}");
     }
 
     fn thread_summary(id: &str) -> ThreadSummary {
