@@ -48,13 +48,13 @@ Syncode is a **Rust DDD (Domain-Driven Design) blueprint of [MCode](https://gith
 │ syncode-provider│   │ syncode-persistence (L1)                │
 │ (L1)            │   │ SQLite: domain_events + 7 projection    │
 │ 10 adapters     │   │ tables + snapshots + watermark          │
-│ (8 stub + 2 HTTP│   └────────────────────────────────────────┘
+│ (all real)      │   └────────────────────────────────────────┘
 └─────────────────┘
         │
 ┌───────▼──────────────────────────────────────────────────────┐
 │  syncode-core (L0) — SHARED DOMAIN KERNEL                     │
 │  Entities (Project/Thread/Turn/Message/Activity) ·            │
-│  DomainEvent (35) · Envelope · Port traits (4)                │
+│  DomainEvent (44) · Envelope · Port traits (7)                │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,7 +77,7 @@ Provider read-back: `ProviderEvent → ingest_provider_event() → DomainEvent` 
 
 | Layer | Crate | Role |
 |---|---|---|
-| **L0 kernel** | `syncode-core` | domain kernel — entities, 35 events, 4 port traits (**universal dependency**) |
+| **L0 kernel** | `syncode-core` | domain kernel — entities, 44 events, 7 port traits (**universal dependency**) |
 | **L0 kernel** | `syncode-contracts` | shared DTOs + ts-rs codegen |
 | **L1 leaf** | `syncode-provider` | `ProviderAdapter` trait + 10 adapters + SessionManager + registry |
 | **L1 leaf** | `syncode-persistence` | SQLite event store + projections + snapshots (CQRS write/read side) |
@@ -86,7 +86,7 @@ Provider read-back: `ProviderEvent → ingest_provider_event() → DomainEvent` 
 | **L1 leaf** | `syncode-automation` | scheduler + retry/misfire/completion policies |
 | **L1 leaf** | `syncode-auth` | credentials, auth policy, secret store, principal/session/authenticator (**wired into WS — opt-in**) |
 | **L1 leaf** | `syncode-http` | *(stub)* future REST surface |
-| **L2 engine** | `syncode-orchestration` | CQRS: 38 Commands, Decider, Orchestrator, Projector, Reactors, ApplicationService |
+| **L2 engine** | `syncode-orchestration` | CQRS: 48 Commands, Decider, Orchestrator, Projector, Reactors, ApplicationService |
 | **L3 transport** | `syncode-ws` | WebSocket JSON-RPC server + push bus |
 | **L4 shell** | `syncode-tauri` | Tauri desktop binary (tray, updater, IPC) |
 
@@ -94,7 +94,7 @@ Provider read-back: `ProviderEvent → ingest_provider_event() → DomainEvent` 
 
 ## 6. Domain model
 
-**Aggregates:** `Project → Thread → Turn → Message`, plus `Activity` (audit log). **35 domain events** (serde-tagged `{event_type, data}`), wrapped in `Envelope { event, sequence, timestamp }` (sequence = monotonic stream position for optimistic concurrency).
+**Aggregates:** `Project → Thread → Turn → Message`, plus `Activity` (audit log). **44 domain events** (serde-tagged `{event_type, data}`), wrapped in `Envelope { event, sequence, timestamp }` (sequence = monotonic stream position for optimistic concurrency).
 
 > **Modeling note:** Syncode treats Turn/Message/Activity as first-class aggregates. MCode only has `project` + `thread` aggregates (turns/messages nested in thread events). This is an intentional simplification.
 
@@ -108,7 +108,7 @@ Defined in `syncode-core/src/ports/mod.rs` (async, `Send+Sync`):
 
 ## 8. Status: what's real vs stub
 
-**Implemented & tested (~615 tests):** core domain (35 events), CQRS engine (38 Commands — all 28 MCode client commands ported; decider/projector/reactors/use-cases), SQLite persistence (7 projections), 2 HTTP provider adapters (Anthropic, OpenAI), git status/diff/branch/commit/checkpoint/worktree + **push/pull/CreatePR via CLI** (`git`/`gh` shelling-out, auth delegated to user credentials), terminal PTY + ack protocol, **automation execution engine** (cron/interval due-evaluation via `cron` crate, retry loop honoring RetryPolicy, run dispatch via `RunExecutor` port, misfire coalesce, trait-abstracted `AutomationRepository`), **WS auth wired** (principal/session/authenticator + authz gate on RPC dispatch + `auth/bootstrap`·`auth/status`·`auth/logout`), **snapshot-then-stream subscriptions** (`push/subscribe` emits a snapshot of current state, then live deltas; reconnecting clients re-subscribe to re-hydrate), WebSocket RPC + push bus, Tauri shell scaffolding.
+**Implemented & tested (~791 tests):** core domain (44 events), CQRS engine (48 Commands — all MCode client + internal commands ported; decider/projector/reactors/use-cases), SQLite persistence (7 projections), 2 HTTP provider adapters (Anthropic, OpenAI), git status/diff/branch/commit/checkpoint/worktree + **push/pull/CreatePR via CLI** (`git`/`gh` shelling-out, auth delegated to user credentials), terminal PTY + ack protocol, **automation execution engine** (cron/interval due-evaluation via `cron` crate, retry loop honoring RetryPolicy, run dispatch via `RunExecutor` port, misfire coalesce, trait-abstracted `AutomationRepository`), **WS auth wired** (principal/session/authenticator + authz gate on RPC dispatch + `auth/bootstrap`·`auth/status`·`auth/logout`), **snapshot-then-stream subscriptions** (`push/subscribe` emits a snapshot of current state, then live deltas; reconnecting clients re-subscribe to re-hydrate), WebSocket RPC + push bus, Tauri shell scaffolding.
 
 **Stubs / not wired:**
 - ~~8 subprocess provider adapters (claude/codex/cursor/gemini/grok/kilo/opencode/pi)~~ — all 8 are now REAL (claude stream-json, codex app-server, opencode/kilo HTTP+SSE, pi RPC, cursor/grok/gemini ACP). No functional stubs remain.
