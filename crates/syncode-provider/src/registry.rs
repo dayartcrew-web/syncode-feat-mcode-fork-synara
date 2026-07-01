@@ -217,41 +217,22 @@ pub fn create_by_id(provider_id: &str) -> Option<SharedAdapter> {
 /// Build the [`AcpProviderConfig`] for an ACP provider id, or `None` if `id`
 /// is not one of the three ACP providers.
 ///
-/// Cursor and Grok delegate to their owning modules
-/// ([`crate::adapters::cursor::spec`] / [`crate::adapters::grok::spec`]), which
-/// own provider-specific flags layered in from `SYNICODE_*` environment
-/// variables. Gemini's spec is kept inline here until its dedicated module lands.
+/// Each ACP provider owns its spec in its module
+/// ([`crate::adapters::cursor::spec`] / [`crate::adapters::grok::spec`] /
+/// [`crate::adapters::gemini::spec`]); cursor and grok layer provider-specific
+/// flags in from `SYNICODE_*` environment variables.
 ///
 /// Command forms follow the mcode ACP integration:
 /// - cursor: `cursor-agent [-e <endpoint>] acp`
 /// - grok: `grok agent [--always-approve] [-m <model>] [--reasoning-effort <effort>] --no-leader stdio`
 /// - gemini: `gemini --acp`
 pub fn acp_config_for(id: &str) -> Option<AcpProviderConfig> {
-    use crate::adapters::{cursor, grok};
+    use crate::adapters::{cursor, gemini, grok};
     match id {
         PROVIDER_CURSOR => Some(cursor::spec()),
         PROVIDER_GROK => Some(grok::spec()),
-        PROVIDER_GEMINI => Some(gemini_baseline_config()),
+        PROVIDER_GEMINI => Some(gemini::spec()),
         _ => None,
-    }
-}
-
-/// Inline baseline config for Gemini (ACP `gemini --acp`). Lives here until the
-/// dedicated `adapters::gemini` rewrite in T5.
-fn gemini_baseline_config() -> AcpProviderConfig {
-    use crate::subprocess::SubprocessSpec;
-    AcpProviderConfig {
-        provider_id: PROVIDER_GEMINI.to_string(),
-        spec: SubprocessSpec::new("gemini").args(["--acp"]),
-        capabilities: vec![
-            ProviderCapability::Streaming,
-            ProviderCapability::ToolUse,
-            ProviderCapability::Vision,
-            ProviderCapability::FileSystem,
-            ProviderCapability::SystemPrompt,
-        ],
-        available_models: vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
-        client_name: "syncode".to_string(),
     }
 }
 

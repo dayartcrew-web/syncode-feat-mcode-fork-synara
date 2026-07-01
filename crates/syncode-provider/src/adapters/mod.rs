@@ -18,11 +18,10 @@ pub use claude::ClaudeAdapter;
 pub use claude::ClaudeConfig;
 pub use codex::CodexAdapter;
 pub use codex::CodexConfig;
-// cursor & grok are ACP-backed: exposed as spec/create helpers (not bespoke
-// adapter structs). See `adapters::cursor` / `adapters::grok`.
+// cursor, grok & gemini are ACP-backed: exposed as spec/create helpers (not
+// bespoke adapter structs). See `adapters::cursor` / `grok` / `gemini`.
 pub use cursor::{create as create_cursor, spec as cursor_spec};
-pub use gemini::GeminiAdapter;
-pub use gemini::GeminiConfig;
+pub use gemini::{create as create_gemini, spec as gemini_spec};
 pub use grok::{create as create_grok, spec as grok_spec};
 pub use kilo::KiloAdapter;
 pub use kilo::KiloConfig;
