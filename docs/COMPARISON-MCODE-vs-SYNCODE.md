@@ -1,6 +1,6 @@
 # MCode vs Syncode — Feature Comparison & Implementation Plan
 
-> ⚠️ **STATUS (2026-06-27) — PLANNING DOC, SUPERSEDED.** This was authored when the repo was empty (it states *"Proyek ini kosong"*). The implementation has since progressed to **422 passing tests and ~19,600 LOC across 12 crates**. For the **current** architecture see [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`CRATES.md`](./CRATES.md), and the per-crate intelligence in [`.masday/intel/`](../.masday/intel/README.md). This file is retained as the original MCode→Syncode plan and gap analysis.
+> ⚠️ **STATUS (2026-06-27) — PLANNING DOC, SUPERSEDED.** This was authored when the repo was empty (it states *"Proyek ini kosong"*). The implementation has since progressed to **791 passing tests and ~39,600 LOC across 12 crates, with all 10 AI providers real** (cursor/grok/gemini ACP · anthropic/openai HTTP · claude stream-json · codex app-server · opencode/kilo HTTP+SSE · pi RPC). For the **current** architecture see [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`CRATES.md`](./CRATES.md), and the per-crate intelligence in [`.masday/intel/`](../.masday/intel/README.md). This file is retained as the original MCode→Syncode plan and gap analysis.
 
 > **Tanggal**: 2026-06-27
 > **Scope**: Perbandingan fitur lengkap MCode (TypeScript monorepo) → Syncode (Rust DDD blueprint)
@@ -21,6 +21,8 @@ MCode adalah **local-first desktop app** untuk coding dengan AI agents. Monorepo
 ### 1.2 Apa itu Syncode (Project Ini)?
 Proyek ini **kosong** — hanya berisi legacy masday workflow state dari Juni 2026. Nama "syncode-rust-ddd-blueprint" mengindikasikan rencana untuk membangun **Rust-based DDD (Domain-Driven Design) blueprint** untuk sebuah IDE/agent workspace serupa MCode, tapi dengan arsitektur yang lebih robust.
 
+> ℹ️ **Update (2026-07-02):** Sudah tidak kosong — blueprint Rust DDD sudah terimplementasi: 12 crates, ~39,600 LOC, 791 tests, 10 provider real. Lihat [ARCHITECTURE.md](./ARCHITECTURE.md) & [CRATES.md](./CRATES.md). (Baris di atas dipertahankan sebagai catatan historis rencana awal.)
+
 ### 1.3 Gap Summary
 
 | Area | MCode (Current) | Syncode (Target) | Gap |
@@ -33,6 +35,8 @@ Proyek ini **kosong** — hanya berisi legacy masday workflow state dari Juni 20
 | Server | Node.js WebSocket | Axum WebSocket | Port |
 | Persistence | SQLite (better-sqlite3) | SQLite (rusqlite/sqlx) or PostgreSQL | Port |
 | Testing | Vitest (1017+ tests) | cargo test | Build from scratch |
+
+> ℹ️ **Update (2026-07-02):** Kolom "Syncode (Target)" di atas adalah rencana 2026-06-27, bukan kondisi aktual — Syncode kini punya 791 cargo tests, ~39,600 LOC, semua 10 provider, serta CQRS/ES engine + git/terminal/automation/auth lengkap (lihat [CRATES.md](./CRATES.md)).
 
 ---
 
