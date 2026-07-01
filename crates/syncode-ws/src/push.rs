@@ -117,7 +117,8 @@ impl SubscriptionRegistry {
 
     /// Register a new connection with empty subscriptions
     pub fn register(&mut self, conn_id: ConnectionId) {
-        self.subscriptions.insert(conn_id, ChannelSubscription::new());
+        self.subscriptions
+            .insert(conn_id, ChannelSubscription::new());
     }
 
     /// Remove a connection and its subscriptions
@@ -222,8 +223,7 @@ mod tests {
         // A published domain event is broadcast on push_tx as (channel, data),
         // where data packs the event type, aggregate id, and payload — the shape
         // a downstream push-delivery loop consumes.
-        let (push_tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, serde_json::Value)>(8);
+        let (push_tx, mut rx) = tokio::sync::broadcast::channel::<(String, serde_json::Value)>(8);
         let publisher = WsDomainEventPublisher::new(push_tx);
 
         publisher
@@ -249,8 +249,7 @@ mod tests {
         // Before any client subscribes there are no receivers. broadcast::send
         // returns SendError in that case, but publish must still return Ok —
         // the absence of a live subscriber is not a publish failure.
-        let (push_tx, _) =
-            tokio::sync::broadcast::channel::<(String, serde_json::Value)>(8);
+        let (push_tx, _) = tokio::sync::broadcast::channel::<(String, serde_json::Value)>(8);
         let publisher = WsDomainEventPublisher::new(push_tx);
 
         publisher

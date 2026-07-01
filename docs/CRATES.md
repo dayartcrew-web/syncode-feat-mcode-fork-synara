@@ -12,9 +12,9 @@ Quick reference for all 12 internal crates. For full detail (files, API surface,
 | [`syncode-git`](../.masday/intel/crates/syncode-git.md) | L1 | git2 — status/diff/branch/commit/checkpoint/worktree/stacked | 1201 | 22 | ⚠️ push/pull/PR stub |
 | [`syncode-terminal`](../.masday/intel/crates/syncode-terminal.md) | L1 | portable-pty PTY + ack-buffered output + sessions | 714 | 15 | ✅ |
 | [`syncode-automation`](../.masday/intel/crates/syncode-automation.md) | L1 | Scheduler + retry/misfire/completion policies | 1101 | 38 | ⚠️ cron/retry/exec stub |
-| [`syncode-ws`](../.masday/intel/crates/syncode-ws.md) | L3 | WebSocket JSON-RPC server + push bus + channels | 1188 | 14 | ⚠️ transport stub |
+| [`syncode-ws`](../.masday/intel/crates/syncode-ws.md) | L3 | WebSocket JSON-RPC server + push bus + channels + **authz gate** | ~1620 | 37 | ⚠️ transport stub |
 | [`syncode-tauri`](../.masday/intel/crates/syncode-tauri.md) | L4 | Tauri desktop binary — tray, updater, IPC | 1129 | 0† | ⚠️ engine not wired |
-| [`syncode-auth`](../.masday/intel/crates/syncode-auth.md) | L1 | Credentials, auth policy, secret store (in-memory) | 311 | 12 | ⚠️ not wired into WS |
+| [`syncode-auth`](../.masday/intel/crates/syncode-auth.md) | L1 | Credentials, auth policy, secret store, **principal/session/authenticator** | ~840 | 35 | ✅ wired into WS (opt-in) |
 | [`syncode-http`](../.masday/intel/crates/syncode-http.md) | L1 | Future REST surface | 12 | 0 | 🚧 stub |
 
 † `syncode-tauri` is excluded from `cargo test --workspace` (pre-existing build issues).
@@ -37,4 +37,4 @@ tests          → core, contracts, provider, terminal, automation
 - **Two parallel git abstractions:** `core::ports::GitServicePort` (async) vs `syncode-git::GitService` (sync) — the latter does **not** implement the port.
 - **Engine not reachable from desktop:** `tauri` reaches orchestration only transitively via `ws`, and isn't confirmed to spawn the WS server; there are no Tauri IPC commands for project/thread/turn.
 - **Automation isolated:** depends on `core` only; triggers create run records but execute nothing; not persisted.
-- **No WS auth** — `syncode-auth` now has credential / policy / secret-store types + an in-memory `SecretStore` (311 LOC, 12 tests), but is still not wired into the WS layer (no request auth/rate-limiting).
+- **WS auth is wired but opt-in** — `syncode-auth` now owns principal/session/authenticator + `AuthMode`; the WS layer authenticates connections and authorizes RPC dispatch via an authz gate (`auth/bootstrap`·`auth/status`·`auth/logout`). Default mode is `UnsafeNoAuth` (backward-compat); `WsState::new_with_auth(.., WsAuthConfig::remote(..))` opts in. No rate limiting; sessions are in-memory.

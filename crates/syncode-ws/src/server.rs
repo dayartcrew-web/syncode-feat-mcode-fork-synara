@@ -2,11 +2,11 @@
 
 use crate::rpc::handle_rpc;
 use crate::{ConnectionId, WsState};
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -24,10 +24,7 @@ pub fn build_app(state: Arc<WsState>) -> Router {
 }
 
 /// WebSocket upgrade handler
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<WsState>>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WsState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_connection(socket, state))
 }
 
@@ -62,10 +59,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<WsState>) {
     while let Some(Ok(msg)) = ws_receiver.next().await {
         if let Message::Text(text) = msg {
             let response = handle_rpc(&state, conn_id, &text).await;
-            if let Some(resp_str) = response {
-                if let Some(sender) = state.connections.read().await.get(&conn_id) {
-                    let _ = sender.send(resp_str);
-                }
+            if let Some(resp_str) = response
+                && let Some(sender) = state.connections.read().await.get(&conn_id)
+            {
+                let _ = sender.send(resp_str);
             }
         }
     }
@@ -106,10 +103,10 @@ pub async fn run_push_delivery(
             "method": format!("push/{}", channel),
             "params": data,
         });
-        if let Ok(msg_str) = serde_json::to_string(&msg) {
-            if tx.send(msg_str).is_err() {
-                break;
-            }
+        if let Ok(msg_str) = serde_json::to_string(&msg)
+            && tx.send(msg_str).is_err()
+        {
+            break;
         }
     }
 }
@@ -125,7 +122,11 @@ mod tests {
         let state = Arc::new(WsState::new_in_memory(16));
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         state.register(1, tx.clone()).await;
-        state.subscriptions.write().await.subscribe(1, "orchestration");
+        state
+            .subscriptions
+            .write()
+            .await
+            .subscribe(1, "orchestration");
 
         let _handle = tokio::spawn(run_push_delivery(Arc::clone(&state), 1, tx));
 
@@ -138,8 +139,7 @@ mod tests {
             "orchestration".to_string(),
             serde_json::json!({"event_type": "ProjectCreated"}),
         ));
-        let received =
-            tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        let received = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
         assert!(received.is_ok(), "subscribed channel should be delivered");
         let msg = received.unwrap().unwrap();
         assert!(msg.contains("push/orchestration"));
@@ -150,8 +150,7 @@ mod tests {
             "git".to_string(),
             serde_json::json!({"event_type": "GitPushed"}),
         ));
-        let filtered =
-            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        let filtered = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
         assert!(
             filtered.is_err(),
             "unsubscribed channel must NOT be delivered"
@@ -166,7 +165,11 @@ mod tests {
 
         let (tx1, mut rx1) = mpsc::unbounded_channel::<String>();
         state.register(1, tx1.clone()).await;
-        state.subscriptions.write().await.subscribe(1, "orchestration");
+        state
+            .subscriptions
+            .write()
+            .await
+            .subscribe(1, "orchestration");
         let _h1 = tokio::spawn(run_push_delivery(Arc::clone(&state), 1, tx1));
 
         let (tx2, mut rx2) = mpsc::unbounded_channel::<String>();
@@ -185,19 +188,27 @@ mod tests {
             .send(("git".to_string(), serde_json::json!({})));
 
         // Conn 1 gets orchestration, not git.
-        assert!(tokio::time::timeout(Duration::from_millis(200), rx1.recv())
-            .await
-            .is_ok());
-        assert!(tokio::time::timeout(Duration::from_millis(100), rx1.recv())
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx1.recv())
+                .await
+                .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx1.recv())
+                .await
+                .is_err()
+        );
 
         // Conn 2 gets git, not orchestration.
-        assert!(tokio::time::timeout(Duration::from_millis(200), rx2.recv())
-            .await
-            .is_ok());
-        assert!(tokio::time::timeout(Duration::from_millis(100), rx2.recv())
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx2.recv())
+                .await
+                .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx2.recv())
+                .await
+                .is_err()
+        );
     }
 }

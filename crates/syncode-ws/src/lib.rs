@@ -3,6 +3,7 @@
 //! WebSocket JSON-RPC server, method dispatch, push bus,
 //! channel management, and connection state machine.
 
+pub mod auth;
 pub mod channels;
 pub mod push;
 pub mod rpc;
@@ -12,7 +13,7 @@ pub mod transport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 /// A JSON-RPC request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,14 +87,41 @@ pub struct WsState {
     /// decide which push broadcasts to forward to each connection (opt-in: a
     /// connection receives nothing until it subscribes via `push/subscribe`).
     pub subscriptions: Arc<RwLock<crate::push::SubscriptionRegistry>>,
+    /// Auth configuration: mode (no-auth vs remote-reachable) + authenticator +
+    /// shared session registry. Defaults to `UnsafeNoAuth` (backward compat).
+    pub auth_config: syncode_auth::WsAuthConfig,
+    /// Per-connection authenticated principals. Populated by `auth/bootstrap`,
+    /// consulted by the authz gate on every protected method call.
+    pub conn_auth: crate::auth::SharedConnectionAuth,
 }
 
 impl WsState {
-    /// Create a new WsState with an Orchestrator.
+    /// Create a new WsState with an Orchestrator, in **no-auth** mode.
+    ///
+    /// This is the backward-compatible default: existing local-first and test
+    /// deployments run without authentication. Callers building a
+    /// network-reachable server should use [`WsState::new_with_auth`] instead.
     ///
     /// The orchestrator's read model is shared with the WsState so RPC handlers
     /// can read the latest projected state.
     pub fn new(push_capacity: usize, orchestrator: syncode_orchestration::Orchestrator) -> Self {
+        Self::new_with_auth(
+            push_capacity,
+            orchestrator,
+            syncode_auth::WsAuthConfig::no_auth(),
+        )
+    }
+
+    /// Create a new WsState with an explicit auth configuration.
+    ///
+    /// Pass [`syncode_auth::WsAuthConfig::no_auth()`] for local/dev (the
+    /// historical behavior), or [`syncode_auth::WsAuthConfig::remote`] to
+    /// require authentication on every connection before dispatch.
+    pub fn new_with_auth(
+        push_capacity: usize,
+        orchestrator: syncode_orchestration::Orchestrator,
+        auth_config: syncode_auth::WsAuthConfig,
+    ) -> Self {
         let (push_tx, _) = broadcast::channel(push_capacity);
 
         // Feed domain events from the pipeline onto the push bus: wrap the push
@@ -110,6 +138,8 @@ impl WsState {
             read_store,
             orchestrator: Arc::new(orchestrator),
             subscriptions: Arc::new(RwLock::new(crate::push::SubscriptionRegistry::new())),
+            auth_config,
+            conn_auth: crate::auth::SharedConnectionAuth::new(),
         }
     }
 
@@ -120,16 +150,25 @@ impl WsState {
 
         // In-memory event repo for testing
         struct InMemoryRepo {
-            events: std::sync::Mutex<std::collections::HashMap<String, Vec<syncode_core::Envelope>>>,
-            snapshots: std::sync::Mutex<std::collections::HashMap<String, (serde_json::Value, u64)>>,
+            events:
+                std::sync::Mutex<std::collections::HashMap<String, Vec<syncode_core::Envelope>>>,
+            snapshots:
+                std::sync::Mutex<std::collections::HashMap<String, (serde_json::Value, u64)>>,
         }
         impl InMemoryRepo {
-            fn new() -> Self { Self { events: std::sync::Mutex::new(std::collections::HashMap::new()), snapshots: std::sync::Mutex::new(std::collections::HashMap::new()) } }
+            fn new() -> Self {
+                Self {
+                    events: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    snapshots: std::sync::Mutex::new(std::collections::HashMap::new()),
+                }
+            }
         }
         #[async_trait::async_trait]
         impl EventRepository for InMemoryRepo {
             async fn append_events(
-                &self, aggregate_id: syncode_core::EntityId, events: Vec<syncode_core::DomainEvent>,
+                &self,
+                aggregate_id: syncode_core::EntityId,
+                events: Vec<syncode_core::DomainEvent>,
                 expected_version: u64,
             ) -> Result<u64, syncode_core::PortError> {
                 use syncode_core::Envelope;
@@ -137,7 +176,10 @@ impl WsState {
                 let key = aggregate_id.to_string();
                 let current = store.get(&key).map(|v| v.len() as u64).unwrap_or(0);
                 if current != expected_version {
-                    return Err(syncode_core::PortError::ConcurrencyConflict { expected: expected_version, actual: current });
+                    return Err(syncode_core::PortError::ConcurrencyConflict {
+                        expected: expected_version,
+                        actual: current,
+                    });
                 }
                 let entry = store.entry(key).or_default();
                 for (i, event) in events.into_iter().enumerate() {
@@ -145,36 +187,75 @@ impl WsState {
                 }
                 Ok(entry.len() as u64)
             }
-            async fn replay_events(&self, aggregate_id: syncode_core::EntityId) -> Result<Vec<syncode_core::Envelope>, syncode_core::PortError> {
+            async fn replay_events(
+                &self,
+                aggregate_id: syncode_core::EntityId,
+            ) -> Result<Vec<syncode_core::Envelope>, syncode_core::PortError> {
                 let store = self.events.lock().unwrap();
-                Ok(store.get(&aggregate_id.to_string()).cloned().unwrap_or_default())
+                Ok(store
+                    .get(&aggregate_id.to_string())
+                    .cloned()
+                    .unwrap_or_default())
             }
-            async fn load_snapshot(&self, aggregate_id: syncode_core::EntityId) -> Result<Option<(serde_json::Value, u64)>, syncode_core::PortError> {
-                Ok(self.snapshots.lock().unwrap().get(&aggregate_id.to_string()).cloned())
+            async fn load_snapshot(
+                &self,
+                aggregate_id: syncode_core::EntityId,
+            ) -> Result<Option<(serde_json::Value, u64)>, syncode_core::PortError> {
+                Ok(self
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .get(&aggregate_id.to_string())
+                    .cloned())
             }
-            async fn save_snapshot(&self, aggregate_id: syncode_core::EntityId, state: serde_json::Value, version: u64) -> Result<(), syncode_core::PortError> {
-                self.snapshots.lock().unwrap().insert(aggregate_id.to_string(), (state, version));
+            async fn save_snapshot(
+                &self,
+                aggregate_id: syncode_core::EntityId,
+                state: serde_json::Value,
+                version: u64,
+            ) -> Result<(), syncode_core::PortError> {
+                self.snapshots
+                    .lock()
+                    .unwrap()
+                    .insert(aggregate_id.to_string(), (state, version));
                 Ok(())
             }
-            async fn load_all_snapshots(&self) -> Result<Vec<(syncode_core::EntityId, serde_json::Value, u64)>, syncode_core::PortError> {
+            async fn load_all_snapshots(
+                &self,
+            ) -> Result<
+                Vec<(syncode_core::EntityId, serde_json::Value, u64)>,
+                syncode_core::PortError,
+            > {
                 let snapshots = self.snapshots.lock().unwrap();
                 let mut out = Vec::with_capacity(snapshots.len());
                 for (id_str, (state, version)) in snapshots.iter() {
-                    let id = syncode_core::EntityId::parse(id_str)
-                        .map_err(|e| syncode_core::PortError::Internal(format!("invalid aggregate_id: {e}")))?;
+                    let id = syncode_core::EntityId::parse(id_str).map_err(|e| {
+                        syncode_core::PortError::Internal(format!("invalid aggregate_id: {e}"))
+                    })?;
                     out.push((id, state.clone(), *version));
                 }
                 Ok(out)
             }
-            async fn replay_all_events(&self, _: Option<u64>, _: u32) -> Result<Vec<syncode_core::Envelope>, syncode_core::PortError> {
+            async fn replay_all_events(
+                &self,
+                _: Option<u64>,
+                _: u32,
+            ) -> Result<Vec<syncode_core::Envelope>, syncode_core::PortError> {
                 let store = self.events.lock().unwrap();
-                let mut all: Vec<syncode_core::Envelope> = store.values().flatten().cloned().collect();
+                let mut all: Vec<syncode_core::Envelope> =
+                    store.values().flatten().cloned().collect();
                 all.sort_by_key(|e| e.sequence);
                 Ok(all)
             }
-            async fn current_version(&self, aggregate_id: syncode_core::EntityId) -> Result<u64, syncode_core::PortError> {
+            async fn current_version(
+                &self,
+                aggregate_id: syncode_core::EntityId,
+            ) -> Result<u64, syncode_core::PortError> {
                 let store = self.events.lock().unwrap();
-                Ok(store.get(&aggregate_id.to_string()).map(|v| v.len() as u64).unwrap_or(0))
+                Ok(store
+                    .get(&aggregate_id.to_string())
+                    .map(|v| v.len() as u64)
+                    .unwrap_or(0))
             }
         }
 

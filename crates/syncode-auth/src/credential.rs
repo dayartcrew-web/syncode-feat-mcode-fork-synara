@@ -4,8 +4,8 @@
 //! provider. Values are stored opaquely; [`Credential::redact`] produces a
 //! display-safe mask for logs and UIs.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use syncode_core::{EntityId, Timestamp};
 
 /// The kind of secret a credential holds.
@@ -31,7 +31,11 @@ pub struct Credential {
 
 impl Credential {
     /// Create a new credential, capturing the creation timestamp.
-    pub fn new(provider_id: impl Into<String>, kind: CredentialKind, value: impl Into<String>) -> Self {
+    pub fn new(
+        provider_id: impl Into<String>,
+        kind: CredentialKind,
+        value: impl Into<String>,
+    ) -> Self {
         Self {
             id: EntityId::new(),
             provider_id: provider_id.into(),
@@ -49,7 +53,15 @@ impl Credential {
         if len <= 4 {
             return "•".repeat(len.max(1));
         }
-        let tail: String = self.value.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = self
+            .value
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("{}{}", "•".repeat(len - 4), tail)
     }
 }
@@ -78,11 +90,18 @@ impl CredentialStore {
 
     /// All credentials for a given provider.
     pub fn list_for_provider(&self, provider_id: &str) -> Vec<&Credential> {
-        self.inner.values().filter(|c| c.provider_id == provider_id).collect()
+        self.inner
+            .values()
+            .filter(|c| c.provider_id == provider_id)
+            .collect()
     }
 
-    pub fn len(&self) -> usize { self.inner.len() }
-    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -92,7 +111,8 @@ mod tests {
     #[test]
     fn redact_masks_all_but_last_four() {
         let cred = Credential::new("anthropic", CredentialKind::ApiKey, "sk-ant-abc123XYZ");
-        let m = cred.redact(); assert!(m.ends_with("3XYZ") && m.chars().count() == 16, "{}", m);
+        let m = cred.redact();
+        assert!(m.ends_with("3XYZ") && m.chars().count() == 16, "{}", m);
     }
 
     #[test]
