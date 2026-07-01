@@ -195,10 +195,22 @@ async fn dispatch_method(
 
 // ─── Push Subscription Handlers ───────────────────────────────────
 
-/// Record a channel subscription for the originating connection. The "*"
+/// Record a channel subscription for the originating connection, then emit a
+/// snapshot of the channel's current state (snapshot-then-stream).
+///
+/// The "*"
 /// wildcard expands to all known channels. Subscriptions are opt-in: a
 /// connection receives no pushes until it subscribes. Idempotent — `added`
 /// reports whether this created a new subscription.
+///
+/// **Snapshot:** after the subscription is recorded, the server builds a
+/// snapshot of the channel's current read-model state and sends it to this
+/// connection as a `push/<channel>` notification with `event_type: "snapshot"`.
+/// The subscribe-then-snapshot ordering is race-free: any event projected
+/// after the snapshot read is delivered live (the subscription was already in
+/// place). For the `orchestration` channel, an optional `threadId` param
+/// selects a thread-detail snapshot (one thread + turns + messages) instead
+/// of the default shell snapshot (all projects + threads).
 async fn handle_push_subscribe(
     state: &WsState,
     conn_id: ConnectionId,
@@ -222,6 +234,9 @@ async fn handle_push_subscribe(
             format!("Unknown channel: {}", channel),
         );
     }
+    // Optional threadId for the orchestration channel (thread-detail snapshot).
+    let thread_id = params.get("threadId").and_then(|v| v.as_str());
+
     // Record against this connection. Returns false if the connection isn't
     // registered (shouldn't happen for a live socket) or was already subscribed.
     let added = state
@@ -229,9 +244,20 @@ async fn handle_push_subscribe(
         .write()
         .await
         .subscribe(conn_id, channel);
+
+    // Snapshot-then-stream: emit current state BEFORE returning, so the
+    // client has an immediate basis to apply live deltas against. Ordering
+    // is safe because the subscription is already recorded above.
+    let snapshot_emitted = crate::push::emit_snapshot(state, conn_id, channel, thread_id).await;
+
     JsonRpcResponse::success(
         id,
-        serde_json::json!({ "subscribed": true, "channel": channel, "added": added }),
+        serde_json::json!({
+            "subscribed": true,
+            "channel": channel,
+            "added": added,
+            "snapshotEmitted": snapshot_emitted,
+        }),
     )
 }
 

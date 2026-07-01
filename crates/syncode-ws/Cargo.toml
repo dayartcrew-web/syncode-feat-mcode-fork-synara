@@ -8,6 +8,7 @@ description = "WebSocket transport — JSON-RPC server, push bus, channels, conn
 
 [dependencies]
 syncode-core = { workspace = true }
+syncode-contracts = { path = "../syncode-contracts" }
 syncode-orchestration = { path = "../syncode-orchestration" }
 syncode-persistence = { path = "../syncode-persistence" }
 syncode-auth = { path = "../syncode-auth" }
