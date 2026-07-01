@@ -574,9 +574,9 @@ DisclosureChevron, DisclosureRegion
 | **Hardcoded placeholder response** | ChatView.tsx:92 | Wire to real provider streaming |
 | **Hardcoded provider list** | ProviderSwitcher.tsx | Fetch from backend via RPC |
 | **GitPanel not imported** | App.tsx | Wire GitPanel into layout |
-| **No reconnection logic** | useWebSocket.ts | Add reconnect with exponential backoff |
-| **No request queueing** | useWebSocket.ts | Queue requests during disconnect |
-| **10s fixed timeout** | useWebSocket.ts:119 | Configurable per-method timeout |
+| ~~**No reconnection logic**~~ ~~useWebSocket.ts~~ | ~~Add reconnect with exponential backoff~~ | ✅ **DONE (ws-snapshot-reconnect)** — `min(500*2^n, 5000)` backoff + re-subscribe; reconnecting clients receive a snapshot via snapshot-then-stream |
+| **No request queueing** | useWebSocket.ts | Queue requests during disconnect (low priority — MCode has neither; reconnect+resubscribe covers it) |
+| **10s fixed timeout** | useWebSocket.ts | Configurable per-method timeout (low priority — MCode has neither) |
 | **No error boundaries** | App.tsx | Add React error boundaries |
 | **No loading states** | Multiple components | Add skeleton/spinner loading states |
 | **Inline styles everywhere** | All components | Migrate to Tailwind CSS |

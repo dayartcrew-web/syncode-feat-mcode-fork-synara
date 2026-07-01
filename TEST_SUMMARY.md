@@ -1,8 +1,8 @@
 # Syncode — Test Summary Report
 
-**Generated:** 2026-06-27 · **numbers refreshed 2026-07-01** (after the command-port, gaps-and-stubs, provider-bridge, internal-commands, snapshot-coldstart, real-providers-acp, and ws-auth-wiring workflows)
-**Total Tests:** ~559 (all passing, 0 failures, 1 ignored doc-test). NOTE: grew from 487 — the ws-auth-wiring workflow connected `syncode-auth` into the WS transport (principal/session/authenticator + authz gate on RPC dispatch + `auth/bootstrap`·`auth/status`·`auth/logout`): auth 12→35, ws 14→37. Per-crate counts below were verified by running each suite.
-**Total Rust LOC:** ~24,900 (90+ source files across 12 internal crates + 1 integration-test package)
+**Generated:** 2026-06-27 · **numbers refreshed 2026-07-01** (after the command-port, gaps-and-stubs, provider-bridge, internal-commands, snapshot-coldstart, real-providers-acp, ws-auth-wiring, and ws-snapshot-reconnect workflows)
+**Total Tests:** ~576 (all passing, 0 failures, 1 ignored doc-test). NOTE: grew from 559 — the ws-snapshot-reconnect workflow added snapshot-then-stream subscriptions (backend `push/subscribe` emits a snapshot of current state, then live deltas) + a reconnect-resilient frontend client: contracts 21→34 (snapshot DTOs), ws 37→42 (emit_snapshot + snapshot-on-subscribe). Per-crate counts below were verified by running each suite. Frontend verified via `npm run typecheck` + `npm run build`.
+**Total Rust LOC:** ~25,400 (95+ source files across 12 internal crates + 1 integration-test package)
 
 ## Test Breakdown by Crate
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | `syncode-automation` | 38 | Scheduled agent runs, retry/misfire/completion policies |
 | `syncode-auth` | 35 | Credentials, secret store, auth policy, **principal/session/authenticator, AuthMode** |
-| `syncode-contracts` | 21 | Shared types, session/message views, TS bindings |
+| `syncode-contracts` | 34 | Shared types, session/message views, TS bindings, **snapshot DTOs** |
 | `syncode-core` | 45 | EntityId, Timestamp, Project, Thread, Turn, DomainEvent (35 variants), port traits |
 | `syncode-git` | 22 | Git operations, checkpoint, branch management |
 | `syncode-http` | 0 | **stub** (TODO only; reserved for a future REST surface — see ARCHITECTURE.md) |
@@ -20,8 +20,8 @@
 | `syncode-provider` | 174 | ProviderAdapter trait + 10 adapters |
 | `syncode-tauri` | — | Desktop tray, auto-updater (pre-existing build issues, excluded) |
 | `syncode-terminal` | 15 | OutputBuffer, ack protocol, chunk management, display |
-| `syncode-ws` | 37 | WebSocket server, JSON-RPC, connection lifecycle, push bus, **authz gate + auth RPC** |
-| **TOTAL** | **~559** | |
+| `syncode-ws` | 42 | WebSocket server, JSON-RPC, connection lifecycle, push bus, **authz gate + auth RPC + snapshot-then-stream** |
+| **TOTAL** | **~576** | |
 
 ## CQRS / Event Sourcing Pipeline (New)
 
