@@ -84,7 +84,7 @@ Provider read-back: `ProviderEvent → ingest_provider_event() → DomainEvent` 
 | **L1 leaf** | `syncode-git` | git2: status/diff/branch/commit/checkpoint/worktree/stacked-actions |
 | **L1 leaf** | `syncode-terminal` | portable-pty PTY + ack-buffered output + sessions |
 | **L1 leaf** | `syncode-automation` | scheduler + retry/misfire/completion policies |
-| **L1 leaf** | `syncode-auth` | *(stub)* credential/policy/secret-store |
+| **L1 leaf** | `syncode-auth` | credentials, auth policy, secret store, principal/session/authenticator (**wired into WS — opt-in**) |
 | **L1 leaf** | `syncode-http` | *(stub)* future REST surface |
 | **L2 engine** | `syncode-orchestration` | CQRS: 38 Commands, Decider, Orchestrator, Projector, Reactors, ApplicationService |
 | **L3 transport** | `syncode-ws` | WebSocket JSON-RPC server + push bus |
