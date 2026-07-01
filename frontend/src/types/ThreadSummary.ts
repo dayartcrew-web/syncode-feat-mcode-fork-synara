@@ -4,4 +4,4 @@
  * A thread's key fields, as carried in a snapshot. Faithful to
  * `syncode_orchestration::ThreadView`.
  */
-export type ThreadSummary = { id: string, project_id: string, provider_id: string, model: string, status: string, title: string | null, git_checkpoint: string | null, runtime_mode: string, interaction_mode: string, turn_count: number, created_at: string, updated_at: string, };
+export type ThreadSummary = { id: string, projectId: string, providerId: string, model: string, status: string, title: string | null, gitCheckpoint: string | null, runtimeMode: string, interactionMode: string, turnCount: number, createdAt: string, updatedAt: string, };

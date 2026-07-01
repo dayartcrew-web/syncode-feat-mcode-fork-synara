@@ -3,4 +3,4 @@ import type { EntityId } from "./EntityId";
 import type { SessionStatus } from "./SessionStatus";
 import type { Timestamp } from "./Timestamp";
 
-export type SessionView = { id: EntityId, provider_id: string, model: string, working_directory: string | null, created_at: Timestamp, status: SessionStatus, };
+export type SessionView = { id: EntityId, providerId: string, model: string, workingDirectory: string | null, createdAt: Timestamp, status: SessionStatus, };

@@ -10,13 +10,13 @@ import { useState, useEffect, useCallback } from "react";
 
 interface GitFileInfo {
   path: string;
-  index_status: string;
-  working_tree_status: string;
+  indexStatus: string;
+  workingTreeStatus: string;
 }
 
 interface GitStatusData {
   branch: string | null;
-  head_detached: boolean;
+  headDetached: boolean;
   files: GitFileInfo[];
   ahead: number;
   behind: number;
@@ -24,7 +24,7 @@ interface GitStatusData {
 
 interface GitLogEntry {
   hash: string;
-  short_hash: string;
+  shortHash: string;
   author: string;
   message: string;
   timestamp: string;
@@ -116,7 +116,7 @@ export default function GitPanel({
             {status.behind > 0 && ` ↓${status.behind}`}
           </span>
         )}
-        {status?.head_detached && (
+        {status?.headDetached && (
           <span style={{ fontSize: 10, color: "#d9534f" }}>DETACHED</span>
         )}
       </div>
@@ -156,11 +156,11 @@ export default function GitPanel({
               justifyContent: "center",
               fontSize: 9,
               fontWeight: 700,
-              background: STATUS_COLORS[file.working_tree_status] || "#555",
+              background: STATUS_COLORS[file.workingTreeStatus] || "#555",
               color: "#fff",
             }}
           >
-            {file.working_tree_status === "?" ? "+" : file.working_tree_status || "·"}
+            {file.workingTreeStatus === "?" ? "+" : file.workingTreeStatus || "·"}
           </span>
           <span style={{ color: "#ccc", fontFamily: "monospace", fontSize: 11 }}>
             {file.path}
@@ -213,11 +213,11 @@ export default function GitPanel({
           <div style={{ fontSize: 10, color: "#555", marginBottom: 4 }}>Recent commits</div>
           {log.slice(0, 5).map((entry) => (
             <div
-              key={entry.short_hash}
+              key={entry.shortHash}
               style={{ fontSize: 10, padding: "2px 0", display: "flex", gap: 6 }}
             >
               <span style={{ color: "#e94560", fontFamily: "monospace" }}>
-                {entry.short_hash.slice(0, 7)}
+                {entry.shortHash.slice(0, 7)}
               </span>
               <span style={{ color: "#aaa", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {entry.message}

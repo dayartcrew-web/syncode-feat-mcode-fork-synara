@@ -11,4 +11,4 @@ export type ShellSnapshot = { scope: SnapshotScope, projects: Array<ProjectSumma
 /**
  * ISO-8601 timestamp at which the snapshot was read.
  */
-snapshot_at: string, };
+snapshotAt: string, };

@@ -49,7 +49,8 @@ impl Timestamp {
 // ─── Provider Types ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct ProviderConfig {
     pub id: String,
     pub api_key: String,
@@ -60,7 +61,8 @@ pub struct ProviderConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct ProviderCapabilities {
     pub chat: bool,
     pub edit: bool,
@@ -72,7 +74,8 @@ pub struct ProviderCapabilities {
 // ─── Session Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct CreateSessionRequest {
     pub provider_id: String,
     pub model: String,
@@ -80,7 +83,8 @@ pub struct CreateSessionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct SessionView {
     pub id: EntityId,
     pub provider_id: String,
@@ -102,7 +106,8 @@ pub enum SessionStatus {
 // ─── Message Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct MessageView {
     pub id: EntityId,
     pub role: MessageRole,
@@ -121,7 +126,8 @@ pub enum MessageRole {
 // ─── Git Types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct GitFileStatusView {
     pub path: String,
     pub index_status: FileStatusKind,
@@ -142,7 +148,8 @@ pub enum FileStatusKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct GitStatusView {
     pub branch: Option<String>,
     pub head_detached: bool,
@@ -154,7 +161,8 @@ pub struct GitStatusView {
 // ─── JSON-RPC Types ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct JsonRpcRequestView {
     pub jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,7 +175,8 @@ pub struct JsonRpcRequestView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct JsonRpcResponseView {
     pub jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,7 +191,8 @@ pub struct JsonRpcResponseView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct JsonRpcErrorView {
     pub code: i32,
     pub message: String,
@@ -194,7 +204,8 @@ pub struct JsonRpcErrorView {
 // ─── WebSocket Push Types ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
 pub struct PushEvent {
     pub channel: String,
     pub event_type: String,
@@ -251,6 +262,96 @@ mod tests {
         let json = serde_json::to_string(&session).unwrap();
         let decoded: SessionView = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.provider_id, "claude");
+    }
+
+    /// Wire-parity guard: the contracts surface must serialize **camelCase**
+    /// field names so the JSON wire and the ts-rs-generated TS types agree
+    /// (the latter is `#[ts(rename_all = "camelCase")]`). If this test fails,
+    /// serde + ts-rs casing drifted apart on a core DTO.
+    #[test]
+    fn core_dtos_serialize_camel_case() {
+        // SessionView: provider_id, working_directory, created_at
+        let json = serde_json::to_string(&SessionView {
+            id: EntityId::new(),
+            provider_id: "claude".into(),
+            model: "m".into(),
+            working_directory: None,
+            created_at: Timestamp("t".into()),
+            status: SessionStatus::Idle,
+        })
+        .unwrap();
+        assert!(
+            json.contains("\"providerId\""),
+            "SessionView camelCase: {json}"
+        );
+        assert!(json.contains("\"workingDirectory\""));
+        assert!(json.contains("\"createdAt\""));
+        assert!(!json.contains("\"provider_id\""), "snake leaked: {json}");
+
+        // ProviderConfig: api_key, base_url, max_tokens
+        let json = serde_json::to_string(&ProviderConfig {
+            id: "claude".into(),
+            api_key: "k".into(),
+            base_url: None,
+            model: None,
+            max_tokens: None,
+            temperature: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"apiKey\""), "ProviderConfig camelCase: {json}");
+        assert!(json.contains("\"baseUrl\""));
+        assert!(json.contains("\"maxTokens\""));
+
+        // GitStatusView: head_detached
+        let json = serde_json::to_string(&GitStatusView {
+            branch: None,
+            head_detached: false,
+            files: vec![],
+            ahead: 0,
+            behind: 0,
+        })
+        .unwrap();
+        assert!(json.contains("\"headDetached\""), "GitStatusView camelCase: {json}");
+
+        // GitFileStatusView: index_status, working_tree_status
+        let json = serde_json::to_string(&GitFileStatusView {
+            path: "p".into(),
+            index_status: FileStatusKind::Unmodified,
+            working_tree_status: FileStatusKind::Unmodified,
+        })
+        .unwrap();
+        assert!(json.contains("\"indexStatus\""), "GitFileStatusView camelCase: {json}");
+        assert!(json.contains("\"workingTreeStatus\""));
+
+        // CreateSessionRequest: provider_id, working_directory
+        let json = serde_json::to_string(&CreateSessionRequest {
+            provider_id: "p".into(),
+            model: "m".into(),
+            working_directory: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"providerId\""), "CreateSessionRequest camelCase: {json}");
+
+        // PushEvent: event_type
+        let json = serde_json::to_string(&PushEvent {
+            channel: "c".into(),
+            event_type: "t".into(),
+            data: serde_json::Value::Null,
+            timestamp: Timestamp("t".into()),
+        })
+        .unwrap();
+        assert!(json.contains("\"eventType\""), "PushEvent camelCase: {json}");
+
+        // JsonRpcRequestView: no snake fields, but check jsonrpc field stays
+        // (it's a single word, no rename needed — sanity only).
+        let json = serde_json::to_string(&JsonRpcRequestView {
+            jsonrpc: "2.0".into(),
+            id: None,
+            method: "m".into(),
+            params: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"jsonrpc\""), "JsonRpcRequestView: {json}");
     }
 
     /// Generate all TypeScript definitions to frontend/src/types/

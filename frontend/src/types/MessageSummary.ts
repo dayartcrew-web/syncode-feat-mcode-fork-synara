@@ -5,4 +5,4 @@
  * `syncode_orchestration::MessageView` (NOT the contracts `MessageView`, which
  * is a different, session-oriented type).
  */
-export type MessageSummary = { id: string, turn_id: string, role: string, content: string, content_type: string, token_count: number | null, tool_name: string | null, tool_call_id: string | null, created_at: string, is_streaming: boolean, };
+export type MessageSummary = { id: string, turnId: string, role: string, content: string, contentType: string, tokenCount: number | null, toolName: string | null, toolCallId: string | null, createdAt: string, isStreaming: boolean, };

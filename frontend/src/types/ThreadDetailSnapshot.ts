@@ -8,4 +8,4 @@ import type { TurnSummary } from "./TurnSummary";
  * Thread-detail snapshot — one thread + its turns + messages. Sent on
  * `orchestration` channel subscribe when a `threadId` is given.
  */
-export type ThreadDetailSnapshot = { scope: SnapshotScope, thread: ThreadSummary, turns: Array<TurnSummary>, messages: Array<MessageSummary>, snapshot_at: string, };
+export type ThreadDetailSnapshot = { scope: SnapshotScope, thread: ThreadSummary, turns: Array<TurnSummary>, messages: Array<MessageSummary>, snapshotAt: string, };

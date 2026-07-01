@@ -5,4 +5,4 @@
  * `syncode_orchestration::ProjectView` (slimmed to the fields a client needs
  * for shell/list views).
  */
-export type ProjectSummary = { id: string, name: string, root_path: string, provider_id: string | null, default_model: string | null, created_at: string, updated_at: string, thread_count: number, };
+export type ProjectSummary = { id: string, name: string, rootPath: string, providerId: string | null, defaultModel: string | null, createdAt: string, updatedAt: string, threadCount: number, };

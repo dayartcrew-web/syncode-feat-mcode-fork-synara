@@ -9,13 +9,13 @@ import { useEffect, useState, useCallback } from "react";
 
 export interface ThreadItem {
   id: string;
-  project_id: string;
-  provider_id: string;
+  projectId: string;
+  providerId: string;
   model: string;
   status: string;
   title: string | null;
-  turn_count: number;
-  created_at: string;
+  turnCount: number;
+  createdAt: string;
 }
 
 interface ThreadListProps {
@@ -98,7 +98,7 @@ export default function ThreadList({
           </div>
           <div style={{ fontSize: 10, color: "#666", display: "flex", gap: 8 }}>
             <span>{t.model}</span>
-            <span>{t.turn_count} turn{t.turn_count !== 1 ? "s" : ""}</span>
+            <span>{t.turnCount} turn{t.turnCount !== 1 ? "s" : ""}</span>
           </div>
         </div>
       ))}

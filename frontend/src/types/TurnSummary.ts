@@ -4,4 +4,4 @@
  * A turn's key fields, as carried in a thread-detail snapshot. Faithful to
  * `syncode_orchestration::TurnView`.
  */
-export type TurnSummary = { id: string, thread_id: string, sequence: number, user_input: string, assistant_output: string | null, status: string, git_checkpoint: string | null, files_modified: Array<string>, duration_ms: bigint | null, created_at: string, completed_at: string | null, };
+export type TurnSummary = { id: string, threadId: string, sequence: number, userInput: string, assistantOutput: string | null, status: string, gitCheckpoint: string | null, filesModified: Array<string>, durationMs: number | null, createdAt: string, completedAt: string | null, };

@@ -9,4 +9,4 @@ import type { TurnSummary } from "./TurnSummary";
 /**
  * Full-store snapshot — every collection. Sent on `*` wildcard subscribe.
  */
-export type FullSnapshot = { scope: SnapshotScope, projects: Array<ProjectSummary>, threads: Array<ThreadSummary>, turns: Array<TurnSummary>, messages: Array<MessageSummary>, activities: Array<ActivitySummary>, snapshot_at: string, };
+export type FullSnapshot = { scope: SnapshotScope, projects: Array<ProjectSummary>, threads: Array<ThreadSummary>, turns: Array<TurnSummary>, messages: Array<MessageSummary>, activities: Array<ActivitySummary>, snapshotAt: string, };
