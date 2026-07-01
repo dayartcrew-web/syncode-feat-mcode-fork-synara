@@ -10,6 +10,7 @@
 //!
 //! This is the command handler / application service for the orchestration layer.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use syncode_core::{
     DomainEvent, Envelope, EntityId,
@@ -19,6 +20,9 @@ use tracing::{info, instrument};
 
 use crate::decider::{Command, Decider, DeciderError};
 use crate::projector::{Projector, ReadModelStore};
+use crate::read_model::{
+    ProjectView, ThreadView, TurnView, MessageView, PinnedMessageView, MarkerView,
+};
 use crate::reactors::{
     ProviderCommandReactor,
     ingest_provider_event, IngestionResult,
@@ -115,6 +119,91 @@ fn view_for_aggregate(read_model: &ReadModelStore, id: EntityId) -> Option<serde
         return serde_json::to_value(view).ok();
     }
     None
+}
+
+/// The aggregate kind a serialized snapshot view belongs to. Used to route a
+/// snapshot's state into the correct read-model map during cold-start seeding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AggregateKind {
+    Project,
+    Thread,
+    Turn,
+    Message,
+    PinnedMessage,
+    Marker,
+}
+
+/// Classify a serialized aggregate view by a field UNIQUE to each kind. Every
+/// view struct has at least one field no other view defines, so this is
+/// order-independent and unambiguous. Returns `None` for shapes we never
+/// snapshot (activities are a flat `Vec`; unknown JSON yields nothing).
+fn aggregate_kind(state: &serde_json::Value) -> Option<AggregateKind> {
+    if state.get("marker_id").is_some() {
+        Some(AggregateKind::Marker)
+    } else if state.get("pinned_at").is_some() {
+        Some(AggregateKind::PinnedMessage)
+    } else if state.get("user_input").is_some() {
+        Some(AggregateKind::Turn)
+    } else if state.get("role").is_some() {
+        Some(AggregateKind::Message)
+    } else if state.get("runtime_mode").is_some() {
+        Some(AggregateKind::Thread)
+    } else if state.get("root_path").is_some() {
+        Some(AggregateKind::Project)
+    } else {
+        None
+    }
+}
+
+/// Seed the read model from a single aggregate snapshot: classify the stored
+/// view and insert it into the matching typed map under the aggregate's id.
+/// This is the inverse of [`view_for_aggregate`]. A view that fails to
+/// deserialize into its classified type is skipped with a warning rather than
+/// panicking — the tail replay will still rebuild it from events.
+fn seed_read_model_from_snapshot(
+    read_model: &mut ReadModelStore,
+    id: EntityId,
+    state: &serde_json::Value,
+) {
+    let key = id.as_str();
+    match aggregate_kind(state) {
+        Some(AggregateKind::Project) => {
+            if let Ok(view) = serde_json::from_value::<ProjectView>(state.clone()) {
+                read_model.projects.insert(key, view);
+            }
+        }
+        Some(AggregateKind::Thread) => {
+            if let Ok(view) = serde_json::from_value::<ThreadView>(state.clone()) {
+                read_model.threads.insert(key, view);
+            }
+        }
+        Some(AggregateKind::Turn) => {
+            if let Ok(view) = serde_json::from_value::<TurnView>(state.clone()) {
+                read_model.turns.insert(key, view);
+            }
+        }
+        Some(AggregateKind::Message) => {
+            if let Ok(view) = serde_json::from_value::<MessageView>(state.clone()) {
+                read_model.messages.insert(key, view);
+            }
+        }
+        Some(AggregateKind::PinnedMessage) => {
+            if let Ok(view) = serde_json::from_value::<PinnedMessageView>(state.clone()) {
+                read_model.pinned_messages.insert(key, view);
+            }
+        }
+        Some(AggregateKind::Marker) => {
+            if let Ok(view) = serde_json::from_value::<MarkerView>(state.clone()) {
+                read_model.markers.insert(key, view);
+            }
+        }
+        None => {
+            tracing::warn!(
+                aggregate = ?id,
+                "snapshot view of unknown kind; skipping cold-start seed"
+            );
+        }
+    }
 }
 
 /// Channel name used for outbound domain-event notifications. All domain events
@@ -586,18 +675,60 @@ impl Orchestrator {
         Arc::clone(&self.read_model)
     }
 
-    /// Replay all events from the repository into the in-memory read model.
+    /// Rebuild the in-memory read model from the event repository.
+    ///
+    /// Cold start: seed the projection from any stored aggregate snapshots,
+    /// then replay only each aggregate's *tail* (the events appended after its
+    /// snapshot) instead of the full stream. When no snapshots exist this
+    /// reduces to a plain full replay — every event is projected.
+    ///
+    /// Correctness: a snapshot at version `V` is exactly the projection of the
+    /// aggregate's first `V` events (it is captured right after projecting the
+    /// `V`-th), so `seed + tail == full replay`.
     pub async fn replay_read_model(&self) -> Result<u32, OrchestrationError> {
+        let snapshots = self.event_repo.load_all_snapshots().await?;
         let envelopes = self.event_repo.replay_all_events(None, 10_000).await?;
         let count = envelopes.len() as u32;
 
-        // Extract raw domain events and project
-        let raw_events: Vec<DomainEvent> = envelopes.iter().map(|e| e.event.clone()).collect();
+        // Per-aggregate skip counters: a snapshot at `version` already reflects
+        // the aggregate's first `version` events, so skip those and project only
+        // the rest. Aggregates without a snapshot are absent here, so every one
+        // of their events is projected (full replay for them).
+        let mut skip: HashMap<EntityId, u64> = snapshots
+            .iter()
+            .map(|(id, _state, version)| (*id, *version))
+            .collect();
+
         let mut read_model = self.read_model.write().await;
-        Projector::project_many(&raw_events, &mut read_model);
+
+        // Seed the projection from snapshots (classified by aggregate kind).
+        for (id, state, _version) in &snapshots {
+            seed_read_model_from_snapshot(&mut read_model, *id, state);
+        }
+
+        // Replay events in order, skipping each snapshotted aggregate's covered
+        // prefix, and project the tail onto the seeded read model. Per-aggregate
+        // order is preserved within the returned stream, so each aggregate's tail
+        // is applied in the correct sequence.
+        let mut tail: Vec<DomainEvent> = Vec::with_capacity(envelopes.len());
+        for env in &envelopes {
+            let aid = env.event.aggregate_id();
+            if let Some(remaining) = skip.get_mut(&aid) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    continue;
+                }
+            }
+            tail.push(env.event.clone());
+        }
+        Projector::project_many(&tail, &mut read_model);
         drop(read_model);
 
-        info!(count, "Read model replayed from event store");
+        info!(
+            count,
+            seeded = snapshots.len(),
+            "Read model replayed (snapshot-seeded + tail)"
+        );
         Ok(count)
     }
 
@@ -1293,6 +1424,192 @@ mod tests {
         let a_entry = all2.into_iter().find(|(id, _, _)| *id == a).expect("a present");
         assert_eq!(a_entry.2, 12);
         assert_eq!(a_entry.1["k"], "a2");
+    }
+
+    /// Grow a single thread stream to exactly SNAPSHOT_INTERVAL events (which
+    /// triggers a snapshot at version SNAPSHOT_INTERVAL) and then append ONE tail
+    /// event past the boundary. Returns the orchestrator (its incrementally
+    /// projected read model is the ground truth) and the thread id. The events
+    /// and snapshot live in the orchestrator's shared event repo.
+    async fn build_thread_across_snapshot_boundary() -> (Orchestrator, EntityId) {
+        let orch = make_orchestrator();
+
+        let project = orch
+            .handle_command(Command::CreateProject {
+                name: "S".into(),
+                root_path: "/s".into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = match &project.events[0].event {
+            DomainEvent::ProjectCreated { id, .. } => *id,
+            _ => unreachable!("CreateProject yields ProjectCreated"),
+        };
+        let thread = orch
+            .handle_command(Command::CreateThread {
+                project_id,
+                provider_id: "p".into(),
+                model: "m".into(),
+            })
+            .await
+            .expect("create thread");
+        let thread_id = match &thread.events[0].event {
+            DomainEvent::ThreadCreated { id, .. } => *id,
+            _ => unreachable!("CreateThread yields ThreadCreated"),
+        };
+        // version 1 -> SNAPSHOT_INTERVAL (snapshot captured at the boundary)
+        for i in 1..SNAPSHOT_INTERVAL {
+            orch.handle_command(Command::SetThreadTitle {
+                id: thread_id,
+                title: format!("title-{i}"),
+            })
+            .await
+            .expect("set title");
+        }
+        // tail: one event past the snapshot boundary
+        orch.handle_command(Command::SetThreadTitle {
+            id: thread_id,
+            title: "tail".into(),
+        })
+        .await
+        .expect("tail title");
+        (orch, thread_id)
+    }
+
+    #[tokio::test]
+    async fn snapshot_replay_equals_full_replay() {
+        // The ground truth is the orchestrator's incrementally-projected read
+        // model (each event applied in order == a full replay). A snapshot-seeded
+        // cold-start replay over the same event store must reproduce the thread
+        // view exactly: seed + tail == full replay.
+        let (orch, thread_id) = build_thread_across_snapshot_boundary().await;
+        let truth = orch.read_model_snapshot().await;
+
+        let fresh: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let orch2 =
+            Orchestrator::with_read_model(Arc::clone(&orch.event_repo), Arc::clone(&fresh));
+        orch2.replay_read_model().await.expect("replay");
+        let replayed = fresh.read().await;
+
+        let key = thread_id.as_str();
+        let truth_view = serde_json::to_value(truth.threads.get(&key)).unwrap();
+        let replayed_view = serde_json::to_value(replayed.threads.get(&key)).unwrap();
+        assert_eq!(
+            truth_view, replayed_view,
+            "snapshot-seeded replay must equal full replay"
+        );
+        // Sanity: the tail event was applied (final title is the tail value).
+        assert_eq!(replayed_view["title"], "tail");
+    }
+
+    #[tokio::test]
+    async fn snapshot_replay_applies_tail_over_seed() {
+        // The persisted snapshot covers the first SNAPSHOT_INTERVAL events, so
+        // its title is the last one set inside the boundary — NOT the tail. After
+        // cold-start replay the tail must be layered over the seed, yielding the
+        // tail title in the read model.
+        let (orch, thread_id) = build_thread_across_snapshot_boundary().await;
+
+        let (snap_state, snap_version) = orch
+            .event_repo
+            .load_snapshot(thread_id)
+            .await
+            .expect("load_snapshot")
+            .expect("snapshot exists at interval boundary");
+        assert_eq!(snap_version, SNAPSHOT_INTERVAL);
+        assert_eq!(
+            snap_state["title"],
+            format!("title-{}", SNAPSHOT_INTERVAL - 1),
+            "snapshot title is the pre-tail value"
+        );
+
+        let fresh: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let orch2 =
+            Orchestrator::with_read_model(Arc::clone(&orch.event_repo), Arc::clone(&fresh));
+        orch2.replay_read_model().await.expect("replay");
+        let replayed = fresh.read().await;
+        let view = replayed
+            .threads
+            .get(&thread_id.as_str())
+            .expect("thread seeded + tail applied");
+        assert_eq!(view.title.as_deref(), Some("tail"), "tail applied over seed");
+    }
+
+    #[tokio::test]
+    async fn snapshot_replay_falls_back_when_no_snapshots() {
+        // A version-1 aggregate is below the snapshot interval: no snapshot is
+        // written, so replay_read_model must fall back to a plain full replay and
+        // still reconstruct the project. load_all_snapshots() returning [] is the
+        // no-snapshot path (empty skip map -> every event projected).
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let orch = Orchestrator::new(Arc::clone(&repo));
+        let project = orch
+            .handle_command(Command::CreateProject {
+                name: "NoSnap".into(),
+                root_path: "/ns".into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = match &project.events[0].event {
+            DomainEvent::ProjectCreated { id, .. } => *id,
+            _ => unreachable!(),
+        };
+        // Precondition: no snapshots stored.
+        assert!(
+            repo.load_all_snapshots().await.expect("load all").is_empty(),
+            "no snapshot below the interval"
+        );
+
+        let fresh: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let orch2 = Orchestrator::with_read_model(Arc::clone(&repo), Arc::clone(&fresh));
+        orch2.replay_read_model().await.expect("replay");
+        let replayed = fresh.read().await;
+        let view = replayed
+            .projects
+            .get(&project_id.as_str())
+            .expect("project replayed via full-replay fallback");
+        assert_eq!(view.name, "NoSnap");
+    }
+
+    #[test]
+    fn aggregate_kind_classifies_each_view() {
+        // Each view kind is identified by a field unique to it; an unknown or
+        // empty shape classifies as None (never snapshotted).
+        let project = serde_json::json!({
+            "id": "p", "name": "n", "root_path": "/r", "thread_count": 0,
+            "created_at": "t", "updated_at": "t"
+        });
+        assert_eq!(aggregate_kind(&project), Some(AggregateKind::Project));
+
+        let thread = serde_json::json!({
+            "id": "t", "project_id": "p", "provider_id": "pr", "model": "m",
+            "status": "active", "runtime_mode": "approval-required",
+            "interaction_mode": "default", "turn_count": 0
+        });
+        assert_eq!(aggregate_kind(&thread), Some(AggregateKind::Thread));
+
+        let turn = serde_json::json!({"user_input": "hi", "sequence": 1});
+        assert_eq!(aggregate_kind(&turn), Some(AggregateKind::Turn));
+
+        let message = serde_json::json!({"role": "user", "content": "hi"});
+        assert_eq!(aggregate_kind(&message), Some(AggregateKind::Message));
+
+        let pinned = serde_json::json!({"pinned_at": "t", "done": false});
+        assert_eq!(aggregate_kind(&pinned), Some(AggregateKind::PinnedMessage));
+
+        let marker = serde_json::json!({"marker_id": "m", "selected_text": "x"});
+        assert_eq!(aggregate_kind(&marker), Some(AggregateKind::Marker));
+
+        // Unknown / empty -> None.
+        assert_eq!(aggregate_kind(&serde_json::json!({})), None);
+        assert_eq!(
+            aggregate_kind(&serde_json::json!({"activity_type": "x"})),
+            None,
+            "activities are never snapshotted"
+        );
     }
 
     #[tokio::test]
