@@ -1,22 +1,22 @@
 # 03 — Test Coverage
 
-Source: `TEST_SUMMARY.md` (repo's recorded summary, 2026-06-27). **Total: 422 tests, 0 failures, 1 ignored doc-test.** ~19,600 LOC / 80 source files / 14 crates + 1 integration package.
+Source: `TEST_SUMMARY.md` + live `cargo test -p` (2026-07-02). **Total: 791 tests.** ~39,600 LOC / 12 crates + 1 integration package.
 
 | Crate | Tests | Domain |
 |---|---|---|
-| `syncode-provider` | 174 | ProviderAdapter trait + 10 adapters (largest) |
-| `syncode-orchestration` | 57 | CQRS pipeline: decider 17, projector 12, pipeline 5, reactors (cmd 6, ingestion 10), use_cases 9 |
-| `syncode-core` | 45 | EntityId, Timestamp, Project/Thread/Turn, DomainEvent, port traits |
-| `syncode-terminal` | 38 | OutputBuffer, ack protocol, chunk mgmt, display |
-| `syncode-git` | 22 | Git ops, checkpoint, worktree, stacked pipeline |
-| `syncode-automation` | 19 | Scheduler, retry/misfire/completion policies, run lifecycle |
-| `syncode-persistence` | 17 | event_store 5, snapshot 5, projections 6, adapters 3 (+1 init) |
-| `syncode-contracts` | 15 | Shared DTOs, TS bindings, JSON roundtrips |
-| `syncode-ws` | 14 | WS server, JSON-RPC dispatch, push bus, channels |
-| `syncode-auth` | 0 | stub |
+| `syncode-provider` | 276 | ProviderAdapter trait + 10 adapters (largest) |
+| `syncode-orchestration` | 179 | CQRS pipeline: decider/projector/pipeline/reactors/use_cases |
+| `syncode-automation` | 67 | Scheduler, retry/misfire/completion policies, run lifecycle |
+| `syncode-ws` | 47 | WS server, JSON-RPC dispatch, push bus, channels, authz |
+| `syncode-core` | 45 | EntityId, Timestamp, aggregates, DomainEvent, port traits |
+| `syncode-git` | 40 | Git ops, checkpoint, worktree, stacked pipeline |
+| `syncode-auth` | 39 | credentials, policy, principal, session, authenticator |
+| `syncode-contracts` | 34 | Shared DTOs, TS bindings, JSON roundtrips |
+| `syncode-persistence` | 25 | event_store, snapshot, projections, adapters |
+| `syncode-terminal` | 20 | OutputBuffer, ack protocol, chunk mgmt, sessions |
 | `syncode-http` | 0 | stub |
 | `syncode-tauri` | 0 | excluded from workspace tests (pre-existing build issues) |
-| `syncode-integration-tests` (`tests/`) | — | cross-crate; not run in `cargo test --workspace` |
+| `syncode-integration-tests` (`tests/`) | 19 | cross-crate workspace integration |
 
 ## Coverage gaps (from analysis)
 - **No real provider integration tests** — provider tests use `MockSessionAdapter`; no real subprocess spawn, no real HTTP calls, no streaming, no concurrent-session tests.

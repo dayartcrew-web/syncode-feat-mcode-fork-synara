@@ -3,7 +3,7 @@
 ## What is this?
 `syncode-feat-mcode-fork-synara` is a **Rust DDD (Domain-Driven Design) blueprint reimplementation of MCode** — a local-first AI-coding-agent desktop app (multi-provider AI, CQRS/Event-Sourcing orchestration, Git integration, terminal, automation scheduler, Tauri desktop shell).
 
-It is **not a feature-complete port**; it's a deliberately slim, well-architected reference skeleton (~19,600 LOC ≈ **20% of MCode's 96,870-LOC server**) focused on the core CQRS/ES engine.
+It is **not a feature-complete port**; it's a well-architected reference skeleton (~39,600 LOC ≈ **41% of MCode's 96,870-LOC server**) focused on the core CQRS/ES engine.
 
 ## Lineage (confirmed via git remotes)
 ```
@@ -26,9 +26,9 @@ synara (upstream — github.com/Emanuele-web04/synara)
 - **Frontend:** React 19 + Vite 6 + TypeScript 5.7 (minimal: App + 5 components + 2 hooks + types).
 
 ## Build status
-- 422 tests pass (per `TEST_SUMMARY.md`); `syncode-tauri` excluded from `cargo test --workspace` (pre-existing build issues).
+- 791 tests pass (per `TEST_SUMMARY.md`, 2026-07-02); `syncode-tauri` excluded from `cargo test --workspace` (pre-existing build issues).
 - CI (`.github/workflows/ci.yml`): 3 jobs — Check (`cargo fmt --check` + `cargo clippy`), Test (ubuntu/windows/macos matrix, `cargo test --workspace`), Build (release + artifact upload).
 - `docs/COMPARISON-MCODE-vs-SYNCODE.md` claims the project is "empty" — **stale**; implementation has progressed well past it.
 
 ## Design intent
-Faithful *architectural* port of MCode's CQRS/ES pattern (decider → projector → reactors) with hexagonal ports, but a **slimmed domain surface** (16 of MCode's ~39 commands, 14 of 35 events) and a **modeling divergence** (Turn/Message/Activity are first-class aggregates here; in MCode only project+thread are aggregates). See [02 — MCode fidelity](crates/../#) and `syncode-vs-mcode-porting-fidelity` memory.
+Faithful *architectural* port of MCode's CQRS/ES pattern (decider → projector → reactors) with hexagonal ports. The domain surface has since grown to **48 Commands** (all MCode client + internal commands ported) and **44 domain events**, with a **modeling divergence** (Turn/Message/Activity are first-class aggregates here; in MCode only project+thread are aggregates). See [02 — MCode fidelity](crates/../#) and `syncode-vs-mcode-porting-fidelity` memory.

@@ -18,7 +18,7 @@ Structured map of the `syncode-feat-mcode-fork-synara` Rust workspace. Read the 
 **L4 shell:** [syncode-tauri](crates/syncode-tauri.md)
 
 ## Quick facts
-- **12 internal crates** + `tests/` + `frontend/`. Rust 2024, MSRV 1.85.0. ~19,600 LOC, **422 tests**.
+- **12 internal crates** + `tests/` + `frontend/`. Rust 2024, MSRV 1.85.0. ~39,600 LOC, **791 tests**.
 - **`syncode-core` is the universal dependency** — highest blast radius.
-- **Stubs:** 8 subprocess provider adapters, `syncode-auth` (16 LOC), `syncode-http` (12 LOC), `ws/transport.rs`, `git` push/pull/PR, automation cron eval. `syncode-tauri` excluded from workspace tests (build issues).
+- **Stubs remaining:** `syncode-http` (12 LOC), `ws/transport.rs` (reframed as an architectural note), `git` push/pull/PR CLI timeout not kill-enforced. **All 10 provider adapters are real; `syncode-auth` is wired (opt-in).** `syncode-tauri` excluded from workspace tests (build issues).
 - **Stale docs:** `docs/COMPARISON-*.md` were planning docs written when the repo was empty — superseded by this intel and `docs/ARCHITECTURE.md`.
