@@ -63,19 +63,27 @@ pub fn git_status(path: String) -> Result<GitStatusResult, String> {
 
 /// Get git diff
 #[tauri::command]
-pub fn git_diff(path: String, old_ref: Option<String>, new_ref: Option<String>) -> Result<GitDiffResult, String> {
+pub fn git_diff(
+    path: String,
+    old_ref: Option<String>,
+    new_ref: Option<String>,
+) -> Result<GitDiffResult, String> {
     let service = syncode_git::service::Git2Service::open(std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
-    let entries = service.diff(
-        old_ref.as_deref(),
-        new_ref.as_deref(),
-    ).map_err(|e| e.to_string())?;
+    let entries = service
+        .diff(old_ref.as_deref(), new_ref.as_deref())
+        .map_err(|e| e.to_string())?;
 
     let additions: u32 = entries.iter().map(|e| e.additions).sum();
     let deletions: u32 = entries.iter().map(|e| e.deletions).sum();
     let files_changed = entries.len();
 
-    Ok(GitDiffResult { entries, files_changed, additions, deletions })
+    Ok(GitDiffResult {
+        entries,
+        files_changed,
+        additions,
+        deletions,
+    })
 }
 
 /// Get commit log
@@ -83,7 +91,9 @@ pub fn git_diff(path: String, old_ref: Option<String>, new_ref: Option<String>) 
 pub fn git_log(path: String, max_count: Option<u32>) -> Result<GitLogResult, String> {
     let service = syncode_git::service::Git2Service::open(std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
-    let entries = service.log(max_count.unwrap_or(20)).map_err(|e| e.to_string())?;
+    let entries = service
+        .log(max_count.unwrap_or(20))
+        .map_err(|e| e.to_string())?;
     Ok(GitLogResult { entries })
 }
 
@@ -120,10 +130,16 @@ pub fn git_commit(path: String, message: String) -> Result<GitCommitResult, Stri
 
 /// Create a branch
 #[tauri::command]
-pub fn git_create_branch(path: String, name: String, checkout: bool) -> Result<syncode_git::GitBranch, String> {
+pub fn git_create_branch(
+    path: String,
+    name: String,
+    checkout: bool,
+) -> Result<syncode_git::GitBranch, String> {
     let service = syncode_git::service::Git2Service::open(std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
-    service.create_branch(&name, checkout).map_err(|e| e.to_string())
+    service
+        .create_branch(&name, checkout)
+        .map_err(|e| e.to_string())
 }
 
 /// Delete a branch

@@ -100,11 +100,7 @@ impl OutputBuffer {
     pub fn unacked_chunks(&self) -> Vec<&OutputChunk> {
         match self.ack_seq {
             None => self.chunks.iter().collect(),
-            Some(acked) => self
-                .chunks
-                .iter()
-                .filter(|c| c.seq > acked)
-                .collect(),
+            Some(acked) => self.chunks.iter().filter(|c| c.seq > acked).collect(),
         }
     }
 

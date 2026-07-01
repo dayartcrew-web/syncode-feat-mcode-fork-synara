@@ -124,7 +124,11 @@ impl AutomationDef {
     }
 
     /// Builder: set provider
-    pub fn with_provider(mut self, provider_id: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn with_provider(
+        mut self,
+        provider_id: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         self.provider_id = Some(provider_id.into());
         self.model = Some(model.into());
         self
@@ -163,13 +167,17 @@ mod tests {
 
     #[test]
     fn automation_def_builder() {
-        let def = AutomationDef::new("build".to_string(), "cargo build".to_string(), ScheduleType::Interval(300))
-            .with_description("Build on schedule")
-            .with_working_dir("/tmp/project")
-            .with_project_id("proj-123")
-            .with_provider("claude", "claude-sonnet-4-20250514")
-            .with_retries(5, 60)
-            .with_timeout(120);
+        let def = AutomationDef::new(
+            "build".to_string(),
+            "cargo build".to_string(),
+            ScheduleType::Interval(300),
+        )
+        .with_description("Build on schedule")
+        .with_working_dir("/tmp/project")
+        .with_project_id("proj-123")
+        .with_provider("claude", "claude-sonnet-4-20250514")
+        .with_retries(5, 60)
+        .with_timeout(120);
 
         assert_eq!(def.description, "Build on schedule");
         assert_eq!(def.working_dir.as_deref(), Some("/tmp/project"));
@@ -196,7 +204,11 @@ mod tests {
 
     #[test]
     fn automation_def_roundtrip() {
-        let def = AutomationDef::new("test".to_string(), "ls".to_string(), ScheduleType::Cron("*/5 * * * *".to_string()));
+        let def = AutomationDef::new(
+            "test".to_string(),
+            "ls".to_string(),
+            ScheduleType::Cron("*/5 * * * *".to_string()),
+        );
         let json = serde_json::to_string(&def).unwrap();
         let back: AutomationDef = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "test");
@@ -214,7 +226,11 @@ mod tests {
 
     #[test]
     fn automation_def_env() {
-        let mut def = AutomationDef::new("env-test".to_string(), "echo $FOO".to_string(), ScheduleType::Manual);
+        let mut def = AutomationDef::new(
+            "env-test".to_string(),
+            "echo $FOO".to_string(),
+            ScheduleType::Manual,
+        );
         def.env.insert("FOO".to_string(), "bar".to_string());
         assert_eq!(def.env.get("FOO").unwrap(), "bar");
     }

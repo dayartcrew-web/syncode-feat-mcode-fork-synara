@@ -1,7 +1,7 @@
 //! Activity — audit log entries for tracking user and system actions
 
-use serde::{Deserialize, Serialize};
 use crate::domain::primitives::{EntityId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// Activity type classification
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -77,7 +77,11 @@ impl Activity {
         self
     }
 
-    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+    pub fn with_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         if let serde_json::Value::Object(ref mut map) = self.metadata {
             map.insert(key.into(), value.into());
         }

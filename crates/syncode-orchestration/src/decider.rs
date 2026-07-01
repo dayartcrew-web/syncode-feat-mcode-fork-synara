@@ -4,10 +4,7 @@
 //! produce zero or more domain events. This is the core business logic
 //! of the CQRS/Event Sourcing architecture.
 
-use syncode_core::{
-    EntityId, Timestamp, CheckpointFile,
-    domain::events::DomainEvent,
-};
+use syncode_core::{CheckpointFile, EntityId, Timestamp, domain::events::DomainEvent};
 use thiserror::Error;
 
 // ─── Imported Message (handoff/fork) ──────────────────────────────
@@ -405,10 +402,14 @@ pub enum DeciderError {
     #[error("Invalid marker style {0:?}: expected \"highlight\" or \"underline\"")]
     InvalidMarkerStyle(String),
 
-    #[error("Invalid marker color {0:?}: expected one of \"yellow\", \"blue\", \"green\", \"pink\"")]
+    #[error(
+        "Invalid marker color {0:?}: expected one of \"yellow\", \"blue\", \"green\", \"pink\""
+    )]
     InvalidMarkerColor(String),
 
-    #[error("Invalid marker offset range: start_offset ({start_offset}) must be strictly less than end_offset ({end_offset})")]
+    #[error(
+        "Invalid marker offset range: start_offset ({start_offset}) must be strictly less than end_offset ({end_offset})"
+    )]
     InvalidMarkerRange { start_offset: u64, end_offset: u64 },
 
     #[error("Pinned-message limit reached ({limit} per thread)")]
@@ -445,151 +446,190 @@ impl Decider {
             Command::CreateProject { name, root_path } => {
                 Self::decide_create_project(name, root_path)
             }
-            Command::UpdateProjectConfig { id, provider_id, default_model } => {
-                Self::decide_update_project(id, current_state, provider_id, default_model)
-            }
-            Command::DeleteProject { id } => {
-                Self::decide_delete_project(id, current_state)
-            }
-            Command::CreateThread { project_id, provider_id, model } => {
-                Self::decide_create_thread(project_id, provider_id, model)
-            }
-            Command::PauseThread { id } => {
-                Self::decide_pause_thread(id, current_state)
-            }
-            Command::ResumeThread { id } => {
-                Self::decide_resume_thread(id, current_state)
-            }
-            Command::CompleteThread { id } => {
-                Self::decide_complete_thread(id, current_state)
-            }
-            Command::CancelThread { id } => {
-                Self::decide_cancel_thread(id, current_state)
-            }
+            Command::UpdateProjectConfig {
+                id,
+                provider_id,
+                default_model,
+            } => Self::decide_update_project(id, current_state, provider_id, default_model),
+            Command::DeleteProject { id } => Self::decide_delete_project(id, current_state),
+            Command::CreateThread {
+                project_id,
+                provider_id,
+                model,
+            } => Self::decide_create_thread(project_id, provider_id, model),
+            Command::PauseThread { id } => Self::decide_pause_thread(id, current_state),
+            Command::ResumeThread { id } => Self::decide_resume_thread(id, current_state),
+            Command::CompleteThread { id } => Self::decide_complete_thread(id, current_state),
+            Command::CancelThread { id } => Self::decide_cancel_thread(id, current_state),
             Command::SetThreadTitle { id, title } => {
                 Self::decide_set_thread_title(id, current_state, title)
             }
             Command::RevertToCheckpoint { thread_id, git_ref } => {
                 Self::decide_revert_to_checkpoint(thread_id, current_state, git_ref)
             }
-            Command::ArchiveThread { id } => {
-                Self::decide_archive_thread(id, current_state)
-            }
-            Command::UnarchiveThread { id } => {
-                Self::decide_unarchive_thread(id, current_state)
-            }
-            Command::DeleteThread { id } => {
-                Self::decide_delete_thread(id, current_state)
-            }
+            Command::ArchiveThread { id } => Self::decide_archive_thread(id, current_state),
+            Command::UnarchiveThread { id } => Self::decide_unarchive_thread(id, current_state),
+            Command::DeleteThread { id } => Self::decide_delete_thread(id, current_state),
             Command::HandoffCreateThread {
-                project_id, provider_id, model, source_thread_id, imported_messages,
-            } => {
-                Self::decide_thread_with_import(
-                    project_id, provider_id, model, source_thread_id, imported_messages,
-                )
-            }
+                project_id,
+                provider_id,
+                model,
+                source_thread_id,
+                imported_messages,
+            } => Self::decide_thread_with_import(
+                project_id,
+                provider_id,
+                model,
+                source_thread_id,
+                imported_messages,
+            ),
             Command::ForkCreateThread {
-                project_id, provider_id, model, source_thread_id, imported_messages,
-            } => {
-                Self::decide_thread_with_import(
-                    project_id, provider_id, model, source_thread_id, imported_messages,
-                )
-            }
+                project_id,
+                provider_id,
+                model,
+                source_thread_id,
+                imported_messages,
+            } => Self::decide_thread_with_import(
+                project_id,
+                provider_id,
+                model,
+                source_thread_id,
+                imported_messages,
+            ),
             Command::StopThreadSession { id } => {
                 Self::decide_stop_thread_session(id, current_state)
             }
             Command::SetThreadRuntimeMode { id, runtime_mode } => {
                 Self::decide_set_thread_runtime_mode(id, current_state, runtime_mode)
             }
-            Command::SetThreadInteractionMode { id, interaction_mode } => {
-                Self::decide_set_thread_interaction_mode(id, current_state, interaction_mode)
-            }
-            Command::RespondThreadApproval { id, request_id, decision } => {
-                Self::decide_respond_thread_approval(id, current_state, request_id, decision)
-            }
-            Command::RespondThreadUserInput { id, request_id, answers } => {
-                Self::decide_respond_thread_user_input(id, current_state, request_id, answers)
-            }
-            Command::EditAndResendThreadMessage { id, message_id, text } => {
-                Self::decide_edit_and_resend_thread_message(id, current_state, message_id, text)
-            }
+            Command::SetThreadInteractionMode {
+                id,
+                interaction_mode,
+            } => Self::decide_set_thread_interaction_mode(id, current_state, interaction_mode),
+            Command::RespondThreadApproval {
+                id,
+                request_id,
+                decision,
+            } => Self::decide_respond_thread_approval(id, current_state, request_id, decision),
+            Command::RespondThreadUserInput {
+                id,
+                request_id,
+                answers,
+            } => Self::decide_respond_thread_user_input(id, current_state, request_id, answers),
+            Command::EditAndResendThreadMessage {
+                id,
+                message_id,
+                text,
+            } => Self::decide_edit_and_resend_thread_message(id, current_state, message_id, text),
             Command::SetThreadSession { id, session } => {
                 Self::decide_set_thread_session(id, current_state, session)
             }
             Command::DispatchQueuedTurn {
-                id, message_id, runtime_mode, interaction_mode, dispatch_mode,
-            } => {
-                Self::decide_dispatch_queued_turn(
-                    id, current_state, message_id, runtime_mode, interaction_mode, dispatch_mode,
-                )
-            }
-            Command::AppendThreadActivity { id, activity_type, description } => {
-                Self::decide_append_thread_activity(id, current_state, activity_type, description)
-            }
+                id,
+                message_id,
+                runtime_mode,
+                interaction_mode,
+                dispatch_mode,
+            } => Self::decide_dispatch_queued_turn(
+                id,
+                current_state,
+                message_id,
+                runtime_mode,
+                interaction_mode,
+                dispatch_mode,
+            ),
+            Command::AppendThreadActivity {
+                id,
+                activity_type,
+                description,
+            } => Self::decide_append_thread_activity(id, current_state, activity_type, description),
             Command::AddPinnedMessage { id, message_id } => {
                 Self::decide_add_pinned_message(id, current_state, message_id)
             }
             Command::RemovePinnedMessage { id, message_id } => {
                 Self::decide_remove_pinned_message(id, current_state, message_id)
             }
-            Command::SetPinnedMessageDone { id, message_id, done } => {
-                Self::decide_set_pinned_message_done(id, current_state, message_id, done)
-            }
-            Command::SetPinnedMessageLabel { id, message_id, label } => {
-                Self::decide_set_pinned_message_label(id, current_state, message_id, label)
-            }
+            Command::SetPinnedMessageDone {
+                id,
+                message_id,
+                done,
+            } => Self::decide_set_pinned_message_done(id, current_state, message_id, done),
+            Command::SetPinnedMessageLabel {
+                id,
+                message_id,
+                label,
+            } => Self::decide_set_pinned_message_label(id, current_state, message_id, label),
             Command::AddMarker {
-                id, marker_id, message_id, start_offset, end_offset, selected_text, style, color,
-            } => {
-                Self::decide_add_marker(
-                    id, current_state, marker_id, message_id, start_offset, end_offset,
-                    selected_text, style, color,
-                )
-            }
+                id,
+                marker_id,
+                message_id,
+                start_offset,
+                end_offset,
+                selected_text,
+                style,
+                color,
+            } => Self::decide_add_marker(
+                id,
+                current_state,
+                marker_id,
+                message_id,
+                start_offset,
+                end_offset,
+                selected_text,
+                style,
+                color,
+            ),
             Command::RemoveMarker { id, marker_id } => {
                 Self::decide_remove_marker(id, current_state, marker_id)
             }
-            Command::SetMarkerDone { id, marker_id, done } => {
-                Self::decide_set_marker_done(id, current_state, marker_id, done)
-            }
-            Command::SetMarkerLabel { id, marker_id, label } => {
-                Self::decide_set_marker_label(id, current_state, marker_id, label)
-            }
-            Command::StartTurn { thread_id, sequence, user_input } => {
-                Self::decide_start_turn(thread_id, sequence, user_input)
-            }
-            Command::CompleteTurn { id, assistant_output, duration_ms } => {
-                Self::decide_complete_turn(id, current_state, assistant_output, duration_ms)
-            }
-            Command::FailTurn { id, error } => {
-                Self::decide_fail_turn(id, current_state, error)
-            }
-            Command::CancelTurn { id } => {
-                Self::decide_cancel_turn(id, current_state)
-            }
-            Command::InterruptTurn { id } => {
-                Self::decide_interrupt_turn(id, current_state)
-            }
-            Command::RecordTurnFiles { id, files } => {
-                Self::decide_record_turn_files(id, files)
-            }
+            Command::SetMarkerDone {
+                id,
+                marker_id,
+                done,
+            } => Self::decide_set_marker_done(id, current_state, marker_id, done),
+            Command::SetMarkerLabel {
+                id,
+                marker_id,
+                label,
+            } => Self::decide_set_marker_label(id, current_state, marker_id, label),
+            Command::StartTurn {
+                thread_id,
+                sequence,
+                user_input,
+            } => Self::decide_start_turn(thread_id, sequence, user_input),
+            Command::CompleteTurn {
+                id,
+                assistant_output,
+                duration_ms,
+            } => Self::decide_complete_turn(id, current_state, assistant_output, duration_ms),
+            Command::FailTurn { id, error } => Self::decide_fail_turn(id, current_state, error),
+            Command::CancelTurn { id } => Self::decide_cancel_turn(id, current_state),
+            Command::InterruptTurn { id } => Self::decide_interrupt_turn(id, current_state),
+            Command::RecordTurnFiles { id, files } => Self::decide_record_turn_files(id, files),
             Command::SetTurnCheckpoint { id, git_ref } => {
                 Self::decide_set_turn_checkpoint(id, git_ref)
             }
-            Command::AddMessage { turn_id, role, content } => {
-                Self::decide_add_message(turn_id, role, content)
-            }
+            Command::AddMessage {
+                turn_id,
+                role,
+                content,
+            } => Self::decide_add_message(turn_id, role, content),
             Command::AppendAssistantDelta {
                 thread_id,
                 message_id,
                 turn_id,
                 delta,
             } => Self::decide_append_assistant_delta(
-                thread_id, message_id, turn_id, delta, current_state,
+                thread_id,
+                message_id,
+                turn_id,
+                delta,
+                current_state,
             ),
-            Command::FinalizeAssistantMessage { thread_id, message_id } => {
-                Self::decide_finalize_assistant_message(thread_id, message_id, current_state)
-            }
+            Command::FinalizeAssistantMessage {
+                thread_id,
+                message_id,
+            } => Self::decide_finalize_assistant_message(thread_id, message_id, current_state),
             Command::UpsertProposedPlan {
                 thread_id,
                 plan_id,
@@ -638,12 +678,9 @@ impl Decider {
                 thread_id,
                 message_id,
                 num_turns,
-            } => Self::decide_conversation_rollback(
-                thread_id,
-                message_id,
-                num_turns,
-                current_state,
-            ),
+            } => {
+                Self::decide_conversation_rollback(thread_id, message_id, num_turns, current_state)
+            }
             Command::ConversationRollbackComplete {
                 thread_id,
                 message_id,
@@ -1188,7 +1225,10 @@ impl Decider {
             other => return Err(DeciderError::InvalidMarkerColor(other.to_string())),
         }
         if end_offset <= start_offset {
-            return Err(DeciderError::InvalidMarkerRange { start_offset, end_offset });
+            return Err(DeciderError::InvalidMarkerRange {
+                start_offset,
+                end_offset,
+            });
         }
 
         // Guard: thread must exist, then enforce the mcode THREAD_MARKERS_MAX_COUNT cap.
@@ -1670,7 +1710,8 @@ mod tests {
                 root_path: "/tmp/project".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ProjectCreated { name, .. } => assert_eq!(name, "my-project"),
@@ -1717,7 +1758,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ProjectNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ProjectNotFound(_)
+        ));
     }
 
     #[test]
@@ -1731,10 +1775,15 @@ mod tests {
                 default_model: Some("claude-3".to_string()),
             },
             Some(&state),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ProjectUpdated { provider_id, default_model, .. } => {
+            DomainEvent::ProjectUpdated {
+                provider_id,
+                default_model,
+                ..
+            } => {
                 assert_eq!(provider_id.as_deref(), Some("anthropic"));
                 assert_eq!(default_model.as_deref(), Some("claude-3"));
             }
@@ -1746,10 +1795,7 @@ mod tests {
     fn delete_project_success() {
         let id = EntityId::new();
         let state = serde_json::json!({ "id": id.as_str() });
-        let events = Decider::decide(
-            Command::DeleteProject { id },
-            Some(&state),
-        ).unwrap();
+        let events = Decider::decide(Command::DeleteProject { id }, Some(&state)).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ProjectDeleted { id: ev_id, .. } => assert_eq!(ev_id, &id),
@@ -1761,7 +1807,10 @@ mod tests {
     fn delete_project_not_found() {
         let id = EntityId::new();
         let result = Decider::decide(Command::DeleteProject { id }, None);
-        assert!(matches!(result.unwrap_err(), DeciderError::ProjectNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ProjectNotFound(_)
+        ));
     }
 
     // ─── Thread tests ────────────────────────────────────────────
@@ -1776,10 +1825,16 @@ mod tests {
                 model: "gpt-4".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ThreadCreated { project_id, provider_id, model, .. } => {
+            DomainEvent::ThreadCreated {
+                project_id,
+                provider_id,
+                model,
+                ..
+            } => {
                 assert_eq!(project_id, &pid);
                 assert_eq!(provider_id, "openai");
                 assert_eq!(model, "gpt-4");
@@ -1791,13 +1846,15 @@ mod tests {
     #[test]
     fn pause_thread_active_success() {
         let id = EntityId::new();
-        let events = Decider::decide(
-            Command::PauseThread { id },
-            Some(&thread_state_active()),
-        ).unwrap();
+        let events =
+            Decider::decide(Command::PauseThread { id }, Some(&thread_state_active())).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ThreadStatusChanged { old_status, new_status, .. } => {
+            DomainEvent::ThreadStatusChanged {
+                old_status,
+                new_status,
+                ..
+            } => {
                 assert_eq!(old_status, "active");
                 assert_eq!(new_status, "paused");
             }
@@ -1808,20 +1865,15 @@ mod tests {
     #[test]
     fn pause_thread_not_active_fails() {
         let id = EntityId::new();
-        let result = Decider::decide(
-            Command::PauseThread { id },
-            Some(&thread_state_paused()),
-        );
+        let result = Decider::decide(Command::PauseThread { id }, Some(&thread_state_paused()));
         assert!(result.is_err());
     }
 
     #[test]
     fn resume_thread_paused_success() {
         let id = EntityId::new();
-        let events = Decider::decide(
-            Command::ResumeThread { id },
-            Some(&thread_state_paused()),
-        ).unwrap();
+        let events =
+            Decider::decide(Command::ResumeThread { id }, Some(&thread_state_paused())).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ThreadStatusChanged { new_status, .. } => {
@@ -1838,7 +1890,10 @@ mod tests {
             Command::CancelThread { id },
             Some(&thread_state_completed()),
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadAlreadyCompleted));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadAlreadyCompleted
+        ));
     }
 
     #[test]
@@ -1850,7 +1905,8 @@ mod tests {
                 title: "My Thread".to_string(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ThreadTitleSet { title, .. } => assert_eq!(title, "My Thread"),
@@ -1870,10 +1926,16 @@ mod tests {
                 user_input: "Hello".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::TurnStarted { thread_id, sequence, user_input, .. } => {
+            DomainEvent::TurnStarted {
+                thread_id,
+                sequence,
+                user_input,
+                ..
+            } => {
                 assert_eq!(thread_id, &tid);
                 assert_eq!(*sequence, 1);
                 assert_eq!(user_input, "Hello");
@@ -1892,7 +1954,8 @@ mod tests {
                 duration_ms: 1500,
             },
             Some(&turn_state_running()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::TurnCompleted { duration_ms, .. } => assert_eq!(*duration_ms, 1500),
@@ -1910,7 +1973,8 @@ mod tests {
                 duration_ms: 100,
             },
             Some(&turn_state_pending()),
-        ).unwrap();
+        )
+        .unwrap();
         // pending → completed is allowed, so let's test against completed state
         let id2 = EntityId::new();
         let result2 = Decider::decide(
@@ -1922,7 +1986,10 @@ mod tests {
             // simulate completed turn
             Some(&serde_json::json!({"status": "completed"})),
         );
-        assert!(matches!(result2.unwrap_err(), DeciderError::TurnAlreadyCompleted));
+        assert!(matches!(
+            result2.unwrap_err(),
+            DeciderError::TurnAlreadyCompleted
+        ));
     }
 
     #[test]
@@ -1934,7 +2001,8 @@ mod tests {
                 error: "API timeout".to_string(),
             },
             Some(&turn_state_running()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::TurnFailed { error, .. } => assert_eq!(error, "API timeout"),
@@ -1945,10 +2013,7 @@ mod tests {
     #[test]
     fn record_turn_files_empty_returns_nothing() {
         let id = EntityId::new();
-        let events = Decider::decide(
-            Command::RecordTurnFiles { id, files: vec![] },
-            None,
-        ).unwrap();
+        let events = Decider::decide(Command::RecordTurnFiles { id, files: vec![] }, None).unwrap();
         assert_eq!(events.len(), 0);
     }
 
@@ -1962,10 +2027,16 @@ mod tests {
                 content: "Hello world".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::MessageAdded { turn_id, role, content, .. } => {
+            DomainEvent::MessageAdded {
+                turn_id,
+                role,
+                content,
+                ..
+            } => {
                 assert_eq!(turn_id, &tid);
                 assert_eq!(role, "user");
                 assert_eq!(content, "Hello world");
@@ -1979,10 +2050,8 @@ mod tests {
     #[test]
     fn interrupt_turn_running_success() {
         let id = EntityId::new();
-        let events = Decider::decide(
-            Command::InterruptTurn { id },
-            Some(&turn_state_running()),
-        ).unwrap();
+        let events =
+            Decider::decide(Command::InterruptTurn { id }, Some(&turn_state_running())).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::TurnInterrupted { id: ev_id, .. } => assert_eq!(ev_id, &id),
@@ -1994,11 +2063,11 @@ mod tests {
     fn interrupt_turn_non_running_rejected() {
         let id = EntityId::new();
         // pending turn cannot be interrupted
-        let result = Decider::decide(
-            Command::InterruptTurn { id },
-            Some(&turn_state_pending()),
-        );
-        assert!(matches!(result.unwrap_err(), DeciderError::TurnNotRunning(_)));
+        let result = Decider::decide(Command::InterruptTurn { id }, Some(&turn_state_pending()));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::TurnNotRunning(_)
+        ));
 
         // completed turn cannot be interrupted
         let id2 = EntityId::new();
@@ -2006,7 +2075,10 @@ mod tests {
             Command::InterruptTurn { id: id2 },
             Some(&serde_json::json!({"status": "completed"})),
         );
-        assert!(matches!(result2.unwrap_err(), DeciderError::TurnNotRunning(_)));
+        assert!(matches!(
+            result2.unwrap_err(),
+            DeciderError::TurnNotRunning(_)
+        ));
     }
 
     #[test]
@@ -2025,7 +2097,8 @@ mod tests {
                 git_ref: "abc1234".to_string(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ThreadReverted { id, git_ref, .. } => {
@@ -2046,7 +2119,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2059,7 +2135,10 @@ mod tests {
             },
             Some(&thread_state_active()),
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::EmptyCheckpointRef));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::EmptyCheckpointRef
+        ));
     }
 
     // ─── Thread lifecycle: delete / archive / unarchive ───────────
@@ -2067,10 +2146,8 @@ mod tests {
     #[test]
     fn archive_thread_active_success() {
         let id = EntityId::new();
-        let events = Decider::decide(
-            Command::ArchiveThread { id },
-            Some(&thread_state_active()),
-        ).unwrap();
+        let events =
+            Decider::decide(Command::ArchiveThread { id }, Some(&thread_state_active())).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], DomainEvent::ThreadArchived { .. }));
     }
@@ -2082,7 +2159,10 @@ mod tests {
             Command::ArchiveThread { id },
             Some(&serde_json::json!({"status": "archived"})),
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::InvalidStateTransition { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::InvalidStateTransition { .. }
+        ));
     }
 
     #[test]
@@ -2091,7 +2171,8 @@ mod tests {
         let events = Decider::decide(
             Command::UnarchiveThread { id },
             Some(&serde_json::json!({"status": "archived"})),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], DomainEvent::ThreadUnarchived { .. }));
     }
@@ -2103,16 +2184,17 @@ mod tests {
             Command::UnarchiveThread { id },
             Some(&thread_state_active()),
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::InvalidStateTransition { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::InvalidStateTransition { .. }
+        ));
     }
 
     #[test]
     fn delete_thread_success() {
         let id = EntityId::new();
-        let events = Decider::decide(
-            Command::DeleteThread { id },
-            Some(&thread_state_active()),
-        ).unwrap();
+        let events =
+            Decider::decide(Command::DeleteThread { id }, Some(&thread_state_active())).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], DomainEvent::ThreadDeleted { .. }));
     }
@@ -2121,7 +2203,10 @@ mod tests {
     fn delete_thread_not_found() {
         let id = EntityId::new();
         let result = Decider::decide(Command::DeleteThread { id }, None);
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     // ─── Stop thread session ──────────────────────────────────────
@@ -2132,7 +2217,8 @@ mod tests {
         let events = Decider::decide(
             Command::StopThreadSession { id },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ThreadSessionStopRequested { id: ev_id, .. } => assert_eq!(ev_id, &id),
@@ -2144,7 +2230,10 @@ mod tests {
     fn stop_thread_session_unknown_thread_rejected() {
         let id = EntityId::new();
         let result = Decider::decide(Command::StopThreadSession { id }, None);
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     // ─── Handoff / fork thread creation ───────────────────────────
@@ -2170,12 +2259,17 @@ mod tests {
                 imported_messages: vec![imported("user", "hi"), imported("assistant", "hello")],
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], DomainEvent::ThreadCreated { .. }));
         match &events[1] {
-            DomainEvent::ThreadMessagesImported { source_thread_id, count, .. } => {
+            DomainEvent::ThreadMessagesImported {
+                source_thread_id,
+                count,
+                ..
+            } => {
                 assert_eq!(*source_thread_id, src);
                 assert_eq!(*count, 2);
             }
@@ -2196,10 +2290,14 @@ mod tests {
                 imported_messages: vec![imported("user", "q")],
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], DomainEvent::ThreadCreated { .. }));
-        assert!(matches!(events[1], DomainEvent::ThreadMessagesImported { count: 1, .. }));
+        assert!(matches!(
+            events[1],
+            DomainEvent::ThreadMessagesImported { count: 1, .. }
+        ));
     }
 
     #[test]
@@ -2215,7 +2313,8 @@ mod tests {
                 imported_messages: vec![],
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         // Source linkage preserved even with zero imported messages.
         assert!(matches!(
             events[1],
@@ -2234,10 +2333,15 @@ mod tests {
                 runtime_mode: "approval-required".to_string(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ThreadRuntimeModeSet { id: ev_id, runtime_mode, .. } => {
+            DomainEvent::ThreadRuntimeModeSet {
+                id: ev_id,
+                runtime_mode,
+                ..
+            } => {
                 assert_eq!(ev_id, &id);
                 assert_eq!(runtime_mode, "approval-required");
             }
@@ -2255,7 +2359,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2267,10 +2374,15 @@ mod tests {
                 interaction_mode: "plan".to_string(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ThreadInteractionModeSet { id: ev_id, interaction_mode, .. } => {
+            DomainEvent::ThreadInteractionModeSet {
+                id: ev_id,
+                interaction_mode,
+                ..
+            } => {
                 assert_eq!(ev_id, &id);
                 assert_eq!(interaction_mode, "plan");
             }
@@ -2288,7 +2400,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     // ─── Session set / queued-turn dispatch ────────────────────────
@@ -2307,13 +2422,22 @@ mod tests {
     fn set_thread_session_success() {
         let id = EntityId::new();
         let events = Decider::decide(
-            Command::SetThreadSession { id, session: session("running") },
+            Command::SetThreadSession {
+                id,
+                session: session("running"),
+            },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ThreadSessionSet {
-                status, provider_name, runtime_mode, active_turn_id, last_error, ..
+                status,
+                provider_name,
+                runtime_mode,
+                active_turn_id,
+                last_error,
+                ..
             } => {
                 assert_eq!(status, "running");
                 assert_eq!(provider_name.as_deref(), Some("anthropic"));
@@ -2329,10 +2453,16 @@ mod tests {
     fn set_thread_session_unknown_thread_rejected() {
         let id = EntityId::new();
         let result = Decider::decide(
-            Command::SetThreadSession { id, session: session("idle") },
+            Command::SetThreadSession {
+                id,
+                session: session("idle"),
+            },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2348,11 +2478,16 @@ mod tests {
                 dispatch_mode: "queue".to_string(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::TurnDispatchRequested {
-                message_id, runtime_mode, interaction_mode, dispatch_mode, ..
+                message_id,
+                runtime_mode,
+                interaction_mode,
+                dispatch_mode,
+                ..
             } => {
                 assert_eq!(*message_id, mid);
                 assert_eq!(runtime_mode, "approval-required");
@@ -2376,7 +2511,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2396,7 +2534,9 @@ mod tests {
         .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::MessageDeltaAppended { id, turn_id, delta, .. } => {
+            DomainEvent::MessageDeltaAppended {
+                id, turn_id, delta, ..
+            } => {
                 assert_eq!(*id, mid);
                 assert_eq!(*turn_id, turn);
                 assert_eq!(delta, "Hello");
@@ -2417,7 +2557,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2449,7 +2592,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2473,7 +2619,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ProposedPlanUpserted {
-                thread_id, plan_id, plan_markdown, ..
+                thread_id,
+                plan_id,
+                plan_markdown,
+                ..
             } => {
                 assert_eq!(*thread_id, tid);
                 assert_eq!(plan_id, "plan-1");
@@ -2499,7 +2648,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2529,7 +2681,11 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::TurnDiffCompleted {
-                turn_id, checkpoint_ref, status, files, ..
+                turn_id,
+                checkpoint_ref,
+                status,
+                files,
+                ..
             } => {
                 assert_eq!(*turn_id, turn);
                 assert_eq!(checkpoint_ref, "abc123");
@@ -2557,7 +2713,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2573,7 +2732,11 @@ mod tests {
         .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ThreadRevertCompleted { thread_id, turn_count, .. } => {
+            DomainEvent::ThreadRevertCompleted {
+                thread_id,
+                turn_count,
+                ..
+            } => {
                 assert_eq!(*thread_id, tid);
                 assert_eq!(*turn_count, 2);
             }
@@ -2591,7 +2754,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2610,7 +2776,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ConversationRollbackRequested {
-                thread_id, message_id, num_turns, ..
+                thread_id,
+                message_id,
+                num_turns,
+                ..
             } => {
                 assert_eq!(*thread_id, tid);
                 assert_eq!(*message_id, mid);
@@ -2631,7 +2800,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2652,7 +2824,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::ConversationRolledBack {
-                thread_id, removed_turn_ids, num_turns, ..
+                thread_id,
+                removed_turn_ids,
+                num_turns,
+                ..
             } => {
                 assert_eq!(*thread_id, tid);
                 assert_eq!(*num_turns, 2);
@@ -2674,7 +2849,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     #[test]
@@ -2727,7 +2905,10 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ThreadNotFound(_)
+        ));
     }
 
     // ─── Turn interaction commands ────────────────────────────────
@@ -2742,10 +2923,15 @@ mod tests {
                 decision: "approved".into(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ThreadApprovalResponded { request_id, decision, .. } => {
+            DomainEvent::ThreadApprovalResponded {
+                request_id,
+                decision,
+                ..
+            } => {
                 assert_eq!(request_id, "req-1");
                 assert_eq!(decision, "approved");
             }
@@ -2763,8 +2949,12 @@ mod tests {
                 answers: "yes".into(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
-        assert!(matches!(events[0], DomainEvent::ThreadUserInputResponded { .. }));
+        )
+        .unwrap();
+        assert!(matches!(
+            events[0],
+            DomainEvent::ThreadUserInputResponded { .. }
+        ));
     }
 
     #[test]
@@ -2778,7 +2968,8 @@ mod tests {
                 text: "edited".into(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         match &events[0] {
             DomainEvent::ThreadMessageEditedAndResent { text, .. } => assert_eq!(text, "edited"),
             _ => panic!("expected ThreadMessageEditedAndResent"),
@@ -2795,10 +2986,15 @@ mod tests {
                 description: "captured".into(),
             },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::ActivityLogged { activity_type, description, .. } => {
+            DomainEvent::ActivityLogged {
+                activity_type,
+                description,
+                ..
+            } => {
                 assert_eq!(activity_type, "checkpoint");
                 assert_eq!(description, "captured");
             }
@@ -2809,24 +3005,44 @@ mod tests {
     #[test]
     fn turn_interaction_commands_unknown_thread_rejected() {
         let id = EntityId::new();
-        let r = Decider::decide(Command::RespondThreadApproval {
-            id, request_id: "r".into(), decision: "approved".into(),
-        }, None);
+        let r = Decider::decide(
+            Command::RespondThreadApproval {
+                id,
+                request_id: "r".into(),
+                decision: "approved".into(),
+            },
+            None,
+        );
         assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
 
-        let r = Decider::decide(Command::RespondThreadUserInput {
-            id, request_id: "r".into(), answers: "a".into(),
-        }, None);
+        let r = Decider::decide(
+            Command::RespondThreadUserInput {
+                id,
+                request_id: "r".into(),
+                answers: "a".into(),
+            },
+            None,
+        );
         assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
 
-        let r = Decider::decide(Command::EditAndResendThreadMessage {
-            id, message_id: id, text: "t".into(),
-        }, None);
+        let r = Decider::decide(
+            Command::EditAndResendThreadMessage {
+                id,
+                message_id: id,
+                text: "t".into(),
+            },
+            None,
+        );
         assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
 
-        let r = Decider::decide(Command::AppendThreadActivity {
-            id, activity_type: "t".into(), description: "d".into(),
-        }, None);
+        let r = Decider::decide(
+            Command::AppendThreadActivity {
+                id,
+                activity_type: "t".into(),
+                description: "d".into(),
+            },
+            None,
+        );
         assert!(matches!(r.unwrap_err(), DeciderError::ThreadNotFound(_)));
     }
 
@@ -2837,12 +3053,22 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let events = Decider::decide(
-            Command::AddPinnedMessage { id, message_id: mid },
+            Command::AddPinnedMessage {
+                id,
+                message_id: mid,
+            },
             Some(&thread_state_active()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            DomainEvent::PinnedMessageAdded { thread_id, message_id, label, done, .. } => {
+            DomainEvent::PinnedMessageAdded {
+                thread_id,
+                message_id,
+                label,
+                done,
+                ..
+            } => {
                 assert_eq!(*thread_id, id);
                 assert_eq!(*message_id, mid);
                 assert!(label.is_none());
@@ -2857,10 +3083,17 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let events = Decider::decide(
-            Command::RemovePinnedMessage { id, message_id: mid },
+            Command::RemovePinnedMessage {
+                id,
+                message_id: mid,
+            },
             Some(&thread_state_with_pinned(vec![mid.as_str()])),
-        ).unwrap();
-        assert!(matches!(events[0], DomainEvent::PinnedMessageRemoved { .. }));
+        )
+        .unwrap();
+        assert!(matches!(
+            events[0],
+            DomainEvent::PinnedMessageRemoved { .. }
+        ));
     }
 
     #[test]
@@ -2868,9 +3101,14 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let events = Decider::decide(
-            Command::SetPinnedMessageDone { id, message_id: mid, done: true },
+            Command::SetPinnedMessageDone {
+                id,
+                message_id: mid,
+                done: true,
+            },
             Some(&thread_state_with_pinned(vec![mid.as_str()])),
-        ).unwrap();
+        )
+        .unwrap();
         match &events[0] {
             DomainEvent::PinnedMessageDoneSet { done, .. } => assert!(*done),
             _ => panic!("expected PinnedMessageDoneSet"),
@@ -2882,11 +3120,18 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let events = Decider::decide(
-            Command::SetPinnedMessageLabel { id, message_id: mid, label: Some("todo".into()) },
+            Command::SetPinnedMessageLabel {
+                id,
+                message_id: mid,
+                label: Some("todo".into()),
+            },
             Some(&thread_state_with_pinned(vec![mid.as_str()])),
-        ).unwrap();
+        )
+        .unwrap();
         match &events[0] {
-            DomainEvent::PinnedMessageLabelSet { label, .. } => assert_eq!(label.as_deref(), Some("todo")),
+            DomainEvent::PinnedMessageLabelSet { label, .. } => {
+                assert_eq!(label.as_deref(), Some("todo"))
+            }
             _ => panic!("expected PinnedMessageLabelSet"),
         }
     }
@@ -2900,7 +3145,10 @@ mod tests {
             .map(|i| format!("p{i}"))
             .collect();
         let err = Decider::decide(
-            Command::AddPinnedMessage { id, message_id: mid },
+            Command::AddPinnedMessage {
+                id,
+                message_id: mid,
+            },
             Some(&thread_state_with_pinned(full)),
         )
         .unwrap_err();
@@ -2915,14 +3163,24 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let state = Some(&thread_state_with_pinned(vec!["other".to_string()]));
-        let err =
-            Decider::decide(Command::RemovePinnedMessage { id, message_id: mid }, state).unwrap_err();
+        let err = Decider::decide(
+            Command::RemovePinnedMessage {
+                id,
+                message_id: mid,
+            },
+            state,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, DeciderError::PinnedMessageNotFound(_)),
             "removing a missing pin must be rejected, got: {err:?}"
         );
         let err = Decider::decide(
-            Command::SetPinnedMessageDone { id, message_id: mid, done: true },
+            Command::SetPinnedMessageDone {
+                id,
+                message_id: mid,
+                done: true,
+            },
             state,
         )
         .unwrap_err();
@@ -2936,10 +3194,48 @@ mod tests {
     fn pinned_message_commands_unknown_thread_rejected() {
         let id = EntityId::new();
         let mid = EntityId::new();
-        assert!(Decider::decide(Command::AddPinnedMessage { id, message_id: mid }, None).is_err());
-        assert!(Decider::decide(Command::RemovePinnedMessage { id, message_id: mid }, None).is_err());
-        assert!(Decider::decide(Command::SetPinnedMessageDone { id, message_id: mid, done: true }, None).is_err());
-        assert!(Decider::decide(Command::SetPinnedMessageLabel { id, message_id: mid, label: None }, None).is_err());
+        assert!(
+            Decider::decide(
+                Command::AddPinnedMessage {
+                    id,
+                    message_id: mid
+                },
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            Decider::decide(
+                Command::RemovePinnedMessage {
+                    id,
+                    message_id: mid
+                },
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            Decider::decide(
+                Command::SetPinnedMessageDone {
+                    id,
+                    message_id: mid,
+                    done: true
+                },
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            Decider::decide(
+                Command::SetPinnedMessageLabel {
+                    id,
+                    message_id: mid,
+                    label: None
+                },
+                None
+            )
+            .is_err()
+        );
     }
 
     // ─── Markers ─────────────────────────────────────────────────
@@ -2962,15 +3258,22 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let msg = EntityId::new();
-        let events = Decider::decide(
-            add_marker_cmd(id, mid, msg),
-            Some(&thread_state_active()),
-        ).unwrap();
+        let events =
+            Decider::decide(add_marker_cmd(id, mid, msg), Some(&thread_state_active())).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             DomainEvent::MarkerAdded {
-                thread_id, marker_id, message_id, start_offset, end_offset,
-                selected_text, style, color, label, done, ..
+                thread_id,
+                marker_id,
+                message_id,
+                start_offset,
+                end_offset,
+                selected_text,
+                style,
+                color,
+                label,
+                done,
+                ..
             } => {
                 assert_eq!(*thread_id, id);
                 assert_eq!(*marker_id, mid);
@@ -3022,7 +3325,13 @@ mod tests {
         // Invalid range: end == start, and end < start.
         let err = Decider::decide(mk("highlight", "yellow", 5, 5), Some(&state)).unwrap_err();
         assert!(
-            matches!(err, DeciderError::InvalidMarkerRange { start_offset: 5, end_offset: 5 }),
+            matches!(
+                err,
+                DeciderError::InvalidMarkerRange {
+                    start_offset: 5,
+                    end_offset: 5
+                }
+            ),
             "equal offsets must be rejected, got: {err:?}"
         );
         let err = Decider::decide(mk("highlight", "yellow", 9, 3), Some(&state)).unwrap_err();
@@ -3042,7 +3351,8 @@ mod tests {
         let events = Decider::decide(
             Command::RemoveMarker { id, marker_id: mid },
             Some(&thread_state_with_markers(vec![mid.as_str()])),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(events[0], DomainEvent::MarkerRemoved { .. }));
     }
 
@@ -3051,11 +3361,18 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let events = Decider::decide(
-            Command::SetMarkerDone { id, marker_id: mid, done: true },
+            Command::SetMarkerDone {
+                id,
+                marker_id: mid,
+                done: true,
+            },
             Some(&thread_state_with_markers(vec![mid.as_str()])),
-        ).unwrap();
+        )
+        .unwrap();
         match &events[0] {
-            DomainEvent::MarkerDoneSet { done, marker_id, .. } => {
+            DomainEvent::MarkerDoneSet {
+                done, marker_id, ..
+            } => {
                 assert!(*done);
                 assert_eq!(*marker_id, mid);
             }
@@ -3068,11 +3385,18 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let events = Decider::decide(
-            Command::SetMarkerLabel { id, marker_id: mid, label: Some("note".into()) },
+            Command::SetMarkerLabel {
+                id,
+                marker_id: mid,
+                label: Some("note".into()),
+            },
             Some(&thread_state_with_markers(vec![mid.as_str()])),
-        ).unwrap();
+        )
+        .unwrap();
         match &events[0] {
-            DomainEvent::MarkerLabelSet { label, marker_id, .. } => {
+            DomainEvent::MarkerLabelSet {
+                label, marker_id, ..
+            } => {
                 assert_eq!(label.as_deref(), Some("note"));
                 assert_eq!(*marker_id, mid);
             }
@@ -3087,8 +3411,28 @@ mod tests {
         let msg = EntityId::new();
         assert!(Decider::decide(add_marker_cmd(id, mid, msg), None).is_err());
         assert!(Decider::decide(Command::RemoveMarker { id, marker_id: mid }, None).is_err());
-        assert!(Decider::decide(Command::SetMarkerDone { id, marker_id: mid, done: true }, None).is_err());
-        assert!(Decider::decide(Command::SetMarkerLabel { id, marker_id: mid, label: None }, None).is_err());
+        assert!(
+            Decider::decide(
+                Command::SetMarkerDone {
+                    id,
+                    marker_id: mid,
+                    done: true
+                },
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            Decider::decide(
+                Command::SetMarkerLabel {
+                    id,
+                    marker_id: mid,
+                    label: None
+                },
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3112,14 +3456,17 @@ mod tests {
         let id = EntityId::new();
         let mid = EntityId::new();
         let state = Some(&thread_state_with_markers(vec!["other".to_string()]));
-        let err =
-            Decider::decide(Command::RemoveMarker { id, marker_id: mid }, state).unwrap_err();
+        let err = Decider::decide(Command::RemoveMarker { id, marker_id: mid }, state).unwrap_err();
         assert!(
             matches!(err, DeciderError::MarkerNotFound(_)),
             "removing a missing marker must be rejected, got: {err:?}"
         );
         let err = Decider::decide(
-            Command::SetMarkerDone { id, marker_id: mid, done: true },
+            Command::SetMarkerDone {
+                id,
+                marker_id: mid,
+                done: true,
+            },
             state,
         )
         .unwrap_err();

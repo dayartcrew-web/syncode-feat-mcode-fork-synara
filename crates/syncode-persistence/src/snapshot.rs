@@ -26,8 +26,8 @@ pub async fn save_snapshot(
     state: &serde_json::Value,
     version: u64,
 ) -> Result<(), SnapshotError> {
-    let data = serde_json::to_string(state)
-        .map_err(|e| SnapshotError::Serialization(e.to_string()))?;
+    let data =
+        serde_json::to_string(state).map_err(|e| SnapshotError::Serialization(e.to_string()))?;
 
     sqlx::query(
         r#"
@@ -54,12 +54,11 @@ pub async fn load_snapshot(
     pool: &SqlitePool,
     aggregate_id: EntityId,
 ) -> Result<Option<(serde_json::Value, u64)>, SnapshotError> {
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT data, sequence FROM snapshots WHERE aggregate_id = ?",
-    )
-    .bind(aggregate_id.to_string())
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String, i64)> =
+        sqlx::query_as("SELECT data, sequence FROM snapshots WHERE aggregate_id = ?")
+            .bind(aggregate_id.to_string())
+            .fetch_optional(pool)
+            .await?;
 
     match row {
         Some((data, version)) => {
@@ -80,11 +79,10 @@ pub async fn load_snapshot(
 pub async fn load_all_snapshots(
     pool: &SqlitePool,
 ) -> Result<Vec<(EntityId, serde_json::Value, u64)>, SnapshotError> {
-    let rows: Vec<(String, String, i64)> = sqlx::query_as(
-        "SELECT aggregate_id, data, sequence FROM snapshots",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT aggregate_id, data, sequence FROM snapshots")
+            .fetch_all(pool)
+            .await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for (id_str, data, version) in rows {
@@ -92,8 +90,8 @@ pub async fn load_all_snapshots(
         // EntityId::to_string); a parse failure here signals corruption.
         let aggregate_id = EntityId::parse(&id_str)
             .map_err(|e| SnapshotError::Serialization(format!("invalid aggregate_id: {e}")))?;
-        let state: serde_json::Value = serde_json::from_str(&data)
-            .map_err(|e| SnapshotError::Serialization(e.to_string()))?;
+        let state: serde_json::Value =
+            serde_json::from_str(&data).map_err(|e| SnapshotError::Serialization(e.to_string()))?;
         out.push((aggregate_id, state, version as u64));
     }
     Ok(out)
@@ -132,9 +130,7 @@ mod tests {
             .await
             .expect("save snapshot");
 
-        let loaded = load_snapshot(&pool, agg_id)
-            .await
-            .expect("load snapshot");
+        let loaded = load_snapshot(&pool, agg_id).await.expect("load snapshot");
 
         assert!(loaded.is_some());
         let (loaded_state, version) = loaded.unwrap();
@@ -155,9 +151,7 @@ mod tests {
             .await
             .expect("save v2");
 
-        let loaded = load_snapshot(&pool, agg_id)
-            .await
-            .expect("load");
+        let loaded = load_snapshot(&pool, agg_id).await.expect("load");
 
         let (state, version) = loaded.unwrap();
         assert_eq!(version, 15);

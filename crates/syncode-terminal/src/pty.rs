@@ -3,10 +3,10 @@
 //! Wraps `portable_pty` to spawn processes with PTY support,
 //! handle resize, write input, and read output.
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -161,7 +161,9 @@ impl PtyHandle {
             return Err(PtyError::NotRunning);
         }
         let mut writer = self.writer.lock().await;
-        writer.write_all(data).map_err(|e| PtyError::Io(e.to_string()))?;
+        writer
+            .write_all(data)
+            .map_err(|e| PtyError::Io(e.to_string()))?;
         writer.flush().map_err(|e| PtyError::Io(e.to_string()))?;
         Ok(())
     }

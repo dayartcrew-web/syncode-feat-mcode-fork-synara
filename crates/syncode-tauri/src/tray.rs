@@ -67,7 +67,14 @@ pub fn build_tray_menu(active_sessions: u32, has_update: bool) -> Vec<TrayMenuIt
         },
         TrayMenuItem {
             id: "new_thread".to_string(),
-            label: format!("New Thread{}", if active_sessions > 0 { format!(" ({} active)", active_sessions) } else { String::new() }),
+            label: format!(
+                "New Thread{}",
+                if active_sessions > 0 {
+                    format!(" ({} active)", active_sessions)
+                } else {
+                    String::new()
+                }
+            ),
             action: Some(TrayAction::NewThread),
             enabled: true,
             separator_after: true,

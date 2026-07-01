@@ -1,7 +1,7 @@
 //! Message — individual messages within a conversation
 
-use serde::{Deserialize, Serialize};
 use crate::domain::primitives::{EntityId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// Message role
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

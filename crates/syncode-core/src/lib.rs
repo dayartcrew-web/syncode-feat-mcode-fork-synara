@@ -20,18 +20,18 @@ pub use domain::primitives::{EntityId, Timestamp, TrimmedString, TrimmedStringEr
 pub use domain::primitives::Command;
 
 // Re-export domain event enum and envelope
-pub use domain::events::{DomainEvent, Envelope, CheckpointFile};
+pub use domain::events::{CheckpointFile, DomainEvent, Envelope};
 
 // Re-export aggregate roots
+pub use domain::activity::{Activity, ActivityType};
+pub use domain::message::{ContentType, Message, MessageRole};
 pub use domain::project::Project;
 pub use domain::thread::{Thread, ThreadStatus};
 pub use domain::turn::{Turn, TurnStatus};
-pub use domain::message::{Message, MessageRole, ContentType};
-pub use domain::activity::{Activity, ActivityType};
 
 // Re-export port interfaces
 pub use domain::primitives::DomainEvent as DomainEventTrait;
 pub use ports::{
-    EventRepository, ReadModelRepository, GitServicePort, ProviderPort,
-    PortError, FileStatus, GitStatus, GitFileStatus,
+    EventRepository, FileStatus, GitFileStatus, GitServicePort, GitStatus, PortError, ProviderPort,
+    ReadModelRepository,
 };

@@ -15,13 +15,11 @@
 
 use std::sync::Arc;
 use syncode_core::EntityId;
-use syncode_core::{Timestamp, CheckpointFile};
+use syncode_core::{CheckpointFile, Timestamp};
 
 use crate::decider::{Command, ImportedMessage, ThreadSession};
-use crate::pipeline::{CommandResult, Orchestrator, OrchestrationError};
-use crate::read_model::{
-    ActivityView, MessageView, ProjectView, ThreadView, TurnView,
-};
+use crate::pipeline::{CommandResult, OrchestrationError, Orchestrator};
+use crate::read_model::{ActivityView, MessageView, ProjectView, ThreadView, TurnView};
 
 // ─── Aggregated Query Types ──────────────────────────────────────
 
@@ -97,10 +95,7 @@ impl ApplicationService {
     ///
     /// Rejects with [`OrchestrationError::ProjectNotFound`] if the project does
     /// not exist in the read model; the Decider mirrors the same guard.
-    pub async fn delete_project(
-        &self,
-        id: EntityId,
-    ) -> Result<CommandResult, OrchestrationError> {
+    pub async fn delete_project(&self, id: EntityId) -> Result<CommandResult, OrchestrationError> {
         if self.get_project(&id.to_string()).await.is_none() {
             return Err(OrchestrationError::ProjectNotFound(id));
         }
@@ -136,27 +131,24 @@ impl ApplicationService {
     }
 
     /// Pause an active thread.
-    pub async fn pause_thread(
-        &self,
-        id: EntityId,
-    ) -> Result<CommandResult, OrchestrationError> {
-        self.orchestrator.handle_command(Command::PauseThread { id }).await
+    pub async fn pause_thread(&self, id: EntityId) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::PauseThread { id })
+            .await
     }
 
     /// Resume a paused thread.
-    pub async fn resume_thread(
-        &self,
-        id: EntityId,
-    ) -> Result<CommandResult, OrchestrationError> {
-        self.orchestrator.handle_command(Command::ResumeThread { id }).await
+    pub async fn resume_thread(&self, id: EntityId) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::ResumeThread { id })
+            .await
     }
 
     /// Archive a thread. Faithful to mcode `thread.archive`.
-    pub async fn archive_thread(
-        &self,
-        id: EntityId,
-    ) -> Result<CommandResult, OrchestrationError> {
-        self.orchestrator.handle_command(Command::ArchiveThread { id }).await
+    pub async fn archive_thread(&self, id: EntityId) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::ArchiveThread { id })
+            .await
     }
 
     /// Unarchive (restore) a thread. Faithful to mcode `thread.unarchive`.
@@ -164,15 +156,16 @@ impl ApplicationService {
         &self,
         id: EntityId,
     ) -> Result<CommandResult, OrchestrationError> {
-        self.orchestrator.handle_command(Command::UnarchiveThread { id }).await
+        self.orchestrator
+            .handle_command(Command::UnarchiveThread { id })
+            .await
     }
 
     /// Delete a thread (tombstone). Faithful to mcode `thread.delete`.
-    pub async fn delete_thread(
-        &self,
-        id: EntityId,
-    ) -> Result<CommandResult, OrchestrationError> {
-        self.orchestrator.handle_command(Command::DeleteThread { id }).await
+    pub async fn delete_thread(&self, id: EntityId) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::DeleteThread { id })
+            .await
     }
 
     /// Stop the active provider session for a thread. Faithful to mcode
@@ -182,7 +175,9 @@ impl ApplicationService {
         &self,
         id: EntityId,
     ) -> Result<CommandResult, OrchestrationError> {
-        self.orchestrator.handle_command(Command::StopThreadSession { id }).await
+        self.orchestrator
+            .handle_command(Command::StopThreadSession { id })
+            .await
     }
 
     /// Create a thread by handoff from a source thread, importing its messages.
@@ -257,27 +252,33 @@ impl ApplicationService {
         if self.get_project(&project_id.to_string()).await.is_none() {
             return Err(OrchestrationError::ProjectNotFound(project_id));
         }
-        if self.get_thread(&source_thread_id.to_string()).await.is_none() {
+        if self
+            .get_thread(&source_thread_id.to_string())
+            .await
+            .is_none()
+        {
             return Err(OrchestrationError::ThreadNotFound(source_thread_id));
         }
         self.orchestrator
-            .handle_command(build(project_id, provider_id, model, source_thread_id, imported_messages))
+            .handle_command(build(
+                project_id,
+                provider_id,
+                model,
+                source_thread_id,
+                imported_messages,
+            ))
             .await
     }
 
     /// Cancel a thread (and any in-progress turns).
-    pub async fn cancel_thread(
-        &self,
-        id: EntityId,
-    ) -> Result<CommandResult, OrchestrationError> {
-        self.orchestrator.handle_command(Command::CancelThread { id }).await
+    pub async fn cancel_thread(&self, id: EntityId) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::CancelThread { id })
+            .await
     }
 
     /// Mark a thread as complete.
-    pub async fn complete_thread(
-        &self,
-        id: EntityId,
-    ) -> Result<CommandResult, OrchestrationError> {
+    pub async fn complete_thread(&self, id: EntityId) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
             .handle_command(Command::CompleteThread { id })
             .await
@@ -316,7 +317,10 @@ impl ApplicationService {
         interaction_mode: String,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::SetThreadInteractionMode { id, interaction_mode })
+            .handle_command(Command::SetThreadInteractionMode {
+                id,
+                interaction_mode,
+            })
             .await
     }
 
@@ -532,7 +536,11 @@ impl ApplicationService {
         decision: String,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::RespondThreadApproval { id, request_id, decision })
+            .handle_command(Command::RespondThreadApproval {
+                id,
+                request_id,
+                decision,
+            })
             .await
     }
 
@@ -545,7 +553,11 @@ impl ApplicationService {
         answers: String,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::RespondThreadUserInput { id, request_id, answers })
+            .handle_command(Command::RespondThreadUserInput {
+                id,
+                request_id,
+                answers,
+            })
             .await
     }
 
@@ -558,7 +570,11 @@ impl ApplicationService {
         text: String,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::EditAndResendThreadMessage { id, message_id, text })
+            .handle_command(Command::EditAndResendThreadMessage {
+                id,
+                message_id,
+                text,
+            })
             .await
     }
 
@@ -571,7 +587,11 @@ impl ApplicationService {
         description: String,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::AppendThreadActivity { id, activity_type, description })
+            .handle_command(Command::AppendThreadActivity {
+                id,
+                activity_type,
+                description,
+            })
             .await
     }
 
@@ -605,7 +625,11 @@ impl ApplicationService {
         done: bool,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::SetPinnedMessageDone { id, message_id, done })
+            .handle_command(Command::SetPinnedMessageDone {
+                id,
+                message_id,
+                done,
+            })
             .await
     }
 
@@ -617,7 +641,11 @@ impl ApplicationService {
         label: Option<String>,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::SetPinnedMessageLabel { id, message_id, label })
+            .handle_command(Command::SetPinnedMessageLabel {
+                id,
+                message_id,
+                label,
+            })
             .await
     }
 
@@ -636,7 +664,14 @@ impl ApplicationService {
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
             .handle_command(Command::AddMarker {
-                id, marker_id, message_id, start_offset, end_offset, selected_text, style, color,
+                id,
+                marker_id,
+                message_id,
+                start_offset,
+                end_offset,
+                selected_text,
+                style,
+                color,
             })
             .await
     }
@@ -660,7 +695,11 @@ impl ApplicationService {
         done: bool,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::SetMarkerDone { id, marker_id, done })
+            .handle_command(Command::SetMarkerDone {
+                id,
+                marker_id,
+                done,
+            })
             .await
     }
 
@@ -672,7 +711,11 @@ impl ApplicationService {
         label: Option<String>,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::SetMarkerLabel { id, marker_id, label })
+            .handle_command(Command::SetMarkerLabel {
+                id,
+                marker_id,
+                label,
+            })
             .await
     }
 
@@ -742,10 +785,7 @@ impl ApplicationService {
         files: Vec<String>,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::RecordTurnFiles {
-                id: turn_id,
-                files,
-            })
+            .handle_command(Command::RecordTurnFiles { id: turn_id, files })
             .await
     }
 
@@ -781,10 +821,7 @@ impl ApplicationService {
         git_ref: String,
     ) -> Result<CommandResult, OrchestrationError> {
         self.orchestrator
-            .handle_command(Command::RevertToCheckpoint {
-                thread_id,
-                git_ref,
-            })
+            .handle_command(Command::RevertToCheckpoint { thread_id, git_ref })
             .await
     }
 
@@ -1013,12 +1050,21 @@ mod tests {
         // Archive
         let archived = svc.archive_thread(tid).await.unwrap();
         assert_eq!(archived.events[0].event.event_type_name(), "ThreadArchived");
-        assert_eq!(svc.get_thread(&tid.to_string()).await.unwrap().status, "archived");
+        assert_eq!(
+            svc.get_thread(&tid.to_string()).await.unwrap().status,
+            "archived"
+        );
 
         // Unarchive restores to active
         let unarchived = svc.unarchive_thread(tid).await.unwrap();
-        assert_eq!(unarchived.events[0].event.event_type_name(), "ThreadUnarchived");
-        assert_eq!(svc.get_thread(&tid.to_string()).await.unwrap().status, "active");
+        assert_eq!(
+            unarchived.events[0].event.event_type_name(),
+            "ThreadUnarchived"
+        );
+        assert_eq!(
+            svc.get_thread(&tid.to_string()).await.unwrap().status,
+            "active"
+        );
     }
 
     #[tokio::test]
@@ -1066,7 +1112,10 @@ mod tests {
         let tid = thread.events[0].event.aggregate_id();
 
         let result = svc.stop_thread_session(tid).await.unwrap();
-        assert_eq!(result.events[0].event.event_type_name(), "ThreadSessionStopRequested");
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadSessionStopRequested"
+        );
     }
 
     #[tokio::test]
@@ -1090,17 +1139,34 @@ mod tests {
         let source_id = source.events[0].event.aggregate_id();
 
         let imported = vec![
-            ImportedMessage { source_message_id: EntityId::new(), role: "user".into(), text: "hi".into() },
-            ImportedMessage { source_message_id: EntityId::new(), role: "assistant".into(), text: "hello".into() },
+            ImportedMessage {
+                source_message_id: EntityId::new(),
+                role: "user".into(),
+                text: "hi".into(),
+            },
+            ImportedMessage {
+                source_message_id: EntityId::new(),
+                role: "assistant".into(),
+                text: "hello".into(),
+            },
         ];
         let result = svc
-            .handoff_create_thread(pid, "anthropic".into(), "claude-3".into(), source_id, imported)
+            .handoff_create_thread(
+                pid,
+                "anthropic".into(),
+                "claude-3".into(),
+                source_id,
+                imported,
+            )
             .await
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
         assert_eq!(result.events[0].event.event_type_name(), "ThreadCreated");
-        assert_eq!(result.events[1].event.event_type_name(), "ThreadMessagesImported");
+        assert_eq!(
+            result.events[1].event.event_type_name(),
+            "ThreadMessagesImported"
+        );
     }
 
     #[tokio::test]
@@ -1110,7 +1176,13 @@ mod tests {
         let pid = proj.events[0].event.aggregate_id();
 
         let result = svc
-            .handoff_create_thread(pid, "anthropic".into(), "claude-3".into(), EntityId::new(), vec![])
+            .handoff_create_thread(
+                pid,
+                "anthropic".into(),
+                "claude-3".into(),
+                EntityId::new(),
+                vec![],
+            )
             .await;
         assert!(matches!(result, Err(OrchestrationError::ThreadNotFound(_))));
     }
@@ -1131,7 +1203,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.events[1].event.event_type_name(), "ThreadMessagesImported");
+        assert_eq!(
+            result.events[1].event.event_type_name(),
+            "ThreadMessagesImported"
+        );
     }
 
     #[tokio::test]
@@ -1139,10 +1214,7 @@ mod tests {
         let svc = make_service();
 
         // Create project first
-        let proj_result = svc
-            .create_project("P".into(), "/tmp".into())
-            .await
-            .unwrap();
+        let proj_result = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
         let project_id = proj_result.events[0].event.aggregate_id();
 
         // Create thread
@@ -1221,10 +1293,7 @@ mod tests {
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
-        let start = svc
-            .start_turn(thread_id, 1, "test".into())
-            .await
-            .unwrap();
+        let start = svc.start_turn(thread_id, 1, "test".into()).await.unwrap();
         let turn_id = start.events[0].event.aggregate_id();
 
         // Fail the turn
@@ -1241,8 +1310,14 @@ mod tests {
         let svc = make_service();
 
         // Create 2 projects
-        let p1 = svc.create_project("Alpha".into(), "/a".into()).await.unwrap();
-        let p2 = svc.create_project("Beta".into(), "/b".into()).await.unwrap();
+        let p1 = svc
+            .create_project("Alpha".into(), "/a".into())
+            .await
+            .unwrap();
+        let p2 = svc
+            .create_project("Beta".into(), "/b".into())
+            .await
+            .unwrap();
         let p1_id = p1.events[0].event.aggregate_id();
         let p2_id = p2.events[0].event.aggregate_id();
 
@@ -1274,7 +1349,10 @@ mod tests {
     async fn test_project_dashboard() {
         let svc = make_service();
 
-        let proj = svc.create_project("Dashboard".into(), "/d".into()).await.unwrap();
+        let proj = svc
+            .create_project("Dashboard".into(), "/d".into())
+            .await
+            .unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
             .create_thread(project_id, "openai".into(), "gpt-4".into())
@@ -1283,9 +1361,7 @@ mod tests {
         let thread_id = thr.events[0].event.aggregate_id();
 
         // Start a turn
-        svc.start_turn(thread_id, 1, "query".into())
-            .await
-            .unwrap();
+        svc.start_turn(thread_id, 1, "query".into()).await.unwrap();
 
         let dashboard = svc
             .get_project_dashboard(&project_id.to_string())
@@ -1311,10 +1387,7 @@ mod tests {
         let thread_id = thr.events[0].event.aggregate_id();
 
         // Start and complete a turn
-        let start = svc
-            .start_turn(thread_id, 1, "hi".into())
-            .await
-            .unwrap();
+        let start = svc.start_turn(thread_id, 1, "hi".into()).await.unwrap();
         let turn_id = start.events[0].event.aggregate_id();
         svc.complete_turn(turn_id, "response".into(), 500)
             .await
@@ -1325,10 +1398,7 @@ mod tests {
             .await
             .unwrap();
 
-        let detail = svc
-            .get_thread_detail(&thread_id.to_string())
-            .await
-            .unwrap();
+        let detail = svc.get_thread_detail(&thread_id.to_string()).await.unwrap();
 
         assert_eq!(detail.thread.provider_id, "openai");
         assert_eq!(detail.turns.len(), 1);
@@ -1397,7 +1467,10 @@ mod tests {
             .set_thread_runtime_mode(thread_id, "approval-required".into())
             .await
             .unwrap();
-        assert_eq!(result.events[0].event.event_type_name(), "ThreadRuntimeModeSet");
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadRuntimeModeSet"
+        );
 
         let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
         assert_eq!(thread.runtime_mode, "approval-required");
@@ -1422,7 +1495,10 @@ mod tests {
             .set_thread_interaction_mode(thread_id, "plan".into())
             .await
             .unwrap();
-        assert_eq!(result.events[0].event.event_type_name(), "ThreadInteractionModeSet");
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadInteractionModeSet"
+        );
 
         let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
         assert_eq!(thread.interaction_mode, "plan");
@@ -1448,14 +1524,20 @@ mod tests {
         let svc = make_service();
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
-        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let thr = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
         let tid = thr.events[0].event.aggregate_id();
 
         let result = svc
             .respond_thread_approval(tid, "req-1".into(), "approved".into())
             .await
             .unwrap();
-        assert_eq!(result.events[0].event.event_type_name(), "ThreadApprovalResponded");
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadApprovalResponded"
+        );
     }
 
     #[tokio::test]
@@ -1463,14 +1545,20 @@ mod tests {
         let svc = make_service();
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
-        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let thr = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
         let tid = thr.events[0].event.aggregate_id();
 
         let result = svc
             .respond_thread_user_input(tid, "req-2".into(), "yes".into())
             .await
             .unwrap();
-        assert_eq!(result.events[0].event.event_type_name(), "ThreadUserInputResponded");
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadUserInputResponded"
+        );
     }
 
     #[tokio::test]
@@ -1478,14 +1566,20 @@ mod tests {
         let svc = make_service();
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
-        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let thr = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
         let tid = thr.events[0].event.aggregate_id();
 
         let result = svc
             .edit_and_resend_thread_message(tid, EntityId::new(), "edited".into())
             .await
             .unwrap();
-        assert_eq!(result.events[0].event.event_type_name(), "ThreadMessageEditedAndResent");
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadMessageEditedAndResent"
+        );
     }
 
     #[tokio::test]
@@ -1493,7 +1587,10 @@ mod tests {
         let svc = make_service();
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
-        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let thr = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
         let tid = thr.events[0].event.aggregate_id();
 
         // activity.append reuses the existing ActivityLogged event.
@@ -1508,22 +1605,26 @@ mod tests {
     async fn test_turn_interaction_commands_unknown_thread_rejected() {
         let svc = make_service();
         // All four guard thread existence at the Decider.
-        assert!(svc
-            .respond_thread_approval(EntityId::new(), "r".into(), "approved".into())
-            .await
-            .is_err());
-        assert!(svc
-            .respond_thread_user_input(EntityId::new(), "r".into(), "a".into())
-            .await
-            .is_err());
-        assert!(svc
-            .edit_and_resend_thread_message(EntityId::new(), EntityId::new(), "t".into())
-            .await
-            .is_err());
-        assert!(svc
-            .append_thread_activity(EntityId::new(), "t".into(), "d".into())
-            .await
-            .is_err());
+        assert!(
+            svc.respond_thread_approval(EntityId::new(), "r".into(), "approved".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.respond_thread_user_input(EntityId::new(), "r".into(), "a".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.edit_and_resend_thread_message(EntityId::new(), EntityId::new(), "t".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.append_thread_activity(EntityId::new(), "t".into(), "d".into())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1531,7 +1632,10 @@ mod tests {
         let svc = make_service();
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
-        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let thr = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
         let tid = thr.events[0].event.aggregate_id();
         let mid = EntityId::new();
 
@@ -1541,7 +1645,10 @@ mod tests {
         let r = svc.set_pinned_message_done(tid, mid, true).await.unwrap();
         assert_eq!(r.events[0].event.event_type_name(), "PinnedMessageDoneSet");
 
-        let r = svc.set_pinned_message_label(tid, mid, Some("todo".into())).await.unwrap();
+        let r = svc
+            .set_pinned_message_label(tid, mid, Some("todo".into()))
+            .await
+            .unwrap();
         assert_eq!(r.events[0].event.event_type_name(), "PinnedMessageLabelSet");
 
         let r = svc.remove_pinned_message(tid, mid).await.unwrap();
@@ -1553,9 +1660,21 @@ mod tests {
         let svc = make_service();
         let mid = EntityId::new();
         assert!(svc.add_pinned_message(EntityId::new(), mid).await.is_err());
-        assert!(svc.remove_pinned_message(EntityId::new(), mid).await.is_err());
-        assert!(svc.set_pinned_message_done(EntityId::new(), mid, true).await.is_err());
-        assert!(svc.set_pinned_message_label(EntityId::new(), mid, None).await.is_err());
+        assert!(
+            svc.remove_pinned_message(EntityId::new(), mid)
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.set_pinned_message_done(EntityId::new(), mid, true)
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.set_pinned_message_label(EntityId::new(), mid, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1563,18 +1682,36 @@ mod tests {
         let svc = make_service();
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
-        let thr = svc.create_thread(pid, "openai".into(), "gpt-4".into()).await.unwrap();
+        let thr = svc
+            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
         let tid = thr.events[0].event.aggregate_id();
         let mid = EntityId::new();
         let msg = EntityId::new();
 
-        let r = svc.add_marker(tid, mid, msg, 0, 5, "hello".into(), "highlight".into(), "yellow".into()).await.unwrap();
+        let r = svc
+            .add_marker(
+                tid,
+                mid,
+                msg,
+                0,
+                5,
+                "hello".into(),
+                "highlight".into(),
+                "yellow".into(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.events[0].event.event_type_name(), "MarkerAdded");
 
         let r = svc.set_marker_done(tid, mid, true).await.unwrap();
         assert_eq!(r.events[0].event.event_type_name(), "MarkerDoneSet");
 
-        let r = svc.set_marker_label(tid, mid, Some("note".into())).await.unwrap();
+        let r = svc
+            .set_marker_label(tid, mid, Some("note".into()))
+            .await
+            .unwrap();
         assert_eq!(r.events[0].event.event_type_name(), "MarkerLabelSet");
 
         let r = svc.remove_marker(tid, mid).await.unwrap();
@@ -1586,10 +1723,31 @@ mod tests {
         let svc = make_service();
         let mid = EntityId::new();
         let msg = EntityId::new();
-        assert!(svc.add_marker(EntityId::new(), mid, msg, 0, 1, "x".into(), "highlight".into(), "yellow".into()).await.is_err());
+        assert!(
+            svc.add_marker(
+                EntityId::new(),
+                mid,
+                msg,
+                0,
+                1,
+                "x".into(),
+                "highlight".into(),
+                "yellow".into()
+            )
+            .await
+            .is_err()
+        );
         assert!(svc.remove_marker(EntityId::new(), mid).await.is_err());
-        assert!(svc.set_marker_done(EntityId::new(), mid, true).await.is_err());
-        assert!(svc.set_marker_label(EntityId::new(), mid, None).await.is_err());
+        assert!(
+            svc.set_marker_done(EntityId::new(), mid, true)
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.set_marker_label(EntityId::new(), mid, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

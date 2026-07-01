@@ -1,7 +1,7 @@
 //! Project aggregate — root entity for a workspace/project
 
-use serde::{Deserialize, Serialize};
 use crate::domain::primitives::{EntityId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// A project represents a workspace directory that Syncode manages.
 /// It is the root aggregate containing threads, configuration, and metadata.

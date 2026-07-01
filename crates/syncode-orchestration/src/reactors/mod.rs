@@ -8,4 +8,4 @@ pub mod command;
 pub mod ingestion;
 
 pub use command::{CommandReaction, CommandReactorError, ProviderCommandReactor};
-pub use ingestion::{ingest_provider_event, IngestionResult};
+pub use ingestion::{IngestionResult, ingest_provider_event};

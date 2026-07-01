@@ -227,7 +227,11 @@ mod tests {
     use crate::runner::RunStatus;
 
     fn make_def(name: &str) -> AutomationDef {
-        AutomationDef::new(name.to_string(), "echo hello".to_string(), ScheduleType::Manual)
+        AutomationDef::new(
+            name.to_string(),
+            "echo hello".to_string(),
+            ScheduleType::Manual,
+        )
     }
 
     #[tokio::test]

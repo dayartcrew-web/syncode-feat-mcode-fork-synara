@@ -10,15 +10,18 @@ pub mod decider;
 pub mod events;
 pub mod pipeline;
 pub mod projector;
-pub mod read_model;
 pub mod reactors;
+pub mod read_model;
 pub mod use_cases;
 
 // Re-exports for convenience
 pub use decider::{Command, Decider, DeciderError};
 pub use events::DomainEvent;
-pub use pipeline::{Orchestrator, OrchestrationError, CommandResult};
+pub use pipeline::{CommandResult, OrchestrationError, Orchestrator};
 pub use projector::{Projector, ReadModelStore};
-pub use read_model::{ProjectView, ThreadView, TurnView, MessageView, ActivityView};
-pub use reactors::{CommandReaction, CommandReactorError, ProviderCommandReactor, ingest_provider_event, IngestionResult};
+pub use reactors::{
+    CommandReaction, CommandReactorError, IngestionResult, ProviderCommandReactor,
+    ingest_provider_event,
+};
+pub use read_model::{ActivityView, MessageView, ProjectView, ThreadView, TurnView};
 pub use use_cases::{ApplicationService, ProjectDashboard, ThreadDetail};

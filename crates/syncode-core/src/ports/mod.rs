@@ -50,10 +50,7 @@ pub trait EventRepository: Send + Sync {
     /// Replay all events for a given aggregate, ordered by sequence.
     ///
     /// Returns an empty vec if the aggregate has no events.
-    async fn replay_events(
-        &self,
-        aggregate_id: EntityId,
-    ) -> Result<Vec<Envelope>, PortError>;
+    async fn replay_events(&self, aggregate_id: EntityId) -> Result<Vec<Envelope>, PortError>;
 
     /// Load a snapshot (if available) to avoid full replay.
     async fn load_snapshot(
@@ -145,7 +142,11 @@ pub trait ReadModelRepository: Send + Sync {
     // ─── Project queries ───────────────────────────────────────────────
 
     /// List all projects, ordered by creation date (most recent first).
-    async fn list_projects(&self, limit: u32, offset: u32) -> Result<Vec<serde_json::Value>, PortError>;
+    async fn list_projects(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<serde_json::Value>, PortError>;
 
     /// Get a single project by ID.
     async fn get_project(&self, id: EntityId) -> Result<Option<serde_json::Value>, PortError>;
@@ -212,11 +213,7 @@ pub trait GitServicePort: Send + Sync {
     async fn status(&self, repo_path: &str) -> Result<GitStatus, PortError>;
 
     /// Create a checkpoint (reference) for the current state.
-    async fn create_checkpoint(
-        &self,
-        repo_path: &str,
-        message: &str,
-    ) -> Result<String, PortError>;
+    async fn create_checkpoint(&self, repo_path: &str, message: &str) -> Result<String, PortError>;
 
     /// Get the diff between the working tree and the last checkpoint.
     async fn diff(&self, repo_path: &str, ref_name: &str) -> Result<String, PortError>;
@@ -290,11 +287,7 @@ pub trait ProviderPort: Send + Sync {
     ) -> Result<String, PortError>;
 
     /// Send a message to an active session.
-    async fn send_to_session(
-        &self,
-        session_id: &str,
-        message: &str,
-    ) -> Result<(), PortError>;
+    async fn send_to_session(&self, session_id: &str, message: &str) -> Result<(), PortError>;
 
     /// Interrupt an active session (user stop).
     async fn interrupt_session(&self, session_id: &str) -> Result<(), PortError>;
@@ -318,7 +311,10 @@ mod tests {
         let err = PortError::NotFound("project-123".into());
         assert!(err.to_string().contains("project-123"));
 
-        let err = PortError::ConcurrencyConflict { expected: 5, actual: 3 };
+        let err = PortError::ConcurrencyConflict {
+            expected: 5,
+            actual: 3,
+        };
         assert!(err.to_string().contains("expected version 5"));
 
         let err = PortError::Internal("db connection lost".into());

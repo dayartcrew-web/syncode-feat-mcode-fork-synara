@@ -1,7 +1,7 @@
 //! Thread aggregate — a conversation session within a project
 
-use serde::{Deserialize, Serialize};
 use crate::domain::primitives::{EntityId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// Thread status lifecycle
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

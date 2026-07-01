@@ -4,11 +4,12 @@
 //! read models optimized for queries. It uses an in-memory store
 //! for fast access, with optional persistence to SQLite.
 
+use crate::read_model::{
+    ActivityView, CheckpointView, MarkerView, MessageView, PinnedMessageView, ProjectView,
+    ProposedPlanView, ThreadSessionView, ThreadView, TurnView,
+};
 use std::collections::HashMap;
 use syncode_core::domain::events::DomainEvent;
-use crate::read_model::{
-    ProjectView, ThreadView, ThreadSessionView, TurnView, MessageView, ActivityView, PinnedMessageView, MarkerView, ProposedPlanView, CheckpointView,
-};
 
 /// In-memory read model store maintained by the Projector.
 /// Thread-safe via interior mutability pattern.
@@ -39,7 +40,10 @@ impl Projector {
     pub fn project(event: &DomainEvent, store: &mut ReadModelStore) {
         match event {
             DomainEvent::ProjectCreated {
-                id, name, root_path, created_at,
+                id,
+                name,
+                root_path,
+                created_at,
             } => {
                 let view = ProjectView {
                     id: id.as_str(),
@@ -55,7 +59,10 @@ impl Projector {
             }
 
             DomainEvent::ProjectUpdated {
-                id, provider_id, default_model, updated_at,
+                id,
+                provider_id,
+                default_model,
+                updated_at,
             } => {
                 if let Some(project) = store.projects.get_mut(&id.as_str()) {
                     if provider_id.is_some() {
@@ -76,7 +83,11 @@ impl Projector {
             }
 
             DomainEvent::ThreadCreated {
-                id, project_id, provider_id, model, created_at,
+                id,
+                project_id,
+                provider_id,
+                model,
+                created_at,
             } => {
                 let view = ThreadView {
                     id: id.as_str(),
@@ -101,7 +112,10 @@ impl Projector {
             }
 
             DomainEvent::ThreadStatusChanged {
-                id, new_status, updated_at, ..
+                id,
+                new_status,
+                updated_at,
+                ..
             } => {
                 if let Some(thread) = store.threads.get_mut(&id.as_str()) {
                     thread.status = new_status.clone();
@@ -121,7 +135,11 @@ impl Projector {
                 }
             }
 
-            DomainEvent::ThreadReverted { id, git_ref, reverted_at } => {
+            DomainEvent::ThreadReverted {
+                id,
+                git_ref,
+                reverted_at,
+            } => {
                 // A revert restores the thread to a captured checkpoint: record it as the
                 // thread's current checkpoint and bump the updated_at watermark.
                 if let Some(thread) = store.threads.get_mut(&id.as_str()) {
@@ -162,14 +180,22 @@ impl Projector {
                 // effect (SessionManager). No read-model mutation needed.
             }
 
-            DomainEvent::ThreadRuntimeModeSet { id, runtime_mode, updated_at } => {
+            DomainEvent::ThreadRuntimeModeSet {
+                id,
+                runtime_mode,
+                updated_at,
+            } => {
                 if let Some(thread) = store.threads.get_mut(&id.as_str()) {
                     thread.runtime_mode = runtime_mode.clone();
                     thread.updated_at = updated_at.to_string();
                 }
             }
 
-            DomainEvent::ThreadInteractionModeSet { id, interaction_mode, updated_at } => {
+            DomainEvent::ThreadInteractionModeSet {
+                id,
+                interaction_mode,
+                updated_at,
+            } => {
                 if let Some(thread) = store.threads.get_mut(&id.as_str()) {
                     thread.interaction_mode = interaction_mode.clone();
                     thread.updated_at = updated_at.to_string();
@@ -184,7 +210,13 @@ impl Projector {
             }
 
             DomainEvent::ThreadSessionSet {
-                id, status, provider_name, runtime_mode, active_turn_id, last_error, updated_at,
+                id,
+                status,
+                provider_name,
+                runtime_mode,
+                active_turn_id,
+                last_error,
+                updated_at,
             } => {
                 if let Some(thread) = store.threads.get_mut(&id.as_str()) {
                     thread.session = Some(ThreadSessionView {
@@ -205,25 +237,42 @@ impl Projector {
             }
 
             DomainEvent::PinnedMessageAdded {
-                thread_id, message_id, label, done, pinned_at, updated_at,
+                thread_id,
+                message_id,
+                label,
+                done,
+                pinned_at,
+                updated_at,
             } => {
                 let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
-                store.pinned_messages.insert(key, PinnedMessageView {
-                    thread_id: thread_id.as_str(),
-                    message_id: message_id.as_str(),
-                    label: label.clone(),
-                    done: *done,
-                    pinned_at: pinned_at.to_string(),
-                    updated_at: updated_at.to_string(),
-                });
+                store.pinned_messages.insert(
+                    key,
+                    PinnedMessageView {
+                        thread_id: thread_id.as_str(),
+                        message_id: message_id.as_str(),
+                        label: label.clone(),
+                        done: *done,
+                        pinned_at: pinned_at.to_string(),
+                        updated_at: updated_at.to_string(),
+                    },
+                );
             }
 
-            DomainEvent::PinnedMessageRemoved { thread_id, message_id, .. } => {
+            DomainEvent::PinnedMessageRemoved {
+                thread_id,
+                message_id,
+                ..
+            } => {
                 let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
                 store.pinned_messages.remove(&key);
             }
 
-            DomainEvent::PinnedMessageDoneSet { thread_id, message_id, done, updated_at } => {
+            DomainEvent::PinnedMessageDoneSet {
+                thread_id,
+                message_id,
+                done,
+                updated_at,
+            } => {
                 let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
                 if let Some(pm) = store.pinned_messages.get_mut(&key) {
                     pm.done = *done;
@@ -231,7 +280,12 @@ impl Projector {
                 }
             }
 
-            DomainEvent::PinnedMessageLabelSet { thread_id, message_id, label, updated_at } => {
+            DomainEvent::PinnedMessageLabelSet {
+                thread_id,
+                message_id,
+                label,
+                updated_at,
+            } => {
                 let key = format!("{}:{}", thread_id.as_str(), message_id.as_str());
                 if let Some(pm) = store.pinned_messages.get_mut(&key) {
                     pm.label = label.clone();
@@ -240,32 +294,54 @@ impl Projector {
             }
 
             DomainEvent::MarkerAdded {
-                thread_id, marker_id, message_id, start_offset, end_offset,
-                selected_text, style, color, label, done, created_at, updated_at,
+                thread_id,
+                marker_id,
+                message_id,
+                start_offset,
+                end_offset,
+                selected_text,
+                style,
+                color,
+                label,
+                done,
+                created_at,
+                updated_at,
             } => {
                 let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
-                store.markers.insert(key, MarkerView {
-                    thread_id: thread_id.as_str(),
-                    marker_id: marker_id.as_str(),
-                    message_id: message_id.as_str(),
-                    start_offset: *start_offset,
-                    end_offset: *end_offset,
-                    selected_text: selected_text.clone(),
-                    style: style.clone(),
-                    color: color.clone(),
-                    label: label.clone(),
-                    done: *done,
-                    created_at: created_at.to_string(),
-                    updated_at: updated_at.to_string(),
-                });
+                store.markers.insert(
+                    key,
+                    MarkerView {
+                        thread_id: thread_id.as_str(),
+                        marker_id: marker_id.as_str(),
+                        message_id: message_id.as_str(),
+                        start_offset: *start_offset,
+                        end_offset: *end_offset,
+                        selected_text: selected_text.clone(),
+                        style: style.clone(),
+                        color: color.clone(),
+                        label: label.clone(),
+                        done: *done,
+                        created_at: created_at.to_string(),
+                        updated_at: updated_at.to_string(),
+                    },
+                );
             }
 
-            DomainEvent::MarkerRemoved { thread_id, marker_id, .. } => {
+            DomainEvent::MarkerRemoved {
+                thread_id,
+                marker_id,
+                ..
+            } => {
                 let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
                 store.markers.remove(&key);
             }
 
-            DomainEvent::MarkerDoneSet { thread_id, marker_id, done, updated_at } => {
+            DomainEvent::MarkerDoneSet {
+                thread_id,
+                marker_id,
+                done,
+                updated_at,
+            } => {
                 let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
                 if let Some(m) = store.markers.get_mut(&key) {
                     m.done = *done;
@@ -273,7 +349,12 @@ impl Projector {
                 }
             }
 
-            DomainEvent::MarkerLabelSet { thread_id, marker_id, label, updated_at } => {
+            DomainEvent::MarkerLabelSet {
+                thread_id,
+                marker_id,
+                label,
+                updated_at,
+            } => {
                 let key = format!("{}:{}", thread_id.as_str(), marker_id.as_str());
                 if let Some(m) = store.markers.get_mut(&key) {
                     m.label = label.clone();
@@ -282,7 +363,11 @@ impl Projector {
             }
 
             DomainEvent::TurnStarted {
-                id, thread_id, sequence, user_input, created_at,
+                id,
+                thread_id,
+                sequence,
+                user_input,
+                created_at,
             } => {
                 let view = TurnView {
                     id: id.as_str(),
@@ -305,7 +390,10 @@ impl Projector {
             }
 
             DomainEvent::TurnCompleted {
-                id, assistant_output, duration_ms, completed_at,
+                id,
+                assistant_output,
+                duration_ms,
+                completed_at,
             } => {
                 if let Some(turn) = store.turns.get_mut(&id.as_str()) {
                     turn.assistant_output = Some(assistant_output.clone());
@@ -316,7 +404,9 @@ impl Projector {
             }
 
             DomainEvent::TurnFailed {
-                id, error, completed_at,
+                id,
+                error,
+                completed_at,
             } => {
                 if let Some(turn) = store.turns.get_mut(&id.as_str()) {
                     turn.assistant_output = Some(error.clone());
@@ -352,7 +442,11 @@ impl Projector {
             }
 
             DomainEvent::MessageAdded {
-                id, turn_id, role, content, created_at,
+                id,
+                turn_id,
+                role,
+                content,
+                created_at,
             } => {
                 let view = MessageView {
                     id: id.as_str(),
@@ -372,7 +466,10 @@ impl Projector {
             // Streamed assistant message: create on the first delta, append on
             // subsequent deltas (mcode `thread.message.assistant.delta`).
             DomainEvent::MessageDeltaAppended {
-                id, turn_id, delta, created_at,
+                id,
+                turn_id,
+                delta,
+                created_at,
             } => {
                 let key = id.as_str();
                 match store.messages.get_mut(&key) {
@@ -409,8 +506,14 @@ impl Projector {
             // Upsert a proposed plan, deduped by `thread_id:plan_id`. On update
             // the original `created_at` is preserved (mcode `proposedPlan.createdAt`).
             DomainEvent::ProposedPlanUpserted {
-                thread_id, plan_id, turn_id, plan_markdown,
-                implemented_at, implementation_thread_id, created_at, updated_at,
+                thread_id,
+                plan_id,
+                turn_id,
+                plan_markdown,
+                implemented_at,
+                implementation_thread_id,
+                created_at,
+                updated_at,
             } => {
                 let key = format!("{}:{}", thread_id.as_str(), plan_id);
                 let created_at = store
@@ -418,42 +521,58 @@ impl Projector {
                     .get(&key)
                     .map(|p| p.created_at.clone())
                     .unwrap_or_else(|| created_at.to_string());
-                store.proposed_plans.insert(key, ProposedPlanView {
-                    thread_id: thread_id.as_str(),
-                    plan_id: plan_id.clone(),
-                    turn_id: turn_id.map(|t| t.as_str()),
-                    plan_markdown: plan_markdown.clone(),
-                    implemented_at: implemented_at.clone(),
-                    implementation_thread_id: implementation_thread_id.map(|t| t.as_str()),
-                    created_at,
-                    updated_at: updated_at.to_string(),
-                });
+                store.proposed_plans.insert(
+                    key,
+                    ProposedPlanView {
+                        thread_id: thread_id.as_str(),
+                        plan_id: plan_id.clone(),
+                        turn_id: turn_id.map(|t| t.as_str()),
+                        plan_markdown: plan_markdown.clone(),
+                        implemented_at: implemented_at.clone(),
+                        implementation_thread_id: implementation_thread_id.map(|t| t.as_str()),
+                        created_at,
+                        updated_at: updated_at.to_string(),
+                    },
+                );
             }
 
             // Record a turn's diff checkpoint, deduped by `thread_id:turn_id`
             // (one checkpoint per turn; upsert overwrites).
             DomainEvent::TurnDiffCompleted {
-                thread_id, turn_id, checkpoint_turn_count, checkpoint_ref,
-                status, files, assistant_message_id, completed_at,
+                thread_id,
+                turn_id,
+                checkpoint_turn_count,
+                checkpoint_ref,
+                status,
+                files,
+                assistant_message_id,
+                completed_at,
             } => {
                 let key = format!("{}:{}", thread_id.as_str(), turn_id.as_str());
-                store.checkpoints.insert(key, CheckpointView {
-                    thread_id: thread_id.as_str(),
-                    turn_id: turn_id.as_str(),
-                    checkpoint_turn_count: *checkpoint_turn_count,
-                    checkpoint_ref: checkpoint_ref.clone(),
-                    status: status.clone(),
-                    files: files.clone(),
-                    assistant_message_id: assistant_message_id.map(|m| m.as_str()),
-                    completed_at: completed_at.to_string(),
-                });
+                store.checkpoints.insert(
+                    key,
+                    CheckpointView {
+                        thread_id: thread_id.as_str(),
+                        turn_id: turn_id.as_str(),
+                        checkpoint_turn_count: *checkpoint_turn_count,
+                        checkpoint_ref: checkpoint_ref.clone(),
+                        status: status.clone(),
+                        files: files.clone(),
+                        assistant_message_id: assistant_message_id.map(|m| m.as_str()),
+                        completed_at: completed_at.to_string(),
+                    },
+                );
             }
 
             // Truncate the thread to `turn_count` turns (mcode
             // `thread.reverted`). Removes turns with sequence > turn_count and
             // their messages/plans, plus checkpoints beyond the revert point.
             // Read model only — the event store is untouched (ES invariant).
-            DomainEvent::ThreadRevertCompleted { thread_id, turn_count, reverted_at } => {
+            DomainEvent::ThreadRevertCompleted {
+                thread_id,
+                turn_count,
+                reverted_at,
+            } => {
                 let tid = thread_id.as_str();
                 let removed: Vec<String> = store
                     .turns
@@ -462,9 +581,9 @@ impl Projector {
                     .map(|t| t.id.clone())
                     .collect();
                 Self::remove_turns_and_dependents(store, &removed);
-                store.checkpoints.retain(|_, c| {
-                    !(c.thread_id == tid && c.checkpoint_turn_count > *turn_count)
-                });
+                store
+                    .checkpoints
+                    .retain(|_, c| !(c.thread_id == tid && c.checkpoint_turn_count > *turn_count));
                 if let Some(thread) = store.threads.get_mut(&tid) {
                     thread.updated_at = reverted_at.to_string();
                 }
@@ -478,11 +597,13 @@ impl Projector {
             // checkpoints) from the read model (mcode `thread.conversation-
             // rolled-back`). Event store untouched.
             DomainEvent::ConversationRolledBack {
-                thread_id, removed_turn_ids, rolled_back_at, ..
+                thread_id,
+                removed_turn_ids,
+                rolled_back_at,
+                ..
             } => {
                 let tid = thread_id.as_str();
-                let removed: Vec<String> =
-                    removed_turn_ids.iter().map(|t| t.as_str()).collect();
+                let removed: Vec<String> = removed_turn_ids.iter().map(|t| t.as_str()).collect();
                 Self::remove_turns_and_dependents(store, &removed);
                 if let Some(thread) = store.threads.get_mut(&tid) {
                     thread.updated_at = rolled_back_at.to_string();
@@ -490,7 +611,11 @@ impl Projector {
             }
 
             DomainEvent::ActivityLogged {
-                id, activity_type, description, thread_id, created_at,
+                id,
+                activity_type,
+                description,
+                thread_id,
+                created_at,
             } => {
                 let view = ActivityView {
                     id: id.as_str(),
@@ -535,8 +660,8 @@ impl Projector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syncode_core::{EntityId, Timestamp};
     use crate::decider::Command;
+    use syncode_core::{EntityId, Timestamp};
 
     /// Helper: create a project via decider + projector
     fn create_project(name: &str, root: &str) -> (EntityId, ReadModelStore) {
@@ -546,7 +671,8 @@ mod tests {
                 root_path: root.to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let mut store = ReadModelStore::new();
         Projector::project_many(&events, &mut store);
         let id = events[0].aggregate_id();
@@ -572,7 +698,8 @@ mod tests {
                 default_model: Some("claude-3".to_string()),
             },
             Some(&serde_json::json!({"id": id.as_str()})),
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&events, &mut store);
         let project = store.projects.get(&id.as_str()).unwrap();
         assert_eq!(project.provider_id.as_deref(), Some("anthropic"));
@@ -589,7 +716,8 @@ mod tests {
                 model: "gpt-4".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&events, &mut store);
         assert_eq!(store.projects.get(&pid.as_str()).unwrap().thread_count, 1);
         assert_eq!(store.threads.len(), 1);
@@ -605,14 +733,16 @@ mod tests {
                 model: "gpt-4".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&thread_events, &mut store);
         let tid = thread_events[0].aggregate_id();
 
         let pause_events = crate::decider::Decider::decide(
             Command::PauseThread { id: tid },
             Some(&serde_json::json!({"status": "active"})),
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&pause_events, &mut store);
         let thread = store.threads.get(&tid.as_str()).unwrap();
         assert_eq!(thread.status, "paused");
@@ -628,7 +758,8 @@ mod tests {
                 model: "gpt-4".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&thread_events, &mut store);
         let tid = thread_events[0].aggregate_id();
 
@@ -639,7 +770,8 @@ mod tests {
                 user_input: "Hello".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&turn_events, &mut store);
         let thread = store.threads.get(&tid.as_str()).unwrap();
         assert_eq!(thread.turn_count, 1);
@@ -656,7 +788,8 @@ mod tests {
                 model: "gpt-4".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&thread_events, &mut store);
         let tid = thread_events[0].aggregate_id();
 
@@ -667,7 +800,8 @@ mod tests {
                 user_input: "Hi".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&turn_events, &mut store);
         let turn_id = turn_events[0].aggregate_id();
 
@@ -678,7 +812,8 @@ mod tests {
                 duration_ms: 500,
             },
             Some(&serde_json::json!({"status": "running"})),
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&complete_events, &mut store);
 
         let turn = store.turns.get(&turn_id.as_str()).unwrap();
@@ -697,7 +832,8 @@ mod tests {
                 content: "Hello".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let mut store = ReadModelStore::new();
         Projector::project_many(&events, &mut store);
         assert_eq!(store.messages.len(), 1);
@@ -750,7 +886,8 @@ mod tests {
                 root_path: "/tmp/full".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&proj_events, &mut store);
         let pid = proj_events[0].aggregate_id();
 
@@ -762,7 +899,8 @@ mod tests {
                 model: "claude-3".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&thread_events, &mut store);
         let tid = thread_events[0].aggregate_id();
 
@@ -774,7 +912,8 @@ mod tests {
                 user_input: "Write tests".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&turn_events, &mut store);
         let turn_id = turn_events[0].aggregate_id();
 
@@ -786,7 +925,8 @@ mod tests {
                 duration_ms: 2000,
             },
             Some(&serde_json::json!({"status": "running"})),
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&complete_events, &mut store);
 
         // 5. Add messages
@@ -797,7 +937,8 @@ mod tests {
                 content: "Write tests".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let assistant_msg = crate::decider::Decider::decide(
             Command::AddMessage {
                 turn_id,
@@ -805,7 +946,8 @@ mod tests {
                 content: "Done!".to_string(),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         Projector::project_many(&user_msg, &mut store);
         Projector::project_many(&assistant_msg, &mut store);
 

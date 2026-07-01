@@ -14,7 +14,10 @@ pub enum UpdateStatus {
     /// Currently checking for updates
     Checking,
     /// Update available
-    Available { version: String, release_notes: String },
+    Available {
+        version: String,
+        release_notes: String,
+    },
     /// Downloading update
     Downloading { progress: f64 },
     /// Update ready to install
@@ -33,7 +36,9 @@ impl std::fmt::Display for UpdateStatus {
             UpdateStatus::Idle => write!(f, "idle"),
             UpdateStatus::Checking => write!(f, "checking"),
             UpdateStatus::Available { version, .. } => write!(f, "available: {}", version),
-            UpdateStatus::Downloading { progress } => write!(f, "downloading: {:.0}%", progress * 100.0),
+            UpdateStatus::Downloading { progress } => {
+                write!(f, "downloading: {:.0}%", progress * 100.0)
+            }
             UpdateStatus::Ready { version } => write!(f, "ready: {}", version),
             UpdateStatus::Installed { version } => write!(f, "installed: {}", version),
             UpdateStatus::UpToDate => write!(f, "up_to_date"),
@@ -104,7 +109,10 @@ impl UpdaterState {
 
     /// Check if an update is available
     pub fn is_update_available(&self) -> bool {
-        matches!(*self.status.lock().unwrap(), UpdateStatus::Available { .. } | UpdateStatus::Ready { .. })
+        matches!(
+            *self.status.lock().unwrap(),
+            UpdateStatus::Available { .. } | UpdateStatus::Ready { .. }
+        )
     }
 
     /// Get the config
@@ -126,11 +134,7 @@ impl Default for UpdaterState {
 
 /// Compare two version strings (simplified semver)
 pub fn version_greater_than(current: &str, available: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect()
-    };
+    let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
     let current_parts = parse(current);
     let available_parts = parse(available);
     let max_len = current_parts.len().max(available_parts.len());
@@ -157,12 +161,21 @@ mod tests {
         let statuses = vec![
             UpdateStatus::Idle,
             UpdateStatus::Checking,
-            UpdateStatus::Available { version: "1.0.0".to_string(), release_notes: "notes".to_string() },
+            UpdateStatus::Available {
+                version: "1.0.0".to_string(),
+                release_notes: "notes".to_string(),
+            },
             UpdateStatus::Downloading { progress: 0.5 },
-            UpdateStatus::Ready { version: "1.0.0".to_string() },
-            UpdateStatus::Installed { version: "1.0.0".to_string() },
+            UpdateStatus::Ready {
+                version: "1.0.0".to_string(),
+            },
+            UpdateStatus::Installed {
+                version: "1.0.0".to_string(),
+            },
             UpdateStatus::UpToDate,
-            UpdateStatus::Error { message: "fail".to_string() },
+            UpdateStatus::Error {
+                message: "fail".to_string(),
+            },
         ];
         for status in statuses {
             let json = serde_json::to_string(&status).unwrap();

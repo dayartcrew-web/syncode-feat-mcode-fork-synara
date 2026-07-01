@@ -64,7 +64,11 @@ pub fn ingest_provider_event(
             tool_input,
             ..
         } => {
-            let description = format!("Provider tool call: {} {}", tool_name, truncate_json(&tool_input, 200));
+            let description = format!(
+                "Provider tool call: {} {}",
+                tool_name,
+                truncate_json(&tool_input, 200)
+            );
             IngestionResult {
                 events: vec![DomainEvent::ActivityLogged {
                     id: EntityId::new(),
@@ -79,9 +83,7 @@ pub fn ingest_provider_event(
         }
 
         ProviderEvent::ToolResult {
-            tool_name,
-            result,
-            ..
+            tool_name, result, ..
         } => {
             let description = format!(
                 "Provider tool result: {} {}",
@@ -106,7 +108,10 @@ pub fn ingest_provider_event(
             // the synchronous batch path (react() events carry no stream start).
             let duration_ms = match started_at {
                 Some(start) => (now.to_millis() - start.to_millis()).max(0) as u64,
-                None => usage.as_ref().map(|u| (u.total_tokens as u64) * 10).unwrap_or(0),
+                None => usage
+                    .as_ref()
+                    .map(|u| (u.total_tokens as u64) * 10)
+                    .unwrap_or(0),
             };
             IngestionResult {
                 events: vec![DomainEvent::TurnCompleted {
@@ -160,7 +165,9 @@ mod tests {
 
     #[test]
     fn ingest_started_produces_no_events() {
-        let event = ProviderEvent::Started { session_id: "s1".to_string() };
+        let event = ProviderEvent::Started {
+            session_id: "s1".to_string(),
+        };
         let result = ingest_provider_event(event, make_turn_id(), None, None);
         assert!(result.events.is_empty());
         assert!(result.consumed);
@@ -225,7 +232,12 @@ mod tests {
         let result = ingest_provider_event(event, turn_id, None, None);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
-            DomainEvent::TurnCompleted { id, assistant_output, duration_ms, .. } => {
+            DomainEvent::TurnCompleted {
+                id,
+                assistant_output,
+                duration_ms,
+                ..
+            } => {
                 assert_eq!(*id, turn_id);
                 assert_eq!(assistant_output, "Here is the fix.");
                 assert_eq!(*duration_ms, 1500); // total_tokens * 10
@@ -301,8 +313,7 @@ mod tests {
         // A start timestamp ~2s ago yields a wall-clock duration (~2000ms),
         // NOT the total_tokens*10 heuristic (150 tokens -> 1500ms).
         let turn_id = make_turn_id();
-        let started_at =
-            Timestamp(chrono::Utc::now() - chrono::Duration::milliseconds(2000));
+        let started_at = Timestamp(chrono::Utc::now() - chrono::Duration::milliseconds(2000));
         let event = ProviderEvent::Completed {
             session_id: "s1".to_string(),
             output: "done".to_string(),

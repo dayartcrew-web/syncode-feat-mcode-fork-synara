@@ -6,7 +6,7 @@
 
 use crate::SqlitePool;
 use crate::event_store::replay_all_events;
-use syncode_core::{DomainEvent, Envelope, DomainEventTrait};
+use syncode_core::{DomainEvent, DomainEventTrait, Envelope};
 use thiserror::Error;
 
 /// Errors that can occur during projection operations
@@ -168,10 +168,7 @@ impl ProjectionManager {
     }
 
     /// Project a single domain event onto the read model tables (async).
-    pub async fn project_event_async(
-        &self,
-        envelope: &Envelope,
-    ) -> Result<(), ProjectionError> {
+    pub async fn project_event_async(&self, envelope: &Envelope) -> Result<(), ProjectionError> {
         match &envelope.event {
             DomainEvent::ProjectCreated {
                 id, name, root_path, created_at, ..
@@ -754,11 +751,10 @@ impl ProjectionManager {
 
     /// Get the last projected event sequence.
     pub async fn watermark(&self) -> Result<u64, ProjectionError> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT last_event_id FROM projection_watermark WHERE id = 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT last_event_id FROM projection_watermark WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(row.map(|(v,)| v as u64).unwrap_or(0))
     }
@@ -773,12 +769,14 @@ impl ProjectionManager {
 mod tests {
     use super::*;
     use crate::init_database;
-    use syncode_core::{EntityId, Timestamp};
     use std::path::Path;
+    use syncode_core::{EntityId, Timestamp};
 
     async fn setup() -> ProjectionManager {
         let pool = init_database(Path::new("")).await.expect("database");
-        ProjectionManager::new(pool).await.expect("projection manager")
+        ProjectionManager::new(pool)
+            .await
+            .expect("projection manager")
     }
 
     #[tokio::test]
@@ -796,13 +794,12 @@ mod tests {
         );
         mgr.project_event_async(&envelope).await.expect("project");
 
-        let row: Option<(String, String,)> = sqlx::query_as(
-            "SELECT id, name FROM view_projects WHERE id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(mgr.pool())
-        .await
-        .unwrap();
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM view_projects WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_optional(mgr.pool())
+                .await
+                .unwrap();
 
         assert!(row.is_some());
         let (_rid, name) = row.unwrap();
@@ -878,7 +875,9 @@ mod tests {
                 created_at: Timestamp::now(),
             },
             1,
-        )).await.expect("project created");
+        ))
+        .await
+        .expect("project created");
 
         // Create thread
         mgr.project_event_async(&Envelope::new(
@@ -890,15 +889,16 @@ mod tests {
                 created_at: Timestamp::now(),
             },
             2,
-        )).await.expect("thread created");
-
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT thread_count FROM view_projects WHERE id = ?",
-        )
-        .bind(pid.to_string())
-        .fetch_optional(mgr.pool())
+        ))
         .await
-        .unwrap();
+        .expect("thread created");
+
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT thread_count FROM view_projects WHERE id = ?")
+                .bind(pid.to_string())
+                .fetch_optional(mgr.pool())
+                .await
+                .unwrap();
 
         assert_eq!(row.unwrap().0, 1);
     }
@@ -912,25 +912,55 @@ mod tests {
 
         // Setup project + thread
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::ProjectCreated { id: pid, name: "P".into(), root_path: "/p".into(), created_at: Timestamp::now() },
+            DomainEvent::ProjectCreated {
+                id: pid,
+                name: "P".into(),
+                root_path: "/p".into(),
+                created_at: Timestamp::now(),
+            },
             1,
-        )).await.ok();
+        ))
+        .await
+        .ok();
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::ThreadCreated { id: tid, project_id: pid, provider_id: "openai".into(), model: "gpt-4".into(), created_at: Timestamp::now() },
+            DomainEvent::ThreadCreated {
+                id: tid,
+                project_id: pid,
+                provider_id: "openai".into(),
+                model: "gpt-4".into(),
+                created_at: Timestamp::now(),
+            },
             2,
-        )).await.ok();
+        ))
+        .await
+        .ok();
 
         // Start turn
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::TurnStarted { id: tid_id, thread_id: tid, sequence: 1, user_input: "hello".into(), created_at: Timestamp::now() },
+            DomainEvent::TurnStarted {
+                id: tid_id,
+                thread_id: tid,
+                sequence: 1,
+                user_input: "hello".into(),
+                created_at: Timestamp::now(),
+            },
             3,
-        )).await.expect("turn started");
+        ))
+        .await
+        .expect("turn started");
 
         // Complete turn
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::TurnCompleted { id: tid_id, assistant_output: "world".into(), duration_ms: 100, completed_at: Timestamp::now() },
+            DomainEvent::TurnCompleted {
+                id: tid_id,
+                assistant_output: "world".into(),
+                duration_ms: 100,
+                completed_at: Timestamp::now(),
+            },
             4,
-        )).await.expect("turn completed");
+        ))
+        .await
+        .expect("turn completed");
 
         let row: Option<(String, i64, String)> = sqlx::query_as(
             "SELECT status, duration_ms, assistant_output FROM view_turns WHERE id = ?",
@@ -956,31 +986,61 @@ mod tests {
 
         // Setup: project -> thread -> turn (FK chain)
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::ProjectCreated { id: pid, name: "P".into(), root_path: "/p".into(), created_at: Timestamp::now() },
+            DomainEvent::ProjectCreated {
+                id: pid,
+                name: "P".into(),
+                root_path: "/p".into(),
+                created_at: Timestamp::now(),
+            },
             1,
-        )).await.ok();
+        ))
+        .await
+        .ok();
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::ThreadCreated { id: tid, project_id: pid, provider_id: "anthropic".into(), model: "claude-3".into(), created_at: Timestamp::now() },
+            DomainEvent::ThreadCreated {
+                id: tid,
+                project_id: pid,
+                provider_id: "anthropic".into(),
+                model: "claude-3".into(),
+                created_at: Timestamp::now(),
+            },
             2,
-        )).await.ok();
+        ))
+        .await
+        .ok();
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::TurnStarted { id: turn_id, thread_id: tid, sequence: 1, user_input: "hi".into(), created_at: Timestamp::now() },
+            DomainEvent::TurnStarted {
+                id: turn_id,
+                thread_id: tid,
+                sequence: 1,
+                user_input: "hi".into(),
+                created_at: Timestamp::now(),
+            },
             3,
-        )).await.ok();
+        ))
+        .await
+        .ok();
 
         // Now insert message
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::MessageAdded { id: mid, turn_id, role: "user".into(), content: "hello".into(), created_at: Timestamp::now() },
+            DomainEvent::MessageAdded {
+                id: mid,
+                turn_id,
+                role: "user".into(),
+                content: "hello".into(),
+                created_at: Timestamp::now(),
+            },
             4,
-        )).await.expect("message added");
-
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT role, content FROM view_messages WHERE id = ?",
-        )
-        .bind(mid.to_string())
-        .fetch_optional(mgr.pool())
+        ))
         .await
-        .unwrap();
+        .expect("message added");
+
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT role, content FROM view_messages WHERE id = ?")
+                .bind(mid.to_string())
+                .fetch_optional(mgr.pool())
+                .await
+                .unwrap();
 
         let (role, content) = row.unwrap();
         assert_eq!(role, "user");
@@ -994,9 +1054,16 @@ mod tests {
 
         let id = EntityId::new();
         mgr.project_event_async(&Envelope::new(
-            DomainEvent::ProjectCreated { id, name: "W".into(), root_path: "/w".into(), created_at: Timestamp::now() },
+            DomainEvent::ProjectCreated {
+                id,
+                name: "W".into(),
+                root_path: "/w".into(),
+                created_at: Timestamp::now(),
+            },
             5,
-        )).await.ok();
+        ))
+        .await
+        .ok();
 
         assert_eq!(mgr.watermark().await.unwrap(), 5);
     }

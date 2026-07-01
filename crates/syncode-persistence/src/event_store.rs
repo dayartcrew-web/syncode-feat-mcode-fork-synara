@@ -4,7 +4,7 @@
 
 use crate::SqlitePool;
 use serde::{Deserialize, Serialize};
-use syncode_core::{DomainEvent, Envelope, EntityId, Timestamp, DomainEventTrait};
+use syncode_core::{DomainEvent, DomainEventTrait, EntityId, Envelope, Timestamp};
 use thiserror::Error;
 
 /// Errors that can occur in the event store
@@ -78,11 +78,12 @@ pub async fn append_domain_events(
     let mut tx = pool.begin().await?;
 
     // Verify expected version (optimistic concurrency)
-    let current_seq: Option<(i64,)> =
-        sqlx::query_as("SELECT COALESCE(MAX(sequence), 0) FROM domain_events WHERE aggregate_id = ?")
-            .bind(&agg_id_str)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let current_seq: Option<(i64,)> = sqlx::query_as(
+        "SELECT COALESCE(MAX(sequence), 0) FROM domain_events WHERE aggregate_id = ?",
+    )
+    .bind(&agg_id_str)
+    .fetch_optional(&mut *tx)
+    .await?;
 
     let current_version = current_seq.map(|(s,)| s as u64).unwrap_or(0);
     if current_version != expected_version {
@@ -129,10 +130,7 @@ pub async fn replay_envelopes(
     aggregate_id: EntityId,
 ) -> Result<Vec<Envelope>, EventStoreError> {
     let persisted = replay_events(pool, &aggregate_id.to_string()).await?;
-    persisted
-        .into_iter()
-        .map(|p| p.to_envelope())
-        .collect()
+    persisted.into_iter().map(|p| p.to_envelope()).collect()
 }
 
 /// Get the current version (event count) for an aggregate stream.
@@ -140,11 +138,12 @@ pub async fn current_version(
     pool: &SqlitePool,
     aggregate_id: &str,
 ) -> Result<u64, EventStoreError> {
-    let row: Option<(i64,)> =
-        sqlx::query_as("SELECT COALESCE(MAX(sequence), 0) FROM domain_events WHERE aggregate_id = ?")
-            .bind(aggregate_id)
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT COALESCE(MAX(sequence), 0) FROM domain_events WHERE aggregate_id = ?",
+    )
+    .bind(aggregate_id)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(row.map(|(s,)| s as u64).unwrap_or(0))
 }
@@ -159,11 +158,12 @@ pub async fn append_events(
     let mut tx = pool.begin().await?;
 
     // Verify expected version (optimistic concurrency)
-    let current_seq: Option<(i64,)> =
-        sqlx::query_as("SELECT COALESCE(MAX(sequence), 0) FROM domain_events WHERE aggregate_id = ?")
-            .bind(aggregate_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let current_seq: Option<(i64,)> = sqlx::query_as(
+        "SELECT COALESCE(MAX(sequence), 0) FROM domain_events WHERE aggregate_id = ?",
+    )
+    .bind(aggregate_id)
+    .fetch_optional(&mut *tx)
+    .await?;
 
     let current_version = current_seq.map(|(s,)| s as u64).unwrap_or(0);
     if current_version != expected_version {
@@ -269,33 +269,34 @@ pub async fn replay_all_events(
     since_sequence: Option<u64>,
     limit: u32,
 ) -> Result<Vec<PersistedEvent>, EventStoreError> {
-    let rows: Vec<(i64, String, String, i64, String, String, String, String)> = if let Some(since) = since_sequence {
-        sqlx::query_as(
-            r#"
+    let rows: Vec<(i64, String, String, i64, String, String, String, String)> =
+        if let Some(since) = since_sequence {
+            sqlx::query_as(
+                r#"
             SELECT id, aggregate_id, event_type, sequence, data, timestamp, metadata, created_at
             FROM domain_events
             WHERE id > ?
             ORDER BY id ASC
             LIMIT ?
             "#,
-        )
-        .bind(since as i64)
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_as(
-            r#"
+            )
+            .bind(since as i64)
+            .bind(limit as i64)
+            .fetch_all(pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                r#"
             SELECT id, aggregate_id, event_type, sequence, data, timestamp, metadata, created_at
             FROM domain_events
             ORDER BY id ASC
             LIMIT ?
             "#,
-        )
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await?
-    };
+            )
+            .bind(limit as i64)
+            .fetch_all(pool)
+            .await?
+        };
 
     Ok(rows
         .into_iter()
@@ -339,9 +340,7 @@ mod tests {
         assert_eq!(persisted[1].sequence, 2);
 
         // Replay
-        let replayed = replay_events(&pool, agg_id)
-            .await
-            .expect("replay");
+        let replayed = replay_events(&pool, agg_id).await.expect("replay");
 
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].event_type, "ThreadCreated");
@@ -357,7 +356,9 @@ mod tests {
         let agg_id = "test-conflict-456";
 
         let events = vec![EventToAppend::new("Created", r#"{}"#)];
-        append_events(&pool, agg_id, &events, 0).await.expect("first append");
+        append_events(&pool, agg_id, &events, 0)
+            .await
+            .expect("first append");
 
         // Try to append with wrong expected version
         let result = append_events(&pool, agg_id, &events, 0).await;
@@ -426,7 +427,8 @@ mod tests {
                 provider_id: "anthropic".into(),
                 model: "claude-3".into(),
                 created_at: Timestamp::now(),
-            }).unwrap(),
+            })
+            .unwrap(),
             timestamp: Timestamp::now().to_string(),
             metadata: "{}".into(),
             created_at: Timestamp::now().to_string(),

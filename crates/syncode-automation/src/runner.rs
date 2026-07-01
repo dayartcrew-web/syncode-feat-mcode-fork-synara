@@ -28,7 +28,10 @@ pub enum RunStatus {
 impl RunStatus {
     /// Whether the run is in a terminal state
     pub fn is_terminal(&self) -> bool {
-        matches!(self, RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled | RunStatus::TimedOut)
+        matches!(
+            self,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled | RunStatus::TimedOut
+        )
     }
 
     /// Whether the run was successful

@@ -42,16 +42,58 @@ pub struct ProviderRegistryState {
 impl ProviderRegistryState {
     pub fn new() -> Self {
         let providers = vec![
-            ProviderStatusInfo { id: "claude".into(), name: "Anthropic Claude".into(), available: true, configured: false },
-            ProviderStatusInfo { id: "codex".into(), name: "OpenAI Codex".into(), available: true, configured: false },
-            ProviderStatusInfo { id: "gemini".into(), name: "Google Gemini".into(), available: true, configured: false },
-            ProviderStatusInfo { id: "grok".into(), name: "xAI Grok".into(), available: true, configured: false },
-            ProviderStatusInfo { id: "cursor".into(), name: "Cursor".into(), available: true, configured: false },
-            ProviderStatusInfo { id: "opencode".into(), name: "OpenCode".into(), available: true, configured: false },
-            ProviderStatusInfo { id: "kilo".into(), name: "Kilo".into(), available: true, configured: false },
-            ProviderStatusInfo { id: "pi".into(), name: "Pi".into(), available: true, configured: false },
+            ProviderStatusInfo {
+                id: "claude".into(),
+                name: "Anthropic Claude".into(),
+                available: true,
+                configured: false,
+            },
+            ProviderStatusInfo {
+                id: "codex".into(),
+                name: "OpenAI Codex".into(),
+                available: true,
+                configured: false,
+            },
+            ProviderStatusInfo {
+                id: "gemini".into(),
+                name: "Google Gemini".into(),
+                available: true,
+                configured: false,
+            },
+            ProviderStatusInfo {
+                id: "grok".into(),
+                name: "xAI Grok".into(),
+                available: true,
+                configured: false,
+            },
+            ProviderStatusInfo {
+                id: "cursor".into(),
+                name: "Cursor".into(),
+                available: true,
+                configured: false,
+            },
+            ProviderStatusInfo {
+                id: "opencode".into(),
+                name: "OpenCode".into(),
+                available: true,
+                configured: false,
+            },
+            ProviderStatusInfo {
+                id: "kilo".into(),
+                name: "Kilo".into(),
+                available: true,
+                configured: false,
+            },
+            ProviderStatusInfo {
+                id: "pi".into(),
+                name: "Pi".into(),
+                available: true,
+                configured: false,
+            },
         ];
-        Self { providers: std::sync::Mutex::new(providers) }
+        Self {
+            providers: std::sync::Mutex::new(providers),
+        }
     }
 }
 
@@ -62,7 +104,9 @@ pub struct SessionStoreState {
 
 impl SessionStoreState {
     pub fn new() -> Self {
-        Self { sessions: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            sessions: std::sync::Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -73,7 +117,11 @@ pub fn get_app_info() -> AppInfo {
         name: "Syncode".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         tauri_version: tauri::VERSION.into(),
-        mode: if cfg!(debug_assertions) { "development".into() } else { "production".into() },
+        mode: if cfg!(debug_assertions) {
+            "development".into()
+        } else {
+            "production".into()
+        },
     }
 }
 
@@ -85,14 +133,25 @@ pub fn get_version() -> String {
 
 /// List all registered providers and their status
 #[tauri::command]
-pub fn list_providers(registry: tauri::State<'_, ProviderRegistryState>) -> Vec<ProviderStatusInfo> {
+pub fn list_providers(
+    registry: tauri::State<'_, ProviderRegistryState>,
+) -> Vec<ProviderStatusInfo> {
     registry.providers.lock().unwrap().clone()
 }
 
 /// Get status of a specific provider
 #[tauri::command]
-pub fn get_provider_status(registry: tauri::State<'_, ProviderRegistryState>, provider_id: String) -> Option<ProviderStatusInfo> {
-    registry.providers.lock().unwrap().iter().find(|p| p.id == provider_id).cloned()
+pub fn get_provider_status(
+    registry: tauri::State<'_, ProviderRegistryState>,
+    provider_id: String,
+) -> Option<ProviderStatusInfo> {
+    registry
+        .providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == provider_id)
+        .cloned()
 }
 
 /// List all active sessions

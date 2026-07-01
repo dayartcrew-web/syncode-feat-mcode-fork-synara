@@ -12,14 +12,20 @@ pub enum RetryPolicy {
     /// Do not retry
     None,
     /// Retry up to N times with exponential backoff
-    ExponentialBackoff { max_retries: u32, base_delay_secs: u64 },
+    ExponentialBackoff {
+        max_retries: u32,
+        base_delay_secs: u64,
+    },
     /// Retry up to N times with fixed delay
     FixedDelay { max_retries: u32, delay_secs: u64 },
 }
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self::ExponentialBackoff { max_retries: 3, base_delay_secs: 5 }
+        Self::ExponentialBackoff {
+            max_retries: 3,
+            base_delay_secs: 5,
+        }
     }
 }
 
@@ -28,7 +34,10 @@ impl RetryPolicy {
     pub fn delay_for_attempt(&self, attempt: u32) -> Option<std::time::Duration> {
         match self {
             RetryPolicy::None => None,
-            RetryPolicy::ExponentialBackoff { max_retries, base_delay_secs } => {
+            RetryPolicy::ExponentialBackoff {
+                max_retries,
+                base_delay_secs,
+            } => {
                 if attempt >= *max_retries {
                     None
                 } else {
@@ -36,7 +45,10 @@ impl RetryPolicy {
                     Some(std::time::Duration::from_secs(secs))
                 }
             }
-            RetryPolicy::FixedDelay { max_retries, delay_secs } => {
+            RetryPolicy::FixedDelay {
+                max_retries,
+                delay_secs,
+            } => {
                 if attempt >= *max_retries {
                     None
                 } else {
@@ -111,18 +123,39 @@ mod tests {
 
     #[test]
     fn retry_policy_exponential_backoff() {
-        let policy = RetryPolicy::ExponentialBackoff { max_retries: 3, base_delay_secs: 2 };
-        assert_eq!(policy.delay_for_attempt(0), Some(std::time::Duration::from_secs(2)));
-        assert_eq!(policy.delay_for_attempt(1), Some(std::time::Duration::from_secs(4)));
-        assert_eq!(policy.delay_for_attempt(2), Some(std::time::Duration::from_secs(8)));
+        let policy = RetryPolicy::ExponentialBackoff {
+            max_retries: 3,
+            base_delay_secs: 2,
+        };
+        assert_eq!(
+            policy.delay_for_attempt(0),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            policy.delay_for_attempt(1),
+            Some(std::time::Duration::from_secs(4))
+        );
+        assert_eq!(
+            policy.delay_for_attempt(2),
+            Some(std::time::Duration::from_secs(8))
+        );
         assert_eq!(policy.delay_for_attempt(3), None); // exhausted
     }
 
     #[test]
     fn retry_policy_fixed_delay() {
-        let policy = RetryPolicy::FixedDelay { max_retries: 2, delay_secs: 10 };
-        assert_eq!(policy.delay_for_attempt(0), Some(std::time::Duration::from_secs(10)));
-        assert_eq!(policy.delay_for_attempt(1), Some(std::time::Duration::from_secs(10)));
+        let policy = RetryPolicy::FixedDelay {
+            max_retries: 2,
+            delay_secs: 10,
+        };
+        assert_eq!(
+            policy.delay_for_attempt(0),
+            Some(std::time::Duration::from_secs(10))
+        );
+        assert_eq!(
+            policy.delay_for_attempt(1),
+            Some(std::time::Duration::from_secs(10))
+        );
         assert_eq!(policy.delay_for_attempt(2), None);
     }
 
@@ -134,7 +167,10 @@ mod tests {
 
     #[test]
     fn retry_policy_exhausted() {
-        let policy = RetryPolicy::ExponentialBackoff { max_retries: 1, base_delay_secs: 1 };
+        let policy = RetryPolicy::ExponentialBackoff {
+            max_retries: 1,
+            base_delay_secs: 1,
+        };
         assert!(!policy.exhausted(0));
         assert!(policy.exhausted(1));
     }
@@ -179,7 +215,10 @@ mod tests {
 
     #[test]
     fn retry_policy_serialization() {
-        let policy = RetryPolicy::ExponentialBackoff { max_retries: 5, base_delay_secs: 10 };
+        let policy = RetryPolicy::ExponentialBackoff {
+            max_retries: 5,
+            base_delay_secs: 10,
+        };
         let json = serde_json::to_string(&policy).unwrap();
         assert!(json.contains("exponential_backoff"));
         let back: RetryPolicy = serde_json::from_str(&json).unwrap();

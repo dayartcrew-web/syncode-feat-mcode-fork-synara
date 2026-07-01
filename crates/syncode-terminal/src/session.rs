@@ -32,14 +32,7 @@ impl TerminalSession {
         cols: u16,
         rows: u16,
     ) -> Result<Self, PtyError> {
-        let pty = PtyHandle::spawn(
-            session_id.clone(),
-            command,
-            args,
-            working_dir,
-            cols,
-            rows,
-        )?;
+        let pty = PtyHandle::spawn(session_id.clone(), command, args, working_dir, cols, rows)?;
         let output = OutputBuffer::new(1000, 4096);
 
         Ok(Self {
@@ -114,14 +107,8 @@ impl SessionManager {
         rows: u16,
     ) -> Result<String, PtyError> {
         let session_id = format!("term-{}", uuid::Uuid::new_v4().hyphenated());
-        let session = TerminalSession::new(
-            session_id.clone(),
-            command,
-            args,
-            working_dir,
-            cols,
-            rows,
-        )?;
+        let session =
+            TerminalSession::new(session_id.clone(), command, args, working_dir, cols, rows)?;
         self.sessions
             .write()
             .await

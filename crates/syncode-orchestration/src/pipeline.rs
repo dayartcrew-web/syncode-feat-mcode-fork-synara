@@ -13,19 +13,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use syncode_core::{
-    DomainEvent, Envelope, EntityId,
+    DomainEvent, EntityId, Envelope,
     ports::{DomainEventPublisher, EventRepository, PortError},
 };
 use tracing::{info, instrument};
 
 use crate::decider::{Command, Decider, DeciderError};
 use crate::projector::{Projector, ReadModelStore};
+use crate::reactors::{IngestionResult, ProviderCommandReactor, ingest_provider_event};
 use crate::read_model::{
-    ProjectView, ThreadView, TurnView, MessageView, PinnedMessageView, MarkerView,
-};
-use crate::reactors::{
-    ProviderCommandReactor,
-    ingest_provider_event, IngestionResult,
+    MarkerView, MessageView, PinnedMessageView, ProjectView, ThreadView, TurnView,
 };
 
 /// Result of handling a command through the orchestration pipeline
@@ -64,7 +61,9 @@ pub enum OrchestrationError {
 
     /// Optimistic-concurrency conflict that did not resolve within the retry
     /// budget. A concurrent append kept racing ahead on the same aggregate.
-    #[error("optimistic-concurrency conflict after {attempts} attempts: expected version {expected}, actual {actual}")]
+    #[error(
+        "optimistic-concurrency conflict after {attempts} attempts: expected version {expected}, actual {actual}"
+    )]
     ConcurrencyConflictRetried {
         expected: u64,
         actual: u64,
@@ -217,10 +216,7 @@ const PUSH_CHANNEL: &str = "orchestration";
 /// serialized payload. Publishing failures (serialization or transport) are
 /// logged and never propagated — by the time we publish, the events are already
 /// durably appended and projected, so a push problem must not fail the command.
-async fn publish_events(
-    publisher: &Arc<dyn DomainEventPublisher>,
-    envelopes: &[Envelope],
-) {
+async fn publish_events(publisher: &Arc<dyn DomainEventPublisher>, envelopes: &[Envelope]) {
     for env in envelopes {
         let event_type = env.event.event_type_name();
         let aggregate_id = env.event.aggregate_id();
@@ -376,7 +372,10 @@ impl Orchestrator {
         let mut appended: Option<AppendedOutcome> = None;
         let mut last_conflict: Option<(u64, u64)> = None;
         for _ in 0..MAX_CONCURRENCY_ATTEMPTS {
-            match self.decide_and_append_once(&command, &aggregate_id_hint).await {
+            match self
+                .decide_and_append_once(&command, &aggregate_id_hint)
+                .await
+            {
                 Ok(None) => {
                     info!("No events produced");
                     return Ok(CommandResult {
@@ -439,7 +438,10 @@ impl Orchestrator {
         drop(read_model);
 
         if let Some((state, version)) = snapshot_to_write
-            && let Err(e) = self.event_repo.save_snapshot(aggregate_id, state, version).await
+            && let Err(e) = self
+                .event_repo
+                .save_snapshot(aggregate_id, state, version)
+                .await
         {
             tracing::warn!(error = %e, aggregate = ?aggregate_id, version, "failed to save aggregate snapshot");
         }
@@ -509,9 +511,7 @@ impl Orchestrator {
                     // (append + project) under the turn. Streaming output (tokens,
                     // tool calls, completion) arrives here, not via react().
                     if let Some(sid) = session_id
-                        && let Err(e) = self
-                            .spawn_provider_stream_consumer(sid, turn_id)
-                            .await
+                        && let Err(e) = self.spawn_provider_stream_consumer(sid, turn_id).await
                     {
                         tracing::warn!(error = %e, "failed to spawn provider stream consumer");
                     }
@@ -584,8 +584,10 @@ impl Orchestrator {
     ) -> Result<Vec<Envelope>, OrchestrationError> {
         // Scope provider-originated activities to the turn's owning thread.
         let thread_id = thread_id_for_turn(&self.read_model, turn_id).await;
-        let IngestionResult { events, consumed: _ } =
-            ingest_provider_event(provider_event, turn_id, thread_id, None);
+        let IngestionResult {
+            events,
+            consumed: _,
+        } = ingest_provider_event(provider_event, turn_id, thread_id, None);
         // Turn events aggregate on the turn; append + project is shared with the
         // live stream consumer via the module-level `append_and_project` helper.
         append_and_project(
@@ -755,8 +757,9 @@ impl Orchestrator {
             | Command::AddMessage { .. } => None,
 
             // Commands targeting an existing project
-            Command::UpdateProjectConfig { id, .. }
-            | Command::DeleteProject { id, .. } => Some(*id),
+            Command::UpdateProjectConfig { id, .. } | Command::DeleteProject { id, .. } => {
+                Some(*id)
+            }
             Command::SetThreadTitle { id, .. } => Some(*id),
 
             // Thread-level commands
@@ -828,12 +831,10 @@ impl Orchestrator {
         match command {
             Command::CreateProject { .. } => None,
 
-            Command::UpdateProjectConfig { .. }
-            | Command::DeleteProject { .. } => {
-                read_model.projects.get(&id.as_str()).map(|p| {
-                    serde_json::to_value(p).unwrap_or_default()
-                })
-            }
+            Command::UpdateProjectConfig { .. } | Command::DeleteProject { .. } => read_model
+                .projects
+                .get(&id.as_str())
+                .map(|p| serde_json::to_value(p).unwrap_or_default()),
 
             Command::SetThreadTitle { .. }
             | Command::PauseThread { .. }
@@ -893,35 +894,31 @@ impl Orchestrator {
                 })
             }
 
-            Command::CreateThread { .. } => {
-                read_model.projects.get(&id.as_str()).map(|p| {
-                    serde_json::to_value(p).unwrap_or_default()
-                })
-            }
+            Command::CreateThread { .. } => read_model
+                .projects
+                .get(&id.as_str())
+                .map(|p| serde_json::to_value(p).unwrap_or_default()),
 
-            Command::StartTurn { .. } => {
-                read_model.threads.get(&id.as_str()).map(|t| {
-                    serde_json::json!({"status": t.status})
-                })
-            }
+            Command::StartTurn { .. } => read_model
+                .threads
+                .get(&id.as_str())
+                .map(|t| serde_json::json!({"status": t.status})),
 
             Command::CompleteTurn { .. }
             | Command::FailTurn { .. }
             | Command::CancelTurn { .. }
             | Command::InterruptTurn { .. }
             | Command::RecordTurnFiles { .. }
-            | Command::SetTurnCheckpoint { .. } => {
-                read_model.turns.get(&id.as_str()).map(|t| {
-                    serde_json::json!({"status": t.status})
-                })
-            }
+            | Command::SetTurnCheckpoint { .. } => read_model
+                .turns
+                .get(&id.as_str())
+                .map(|t| serde_json::json!({"status": t.status})),
 
             Command::AddMessage { .. } => None,
 
             // Thread-creation-by-import: the Decider trusts the command (project
             // and source-thread existence are enforced at the application layer).
-            Command::HandoffCreateThread { .. }
-            | Command::ForkCreateThread { .. } => None,
+            Command::HandoffCreateThread { .. } | Command::ForkCreateThread { .. } => None,
         }
     }
 
@@ -930,16 +927,16 @@ impl Orchestrator {
         matches!(
             command,
             Command::StartTurn { .. }
-            | Command::FailTurn { .. }
-            | Command::CancelTurn { .. }
-            | Command::InterruptTurn { .. }
-            | Command::PauseThread { .. }
-            | Command::CancelThread { .. }
-            | Command::StopThreadSession { .. }
-            | Command::RespondThreadApproval { .. }
-            | Command::RespondThreadUserInput { .. }
-            | Command::EditAndResendThreadMessage { .. }
-            | Command::DispatchQueuedTurn { .. }
+                | Command::FailTurn { .. }
+                | Command::CancelTurn { .. }
+                | Command::InterruptTurn { .. }
+                | Command::PauseThread { .. }
+                | Command::CancelThread { .. }
+                | Command::StopThreadSession { .. }
+                | Command::RespondThreadApproval { .. }
+                | Command::RespondThreadUserInput { .. }
+                | Command::EditAndResendThreadMessage { .. }
+                | Command::DispatchQueuedTurn { .. }
         )
     }
 }
@@ -1032,12 +1029,8 @@ pub(crate) async fn consume_provider_stream(
     while let Some(result) = stream.next().await {
         match result {
             Ok(provider_event) => {
-                let ingestion = ingest_provider_event(
-                    provider_event,
-                    turn_id,
-                    thread_id,
-                    Some(started_at),
-                );
+                let ingestion =
+                    ingest_provider_event(provider_event, turn_id, thread_id, Some(started_at));
                 if let Err(e) = append_and_project(
                     &event_repo,
                     &read_model,
@@ -1063,9 +1056,9 @@ pub(crate) async fn consume_provider_stream(
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use super::*;
-    use syncode_core::ports::EventRepository;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use syncode_core::ports::EventRepository;
 
     /// In-memory fake event repository for testing
     pub(crate) struct InMemoryEventRepo {
@@ -1110,12 +1103,12 @@ pub(crate) mod test_helpers {
             Ok(entry.len() as u64)
         }
 
-        async fn replay_events(
-            &self,
-            aggregate_id: EntityId,
-        ) -> Result<Vec<Envelope>, PortError> {
+        async fn replay_events(&self, aggregate_id: EntityId) -> Result<Vec<Envelope>, PortError> {
             let store = self.events.lock().unwrap();
-            Ok(store.get(&aggregate_id.to_string()).cloned().unwrap_or_default())
+            Ok(store
+                .get(&aggregate_id.to_string())
+                .cloned()
+                .unwrap_or_default())
         }
 
         async fn load_snapshot(
@@ -1165,15 +1158,18 @@ pub(crate) mod test_helpers {
 
         async fn current_version(&self, aggregate_id: EntityId) -> Result<u64, PortError> {
             let store = self.events.lock().unwrap();
-            Ok(store.get(&aggregate_id.to_string()).map(|v| v.len() as u64).unwrap_or(0))
+            Ok(store
+                .get(&aggregate_id.to_string())
+                .map(|v| v.len() as u64)
+                .unwrap_or(0))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_helpers::InMemoryEventRepo;
+    use super::*;
     use syncode_provider::SessionManager;
 
     fn make_orchestrator() -> Orchestrator {
@@ -1237,10 +1233,7 @@ mod tests {
                 .await
         }
 
-        async fn replay_events(
-            &self,
-            aggregate_id: EntityId,
-        ) -> Result<Vec<Envelope>, PortError> {
+        async fn replay_events(&self, aggregate_id: EntityId) -> Result<Vec<Envelope>, PortError> {
             self.inner.replay_events(aggregate_id).await
         }
 
@@ -1428,9 +1421,15 @@ mod tests {
         let b = EntityId::new();
         let c = EntityId::new();
 
-        repo.save_snapshot(a, serde_json::json!({"k": "a"}), 10).await.expect("save a");
-        repo.save_snapshot(b, serde_json::json!({"k": "b"}), 25).await.expect("save b");
-        repo.save_snapshot(c, serde_json::json!({"k": "c"}), 50).await.expect("save c");
+        repo.save_snapshot(a, serde_json::json!({"k": "a"}), 10)
+            .await
+            .expect("save a");
+        repo.save_snapshot(b, serde_json::json!({"k": "b"}), 25)
+            .await
+            .expect("save b");
+        repo.save_snapshot(c, serde_json::json!({"k": "c"}), 50)
+            .await
+            .expect("save c");
 
         let mut all = repo.load_all_snapshots().await.expect("load all");
         all.sort_by_key(|(_, _, v)| *v);
@@ -1442,10 +1441,15 @@ mod tests {
         assert_eq!(all[2].2, 50);
 
         // Re-saving a snapshot for an existing aggregate replaces it (no dup).
-        repo.save_snapshot(a, serde_json::json!({"k": "a2"}), 12).await.expect("update a");
+        repo.save_snapshot(a, serde_json::json!({"k": "a2"}), 12)
+            .await
+            .expect("update a");
         let all2 = repo.load_all_snapshots().await.expect("load all 2");
         assert_eq!(all2.len(), 3, "overwrite must not duplicate");
-        let a_entry = all2.into_iter().find(|(id, _, _)| *id == a).expect("a present");
+        let a_entry = all2
+            .into_iter()
+            .find(|(id, _, _)| *id == a)
+            .expect("a present");
         assert_eq!(a_entry.2, 12);
         assert_eq!(a_entry.1["k"], "a2");
     }
@@ -1511,8 +1515,7 @@ mod tests {
 
         let fresh: Arc<tokio::sync::RwLock<ReadModelStore>> =
             Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
-        let orch2 =
-            Orchestrator::with_read_model(Arc::clone(&orch.event_repo), Arc::clone(&fresh));
+        let orch2 = Orchestrator::with_read_model(Arc::clone(&orch.event_repo), Arc::clone(&fresh));
         orch2.replay_read_model().await.expect("replay");
         let replayed = fresh.read().await;
 
@@ -1550,15 +1553,18 @@ mod tests {
 
         let fresh: Arc<tokio::sync::RwLock<ReadModelStore>> =
             Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
-        let orch2 =
-            Orchestrator::with_read_model(Arc::clone(&orch.event_repo), Arc::clone(&fresh));
+        let orch2 = Orchestrator::with_read_model(Arc::clone(&orch.event_repo), Arc::clone(&fresh));
         orch2.replay_read_model().await.expect("replay");
         let replayed = fresh.read().await;
         let view = replayed
             .threads
             .get(&thread_id.as_str())
             .expect("thread seeded + tail applied");
-        assert_eq!(view.title.as_deref(), Some("tail"), "tail applied over seed");
+        assert_eq!(
+            view.title.as_deref(),
+            Some("tail"),
+            "tail applied over seed"
+        );
     }
 
     #[tokio::test]
@@ -1582,7 +1588,10 @@ mod tests {
         };
         // Precondition: no snapshots stored.
         assert!(
-            repo.load_all_snapshots().await.expect("load all").is_empty(),
+            repo.load_all_snapshots()
+                .await
+                .expect("load all")
+                .is_empty(),
             "no snapshot below the interval"
         );
 
@@ -1669,7 +1678,11 @@ mod tests {
             .expect("batch ingest");
 
         // Both provider events yield exactly one domain event each.
-        assert_eq!(envelopes.len(), 2, "both provider events should be ingested");
+        assert_eq!(
+            envelopes.len(),
+            2,
+            "both provider events should be ingested"
+        );
         assert!(
             envelopes
                 .iter()
@@ -1709,7 +1722,9 @@ mod tests {
                 output: "done".into(),
                 usage: None,
             }),
-            Ok(syncode_provider::ProviderEvent::Started { session_id: "s1".into() }),
+            Ok(syncode_provider::ProviderEvent::Started {
+                session_id: "s1".into(),
+            }),
         ]));
 
         consume_provider_stream(
@@ -1732,7 +1747,11 @@ mod tests {
         // ToolCall projects one activity; Completed only updates an existing turn
         // (none here — no TurnStarted), so it adds nothing to the read model.
         let rm = read_model.read().await;
-        assert_eq!(rm.activities.len(), 1, "ToolCall should project one activity");
+        assert_eq!(
+            rm.activities.len(),
+            1,
+            "ToolCall should project one activity"
+        );
         drop(rm);
     }
 
@@ -1761,13 +1780,13 @@ mod tests {
             );
         }
 
-        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
-            Ok(syncode_provider::ProviderEvent::ToolCall {
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![Ok(
+            syncode_provider::ProviderEvent::ToolCall {
                 session_id: "s1".into(),
                 tool_name: "grep".into(),
                 tool_input: serde_json::json!({"q": "foo"}),
-            }),
-        ]));
+            },
+        )]));
         consume_provider_stream(
             stream,
             Arc::clone(&repo),
@@ -1779,7 +1798,11 @@ mod tests {
         .await;
 
         let rm = read_model.read().await;
-        assert_eq!(rm.activities.len(), 1, "ToolCall should produce one activity");
+        assert_eq!(
+            rm.activities.len(),
+            1,
+            "ToolCall should produce one activity"
+        );
         assert_eq!(
             rm.activities[0].thread_id,
             Some(thread_id.as_str()),
@@ -1805,7 +1828,9 @@ mod tests {
 
     impl RecordingPublisher {
         fn new() -> Self {
-            Self { calls: std::sync::Mutex::new(Vec::new()) }
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
         }
     }
 
@@ -1853,11 +1878,20 @@ mod tests {
             1,
             "the single ProjectCreated event should be pushed exactly once"
         );
-        assert_eq!(calls[0].0, "orchestration", "pushed on the orchestration channel");
-        assert_eq!(calls[0].1, "ProjectCreated", "pushed with the event type name");
+        assert_eq!(
+            calls[0].0, "orchestration",
+            "pushed on the orchestration channel"
+        );
+        assert_eq!(
+            calls[0].1, "ProjectCreated",
+            "pushed with the event type name"
+        );
         // The pushed aggregate id matches the produced event's aggregate id.
         let pushed_agg = result.events[0].event.aggregate_id().to_string();
-        assert_eq!(calls[0].2, pushed_agg, "pushed aggregate id matches the event's");
+        assert_eq!(
+            calls[0].2, pushed_agg,
+            "pushed aggregate id matches the event's"
+        );
     }
 
     #[tokio::test]
@@ -1888,7 +1922,10 @@ mod tests {
             })
             .await;
 
-        assert!(result.is_ok(), "command must succeed despite a publish failure");
+        assert!(
+            result.is_ok(),
+            "command must succeed despite a publish failure"
+        );
         assert_eq!(result.unwrap().events.len(), 1);
     }
 
@@ -1946,10 +1983,13 @@ mod tests {
     #[tokio::test]
     async fn test_create_project() {
         let orch = make_orchestrator();
-        let result = orch.handle_command(Command::CreateProject {
-            name: "Test".into(),
-            root_path: "/test".into(),
-        }).await.expect("handle command");
+        let result = orch
+            .handle_command(Command::CreateProject {
+                name: "Test".into(),
+                root_path: "/test".into(),
+            })
+            .await
+            .expect("handle command");
 
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0].event.event_type_name(), "ProjectCreated");
@@ -1963,12 +2003,13 @@ mod tests {
         // CreateThread now enforces the cross-aggregate invariant that its parent
         // project must exist. A thread targeting an unknown project is rejected
         // with ProjectNotFound before any event is produced.
-        let result = orch.handle_command(Command::CreateThread {
-            project_id: EntityId::new(),
-            provider_id: "anthropic".into(),
-            model: "claude-3".into(),
-        })
-        .await;
+        let result = orch
+            .handle_command(Command::CreateThread {
+                project_id: EntityId::new(),
+                provider_id: "anthropic".into(),
+                model: "claude-3".into(),
+            })
+            .await;
 
         assert!(
             matches!(result, Err(OrchestrationError::ProjectNotFound(_))),
@@ -2019,11 +2060,16 @@ mod tests {
         orch.handle_command(Command::CreateProject {
             name: "Snapshot Test".into(),
             root_path: "/snap".into(),
-        }).await.expect("create project");
+        })
+        .await
+        .expect("create project");
 
         let read_model = orch.read_model_snapshot().await;
         assert_eq!(read_model.projects.len(), 1);
-        assert_eq!(read_model.projects.values().next().unwrap().name, "Snapshot Test");
+        assert_eq!(
+            read_model.projects.values().next().unwrap().name,
+            "Snapshot Test"
+        );
     }
 
     #[tokio::test]
@@ -2034,13 +2080,18 @@ mod tests {
         orch.handle_command(Command::CreateProject {
             name: "P".into(),
             root_path: "/p".into(),
-        }).await.expect("first");
+        })
+        .await
+        .expect("first");
 
         // Second create produces a different aggregate — should succeed
-        let result = orch.handle_command(Command::CreateProject {
-            name: "P2".into(),
-            root_path: "/p2".into(),
-        }).await.expect("second");
+        let result = orch
+            .handle_command(Command::CreateProject {
+                name: "P2".into(),
+                root_path: "/p2".into(),
+            })
+            .await
+            .expect("second");
 
         assert_eq!(result.events.len(), 1);
     }
@@ -2052,7 +2103,9 @@ mod tests {
         orch.handle_command(Command::CreateProject {
             name: "Replay".into(),
             root_path: "/replay".into(),
-        }).await.expect("create");
+        })
+        .await
+        .expect("create");
 
         // Reset read model
         {

@@ -9,10 +9,10 @@ pub mod migrations;
 pub mod projections;
 pub mod snapshot;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
-use std::str::FromStr;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::Path;
+use std::str::FromStr;
 
 /// Initialize the SQLite database with migrations
 pub async fn init_database(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
@@ -82,7 +82,7 @@ mod tests {
 
         // Verify tables exist
         let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='domain_events'"
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='domain_events'",
         )
         .fetch_optional(pool.as_ref().unwrap())
         .await
@@ -91,7 +91,7 @@ mod tests {
         assert!(row.is_some(), "domain_events table should exist");
 
         let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='snapshots'"
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='snapshots'",
         )
         .fetch_optional(pool.as_ref().unwrap())
         .await

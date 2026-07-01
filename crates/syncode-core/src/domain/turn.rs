@@ -1,7 +1,7 @@
 //! Turn — a single user-assistant exchange within a thread
 
-use serde::{Deserialize, Serialize};
 use crate::domain::primitives::{EntityId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// Turn status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,7 +126,10 @@ mod tests {
         let mut t = Turn::new(EntityId::new(), 1, "Do something");
         t.fail("API rate limit exceeded");
         assert_eq!(t.status, TurnStatus::Error);
-        assert_eq!(t.assistant_output.as_deref(), Some("API rate limit exceeded"));
+        assert_eq!(
+            t.assistant_output.as_deref(),
+            Some("API rate limit exceeded")
+        );
         assert!(t.completed_at.is_some());
     }
 

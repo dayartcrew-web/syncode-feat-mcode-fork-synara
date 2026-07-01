@@ -7,8 +7,8 @@
 //! `Envelope` wraps a `DomainEvent` with stream-level metadata (sequence, timestamp)
 //! and is what gets persisted to the event store.
 
-use serde::{Deserialize, Serialize};
 use crate::domain::primitives::{DomainEvent as DomainEventTrait, EntityId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// All domain event types in the system (the payload).
 ///
@@ -573,11 +573,55 @@ mod tests {
     fn event_type_name_matches_variant() {
         let id = EntityId::new();
         let events = vec![
-            (DomainEvent::ProjectCreated { id, name: "p".into(), root_path: "/p".into(), created_at: Timestamp::now() }, "ProjectCreated"),
-            (DomainEvent::ThreadCreated { id, project_id: id, provider_id: "p".into(), model: "m".into(), created_at: Timestamp::now() }, "ThreadCreated"),
-            (DomainEvent::TurnStarted { id, thread_id: id, sequence: 1, user_input: "hi".into(), created_at: Timestamp::now() }, "TurnStarted"),
-            (DomainEvent::MessageAdded { id, turn_id: id, role: "user".into(), content: "msg".into(), created_at: Timestamp::now() }, "MessageAdded"),
-            (DomainEvent::ActivityLogged { id, activity_type: "session_started".into(), description: "d".into(), thread_id: None, created_at: Timestamp::now() }, "ActivityLogged"),
+            (
+                DomainEvent::ProjectCreated {
+                    id,
+                    name: "p".into(),
+                    root_path: "/p".into(),
+                    created_at: Timestamp::now(),
+                },
+                "ProjectCreated",
+            ),
+            (
+                DomainEvent::ThreadCreated {
+                    id,
+                    project_id: id,
+                    provider_id: "p".into(),
+                    model: "m".into(),
+                    created_at: Timestamp::now(),
+                },
+                "ThreadCreated",
+            ),
+            (
+                DomainEvent::TurnStarted {
+                    id,
+                    thread_id: id,
+                    sequence: 1,
+                    user_input: "hi".into(),
+                    created_at: Timestamp::now(),
+                },
+                "TurnStarted",
+            ),
+            (
+                DomainEvent::MessageAdded {
+                    id,
+                    turn_id: id,
+                    role: "user".into(),
+                    content: "msg".into(),
+                    created_at: Timestamp::now(),
+                },
+                "MessageAdded",
+            ),
+            (
+                DomainEvent::ActivityLogged {
+                    id,
+                    activity_type: "session_started".into(),
+                    description: "d".into(),
+                    thread_id: None,
+                    created_at: Timestamp::now(),
+                },
+                "ActivityLogged",
+            ),
         ];
         for (ev, expected_name) in events {
             assert_eq!(ev.event_type_name(), expected_name);

@@ -12,8 +12,7 @@
 
 use syncode_core::EntityId;
 use syncode_provider::{
-    ProviderEvent, ProviderRequest,
-    SessionContext, SessionManager, SessionStateStatus,
+    ProviderEvent, ProviderRequest, SessionContext, SessionManager, SessionStateStatus,
 };
 
 use crate::decider::Command;
@@ -64,23 +63,13 @@ impl ProviderCommandReactor {
                 sequence,
                 user_input,
             } => {
-                self.handle_start_turn(
-                    turn_id_hint,
-                    *thread_id,
-                    *sequence,
-                    user_input,
-                    adapter,
-                )
-                .await
+                self.handle_start_turn(turn_id_hint, *thread_id, *sequence, user_input, adapter)
+                    .await
             }
 
-            Command::FailTurn { id, error: _ } => {
-                self.handle_fail_turn(*id, adapter).await
-            }
+            Command::FailTurn { id, error: _ } => self.handle_fail_turn(*id, adapter).await,
 
-            Command::CancelTurn { id } => {
-                self.handle_cancel_turn(*id, adapter).await
-            }
+            Command::CancelTurn { id } => self.handle_cancel_turn(*id, adapter).await,
 
             Command::InterruptTurn { id } => {
                 // Interrupt an in-progress turn: interrupt the provider session (if any).
@@ -115,10 +104,16 @@ impl ProviderCommandReactor {
                 // thread's sessions). Uses the SessionManager's thread→session index;
                 // among a thread's sessions we stop the ones still active.
                 let mut handled = false;
-                let sessions = self.session_manager.get_sessions_by_thread(&id.as_str()).await;
+                let sessions = self
+                    .session_manager
+                    .get_sessions_by_thread(&id.as_str())
+                    .await;
                 for session in &sessions {
                     if session.is_active() {
-                        let _ = self.session_manager.stop_session(adapter, &session.id).await;
+                        let _ = self
+                            .session_manager
+                            .stop_session(adapter, &session.id)
+                            .await;
                         handled = true;
                     }
                 }
@@ -135,7 +130,11 @@ impl ProviderCommandReactor {
             // Processing the thread. Faithful to mcode's approval/user-input
             // response-requested dispatch. If no session is Processing the thread
             // (nothing awaiting input), there is nothing to dispatch (handled = false).
-            Command::RespondThreadApproval { id, request_id, decision } => {
+            Command::RespondThreadApproval {
+                id,
+                request_id,
+                decision,
+            } => {
                 let payload = serde_json::json!({
                     "request_id": request_id,
                     "decision": decision,
@@ -149,7 +148,11 @@ impl ProviderCommandReactor {
                     events: vec![],
                 })
             }
-            Command::RespondThreadUserInput { id, request_id, answers } => {
+            Command::RespondThreadUserInput {
+                id,
+                request_id,
+                answers,
+            } => {
                 let payload = serde_json::json!({
                     "request_id": request_id,
                     "answers": answers,
@@ -163,7 +166,11 @@ impl ProviderCommandReactor {
                     events: vec![],
                 })
             }
-            Command::EditAndResendThreadMessage { id, message_id, text } => {
+            Command::EditAndResendThreadMessage {
+                id,
+                message_id,
+                text,
+            } => {
                 let payload = serde_json::json!({
                     "message_id": message_id.as_str(),
                     "text": text,
@@ -178,7 +185,11 @@ impl ProviderCommandReactor {
                 })
             }
             Command::DispatchQueuedTurn {
-                id, message_id, runtime_mode, interaction_mode, dispatch_mode,
+                id,
+                message_id,
+                runtime_mode,
+                interaction_mode,
+                dispatch_mode,
             } => {
                 // Dispatch the queued turn to the thread's active Processing session,
                 // if any (faithful to mcode `thread.turn.dispatch-queued` → provider
@@ -284,7 +295,10 @@ impl ProviderCommandReactor {
             serde_json::Value::Object(map) => map,
             _ => serde_json::Map::new(),
         };
-        params.insert("session_id".to_string(), serde_json::Value::String(session_id.clone()));
+        params.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.clone()),
+        );
 
         let request = ProviderRequest::new(method, Some(serde_json::Value::Object(params)));
         let guard = adapter.read().await;
@@ -308,7 +322,11 @@ impl ProviderCommandReactor {
         let turn_id = turn_id.unwrap_or_else(EntityId::new);
 
         // Check if a session already exists for this turn
-        if let Some(existing) = self.session_manager.get_session_by_turn(&turn_id.as_str()).await {
+        if let Some(existing) = self
+            .session_manager
+            .get_session_by_turn(&turn_id.as_str())
+            .await
+        {
             return Ok(CommandReaction {
                 handled: true,
                 session_id: Some(existing.id.clone()),
@@ -340,7 +358,9 @@ impl ProviderCommandReactor {
         );
 
         let guard = adapter.read().await;
-        let _resp = guard.send_request(request).await
+        let _resp = guard
+            .send_request(request)
+            .await
             .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
 
         Ok(CommandReaction {
@@ -377,9 +397,15 @@ impl ProviderCommandReactor {
         turn_id: EntityId,
         adapter: &syncode_provider::registry::SharedAdapter,
     ) -> Result<CommandReaction, CommandReactorError> {
-        let session = self.session_manager.get_session_by_turn(&turn_id.as_str()).await;
+        let session = self
+            .session_manager
+            .get_session_by_turn(&turn_id.as_str())
+            .await;
         if let Some(session) = session {
-            let _ = self.session_manager.interrupt_session(adapter, &session.id).await;
+            let _ = self
+                .session_manager
+                .interrupt_session(adapter, &session.id)
+                .await;
             Ok(CommandReaction {
                 handled: true,
                 session_id: Some(session.id.clone()),
@@ -400,9 +426,15 @@ impl ProviderCommandReactor {
         turn_id: EntityId,
         adapter: &syncode_provider::registry::SharedAdapter,
     ) -> Result<CommandReaction, CommandReactorError> {
-        let session = self.session_manager.get_session_by_turn(&turn_id.as_str()).await;
+        let session = self
+            .session_manager
+            .get_session_by_turn(&turn_id.as_str())
+            .await;
         if let Some(session) = session {
-            let _ = self.session_manager.stop_session(adapter, &session.id).await;
+            let _ = self
+                .session_manager
+                .stop_session(adapter, &session.id)
+                .await;
             Ok(CommandReaction {
                 handled: true,
                 session_id: Some(session.id.clone()),
@@ -441,8 +473,8 @@ impl From<syncode_provider::ProviderAdapterError> for CommandReactorError {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use syncode_provider::{ProviderAdapter, ProviderConfig, ProviderResponse, ProviderStatus};
     use std::sync::Arc;
+    use syncode_provider::{ProviderAdapter, ProviderConfig, ProviderResponse, ProviderStatus};
     use tokio::sync::RwLock;
 
     /// Mock adapter for command reactor tests
@@ -486,34 +518,72 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl ProviderAdapter for CmdTestMock {
-        fn provider_id(&self) -> &str { "cmd-test-mock" }
-        fn capabilities(&self) -> Vec<syncode_provider::ProviderCapability> { vec![] }
-        fn status(&self) -> ProviderStatus { ProviderStatus::Idle }
-        fn available_models(&self) -> Vec<String> { vec!["mock".to_string()] }
+        fn provider_id(&self) -> &str {
+            "cmd-test-mock"
+        }
+        fn capabilities(&self) -> Vec<syncode_provider::ProviderCapability> {
+            vec![]
+        }
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus::Idle
+        }
+        fn available_models(&self) -> Vec<String> {
+            vec!["mock".to_string()]
+        }
 
-        async fn spawn(&mut self, _config: ProviderConfig) -> Result<(), syncode_provider::ProviderAdapterError> { Ok(()) }
-        async fn shutdown(&mut self) -> Result<(), syncode_provider::ProviderAdapterError> { Ok(()) }
-
-        async fn interrupt(&self, session_id: &str) -> Result<(), syncode_provider::ProviderAdapterError> {
-            self.interrupted.lock().unwrap().push(session_id.to_string());
+        async fn spawn(
+            &mut self,
+            _config: ProviderConfig,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), syncode_provider::ProviderAdapterError> {
             Ok(())
         }
 
-        async fn start_session(&mut self, _ctx: SessionContext) -> Result<String, syncode_provider::ProviderAdapterError> {
+        async fn interrupt(
+            &self,
+            session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            self.interrupted
+                .lock()
+                .unwrap()
+                .push(session_id.to_string());
+            Ok(())
+        }
+
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, syncode_provider::ProviderAdapterError> {
             let sid = format!("cmd-{}", uuid::Uuid::new_v4().hyphenated());
             self.started_sessions.lock().unwrap().push(sid.clone());
             Ok(sid)
         }
 
-        async fn resume_session(&mut self, _session_id: &str) -> Result<(), syncode_provider::ProviderAdapterError> { Ok(()) }
+        async fn resume_session(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
 
-        async fn stop_session(&mut self, session_id: &str) -> Result<(), syncode_provider::ProviderAdapterError> {
+        async fn stop_session(
+            &mut self,
+            session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
             self.stopped.lock().unwrap().push(session_id.to_string());
             Ok(())
         }
 
-        async fn send_request(&self, request: ProviderRequest) -> Result<ProviderResponse, syncode_provider::ProviderAdapterError> {
-            self.requests.lock().unwrap().push((request.method.clone(), request.params.clone()));
+        async fn send_request(
+            &self,
+            request: ProviderRequest,
+        ) -> Result<ProviderResponse, syncode_provider::ProviderAdapterError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request.method.clone(), request.params.clone()));
             Ok(ProviderResponse {
                 jsonrpc: "2.0".to_string(),
                 id: Some(1),
@@ -522,11 +592,17 @@ pub(crate) mod tests {
             })
         }
 
-        fn event_stream(&self, _session_id: &str) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError> {
+        fn event_stream(
+            &self,
+            _session_id: &str,
+        ) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError>
+        {
             Ok(Box::pin(tokio_stream::empty()))
         }
 
-        async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> { Ok(true) }
+        async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> {
+            Ok(true)
+        }
     }
 
     pub(crate) fn make_shared_test_mock() -> syncode_provider::registry::SharedAdapter {
@@ -557,7 +633,10 @@ pub(crate) mod tests {
             user_input: "Fix the bug".to_string(),
         };
 
-        let result = reactor.react(&command, &adapter, Some(turn_id)).await.unwrap();
+        let result = reactor
+            .react(&command, &adapter, Some(turn_id))
+            .await
+            .unwrap();
         assert!(result.handled);
         assert!(result.session_id.is_some());
     }
@@ -571,15 +650,31 @@ pub(crate) mod tests {
         let thread_id = EntityId::new();
 
         // Start a turn first
-        reactor.react(&Command::StartTurn {
-            thread_id, sequence: 1, user_input: "test".to_string(),
-        }, &adapter, Some(turn_id)).await.unwrap();
+        reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id,
+                    sequence: 1,
+                    user_input: "test".to_string(),
+                },
+                &adapter,
+                Some(turn_id),
+            )
+            .await
+            .unwrap();
 
         // Now fail it
-        let result = reactor.react(&Command::FailTurn {
-            id: turn_id,
-            error: "Something went wrong".to_string(),
-        }, &adapter, None).await.unwrap();
+        let result = reactor
+            .react(
+                &Command::FailTurn {
+                    id: turn_id,
+                    error: "Something went wrong".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
         assert!(result.handled);
     }
 
@@ -591,13 +686,23 @@ pub(crate) mod tests {
         let turn_id = EntityId::new();
         let thread_id = EntityId::new();
 
-        reactor.react(&Command::StartTurn {
-            thread_id, sequence: 1, user_input: "test".to_string(),
-        }, &adapter, Some(turn_id)).await.unwrap();
+        reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id,
+                    sequence: 1,
+                    user_input: "test".to_string(),
+                },
+                &adapter,
+                Some(turn_id),
+            )
+            .await
+            .unwrap();
 
-        let result = reactor.react(&Command::CancelTurn {
-            id: turn_id,
-        }, &adapter, None).await.unwrap();
+        let result = reactor
+            .react(&Command::CancelTurn { id: turn_id }, &adapter, None)
+            .await
+            .unwrap();
         assert!(result.handled);
     }
 
@@ -606,10 +711,17 @@ pub(crate) mod tests {
         let reactor = ProviderCommandReactor::new(SessionManager::new());
         let adapter = make_shared_test_mock();
 
-        let result = reactor.react(&Command::CreateProject {
-            name: "Test".to_string(),
-            root_path: "/tmp".to_string(),
-        }, &adapter, None).await.unwrap();
+        let result = reactor
+            .react(
+                &Command::CreateProject {
+                    name: "Test".to_string(),
+                    root_path: "/tmp".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert!(!result.handled);
         assert!(result.session_id.is_none());
@@ -620,10 +732,17 @@ pub(crate) mod tests {
         let reactor = ProviderCommandReactor::new(SessionManager::new());
         let adapter = make_shared_test_mock();
 
-        let result = reactor.react(&Command::FailTurn {
-            id: EntityId::new(),
-            error: "error".to_string(),
-        }, &adapter, None).await.unwrap();
+        let result = reactor
+            .react(
+                &Command::FailTurn {
+                    id: EntityId::new(),
+                    error: "error".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert!(!result.handled);
     }
@@ -633,9 +752,16 @@ pub(crate) mod tests {
         let reactor = ProviderCommandReactor::new(SessionManager::new());
         let adapter = make_shared_test_mock();
 
-        let result = reactor.react(&Command::CancelTurn {
-            id: EntityId::new(),
-        }, &adapter, None).await.unwrap();
+        let result = reactor
+            .react(
+                &Command::CancelTurn {
+                    id: EntityId::new(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert!(!result.handled);
     }
@@ -645,20 +771,35 @@ pub(crate) mod tests {
         let reactor = ProviderCommandReactor::new(SessionManager::new());
         let adapter = make_shared_test_mock();
 
-        let result = reactor.react(&Command::AddMessage {
-            turn_id: EntityId::new(),
-            role: "user".to_string(),
-            content: "hello".to_string(),
-        }, &adapter, None).await.unwrap();
+        let result = reactor
+            .react(
+                &Command::AddMessage {
+                    turn_id: EntityId::new(),
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert!(!result.handled);
     }
 
     /// Helper: start a turn so a Processing session exists for the thread.
-    async fn start_turn(reactor: &ProviderCommandReactor, adapter: &syncode_provider::registry::SharedAdapter, thread_id: EntityId) {
+    async fn start_turn(
+        reactor: &ProviderCommandReactor,
+        adapter: &syncode_provider::registry::SharedAdapter,
+        thread_id: EntityId,
+    ) {
         reactor
             .react(
-                &Command::StartTurn { thread_id, sequence: 1, user_input: "hi".to_string() },
+                &Command::StartTurn {
+                    thread_id,
+                    sequence: 1,
+                    user_input: "hi".to_string(),
+                },
                 adapter,
                 Some(EntityId::new()),
             )
@@ -753,7 +894,10 @@ pub(crate) mod tests {
         let reqs = requests.lock().unwrap().clone();
         assert_eq!(reqs.last().unwrap().0, "message/edit-and-resend");
         let params = reqs.last().unwrap().1.as_ref().expect("params");
-        assert_eq!(params["message_id"].as_str(), Some(message_id.as_str().as_str()));
+        assert_eq!(
+            params["message_id"].as_str(),
+            Some(message_id.as_str().as_str())
+        );
         assert_eq!(params["text"].as_str(), Some("edited"));
     }
 
@@ -798,7 +942,10 @@ pub(crate) mod tests {
 
         let stopped = stopped.lock().unwrap().clone();
         assert!(stopped.contains(&a), "thread A's session should be stopped");
-        assert!(!stopped.contains(&b), "thread B's session should be left running");
+        assert!(
+            !stopped.contains(&b),
+            "thread B's session should be left running"
+        );
     }
 
     /// Like start_turn but returns the created session id (for stop-scoping assertions).
@@ -809,7 +956,11 @@ pub(crate) mod tests {
     ) -> String {
         let r = reactor
             .react(
-                &Command::StartTurn { thread_id, sequence: 1, user_input: "hi".to_string() },
+                &Command::StartTurn {
+                    thread_id,
+                    sequence: 1,
+                    user_input: "hi".to_string(),
+                },
                 adapter,
                 Some(EntityId::new()),
             )

@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use syncode_terminal::SessionManager;
+use tokio::sync::RwLock;
 
 /// Shared session manager state
 pub type SharedSessionManager = Arc<RwLock<SessionManager>>;
