@@ -230,6 +230,96 @@ pub trait GitServicePort: Send + Sync {
     async fn is_valid_repo(&self, repo_path: &str) -> Result<bool, PortError>;
 }
 
+// ---------------------------------------------------------------------------
+// Automation Repository (storage seam — definitions + runs)
+// ---------------------------------------------------------------------------
+
+/// Storage port for automation definitions and run records.
+///
+/// Defined in `syncode-core` (not `syncode-automation`) so the persistence
+/// crate can implement it without inverting the layering: automation depends
+/// on core, persistence depends on core, neither depends on the other.
+///
+/// Definitions and runs are passed as `serde_json::Value` payloads — the port
+/// is storage-shape-agnostic. This avoids moving `AutomationDef`/`AutomationRun`
+/// into core (which would disrupt the 38 existing automation tests) while still
+/// giving the SQLite adapter a clean contract to implement later.
+#[async_trait::async_trait]
+pub trait AutomationRepository: Send + Sync {
+    /// Upsert an automation definition (serialized). Returns the stored payload.
+    async fn save_def(&self, id: &str, payload: serde_json::Value) -> Result<(), PortError>;
+
+    /// Load a definition by id (serialized payload), if present.
+    async fn get_def(&self, id: &str) -> Result<Option<serde_json::Value>, PortError>;
+
+    /// List all definition payloads.
+    async fn list_defs(&self) -> Result<Vec<serde_json::Value>, PortError>;
+
+    /// Delete a definition. Returns whether one was present.
+    async fn delete_def(&self, id: &str) -> Result<bool, PortError>;
+
+    /// Upsert a run record (serialized). The run id is inside the payload.
+    async fn save_run(&self, payload: serde_json::Value) -> Result<(), PortError>;
+
+    /// Load a run by id, if present.
+    async fn get_run(&self, id: &str) -> Result<Option<serde_json::Value>, PortError>;
+
+    /// List runs for a given automation id.
+    async fn list_runs(&self, automation_id: &str) -> Result<Vec<serde_json::Value>, PortError>;
+
+    /// Advance the scheduling pointer for a definition. `next_run_at` is an
+    /// RFC-3339 string (mirrors MCode's `next_run_at` column — the single
+    /// source of truth for due-evaluation). `None` means "no future fire".
+    async fn advance_next_run_at(
+        &self,
+        id: &str,
+        next_run_at: Option<String>,
+    ) -> Result<(), PortError>;
+}
+
+// ---------------------------------------------------------------------------
+// Run Executor (dispatch seam — what a run actually does)
+// ---------------------------------------------------------------------------
+
+/// A request to dispatch a turn as an automation run.
+///
+/// `target_thread_id` selects the mode (mirrors MCode's `mode` field):
+/// - `None` → **standalone**: create a new thread + start a turn in it.
+/// - `Some(id)` → **heartbeat**: start a turn on the existing thread (append).
+#[derive(Debug, Clone)]
+pub struct DispatchRequest {
+    /// Project the run belongs to (required for standalone; ignored for heartbeat).
+    pub project_id: Option<EntityId>,
+    /// Existing thread to append to (heartbeat mode). `None` = standalone.
+    pub target_thread_id: Option<EntityId>,
+    /// Provider + model to use (mirrors MCode's `modelSelection`).
+    pub provider_id: String,
+    pub model: String,
+    /// The prompt / user message for the turn.
+    pub prompt: String,
+}
+
+/// The outcome of dispatching a turn.
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    /// The thread the turn was created in (new for standalone, existing for heartbeat).
+    pub thread_id: EntityId,
+    /// The created turn id.
+    pub turn_id: EntityId,
+}
+
+/// Port for executing an automation run by dispatching a turn into the
+/// orchestration engine. The automation crate depends only on this trait; the
+/// orchestration crate (or a production host) provides an impl that calls
+/// `ApplicationService::create_thread` + `start_turn`. Tests use a recorded
+/// mock to validate the execution loop without a real engine.
+#[async_trait::async_trait]
+pub trait RunExecutor: Send + Sync {
+    /// Dispatch a turn per `req`. Returns the created thread + turn ids, or an
+    /// error (which the executor's retry loop may act on).
+    async fn dispatch_turn(&self, req: DispatchRequest) -> Result<DispatchOutcome, PortError>;
+}
+
 /// Git file status for a single file
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

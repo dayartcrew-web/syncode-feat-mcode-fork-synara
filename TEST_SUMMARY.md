@@ -14,7 +14,7 @@
 | `syncode-provider` | 190 |
 | `syncode-git` | 34 |
 | `syncode-terminal` | 15 |
-| `syncode-automation` | 38 |
+| `syncode-automation` | 65 |
 | `syncode-persistence` | 20 |
 | `syncode-auth` | 35 |
 | `syncode-ws` | 42 |

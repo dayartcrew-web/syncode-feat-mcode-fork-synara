@@ -4,8 +4,11 @@
 //! retry/misfire/completion policies, heartbeat mode, and AI-evaluated completion.
 
 pub mod definition;
+pub mod executor;
+pub mod in_memory_repo;
 pub mod policies;
 pub mod runner;
+pub mod schedule;
 pub mod scheduler;
 
 pub use definition::{AutomationDef, AutomationId, ScheduleType};
