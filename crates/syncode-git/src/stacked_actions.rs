@@ -18,7 +18,11 @@ pub enum StackedAction {
     /// Push to a remote branch
     Push { remote: String, branch: String },
     /// Create a pull request (external — returns URL)
-    CreatePR { title: String, body: String, base: String },
+    CreatePR {
+        title: String,
+        body: String,
+        base: String,
+    },
 }
 
 /// Result of executing a stacked action
@@ -81,48 +85,75 @@ impl StackedPipeline {
                         },
                     }
                 }
-                StackedAction::Commit { message } => {
-                    match service.commit(message) {
-                        Ok(commit) => ActionResult {
-                            action_index: i,
-                            success: true,
-                            output: Some(format!("Committed: {} ({})", commit.message, commit.short_hash)),
-                            error: None,
-                        },
-                        Err(e) => ActionResult {
-                            action_index: i,
-                            success: false,
-                            output: None,
-                            error: Some(e.to_string()),
-                        },
-                    }
-                }
-                StackedAction::Push { remote, branch } => {
-                    match service.push(remote, branch) {
-                        Ok(()) => ActionResult {
-                            action_index: i,
-                            success: true,
-                            output: Some(format!("Pushed to {}/{}", remote, branch)),
-                            error: None,
-                        },
-                        Err(e) => ActionResult {
-                            action_index: i,
-                            success: false,
-                            output: None,
-                            error: Some(e.to_string()),
-                        },
-                    }
-                }
-                StackedAction::CreatePR { title, body: _, base } => {
-                    // PR creation is external (GitHub API) — stub
-                    ActionResult {
+                StackedAction::Commit { message } => match service.commit(message) {
+                    Ok(commit) => ActionResult {
                         action_index: i,
                         success: true,
                         output: Some(format!(
-                            "PR stub: '{}' against '{}' (external API not yet connected)",
-                            title, base
+                            "Committed: {} ({})",
+                            commit.message, commit.short_hash
                         )),
                         error: None,
+                    },
+                    Err(e) => ActionResult {
+                        action_index: i,
+                        success: false,
+                        output: None,
+                        error: Some(e.to_string()),
+                    },
+                },
+                StackedAction::Push { remote, branch } => match service.push(remote, branch) {
+                    Ok(result) => {
+                        let msg = match &result {
+                            crate::service::PushResult::Pushed {
+                                branch,
+                                upstream_branch,
+                                set_upstream,
+                            } => {
+                                if *set_upstream {
+                                    format!(
+                                        "Pushed {} (set upstream to {})",
+                                        branch, upstream_branch
+                                    )
+                                } else {
+                                    format!("Pushed {} to {}", branch, upstream_branch)
+                                }
+                            }
+                            crate::service::PushResult::SkippedUpToDate {
+                                branch,
+                                upstream_branch,
+                            } => {
+                                format!("Skipped ({} up to date with {})", branch, upstream_branch)
+                            }
+                        };
+                        ActionResult {
+                            action_index: i,
+                            success: true,
+                            output: Some(msg),
+                            error: None,
+                        }
+                    }
+                    Err(e) => ActionResult {
+                        action_index: i,
+                        success: false,
+                        output: None,
+                        error: Some(e.to_string()),
+                    },
+                },
+                StackedAction::CreatePR { title, body, base } => {
+                    match create_pull_request(service, title, body, base) {
+                        Ok(url) => ActionResult {
+                            action_index: i,
+                            success: true,
+                            output: Some(format!("Created PR '{}' → {}", title, url)),
+                            error: None,
+                        },
+                        Err(e) => ActionResult {
+                            action_index: i,
+                            success: false,
+                            output: None,
+                            error: Some(e.to_string()),
+                        },
                     }
                 }
             };
@@ -139,6 +170,68 @@ impl StackedPipeline {
         self.actions.clear();
         self.results.clear();
     }
+}
+
+/// Create a GitHub pull request by shelling out to `gh pr create` (mirrors
+/// MCode's `GitHubCliShape.createPullRequest`). Auth is delegated to the user's
+/// `gh auth login` setup — we never handle tokens. The PR body is written to a
+/// temp file and passed via `--body-file` (avoids shell-escaping long bodies,
+/// matching MCode).
+///
+/// Returns the created PR's URL on success. Detects the "PR already exists"
+/// race and surfaces it as an error (callers may treat it as success per
+/// MCode's `opened_existing` semantics).
+pub fn create_pull_request(
+    service: &Git2Service,
+    title: &str,
+    body: &str,
+    base: &str,
+) -> Result<String, GitError> {
+    use std::io::Write;
+
+    let cwd = service.path();
+    let head = service
+        .current_branch()?
+        .ok_or_else(|| GitError::BranchNotFound("HEAD is detached; cannot create PR".into()))?;
+
+    // Write the body to a temp file (MCode writes to a temp .md).
+    let mut tmp = tempfile::Builder::new()
+        .suffix(".md")
+        .tempfile()
+        .map_err(|e| GitError::GitOperation(git2::Error::from_str(&e.to_string())))?;
+    tmp.write_all(body.as_bytes())
+        .map_err(|e| GitError::GitOperation(git2::Error::from_str(&e.to_string())))?;
+    let tmp_path = tmp.path().to_string_lossy().to_string();
+
+    let args = [
+        "pr",
+        "create",
+        "--base",
+        base,
+        "--head",
+        &head,
+        "--title",
+        title,
+        "--body-file",
+        &tmp_path,
+    ];
+    let output = crate::service::run_gh(cwd, &args)?;
+    // tmp is dropped here, cleaning up the file.
+
+    if output.status != 0 {
+        return Err(crate::service::classify_cli_error(&output.stderr));
+    }
+
+    // `gh pr create` prints the PR URL on success (to stdout). Parse it.
+    // If a PR already exists, gh exits non-zero with a message containing the
+    // existing URL — surfaced as an error above; callers decide.
+    let url = output
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("https://"))
+        .map(String::from)
+        .unwrap_or_else(|| output.stdout.trim().to_string());
+    Ok(url)
 }
 
 #[cfg(test)]

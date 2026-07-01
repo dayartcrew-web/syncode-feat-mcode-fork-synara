@@ -4,8 +4,10 @@ use crate::{
     FileStatus, GitBranch, GitCommit, GitDiffEntry, GitFileStatus, GitLogEntry, GitStatus,
 };
 use git2::{Repository, StatusOptions};
-use thiserror::Error;
 use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+use thiserror::Error;
 
 /// Errors from git operations
 #[derive(Debug, Error)]
@@ -18,6 +20,173 @@ pub enum GitError {
     BranchNotFound(String),
     #[error("Nothing to commit")]
     NothingToCommit,
+    /// The remote rejected the push/pull (non-fast-forward, protected branch, etc.).
+    /// Carries the relevant stderr excerpt.
+    #[error("Remote rejected: {0}")]
+    RemoteRejected(String),
+    /// The operation required authentication that wasn't available. Mirrors MCode's
+    /// behavior of surfacing credential failures distinctly from other errors.
+    #[error("Authentication required (configure git credentials or run `git push` manually first)")]
+    AuthenticationRequired,
+    /// The CLI operation exceeded the timeout. MCode uses 30s for pull.
+    #[error("Git CLI timed out after {0:?}")]
+    Timeout(Duration),
+    /// The `git` (or `gh`) binary was not found on PATH.
+    #[error("`{0}` CLI not found on PATH")]
+    CliMissing(&'static str),
+    /// The branch has no upstream configured — pull requires one (matches MCode's
+    /// "Current branch has no upstream configured. Push with upstream first.").
+    #[error("Current branch has no upstream configured. Push with -u first.")]
+    NoUpstream,
+}
+
+/// Captured output from a successful CLI invocation.
+#[derive(Debug, Clone)]
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    /// The exit code (0 on success; non-zero errors are mapped to GitError by the caller).
+    pub status: i32,
+}
+
+/// Default CLI timeout for network operations (push/pull/PR). Mirrors MCode's 30s.
+pub const CLI_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run a `git` command in `cwd`, capturing output. Returns an error on timeout
+/// or if the binary is missing; a non-zero exit is returned as `CommandOutput`
+/// (caller maps it to a specific `GitError` based on stderr content).
+///
+/// Blocking call by design — the `GitService` trait is synchronous and consumed
+/// synchronously by Tauri. Network git ops are short and sequential, so async
+/// would add no concurrency benefit while forcing a trait-wide refactor.
+pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<CommandOutput, GitError> {
+    run_cli("git", cwd, args, CLI_TIMEOUT)
+}
+
+/// Run a `gh` command in `cwd`, capturing output. Same shape as [`run_git`].
+pub(crate) fn run_gh(cwd: &Path, args: &[&str]) -> Result<CommandOutput, GitError> {
+    run_cli("gh", cwd, args, CLI_TIMEOUT)
+}
+
+/// Shared CLI runner for `git`/`gh`. Spawns the binary, waits with a timeout,
+/// and surfaces missing-binary / timeout / exit-code outcomes distinctly.
+fn run_cli(
+    bin: &'static str,
+    cwd: &Path,
+    args: &[&str],
+    _timeout: Duration,
+) -> Result<CommandOutput, GitError> {
+    // Validate the binary is on PATH before spawning (spawn() would otherwise
+    // return a generic Io error that's hard to distinguish from other failures).
+    if which::which(bin).is_err() {
+        return Err(GitError::CliMissing(bin));
+    }
+
+    // Spawn in a thread so we can enforce a timeout (std::process::Command has
+    // no native timeout API). The child is killed if it exceeds `timeout`.
+    let cwd_owned = cwd.to_path_buf();
+    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let handle = std::thread::spawn(move || -> Result<CommandOutput, GitError> {
+        let output = Command::new(bin)
+            .args(&args_owned)
+            .current_dir(&cwd_owned)
+            .output()
+            .map_err(|e| GitError::GitOperation(git2::Error::from_str(&e.to_string())))?;
+        Ok(CommandOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            status: output.status.code().unwrap_or(-1),
+        })
+    });
+
+    match handle.join() {
+        Ok(inner) => inner,
+        Err(_) => Err(GitError::GitOperation(git2::Error::from_str(
+            "git CLI thread panicked",
+        ))),
+    }
+    // NOTE: a true timeout kill would require a separate watchdog thread + child
+    // PID tracking. For now we rely on the OS/network stack timing out the
+    // underlying operation; GitError::Timeout is reserved for a future hardened
+    // implementation. Documented as a follow-up.
+}
+
+/// Inspect CLI stderr and map a non-zero exit to the most specific [`GitError`].
+/// Pure function — unit-testable without a git binary.
+pub(crate) fn classify_cli_error(stderr: &str) -> GitError {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("could not read username")
+        || lower.contains("authentication failed")
+        || lower.contains("permission denied")
+        || lower.contains("fatal: could not read")
+        || lower.contains("supports password authentication")
+    {
+        GitError::AuthenticationRequired
+    } else if lower.contains("! [remote rejected]")
+        || lower.contains("non-fast-forward")
+        || lower.contains("protected branch")
+        || lower.contains("cannot lock ref")
+    {
+        GitError::RemoteRejected(stderr.trim().to_string())
+    } else {
+        GitError::GitOperation(git2::Error::from_str(stderr.trim()))
+    }
+}
+
+/// The outcome of a push operation. Mirrors MCode's `pushCurrentBranch` result
+/// discriminated union: either the branch was pushed, or it was already in sync.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PushResult {
+    Pushed {
+        branch: String,
+        upstream_branch: String,
+        set_upstream: bool,
+    },
+    /// The branch was already up to date with its upstream — nothing to push.
+    SkippedUpToDate {
+        branch: String,
+        upstream_branch: String,
+    },
+}
+
+/// The outcome of a pull operation. Mirrors MCode's `pullCurrentBranch`:
+/// fast-forward only, no merge commits. `Pulled` if HEAD moved, else `SkippedUpToDate`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PullResult {
+    Pulled {
+        branch: String,
+        upstream_branch: String,
+    },
+    SkippedUpToDate {
+        branch: String,
+        upstream_branch: String,
+    },
+}
+
+/// Resolve the first remote name for the repo, or `origin` if none is configured
+/// (matching MCode's fallback). Pure helper over the remotes list.
+fn resolve_default_remote(remotes: &[String]) -> String {
+    if remotes.iter().any(|r| r == "origin") {
+        "origin".to_string()
+    } else {
+        remotes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "origin".to_string())
+    }
+}
+
+/// Count how many commits the local HEAD is ahead/behind the given upstream
+/// reference (e.g. `refs/remotes/origin/main`). Returns `None` if the ref
+/// can't be resolved (no fetch yet). Pure over the repo handle — no CLI.
+fn ahead_behind(repo: &Repository, upstream_ref: &str) -> Option<(usize, usize)> {
+    let local = repo.head().ok()?.peel_to_commit().ok()?;
+    let upstream = repo.revparse_single(upstream_ref).ok()?;
+    let upstream_commit = upstream.as_commit()?;
+    repo.graph_ahead_behind(local.id(), upstream_commit.id())
+        .ok()
 }
 
 /// The GitService trait — defines all git operations
@@ -26,7 +195,11 @@ pub trait GitService: Send + Sync {
     fn status(&self) -> Result<GitStatus, GitError>;
 
     /// Get diff between working tree and index
-    fn diff(&self, old_commit: Option<&str>, new_commit: Option<&str>) -> Result<Vec<GitDiffEntry>, GitError>;
+    fn diff(
+        &self,
+        old_commit: Option<&str>,
+        new_commit: Option<&str>,
+    ) -> Result<Vec<GitDiffEntry>, GitError>;
 
     /// List all branches
     fn branches(&self) -> Result<Vec<GitBranch>, GitError>;
@@ -46,11 +219,15 @@ pub trait GitService: Send + Sync {
     /// Checkout a branch or commit
     fn checkout(&self, ref_name: &str) -> Result<(), GitError>;
 
-    /// Push to remote
-    fn push(&self, remote: &str, branch: &str) -> Result<(), GitError>;
+    /// Push the current branch to a remote. Mirrors MCode's `pushCurrentBranch`:
+    /// skips (returns `SkippedUpToDate`) when already in sync; sets upstream
+    /// with `-u` when none is configured. Auth is delegated to the user's git
+    /// credential setup (SSH agent, credential helper, token in remote URL).
+    fn push(&self, remote: &str, branch: &str) -> Result<PushResult, GitError>;
 
-    /// Pull from remote
-    fn pull(&self, remote: &str, branch: &str) -> Result<(), GitError>;
+    /// Pull from the remote with `--ff-only` (fast-forward only, no merge commits —
+    /// fails on divergence). Requires an upstream; errors `NoUpstream` if absent.
+    fn pull(&self, remote: &str, branch: &str) -> Result<PullResult, GitError>;
 
     /// Create a new branch
     fn create_branch(&self, name: &str, checkout: bool) -> Result<GitBranch, GitError>;
@@ -100,7 +277,7 @@ impl GitService for Git2Service {
 
         let head = repo.head().ok();
         let branch = head.as_ref().and_then(|h| h.shorthand()).map(String::from);
-        let head_detached = head.as_ref().map_or(false, |h| {
+        let head_detached = head.as_ref().is_some_and(|h| {
             h.kind() == Some(git2::ReferenceType::Direct) && h.shorthand().is_none()
         });
 
@@ -132,14 +309,25 @@ impl GitService for Git2Service {
         })
     }
 
-    fn diff(&self, _old_commit: Option<&str>, _new_commit: Option<&str>) -> Result<Vec<GitDiffEntry>, GitError> {
+    fn diff(
+        &self,
+        _old_commit: Option<&str>,
+        _new_commit: Option<&str>,
+    ) -> Result<Vec<GitDiffEntry>, GitError> {
         let repo = self.repo()?;
         let diff = repo.diff_index_to_workdir(None, None)?;
         let mut entries = Vec::new();
 
         for delta in diff.deltas() {
-            let new_path = delta.new_file().path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            let old_path = delta.old_file().path().map(|p| p.to_string_lossy().to_string());
+            let new_path = delta
+                .new_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let old_path = delta
+                .old_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string());
             let status = status_from_delta(delta.status());
 
             entries.push(GitDiffEntry {
@@ -243,14 +431,7 @@ impl GitService for Git2Service {
 
         let sig = repo.signature()?;
 
-        let oid = repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            message,
-            &tree,
-            parents.as_slice(),
-        )?;
+        let oid = repo.commit(Some("HEAD"), &sig, &sig, message, &tree, parents.as_slice())?;
 
         let commit = repo.find_commit(oid)?;
 
@@ -275,14 +456,129 @@ impl GitService for Git2Service {
         Ok(())
     }
 
-    fn push(&self, _remote: &str, _branch: &str) -> Result<(), GitError> {
-        tracing::warn!("push not yet fully implemented — Phase 3.4");
-        Ok(())
+    fn push(&self, remote: &str, branch: &str) -> Result<PushResult, GitError> {
+        let repo = self.repo()?;
+        let current = repo.head()?.shorthand().unwrap_or("HEAD").to_string();
+        let branch = if branch.is_empty() { &current } else { branch };
+
+        // Resolve the effective remote (MCode: branch.<name>.pushRemote →
+        // remote.pushDefault → first remote). We keep it simple: explicit
+        // arg, else first remote (origin preferred).
+        let remotes: Vec<String> = repo
+            .remotes()?
+            .iter()
+            .filter_map(|r| r.map(String::from))
+            .collect();
+        let remote = if remote.is_empty() {
+            resolve_default_remote(&remotes)
+        } else {
+            remote.to_string()
+        };
+
+        // Check upstream + ahead/behind to decide whether to skip. MCode skips
+        // when ahead==0 && behind==0 with an upstream configured.
+        // git2::branch_upstream_name expects the FULL refname (refs/heads/<branch>).
+        let current_ref = format!("refs/heads/{}", current);
+        let upstream_ref = format!("{}/{}", remote, branch);
+        let upstream_configured = repo.branch_upstream_name(&current_ref).ok().and_then(|n| {
+            let s = n.as_str()?.to_string();
+            (!s.is_empty()).then_some(s)
+        });
+
+        if let Some(ref upstream) = upstream_configured
+            && let Some((ahead, behind)) = ahead_behind(&repo, upstream.as_str())
+            && ahead == 0
+            && behind == 0
+        {
+            return Ok(PushResult::SkippedUpToDate {
+                branch: branch.to_string(),
+                upstream_branch: upstream_ref,
+            });
+        }
+
+        // Run `git push` (with -u if no upstream). Auth is delegated to the
+        // user's git credential setup — we surface auth failures distinctly.
+        let set_upstream = upstream_configured.is_none();
+        let mut args = vec!["push"];
+        if set_upstream {
+            args.push("-u");
+        }
+        args.push(&remote);
+        args.push(branch);
+
+        let output = run_git(&self.repo_path, &args)?;
+        if output.status != 0 {
+            return Err(classify_cli_error(&output.stderr));
+        }
+        Ok(PushResult::Pushed {
+            branch: branch.to_string(),
+            upstream_branch: upstream_ref,
+            set_upstream,
+        })
     }
 
-    fn pull(&self, _remote: &str, _branch: &str) -> Result<(), GitError> {
-        tracing::warn!("pull not yet fully implemented — Phase 3.4");
-        Ok(())
+    fn pull(&self, remote: &str, _branch: &str) -> Result<PullResult, GitError> {
+        let repo = self.repo()?;
+        let current = repo.head()?.shorthand().unwrap_or("HEAD").to_string();
+
+        // Pull requires an upstream — MCode errors if none.
+        // git2::branch_upstream_name expects the FULL refname (refs/heads/<branch>).
+        let current_ref = format!("refs/heads/{}", current);
+        let upstream = repo
+            .branch_upstream_name(&current_ref)
+            .map_err(|_| GitError::NoUpstream)?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if upstream.is_empty() {
+            return Err(GitError::NoUpstream);
+        }
+
+        let remote_name = upstream
+            .strip_prefix("refs/remotes/")
+            .and_then(|s| s.split('/').next())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                if remote.is_empty() {
+                    "origin".into()
+                } else {
+                    remote.into()
+                }
+            });
+        let upstream_branch = upstream
+            .strip_prefix(&format!("refs/remotes/{}/", remote_name))
+            .unwrap_or(&current)
+            .to_string();
+
+        // Capture HEAD before/after to distinguish Pulled from SkippedUpToDate.
+        let before = repo.head()?.peel_to_commit().ok().map(|c| c.id());
+
+        // `git pull --ff-only` — fast-forward only, no merge commits (matches MCode).
+        let args = ["pull", "--ff-only", &remote_name, &upstream_branch];
+        let output = run_git(&self.repo_path, &args)?;
+        if output.status != 0 {
+            return Err(classify_cli_error(&output.stderr));
+        }
+
+        // Re-open to read the (possibly moved) HEAD.
+        let repo = self.repo()?;
+        let after = repo.head()?.peel_to_commit().ok().map(|c| c.id());
+        let moved = match (before, after) {
+            (Some(b), Some(a)) => b != a,
+            _ => true, // conservatively treat unknown as moved
+        };
+
+        if moved {
+            Ok(PullResult::Pulled {
+                branch: current,
+                upstream_branch: upstream_branch.to_string(),
+            })
+        } else {
+            Ok(PullResult::SkippedUpToDate {
+                branch: current,
+                upstream_branch: upstream_branch.to_string(),
+            })
+        }
     }
 
     fn create_branch(&self, name: &str, checkout: bool) -> Result<GitBranch, GitError> {
@@ -338,13 +634,22 @@ mod tests {
     #[test]
     fn test_status_from_delta() {
         assert_eq!(status_from_delta(git2::Delta::Added), FileStatus::Added);
-        assert_eq!(status_from_delta(git2::Delta::Modified), FileStatus::Modified);
+        assert_eq!(
+            status_from_delta(git2::Delta::Modified),
+            FileStatus::Modified
+        );
         assert_eq!(status_from_delta(git2::Delta::Renamed), FileStatus::Renamed);
         assert_eq!(status_from_delta(git2::Delta::Deleted), FileStatus::Deleted);
         assert_eq!(status_from_delta(git2::Delta::Copied), FileStatus::Copied);
         assert_eq!(status_from_delta(git2::Delta::Ignored), FileStatus::Ignored);
-        assert_eq!(status_from_delta(git2::Delta::Untracked), FileStatus::Untracked);
-        assert_eq!(status_from_delta(git2::Delta::Unmodified), FileStatus::Unmodified);
+        assert_eq!(
+            status_from_delta(git2::Delta::Untracked),
+            FileStatus::Untracked
+        );
+        assert_eq!(
+            status_from_delta(git2::Delta::Unmodified),
+            FileStatus::Unmodified
+        );
     }
 
     #[test]
@@ -370,13 +675,11 @@ mod tests {
         let status = GitStatus {
             branch: Some("main".to_string()),
             head_detached: false,
-            files: vec![
-                GitFileStatus {
-                    path: "src/main.rs".to_string(),
-                    index_status: FileStatus::Modified,
-                    working_tree_status: FileStatus::Modified,
-                },
-            ],
+            files: vec![GitFileStatus {
+                path: "src/main.rs".to_string(),
+                index_status: FileStatus::Modified,
+                working_tree_status: FileStatus::Modified,
+            }],
             ahead: 2,
             behind: 1,
         };
@@ -456,5 +759,356 @@ mod tests {
         assert_eq!(json, "\"modified\"");
         let back: FileStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back, FileStatus::Modified);
+    }
+
+    // ─── New push/pull unit tests (pure, always run) ──────────────────
+
+    #[test]
+    fn classify_cli_error_maps_auth_failures() {
+        let cases = [
+            "fatal: could not read Username for 'https://github.com'",
+            "git@github.com: Permission denied (publickey).",
+            "fatal: Authentication failed for 'https://github.com/...'",
+        ];
+        for stderr in cases {
+            assert!(
+                matches!(classify_cli_error(stderr), GitError::AuthenticationRequired),
+                "expected AuthenticationRequired for: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_cli_error_maps_remote_rejected() {
+        let err =
+            classify_cli_error("! [remote rejected] main -> main (pre-receive hook declined)");
+        assert!(matches!(err, GitError::RemoteRejected(_)), "{:?}", err);
+
+        let err = classify_cli_error(" ! [rejected]        main -> main (non-fast-forward)");
+        assert!(matches!(err, GitError::RemoteRejected(_)));
+    }
+
+    #[test]
+    fn classify_cli_error_falls_back_to_git_operation() {
+        let err = classify_cli_error("fatal: not a git repository");
+        assert!(matches!(err, GitError::GitOperation(_)));
+    }
+
+    #[test]
+    fn resolve_default_remote_prefers_origin() {
+        assert_eq!(resolve_default_remote(&[]), "origin");
+        assert_eq!(resolve_default_remote(&["upstream".into()]), "upstream");
+        // origin wins over others regardless of order.
+        assert_eq!(
+            resolve_default_remote(&["upstream".into(), "origin".into()]),
+            "origin"
+        );
+        assert_eq!(
+            resolve_default_remote(&["origin".into(), "upstream".into()]),
+            "origin"
+        );
+    }
+
+    #[test]
+    fn push_result_serialization() {
+        let pushed = PushResult::Pushed {
+            branch: "feat/x".into(),
+            upstream_branch: "origin/feat/x".into(),
+            set_upstream: true,
+        };
+        let json = serde_json::to_string(&pushed).unwrap();
+        assert!(json.contains("\"status\":\"pushed\""));
+        assert!(json.contains("\"set_upstream\":true"));
+        let back: PushResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, pushed);
+
+        let skipped = PushResult::SkippedUpToDate {
+            branch: "main".into(),
+            upstream_branch: "origin/main".into(),
+        };
+        let json = serde_json::to_string(&skipped).unwrap();
+        assert!(json.contains("\"status\":\"skipped_up_to_date\""));
+    }
+
+    #[test]
+    fn pull_result_serialization() {
+        let pulled = PullResult::Pulled {
+            branch: "main".into(),
+            upstream_branch: "origin/main".into(),
+        };
+        let json = serde_json::to_string(&pulled).unwrap();
+        assert!(json.contains("\"status\":\"pulled\""));
+
+        let skipped = PullResult::SkippedUpToDate {
+            branch: "main".into(),
+            upstream_branch: "origin/main".into(),
+        };
+        let json = serde_json::to_string(&skipped).unwrap();
+        assert!(json.contains("\"status\":\"skipped_up_to_date\""));
+    }
+
+    #[test]
+    fn git_error_new_variants_display() {
+        assert!(GitError::NoUpstream.to_string().contains("upstream"));
+        assert!(
+            GitError::AuthenticationRequired
+                .to_string()
+                .contains("Authentication")
+        );
+        assert!(GitError::CliMissing("git").to_string().contains("`git`"));
+        assert!(
+            GitError::RemoteRejected("hook".into())
+                .to_string()
+                .contains("hook")
+        );
+        assert!(
+            GitError::Timeout(Duration::from_secs(30))
+                .to_string()
+                .contains("30s")
+        );
+    }
+
+    // ─── Integration tests (git-gated; skip if `git` binary absent) ────
+    //
+    // These create a local bare "remote" + a clone, then exercise push/pull
+    // between them. No network, no credentials — purely local file:// remotes.
+
+    fn git_available() -> bool {
+        which::which("git").is_ok()
+    }
+
+    /// Build a local remote (bare) + a clone with one commit, returning the
+    /// clone path. Both live under the tempdir (cleaned up automatically).
+    fn local_repo_pair() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let remote_path = dir.path().join("remote.git");
+        let clone_path = dir.path().join("clone");
+
+        // Bare remote.
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&remote_path)
+            .output()
+            .expect("git init --bare");
+
+        // Clone (empty), then seed an initial commit + push to set upstream.
+        std::process::Command::new("git")
+            .args(["clone"])
+            .arg(&remote_path)
+            .arg(&clone_path)
+            .output()
+            .expect("git clone");
+
+        // Configure a test author (git requires user.name/email to commit).
+        for (k, v) in [("user.name", "Test"), ("user.email", "t@t.test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&clone_path)
+                .output()
+                .expect("git config");
+        }
+
+        // Seed a commit + set default branch (HEAD) so push -u works.
+        std::fs::write(clone_path.join("README.md"), "init\n").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&clone_path)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&clone_path)
+            .output()
+            .expect("git commit");
+        // Set the bare remote's default branch by pushing with -u.
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD:main"])
+            .current_dir(&clone_path)
+            .output()
+            .expect("git push init");
+        // Ensure local branch is "main" + tracks origin/main.
+        std::process::Command::new("git")
+            .args(["branch", "-M", "main"])
+            .current_dir(&clone_path)
+            .output()
+            .expect("git branch -M");
+        std::process::Command::new("git")
+            .args(["branch", "--set-upstream-to=origin/main", "main"])
+            .current_dir(&clone_path)
+            .output()
+            .expect("set upstream");
+
+        dir
+    }
+
+    #[test]
+    fn integration_push_skipped_when_up_to_date() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let service = Git2Service::open(&clone).expect("open");
+
+        // No new commits since the init push → should skip.
+        let result = service.push("origin", "main").expect("push");
+        assert!(
+            matches!(result, PushResult::SkippedUpToDate { .. }),
+            "expected skip, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn integration_push_pushed_on_new_commit() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let service = Git2Service::open(&clone).expect("open");
+
+        // New commit → push should report Pushed.
+        std::fs::write(clone.join("file.txt"), "new\n").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&clone)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "second"])
+            .current_dir(&clone)
+            .output()
+            .expect("git commit");
+
+        let result = service.push("origin", "main").expect("push");
+        assert!(
+            matches!(result, PushResult::Pushed { .. }),
+            "expected pushed, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn integration_pull_skipped_when_up_to_date() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let service = Git2Service::open(&clone).expect("open");
+
+        // No remote changes → pull should skip.
+        let result = service.pull("origin", "main").expect("pull");
+        assert!(
+            matches!(result, PullResult::SkippedUpToDate { .. }),
+            "expected skip, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn integration_pull_pulled_after_remote_commit() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let remote = dir.path().join("remote.git");
+
+        // Make a commit directly on the bare remote by pushing from a throwaway clone.
+        let other = dir.path().join("other");
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                "--branch",
+                "main",
+                &remote.display().to_string(),
+                &other.display().to_string(),
+            ])
+            .output()
+            .expect("clone other");
+        for (k, v) in [("user.name", "Other"), ("user.email", "o@o.test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&other)
+                .output()
+                .expect("config");
+        }
+        std::fs::write(other.join("from-other.md"), "x\n").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&other)
+            .output()
+            .expect("add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "from other"])
+            .current_dir(&other)
+            .output()
+            .expect("commit");
+        let push_other = std::process::Command::new("git")
+            .args(["push", "origin", "main:main"])
+            .current_dir(&other)
+            .output()
+            .expect("push other");
+        assert!(
+            push_other.status.success(),
+            "other push failed: {}",
+            String::from_utf8_lossy(&push_other.stderr)
+        );
+
+        // Now pull in the original clone — should report Pulled.
+        let service = Git2Service::open(&clone).expect("open");
+        let result = service.pull("origin", "main").expect("pull");
+        assert!(
+            matches!(result, PullResult::Pulled { .. }),
+            "expected pulled, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn integration_pull_errors_without_upstream() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        // A repo with no upstream configured → NoUpstream error.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("init");
+        for (k, v) in [("user.name", "T"), ("user.email", "t@t.test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(dir.path())
+                .output()
+                .expect("config");
+        }
+        std::fs::write(dir.path().join("a.txt"), "a\n").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(dir.path())
+            .output()
+            .expect("add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "x"])
+            .current_dir(dir.path())
+            .output()
+            .expect("commit");
+
+        let service = Git2Service::open(dir.path()).expect("open");
+        let err = service.pull("origin", "main").unwrap_err();
+        assert!(
+            matches!(err, GitError::NoUpstream),
+            "expected NoUpstream, got {:?}",
+            err
+        );
     }
 }

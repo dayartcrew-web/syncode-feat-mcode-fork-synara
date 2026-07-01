@@ -1,8 +1,8 @@
 # Syncode — Test Summary Report
 
-**Generated:** 2026-06-27 · **numbers refreshed 2026-07-01** (after the command-port, gaps-and-stubs, provider-bridge, internal-commands, snapshot-coldstart, real-providers-acp, ws-auth-wiring, and ws-snapshot-reconnect workflows)
-**Total Tests:** ~576 (all passing, 0 failures, 1 ignored doc-test). NOTE: grew from 559 — the ws-snapshot-reconnect workflow added snapshot-then-stream subscriptions (backend `push/subscribe` emits a snapshot of current state, then live deltas) + a reconnect-resilient frontend client: contracts 21→34 (snapshot DTOs), ws 37→42 (emit_snapshot + snapshot-on-subscribe). Per-crate counts below were verified by running each suite. Frontend verified via `npm run typecheck` + `npm run build`.
-**Total Rust LOC:** ~25,400 (95+ source files across 12 internal crates + 1 integration-test package)
+**Generated:** 2026-06-27 · **numbers refreshed 2026-07-01** (after the command-port, gaps-and-stubs, provider-bridge, internal-commands, snapshot-coldstart, real-providers-acp, ws-auth-wiring, ws-snapshot-reconnect, and git-push-pull-pr workflows)
+**Total Tests:** ~588 (all passing, 0 failures, 1 ignored doc-test). NOTE: grew from 576 — the git-push-pull-pr workflow replaced no-op push/pull stubs with real `git`/`gh` CLI shelling-out (push, pull --ff-only, CreatePR via `gh pr create`): git 22→34 (+6 unit + 4 git-gated integration). Per-crate counts below were verified by running each suite.
+**Total Rust LOC:** ~25,800 (96+ source files across 12 internal crates + 1 integration-test package)
 
 ## Test Breakdown by Crate
 
@@ -12,7 +12,7 @@
 | `syncode-auth` | 35 | Credentials, secret store, auth policy, **principal/session/authenticator, AuthMode** |
 | `syncode-contracts` | 34 | Shared types, session/message views, TS bindings, **snapshot DTOs** |
 | `syncode-core` | 45 | EntityId, Timestamp, Project, Thread, Turn, DomainEvent (35 variants), port traits |
-| `syncode-git` | 22 | Git operations, checkpoint, branch management |
+| `syncode-git` | 34 | Git operations, checkpoint, branch management, **push/pull/CreatePR (CLI)** |
 | `syncode-http` | 0 | **stub** (TODO only; reserved for a future REST surface — see ARCHITECTURE.md) |
 | `syncode-integration-tests` | — | Cross-crate integration (not run in workspace test) |
 | `syncode-orchestration` | 129 | CQRS pipeline (38 Commands), Decider, Projector, Orchestrator, Reactors, Use Cases |
@@ -21,7 +21,7 @@
 | `syncode-tauri` | — | Desktop tray, auto-updater (pre-existing build issues, excluded) |
 | `syncode-terminal` | 15 | OutputBuffer, ack protocol, chunk management, display |
 | `syncode-ws` | 42 | WebSocket server, JSON-RPC, connection lifecycle, push bus, **authz gate + auth RPC + snapshot-then-stream** |
-| **TOTAL** | **~576** | |
+| **TOTAL** | **~588** | |
 
 ## CQRS / Event Sourcing Pipeline (New)
 

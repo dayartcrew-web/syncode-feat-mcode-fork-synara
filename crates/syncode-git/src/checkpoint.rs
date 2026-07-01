@@ -6,8 +6,8 @@
 //! - Computing diffs between turns
 //! - Undo/redo of agent actions
 
-use crate::service::{Git2Service, GitError};
 use crate::GitCommit;
+use crate::service::{Git2Service, GitError};
 
 /// A checkpoint representing the git state at a turn boundary
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -91,14 +91,12 @@ pub fn list_checkpoints(service: &Git2Service) -> Result<Vec<Checkpoint>, GitErr
 }
 
 /// Restore a checkpoint by checking out the commit
-pub fn restore_checkpoint(
-    service: &Git2Service,
-    turn_id: &str,
-) -> Result<GitCommit, GitError> {
+pub fn restore_checkpoint(service: &Git2Service, turn_id: &str) -> Result<GitCommit, GitError> {
     let repo = service.repo()?;
     let ref_name = format!("refs/syncode/checkpoints/{}", turn_id);
 
-    let reference = repo.find_reference(&ref_name)
+    let reference = repo
+        .find_reference(&ref_name)
         .map_err(|_| GitError::BranchNotFound(format!("Checkpoint '{}' not found", turn_id)))?;
 
     let target = reference.target().unwrap();
@@ -126,7 +124,8 @@ pub fn delete_checkpoint(service: &Git2Service, turn_id: &str) -> Result<(), Git
     let repo = service.repo()?;
     let ref_name = format!("refs/syncode/checkpoints/{}", turn_id);
 
-    let mut reference = repo.find_reference(&ref_name)
+    let mut reference = repo
+        .find_reference(&ref_name)
         .map_err(|_| GitError::BranchNotFound(format!("Checkpoint '{}' not found", turn_id)))?;
 
     reference.delete()?;

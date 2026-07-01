@@ -24,7 +24,8 @@ pub struct WorktreeInfo {
 pub fn list_worktrees(service: &Git2Service) -> Result<Vec<WorktreeInfo>, GitError> {
     let repo = service.repo()?;
     let wt_names = repo.worktrees()?;
-    let main_path = repo.workdir()
+    let main_path = repo
+        .workdir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
@@ -68,11 +69,7 @@ pub fn add_worktree(
     let branch_ref = format!("refs/heads/{}", branch_name);
     let branch_path = std::path::Path::new(&branch_ref);
 
-    let wt = repo.worktree(
-        branch_name,
-        branch_path,
-        None,
-    )?;
+    let wt = repo.worktree(branch_name, branch_path, None)?;
 
     Ok(WorktreeInfo {
         path: wt.path().to_string_lossy().to_string(),
@@ -83,20 +80,34 @@ pub fn add_worktree(
 }
 
 /// Remove a worktree
-pub fn remove_worktree(service: &Git2Service, branch_name: &str, _force: bool) -> Result<(), GitError> {
+pub fn remove_worktree(
+    service: &Git2Service,
+    branch_name: &str,
+    _force: bool,
+) -> Result<(), GitError> {
     let repo = service.repo()?;
-    let wt = repo.find_worktree(branch_name)
+    let wt = repo
+        .find_worktree(branch_name)
         .map_err(|_| GitError::BranchNotFound(format!("Worktree '{}' not found", branch_name)))?;
 
     wt.prune(None)?;
     Ok(())
 }
 
-/// Prune stale worktree admin files
+/// Prune stale worktree admin files.
+///
+/// **Deprecated.** MCode has no `git worktree prune` operation — it only ever
+/// does explicit [`remove_worktree`] calls for known paths. This stub returned
+/// `Ok(0)` (pretending success while doing nothing), which is misleading. It
+/// now returns an error directing callers to `remove_worktree`. Kept as a
+/// non-removing function for source back-compat; do not call.
+#[deprecated(
+    note = "MCode has no worktree-prune operation; use remove_worktree for explicit cleanup"
+)]
 pub fn prune_worktrees(_service: &Git2Service) -> Result<u32, GitError> {
-    // git2 doesn't expose prune_worktrees directly
-    // In production, shell out: git worktree prune
-    Ok(0)
+    Err(GitError::GitOperation(git2::Error::from_str(
+        "prune_worktrees is not supported (MCode has no such operation); use remove_worktree for explicit cleanup",
+    )))
 }
 
 #[cfg(test)]
