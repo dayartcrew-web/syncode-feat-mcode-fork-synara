@@ -1,5 +1,15 @@
 # Custom Provider Porting Feasibility (claude, codex, opencode, kilo, pi)
 
+> ⚠️ **CORRECTION (2026-07-01): The pi verdict below ("INFEASIBLE") is REFUTED.**
+> Follow-up research found that `@earendil-works/pi-coding-agent` ships a
+> first-class headless RPC mode (`pi --mode rpc`) — a JSON-over-stdio protocol
+> documented at the SDK's `docs/rpc.md`, explicitly designed for non-Node
+> embedding, with a reference TS client. The original verdict examined only how
+> *mcode* integrates pi (in-process TS SDK) and incorrectly generalized that to
+> pi's only interface. Pi is now a REAL adapter (`crates/syncode-provider/src/pi_rpc.rs`
+> + `adapters/pi.rs`); see `PROVIDERS.md` §"Real RPC provider (pi)". The original
+> §5 analysis is retained below for history.
+
 **Source:** masday workflow `a4b8b0f4` task T3 (research, read-only).
 **Ground truth:** `/home/vibe-dev/mcode` (TS/Node). **Target:** syncode `crates/syncode-provider`.
 **Date:** 2026-07-01.

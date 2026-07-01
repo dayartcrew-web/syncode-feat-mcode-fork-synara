@@ -111,7 +111,7 @@ Defined in `syncode-core/src/ports/mod.rs` (async, `Send+Sync`):
 **Implemented & tested (~615 tests):** core domain (35 events), CQRS engine (38 Commands — all 28 MCode client commands ported; decider/projector/reactors/use-cases), SQLite persistence (7 projections), 2 HTTP provider adapters (Anthropic, OpenAI), git status/diff/branch/commit/checkpoint/worktree + **push/pull/CreatePR via CLI** (`git`/`gh` shelling-out, auth delegated to user credentials), terminal PTY + ack protocol, **automation execution engine** (cron/interval due-evaluation via `cron` crate, retry loop honoring RetryPolicy, run dispatch via `RunExecutor` port, misfire coalesce, trait-abstracted `AutomationRepository`), **WS auth wired** (principal/session/authenticator + authz gate on RPC dispatch + `auth/bootstrap`·`auth/status`·`auth/logout`), **snapshot-then-stream subscriptions** (`push/subscribe` emits a snapshot of current state, then live deltas; reconnecting clients re-subscribe to re-hydrate), WebSocket RPC + push bus, Tauri shell scaffolding.
 
 **Stubs / not wired:**
-- 8 subprocess provider adapters (claude/codex/cursor/gemini/grok/kilo/opencode/pi) — non-functional
+- ~~8 subprocess provider adapters (claude/codex/cursor/gemini/grok/kilo/opencode/pi)~~ — all 8 are now REAL (claude stream-json, codex app-server, opencode/kilo HTTP+SSE, pi RPC, cursor/grok/gemini ACP). No functional stubs remain.
 - `syncode-http` — empty
 - `ws/transport.rs` — reframed as an architectural note (server is stateless-per-upgrade; reconnect is client-owned; the server's obligation — snapshot-on-subscribe — is in `push.rs`/`rpc.rs`). See the module doc.
 - **Automation execution engine is ready but not yet hosted** — no production runtime process exists to drive `Scheduler::tick()`; storage is in-memory (SQLite `AutomationRepository` is a drop-in follow-up via the port in core).
@@ -125,7 +125,7 @@ Defined in `syncode-core/src/ports/mod.rs` (async, `Send+Sync`):
 |---|---|---|
 | Commands | ~39 (28 client + 11 internal) | 38 (all 28 client commands ported) |
 | Event types | 35 | 35 |
-| Providers | 8 CLI via ACP + Effect layers | 8 subprocess stubs + 2 HTTP |
+| Providers | 8 CLI via ACP + Effect layers | 8 real CLI adapters (ACP×3, codex, claude, opencode, kilo, pi) + 2 HTTP |
 | Server LOC | 96,870 | ~23,300 |
 
 All 28 MCode client-orchestration commands are now ported (command-port workflow). Provider dispatch (command → provider) is wired through the command reactor (provider-bridge workflow). Still-unported MCode surfaces are the **internal** commands: conversation rollback (+complete), proposed-plan-upsert, the turn-diff pipeline (turn-diff-complete), standalone messages-import, and assistant streaming deltas. The reverse bridge — provider response events fed back into the pipeline as domain events — is not yet collected (the ingestion reactor handles the separate `ProviderEvent → DomainEvent` path).

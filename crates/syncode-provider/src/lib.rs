@@ -18,6 +18,7 @@ pub mod acp_provider;
 pub mod adapters;
 pub mod codex_app_server;
 pub mod opencode_server;
+pub mod pi_rpc;
 pub mod registry;
 pub mod session;
 pub mod subprocess;
@@ -26,10 +27,13 @@ pub mod trait_def;
 // Re-exports for convenience
 pub use acp::{AcpClient, PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, PromptResult};
 pub use acp_provider::{AcpProvider, AcpProviderConfig};
-pub use codex_app_server::{CodexAppServerClient, TurnResult as CodexTurnResult, TurnStatus as CodexTurnStatus};
+pub use codex_app_server::{
+    CodexAppServerClient, TurnResult as CodexTurnResult, TurnStatus as CodexTurnStatus,
+};
 pub use opencode_server::{
-    KILO_CLI_SPEC, OPENCODE_CLI_SPEC, OpenCodeAuth, OpenCodeCompatibleCliSpec, OpenCodeServerClient,
-    ModelRef as OpenCodeModelRef, TurnOutcome as OpenCodeTurnOutcome, TurnStatus as OpenCodeTurnStatus,
+    KILO_CLI_SPEC, ModelRef as OpenCodeModelRef, OPENCODE_CLI_SPEC, OpenCodeAuth,
+    OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnOutcome as OpenCodeTurnOutcome,
+    TurnStatus as OpenCodeTurnStatus,
 };
 pub use session::{SessionManager, SessionState, SessionStateStatus, SessionTransitionError};
 pub use trait_def::{
