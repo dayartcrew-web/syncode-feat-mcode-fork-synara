@@ -217,58 +217,42 @@ pub fn create_by_id(provider_id: &str) -> Option<SharedAdapter> {
 /// Build the [`AcpProviderConfig`] for an ACP provider id, or `None` if `id`
 /// is not one of the three ACP providers.
 ///
-/// Command specs follow the mcode ACP integration:
-/// - cursor: `cursor-agent acp`
-/// - grok: `grok agent --no-leader stdio`
-/// - gemini: `gemini --acp`
+/// Cursor and Grok delegate to their owning modules
+/// ([`crate::adapters::cursor::spec`] / [`crate::adapters::grok::spec`]), which
+/// own provider-specific flags layered in from `SYNICODE_*` environment
+/// variables. Gemini's spec is kept inline here until its dedicated module lands.
 ///
-/// Provider-specific flags/env (endpoints, model, reasoning effort) are layered
-/// on by the adapter owners; this captures the baseline that speaks ACP.
+/// Command forms follow the mcode ACP integration:
+/// - cursor: `cursor-agent [-e <endpoint>] acp`
+/// - grok: `grok agent [--always-approve] [-m <model>] [--reasoning-effort <effort>] --no-leader stdio`
+/// - gemini: `gemini --acp`
 pub fn acp_config_for(id: &str) -> Option<AcpProviderConfig> {
+    use crate::adapters::{cursor, grok};
+    match id {
+        PROVIDER_CURSOR => Some(cursor::spec()),
+        PROVIDER_GROK => Some(grok::spec()),
+        PROVIDER_GEMINI => Some(gemini_baseline_config()),
+        _ => None,
+    }
+}
+
+/// Inline baseline config for Gemini (ACP `gemini --acp`). Lives here until the
+/// dedicated `adapters::gemini` rewrite in T5.
+fn gemini_baseline_config() -> AcpProviderConfig {
     use crate::subprocess::SubprocessSpec;
-    let (provider_id, spec, capabilities, available_models) = match id {
-        PROVIDER_CURSOR => (
-            PROVIDER_CURSOR,
-            SubprocessSpec::new("cursor-agent").args(["acp"]),
-            vec![
-                ProviderCapability::Streaming,
-                ProviderCapability::ToolUse,
-                ProviderCapability::FileSystem,
-                ProviderCapability::SystemPrompt,
-            ],
-            vec!["cursor-default".to_string()],
-        ),
-        PROVIDER_GROK => (
-            PROVIDER_GROK,
-            SubprocessSpec::new("grok").args(["agent", "--no-leader", "stdio"]),
-            vec![
-                ProviderCapability::Streaming,
-                ProviderCapability::ToolUse,
-                ProviderCapability::SystemPrompt,
-            ],
-            vec!["grok-default".to_string()],
-        ),
-        PROVIDER_GEMINI => (
-            PROVIDER_GEMINI,
-            SubprocessSpec::new("gemini").args(["--acp"]),
-            vec![
-                ProviderCapability::Streaming,
-                ProviderCapability::ToolUse,
-                ProviderCapability::Vision,
-                ProviderCapability::FileSystem,
-                ProviderCapability::SystemPrompt,
-            ],
-            vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
-        ),
-        _ => return None,
-    };
-    Some(AcpProviderConfig {
-        provider_id: provider_id.to_string(),
-        spec,
-        capabilities,
-        available_models,
+    AcpProviderConfig {
+        provider_id: PROVIDER_GEMINI.to_string(),
+        spec: SubprocessSpec::new("gemini").args(["--acp"]),
+        capabilities: vec![
+            ProviderCapability::Streaming,
+            ProviderCapability::ToolUse,
+            ProviderCapability::Vision,
+            ProviderCapability::FileSystem,
+            ProviderCapability::SystemPrompt,
+        ],
+        available_models: vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
         client_name: "syncode".to_string(),
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------

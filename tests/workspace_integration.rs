@@ -106,20 +106,33 @@ async fn all_provider_adapters_spawn_and_shutdown() {
     assert_eq!(codex.status(), ProviderStatus::Idle);
     codex.shutdown().await.unwrap();
 
-    let mut cursor = CursorAdapter::new();
-    cursor.spawn(ProviderConfig::default()).await.unwrap();
-    assert_eq!(cursor.status(), ProviderStatus::Idle);
-    cursor.shutdown().await.unwrap();
+    // cursor & grok are real ACP subprocess adapters: they spawn `cursor-agent`
+    // / `grok` and run the ACP `initialize` handshake. The strict spawn→Idle→
+    // shutdown path is environment-dependent (needs the CLI installed AND
+    // speaking ACP), so it runs only under SYNICODE_ACP_E2E=1; the full
+    // protocol lifecycle is also covered by syncode-provider's own from_streams
+    // duplex unit tests (no real binary). Otherwise just assert the real,
+    // environment-independent pre-spawn invariant (Disconnected).
+    let e2e = std::env::var("SYNICODE_ACP_E2E").as_deref() == Ok("1");
+    if e2e {
+        let mut cursor = create_cursor();
+        cursor.spawn(ProviderConfig::default()).await.unwrap();
+        assert_eq!(cursor.status(), ProviderStatus::Idle);
+        cursor.shutdown().await.unwrap();
+
+        let mut grok = create_grok();
+        grok.spawn(ProviderConfig::default()).await.unwrap();
+        assert_eq!(grok.status(), ProviderStatus::Idle);
+        grok.shutdown().await.unwrap();
+    } else {
+        assert_eq!(create_cursor().status(), ProviderStatus::Disconnected);
+        assert_eq!(create_grok().status(), ProviderStatus::Disconnected);
+    }
 
     let mut gemini = GeminiAdapter::new();
     gemini.spawn(ProviderConfig::default()).await.unwrap();
     assert_eq!(gemini.status(), ProviderStatus::Idle);
     gemini.shutdown().await.unwrap();
-
-    let mut grok = GrokAdapter::new();
-    grok.spawn(ProviderConfig::default()).await.unwrap();
-    assert_eq!(grok.status(), ProviderStatus::Idle);
-    grok.shutdown().await.unwrap();
 
     let mut kilo = KiloAdapter::new();
     kilo.spawn(ProviderConfig::default()).await.unwrap();
@@ -149,14 +162,14 @@ async fn all_provider_adapters_spawn_and_shutdown() {
 
 #[tokio::test]
 async fn all_provider_adapters_have_unique_ids() {
-    use syncode_provider::adapters::*;
     use syncode_provider::ProviderAdapter;
+    use syncode_provider::adapters::*;
     let ids: Vec<String> = vec![
         ClaudeAdapter::new().provider_id().to_string(),
         CodexAdapter::new().provider_id().to_string(),
-        CursorAdapter::new().provider_id().to_string(),
+        create_cursor().provider_id().to_string(),
         GeminiAdapter::new().provider_id().to_string(),
-        GrokAdapter::new().provider_id().to_string(),
+        create_grok().provider_id().to_string(),
         KiloAdapter::new().provider_id().to_string(),
         OpenCodeAdapter::new().provider_id().to_string(),
         PiAdapter::new().provider_id().to_string(),
@@ -169,15 +182,15 @@ async fn all_provider_adapters_have_unique_ids() {
 
 #[tokio::test]
 async fn all_provider_adapters_have_capabilities() {
-    use syncode_provider::adapters::*;
     use syncode_provider::ProviderAdapter;
+    use syncode_provider::adapters::*;
 
     let adapters: Vec<Box<dyn ProviderAdapter>> = vec![
         Box::new(ClaudeAdapter::new()),
         Box::new(CodexAdapter::new()),
-        Box::new(CursorAdapter::new()),
+        Box::new(create_cursor()),
         Box::new(GeminiAdapter::new()),
-        Box::new(GrokAdapter::new()),
+        Box::new(create_grok()),
         Box::new(KiloAdapter::new()),
         Box::new(OpenCodeAdapter::new()),
         Box::new(PiAdapter::new()),
@@ -290,7 +303,7 @@ fn output_buffer_ack_protocol() {
 
 #[tokio::test]
 async fn provider_session_context_uses_core_types() {
-    use syncode_provider::{SessionContext, ProviderRequest};
+    use syncode_provider::{ProviderRequest, SessionContext};
 
     let ctx = SessionContext {
         thread_id: EntityId::new(),

@@ -1,331 +1,75 @@
-//! Cursor adapter — Cursor AI coding assistant
+//! Cursor provider — ACP subprocess configuration for the Cursor CLI.
 //!
-//! Cursor adapter. Spawns `cursor` CLI and communicates
-//! via JSON-RPC over stdin/stdout.
+//! Cursor speaks the Agent Client Protocol over stdio. This module owns Cursor's
+//! ACP spawn configuration; the protocol itself is implemented by the shared
+//! [`AcpProvider`], so Cursor is *just* spec configuration — no separate trait
+//! implementation.
+//!
+//! Spawn form (matches the mcode ACP integration):
+//! ```text
+//! cursor-agent [-e <apiEndpoint>] acp
+//! ```
+//! The optional API endpoint is layered in from the `SYNICODE_CURSOR_ENDPOINT`
+//! environment variable when present.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::acp_provider::{AcpProvider, AcpProviderConfig};
+use crate::subprocess::SubprocessSpec;
+use crate::trait_def::{PROVIDER_CURSOR, ProviderCapability};
 
-use tokio::sync::{Mutex, broadcast};
+/// Environment variable overriding the Cursor API endpoint.
+pub const ENV_ENDPOINT: &str = "SYNICODE_CURSOR_ENDPOINT";
 
-use super::super::trait_def::*;
-use crate::session::SessionState;
-
-/// Cursor-specific configuration
-#[derive(Debug, Clone)]
-pub struct CursorConfig {
-    /// Path to the cursor CLI binary (default: "cursor")
-    pub bin_path: String,
-    /// Cursor API key (if not set, reads CURSOR_API_KEY env var)
-    pub api_key: Option<String>,
-    /// Cursor API base URL (default: "https://api.cursor.sh")
-    pub base_url: String,
-    /// Default Cursor model
-    pub model: String,
-}
-
-impl Default for CursorConfig {
-    fn default() -> Self {
-        Self {
-            bin_path: "cursor".to_string(),
-            api_key: std::env::var("CURSOR_API_KEY").ok(),
-            base_url: "https://api.cursor.sh".to_string(),
-            model: "cursor-default".to_string(),
+/// Build the `cursor-agent` argument list given an optional API endpoint.
+///
+/// The endpoint, when provided, is passed as `-e <endpoint>` *before* `acp`,
+/// matching the mcode spawn form. This is a pure helper so the flag ordering is
+/// unit-testable without touching the process environment.
+pub fn build_args(endpoint: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(ep) = endpoint {
+        let trimmed = ep.trim();
+        if !trimmed.is_empty() {
+            args.push("-e".to_string());
+            args.push(trimmed.to_string());
         }
     }
+    args.push("acp".to_string());
+    args
 }
 
-/// The Cursor provider adapter
-pub struct CursorAdapter {
-    config: Option<ProviderConfig>,
-    cursor_config: CursorConfig,
-    status: AtomicU64,
-    sessions: Mutex<HashMap<String, Arc<SessionState>>>,
-    event_tx: broadcast::Sender<ProviderEvent>,
-    spawned: AtomicBool,
-    next_req_id: AtomicU64,
+/// Read the optional Cursor API endpoint from the environment, if set.
+fn env_endpoint() -> Option<String> {
+    std::env::var(ENV_ENDPOINT)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
-impl CursorAdapter {
-    /// Create a new Cursor adapter with default settings
-    pub fn new() -> Self {
-        let (event_tx, _) = broadcast::channel(256);
-        Self {
-            config: None,
-            cursor_config: CursorConfig::default(),
-            status: AtomicU64::new(ProviderStatus::Disconnected.into()),
-            sessions: Mutex::new(HashMap::new()),
-            event_tx,
-            spawned: AtomicBool::new(false),
-            next_req_id: AtomicU64::new(1),
-        }
-    }
-
-    /// Create a new Cursor adapter with custom cursor-specific config
-    pub fn with_cursor_config(cursor_config: CursorConfig) -> Self {
-        let (event_tx, _) = broadcast::channel(256);
-        Self {
-            config: None,
-            cursor_config,
-            status: AtomicU64::new(ProviderStatus::Disconnected.into()),
-            sessions: Mutex::new(HashMap::new()),
-            event_tx,
-            spawned: AtomicBool::new(false),
-            next_req_id: AtomicU64::new(1),
-        }
-    }
-
-    /// Check if the Cursor API key is configured
-    pub fn has_api_key(&self) -> bool {
-        self.cursor_config.api_key.is_some() || std::env::var("CURSOR_API_KEY").is_ok()
-    }
-
-    fn set_status(&self, status: ProviderStatus) {
-        self.status.store(status.into(), Ordering::Release);
-    }
-
-    fn next_request_id(&self) -> u64 {
-        self.next_req_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn generate_session_id() -> String {
-        format!("cursor-{}", uuid::Uuid::new_v4().hyphenated())
-    }
+/// Build the ACP spawn config + identity for the Cursor provider, honoring an
+/// optional endpoint from the environment.
+pub fn spec() -> AcpProviderConfig {
+    spec_with(env_endpoint().as_deref())
 }
 
-impl Default for CursorAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ProviderAdapter for CursorAdapter {
-    // -- Identity ----------------------------------------------------------
-
-    fn provider_id(&self) -> &str {
-        PROVIDER_CURSOR
-    }
-
-    fn capabilities(&self) -> Vec<ProviderCapability> {
-        vec![
+/// Build the config from an explicit endpoint value (env-free; used by tests).
+pub fn spec_with(endpoint: Option<&str>) -> AcpProviderConfig {
+    AcpProviderConfig {
+        provider_id: PROVIDER_CURSOR.to_string(),
+        spec: SubprocessSpec::new("cursor-agent").args(build_args(endpoint)),
+        capabilities: vec![
             ProviderCapability::Streaming,
             ProviderCapability::ToolUse,
             ProviderCapability::FileSystem,
             ProviderCapability::SystemPrompt,
-            ProviderCapability::CodeExecution,
-        ]
+        ],
+        available_models: vec!["cursor-default".to_string()],
+        client_name: "syncode".to_string(),
     }
+}
 
-    fn status(&self) -> ProviderStatus {
-        self.status.load(Ordering::Acquire).into()
-    }
-
-    fn available_models(&self) -> Vec<String> {
-        vec![
-            "cursor-default".to_string(),
-            "cursor-auto".to_string(),
-            "cursor-fast".to_string(),
-        ]
-    }
-
-    // -- Lifecycle ---------------------------------------------------------
-
-    async fn spawn(&mut self, config: ProviderConfig) -> Result<(), ProviderAdapterError> {
-        if self.spawned.load(Ordering::Acquire) {
-            return Err(ProviderAdapterError::ConfigError(
-                "Cursor adapter already spawned".to_string(),
-            ));
-        }
-
-        let has_key = config.api_key.is_some() || self.has_api_key();
-        if !has_key {
-            tracing::warn!(
-                provider = PROVIDER_CURSOR,
-                "No Cursor API key found. Set CURSOR_API_KEY env var or pass api_key in config."
-            );
-        }
-
-        self.config = Some(config);
-        self.spawned.store(true, Ordering::Release);
-        self.set_status(ProviderStatus::Idle);
-
-        tracing::info!(
-            provider = PROVIDER_CURSOR,
-            model = %self.cursor_config.model,
-            has_api_key = has_key,
-            "Cursor adapter spawned (process stub)"
-        );
-
-        Ok(())
-    }
-
-    async fn shutdown(&mut self) -> Result<(), ProviderAdapterError> {
-        if !self.spawned.load(Ordering::Acquire) {
-            return Err(ProviderAdapterError::NotSpawned);
-        }
-
-        self.set_status(ProviderStatus::ShuttingDown);
-
-        let sessions = self.sessions.lock().await;
-        for session_id in sessions.keys() {
-            let _ = self.interrupt(session_id).await;
-        }
-        drop(sessions);
-
-        let mut sessions = self.sessions.lock().await;
-        sessions.clear();
-
-        self.spawned.store(false, Ordering::Release);
-        self.set_status(ProviderStatus::Disconnected);
-
-        tracing::info!(provider = PROVIDER_CURSOR, "Cursor adapter shut down");
-        Ok(())
-    }
-
-    async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let sessions = self.sessions.lock().await;
-        if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
-        }
-        tracing::info!(
-            provider = PROVIDER_CURSOR,
-            session_id,
-            "Interrupting session"
-        );
-        Ok(())
-    }
-
-    // -- Session management -------------------------------------------------
-
-    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
-        if !self.spawned.load(Ordering::Acquire) {
-            return Err(ProviderAdapterError::NotSpawned);
-        }
-
-        let session_id = Self::generate_session_id();
-
-        let _ = self.event_tx.send(ProviderEvent::Started {
-            session_id: session_id.clone(),
-        });
-
-        let session = Arc::new(SessionState::new(
-            session_id.clone(),
-            ctx.thread_id,
-            ctx.turn_id,
-            ctx.working_dir,
-        ));
-
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), session);
-        self.set_status(ProviderStatus::Busy);
-
-        tracing::info!(
-            provider = PROVIDER_CURSOR,
-            session_id = %session_id,
-            "Session started"
-        );
-
-        Ok(session_id)
-    }
-
-    async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let sessions = self.sessions.lock().await;
-        if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
-        }
-        tracing::info!(provider = PROVIDER_CURSOR, session_id, "Session resumed");
-        Ok(())
-    }
-
-    async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
-        let mut sessions = self.sessions.lock().await;
-        if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(
-                session_id.to_string(),
-            ));
-        }
-
-        let _ = self.event_tx.send(ProviderEvent::StatusChanged {
-            status: ProviderStatus::Idle,
-        });
-
-        tracing::info!(provider = PROVIDER_CURSOR, session_id, "Session stopped");
-        Ok(())
-    }
-
-    // -- Communication -----------------------------------------------------
-
-    async fn send_request(
-        &self,
-        request: ProviderRequest,
-    ) -> Result<ProviderResponse, ProviderAdapterError> {
-        if !self.spawned.load(Ordering::Acquire) {
-            return Err(ProviderAdapterError::NotSpawned);
-        }
-
-        tracing::debug!(
-            provider = PROVIDER_CURSOR,
-            method = %request.method,
-            id = request.id,
-            "Sending JSON-RPC request to Cursor (stub)"
-        );
-
-        Ok(ProviderResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(request.id),
-            result: Some(serde_json::json!({
-                "status": "ok",
-                "provider": PROVIDER_CURSOR,
-                "stub": true
-            })),
-            error: None,
-        })
-    }
-
-    fn event_stream(&self, session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
-        let rx = self.event_tx.subscribe();
-        let sid = session_id.to_string();
-
-        let stream = async_stream::stream! {
-            let mut rx = rx;
-            while let Ok(event) = rx.recv().await {
-                match &event {
-                    ProviderEvent::Started { session_id } |
-                    ProviderEvent::Token { session_id, .. } |
-                    ProviderEvent::ToolCall { session_id, .. } |
-                    ProviderEvent::ToolResult { session_id, .. } |
-                    ProviderEvent::Completed { session_id, .. } |
-                    ProviderEvent::Error { session_id, .. } => {
-                        if session_id == &sid {
-                            yield Ok(event);
-                        }
-                    }
-                    ProviderEvent::StatusChanged { .. } => {
-                        yield Ok(event);
-                    }
-                }
-            }
-        };
-
-        Ok(Box::pin(stream))
-    }
-
-    // -- Utility -----------------------------------------------------------
-
-    async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
-        if !self.spawned.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-        Ok(self.status() != ProviderStatus::Disconnected && self.status() != ProviderStatus::Error)
-    }
+/// Construct a fresh (un-spawned) Cursor [`AcpProvider`] from the env-configured spec.
+pub fn create() -> AcpProvider {
+    AcpProvider::new(spec())
 }
 
 // ---------------------------------------------------------------------------
@@ -335,152 +79,83 @@ impl ProviderAdapter for CursorAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syncode_core::EntityId;
+    use crate::trait_def::ProviderAdapter;
 
-    fn make_ctx() -> SessionContext {
-        SessionContext {
-            thread_id: EntityId::new(),
-            turn_id: EntityId::new(),
-            working_dir: "/tmp/test-cursor-project".to_string(),
-            system_prompt: Some("Be helpful.".to_string()),
-            user_input: "Fix the bug in main.rs".to_string(),
-            context_files: vec![],
+    #[test]
+    fn build_args_baseline_just_acp() {
+        assert_eq!(build_args(None), vec!["acp".to_string()]);
+    }
+
+    #[test]
+    fn build_args_with_endpoint_inserts_dash_e_before_acp() {
+        assert_eq!(
+            build_args(Some("https://my.cursor.sh")),
+            vec![
+                "-e".to_string(),
+                "https://my.cursor.sh".to_string(),
+                "acp".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_args_ignores_blank_endpoint() {
+        assert_eq!(build_args(Some("   ")), vec!["acp".to_string()]);
+    }
+
+    #[test]
+    fn build_args_tail_is_invariant() {
+        // `-e <ep>` may lead, but `acp` is always the trailing command.
+        for endpoint in [None, Some("https://a.b"), Some("  ")] {
+            let args = build_args(endpoint);
+            assert_eq!(args.last(), Some(&"acp".to_string()), "{args:?}");
         }
     }
 
     #[test]
-    fn cursor_config_defaults() {
-        let config = CursorConfig::default();
-        assert_eq!(config.bin_path, "cursor");
-        assert_eq!(config.model, "cursor-default");
-        assert_eq!(config.base_url, "https://api.cursor.sh");
+    fn spec_with_identity_and_command() {
+        let config = spec_with(None);
+        assert_eq!(config.provider_id, PROVIDER_CURSOR);
+        assert_eq!(config.spec.command, "cursor-agent");
+        assert_eq!(config.spec.args, vec!["acp".to_string()]);
+        assert!(config.capabilities.contains(&ProviderCapability::Streaming));
+        assert!(config.capabilities.contains(&ProviderCapability::ToolUse));
+        assert!(
+            config
+                .capabilities
+                .contains(&ProviderCapability::FileSystem)
+        );
+        assert_eq!(config.available_models, vec!["cursor-default".to_string()]);
+        assert_eq!(config.client_name, "syncode");
     }
 
-    #[tokio::test]
-    async fn cursor_adapter_new() {
-        let adapter = CursorAdapter::new();
-        assert_eq!(adapter.provider_id(), PROVIDER_CURSOR);
-        assert_eq!(adapter.status(), ProviderStatus::Disconnected);
-        assert!(!adapter.spawned.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_spawn_and_shutdown() {
-        let mut adapter = CursorAdapter::new();
-        let config = ProviderConfig {
-            provider_id: PROVIDER_CURSOR.to_string(),
-            model: "cursor-default".to_string(),
-            ..Default::default()
-        };
-
-        assert!(adapter.spawn(config).await.is_ok());
-        assert_eq!(adapter.status(), ProviderStatus::Idle);
-        assert!(adapter.spawned.load(Ordering::Acquire));
-
-        assert!(adapter.shutdown().await.is_ok());
-        assert_eq!(adapter.status(), ProviderStatus::Disconnected);
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_double_spawn_fails() {
-        let mut adapter = CursorAdapter::new();
-        let config = ProviderConfig::default();
-
-        assert!(adapter.spawn(config).await.is_ok());
-        let result = adapter.spawn(ProviderConfig::default()).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("already spawned"));
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_shutdown_not_spawned_fails() {
-        let mut adapter = CursorAdapter::new();
-        let result = adapter.shutdown().await;
-        assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_session_lifecycle() {
-        let mut adapter = CursorAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-
-        let ctx = make_ctx();
-        let session_id = adapter.start_session(ctx).await.unwrap();
-        assert!(session_id.starts_with("cursor-"));
-        assert_eq!(adapter.status(), ProviderStatus::Busy);
-
-        assert!(adapter.resume_session(&session_id).await.is_ok());
-        assert!(adapter.stop_session(&session_id).await.is_ok());
-
-        let result = adapter.stop_session("nonexistent").await;
-        assert!(result.is_err());
-        matches!(
-            result.unwrap_err(),
-            ProviderAdapterError::SessionNotFound(_)
+    #[test]
+    fn spec_with_endpoint_layers_dash_e() {
+        let config = spec_with(Some("https://ep.example"));
+        assert_eq!(
+            config.spec.args,
+            vec![
+                "-e".to_string(),
+                "https://ep.example".to_string(),
+                "acp".to_string()
+            ]
         );
     }
 
-    #[tokio::test]
-    async fn cursor_adapter_session_without_spawn_fails() {
-        let mut adapter = CursorAdapter::new();
-        let result = adapter.start_session(make_ctx()).await;
-        assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
+    #[test]
+    fn spec_acp_command_is_invariant_under_env() {
+        // The trailing `acp` command holds whether or not an env endpoint is set;
+        // the env-reading wrapper is a thin pass-through to `spec_with`.
+        let config = spec();
+        assert_eq!(config.spec.command, "cursor-agent");
+        assert_eq!(config.spec.args.last(), Some(&"acp".to_string()));
+        assert_eq!(config.provider_id, PROVIDER_CURSOR);
     }
 
-    #[tokio::test]
-    async fn cursor_adapter_send_request_echo() {
-        let mut adapter = CursorAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-
-        let req = ProviderRequest::new("initialize", Some(serde_json::json!({"key": "val"})));
-        let resp = adapter.send_request(req).await.unwrap();
-        assert_eq!(resp.jsonrpc, "2.0");
-        assert!(resp.result.is_some());
-        assert!(resp.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_health_check() {
-        let adapter = CursorAdapter::new();
-        assert_eq!(adapter.health_check().await.unwrap(), false);
-
-        let mut adapter = CursorAdapter::new();
-        adapter.spawn(ProviderConfig::default()).await.unwrap();
-        assert_eq!(adapter.health_check().await.unwrap(), true);
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_capabilities() {
-        let adapter = CursorAdapter::new();
-        let caps = adapter.capabilities();
-        assert!(caps.contains(&ProviderCapability::Streaming));
-        assert!(caps.contains(&ProviderCapability::ToolUse));
-        assert!(caps.contains(&ProviderCapability::FileSystem));
-        assert!(caps.contains(&ProviderCapability::CodeExecution));
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_available_models() {
-        let adapter = CursorAdapter::new();
-        let models = adapter.available_models();
-        assert!(!models.is_empty());
-        assert!(models.contains(&"cursor-default".to_string()));
-        assert!(models.contains(&"cursor-auto".to_string()));
-    }
-
-    #[tokio::test]
-    async fn cursor_adapter_with_custom_config() {
-        let cursor_config = CursorConfig {
-            bin_path: "/custom/cursor".to_string(),
-            api_key: Some("test-key".to_string()),
-            base_url: "https://custom.cursor.sh".to_string(),
-            model: "cursor-custom".to_string(),
-        };
-        let adapter = CursorAdapter::with_cursor_config(cursor_config);
-        assert!(adapter.has_api_key());
-        assert_eq!(adapter.provider_id(), PROVIDER_CURSOR);
+    #[test]
+    fn create_builds_acp_provider_with_cursor_identity() {
+        let provider = create();
+        assert_eq!(provider.provider_id(), PROVIDER_CURSOR);
+        assert!(!provider.capabilities().is_empty());
     }
 }
