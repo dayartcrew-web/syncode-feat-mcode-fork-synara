@@ -337,6 +337,18 @@ pub enum Command {
         num_turns: u32,
         removed_turn_ids: Vec<EntityId>,
     },
+    /// `thread.messages.import` — import standalone messages into an existing
+    /// thread. Faithful to mcode (orchestration.ts:1247-1253,
+    /// decider.ts:1430-1457): {threadId, messages}. mcode emits one
+    /// `thread.message-sent` per message with `turnId: null`; syncode instead
+    /// records a single durable [`DomainEvent::ThreadMessagesImported`] summary
+    /// (consistent with handoff/fork import — message-body materialization is
+    /// deferred). The thread's own id is used as the recorded source to signal a
+    /// native/standalone import with no external source thread.
+    ImportMessages {
+        thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+    },
 }
 
 // ─── Decider Errors ──────────────────────────────────────────────
@@ -644,6 +656,10 @@ impl Decider {
                 removed_turn_ids,
                 current_state,
             ),
+            Command::ImportMessages {
+                thread_id,
+                imported_messages,
+            } => Self::decide_import_messages(thread_id, imported_messages, current_state),
         }
     }
 
@@ -1481,6 +1497,26 @@ impl Decider {
             thread_id,
             turn_count,
             reverted_at: Timestamp::now(),
+        }])
+    }
+
+    /// Import standalone messages into an existing thread (mcode
+    /// `thread.messages.import`). Guard: thread must exist. Emits a single
+    /// [`DomainEvent::ThreadMessagesImported`] durable record; the thread's own
+    /// id is used as the source to mark a native import (no external source
+    /// thread). Message-body materialization is deferred, as for handoff/fork.
+    fn decide_import_messages(
+        thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        let count = imported_messages.len() as u32;
+        Ok(vec![DomainEvent::ThreadMessagesImported {
+            thread_id,
+            source_thread_id: thread_id,
+            count,
+            imported_at: Timestamp::now(),
         }])
     }
 
@@ -2635,6 +2671,59 @@ mod tests {
                 message_id: tid,
                 num_turns: 1,
                 removed_turn_ids: vec![],
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn import_messages_success() {
+        let tid = EntityId::new();
+        let msgs = vec![
+            ImportedMessage {
+                source_message_id: EntityId::new(),
+                role: "user".into(),
+                text: "hi".into(),
+            },
+            ImportedMessage {
+                source_message_id: EntityId::new(),
+                role: "assistant".into(),
+                text: "hello".into(),
+            },
+        ];
+        let events = Decider::decide(
+            Command::ImportMessages {
+                thread_id: tid,
+                imported_messages: msgs,
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadMessagesImported {
+                thread_id,
+                source_thread_id,
+                count,
+                ..
+            } => {
+                assert_eq!(*thread_id, tid);
+                // Standalone import records the thread's own id as the source.
+                assert_eq!(*source_thread_id, tid);
+                assert_eq!(*count, 2);
+            }
+            _ => panic!("expected ThreadMessagesImported"),
+        }
+    }
+
+    #[test]
+    fn import_messages_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::ImportMessages {
+                thread_id: tid,
+                imported_messages: vec![],
             },
             None,
         );

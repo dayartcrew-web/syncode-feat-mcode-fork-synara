@@ -237,7 +237,8 @@ impl ProviderCommandReactor {
             | Command::CompleteTurnDiff { .. }
             | Command::CompleteRevert { .. }
             | Command::ConversationRollback { .. }
-            | Command::ConversationRollbackComplete { .. } => Ok(CommandReaction {
+            | Command::ConversationRollbackComplete { .. }
+            | Command::ImportMessages { .. } => Ok(CommandReaction {
                 handled: false,
                 session_id: None,
                 events: vec![],

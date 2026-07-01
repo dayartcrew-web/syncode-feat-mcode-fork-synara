@@ -505,6 +505,23 @@ impl ApplicationService {
             .await
     }
 
+    /// Import standalone messages into an existing thread. Faithful to mcode
+    /// `thread.messages.import` {threadId, messages}. Records a single durable
+    /// import-summary event (message-body materialization is deferred, as for
+    /// handoff/fork import).
+    pub async fn import_messages(
+        &self,
+        thread_id: EntityId,
+        imported_messages: Vec<ImportedMessage>,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::ImportMessages {
+                thread_id,
+                imported_messages,
+            })
+            .await
+    }
+
     /// Respond to a pending provider approval request for a thread. Faithful to
     /// mcode `thread.approval.respond`. Records the response; the provider
     /// dispatch is handled by the command reactor when wired.

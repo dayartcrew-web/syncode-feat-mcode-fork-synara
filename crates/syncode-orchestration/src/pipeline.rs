@@ -796,7 +796,8 @@ impl Orchestrator {
             | Command::CompleteTurnDiff { thread_id, .. }
             | Command::CompleteRevert { thread_id, .. }
             | Command::ConversationRollback { thread_id, .. }
-            | Command::ConversationRollbackComplete { thread_id, .. } => Some(*thread_id),
+            | Command::ConversationRollbackComplete { thread_id, .. }
+            | Command::ImportMessages { thread_id, .. } => Some(*thread_id),
 
             // Turn-level commands
             Command::CompleteTurn { id, .. }
@@ -858,6 +859,7 @@ impl Orchestrator {
             | Command::CompleteRevert { .. }
             | Command::ConversationRollback { .. }
             | Command::ConversationRollbackComplete { .. }
+            | Command::ImportMessages { .. }
             | Command::AppendThreadActivity { .. }
             | Command::AddPinnedMessage { .. }
             | Command::RemovePinnedMessage { .. }
