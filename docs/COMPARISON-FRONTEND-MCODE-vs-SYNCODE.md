@@ -1,6 +1,8 @@
 # Frontend Comparison: MCode (`apps/web`) vs Syncode (`frontend/`)
 
-> ⚠️ **STATUS (2026-06-27) — PLANNING DOC, SUPERSEDED.** Authored as a forward-looking gap analysis/roadmap for the (currently minimal) React+Vite frontend. The backend has since been substantially built — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`.masday/intel/`](../.masday/intel/README.md) for current state. Retained as the original frontend roadmap.
+> ⚠️ **STATUS (2026-07-02) — PLANNING DOC, SUPERSEDED.** Authored as a forward-looking gap analysis/roadmap for the (currently minimal) React+Vite frontend. The backend has since been substantially built — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`.masday/intel/`](../.masday/intel/README.md) for current state. Retained as the original frontend roadmap.
+>
+> ✅ **RECOMMENDED PATH (added 2026-07-02): clone + re-wire.** Rather than building the UI from scratch (the §12 roadmap, ~16-18 weeks), clone MCode's `apps/web` (752 files, production-grade) and **re-wire** its transport to Syncode's Rust endpoints — replace MCode's Effect-RPC-over-WS + Effect-Schema contracts (`@t3tools/contracts`) with Syncode's **plain JSON-RPC-over-WS + ts-rs-generated types**, and swap the Electron `nativeApi` shell for **Tauri v2 IPC**. The Effect runtime is confined to ~15 boundary files (not pervasive across the 752-file tree), so the dominant cost is **contract/type re-mapping**, not the UI — see §14.3. Body below is the original analysis, left intact.
 
 > **Tanggal**: 2026-06-27
 > **Scope**: Perbandingan detail frontend MCode (React + Vite + Electron) → Syncode (React + Vite + Tauri)
@@ -12,8 +14,8 @@
 
 | Dimension | MCode (`apps/web`) | Syncode (`frontend/`) | Gap |
 |-----------|-------------------|----------------------|-----|
-| **Maturity** | Production-grade, 750+ source files | MVP skeleton, 7 source files | 🔴 ~99% |
-| **Components** | ~100+ organized components | 6 basic components | 🔴 ~94% |
+| **Maturity** | Production-grade, 752 source files | MVP skeleton, 36 src files (8 handwritten + 27 ts-rs types) | 🔴 ~95% |
+| **Components** | ~100+ organized components | 5 basic components | 🔴 ~95% |
 | **State Management** | Zustand (15+ stores) + React Query | React useState/useEffect only | 🔴 100% |
 | **Routing** | TanStack Router (file-based, 10+ routes) | None (single page) | 🔴 100% |
 | **UI Library** | shadcn/ui v4 (48 primitives) + CVA + tailwind-merge | None (inline styles) | 🔴 100% |
@@ -32,6 +34,8 @@
 | **Type Safety** | Effect Schema (contracts package) + auto-generated | ts-rs auto-generated (Rust→TS) | 🟢 Comparable |
 
 **Overall Frontend Completeness: ~5% of MCode parity**
+
+> 📌 **Reality check (2026-07-02):** the original "7 source files / 6 components" figures above are stale. `frontend/src` actually holds **36 files**: 8 handwritten (`App.tsx`, `main.tsx`, **5 components**, 2 hooks) + **27 auto-generated `ts-rs` type files** (`EntityId`, `SessionView`, `PushEvent`, `JsonRpcRequestView`, …). Runtime deps are **3** (`react`, `react-dom`, `@tauri-apps/api`). The auto-generated type surface is the one area where Syncode already **exceeds** hand-rolling — it is the natural keystone for the clone + re-wire contracts bridge (§14.3).
 
 ---
 
@@ -598,6 +602,8 @@ DisclosureChevron, DisclosureRegion
 
 ## 12. Implementation Roadmap
 
+> 📌 **Superseded by clone + re-wire (2026-07-02).** This from-scratch roadmap (Phases 0-6, ~16-18 weeks) remains valid as a *fallback* and as a checklist of what the cloned UI must ultimately cover. Under the clone strategy, Phase 0 (foundation/scaffolding) + Phase 1 (state & comms / transport re-wire) are the active work; Phases 2-5 (building chat/terminal/git/nav/kanban UI from nothing) are largely obviated because those components arrive intact from `apps/web`. See §13.2 for revised effort.
+
 ### Phase 0: Foundation (Week 1-2) — Frontend Scaffolding
 
 | # | Task | Priority | Details |
@@ -736,6 +742,8 @@ DisclosureChevron, DisclosureRegion
 | Phase 6: Polish & Test | 8 tasks | 2 weeks | All |
 | **Total** | **69 tasks** | **16-18 weeks** | — |
 
+> 📌 **Revised under clone + re-wire (2026-07-02):** Phase 0 + Phase 1 + transport/contract re-wire ≈ **~3-6 weeks** to a working parity frontend; Phases 2-5 collapse into "integrate & adapt cloned components" (days-to-weeks each, not weeks-to-build). The 16-18 week total applies only to the from-scratch fallback. Dominant risk/cost is the contracts re-mapping (Effect Schema → ts-rs), not UI construction.
+
 ---
 
 ## 14. Recommendations
@@ -762,11 +770,22 @@ DisclosureChevron, DisclosureRegion
 | **Testing** | Vitest + Playwright (MCode) vs Jest + Cypress | ✅ Vitest + Playwright (match MCode) |
 | **CSS** | Tailwind v4 (inline config) vs v3 (config file) | ✅ Tailwind v4 (match MCode) |
 
+> 📌 Under the **clone + re-wire** strategy (§14.3), these decisions are largely *inherited* from MCode rather than re-litigated: the clone brings TanStack Router/Query, Zustand, shadcn/ui, xterm.js, and Lexical with it. The one genuinely new decision is the **transport/contract** choice — and it is forced: Syncode's backend speaks plain JSON-RPC + ts-rs types, so the Effect-RPC/Schema layer must go.
+
 ### 14.3 Potential Optimizations
 
-1. **Port MCode components directly**: Many chat/terminal/git components could be adapted from MCode's React code rather than built from scratch, since both use React 19 + Tailwind.
-2. **Share contracts**: The ts-rs auto-generated types already bridge Rust→TypeScript. Ensure all new RPC methods generate matching types.
-3. **Start with Electron parity**: Match MCode's feature set first, then optimize for Tauri-specific features (smaller bundle, native APIs).
+> ✅ **Adopted as the recommended strategy (2026-07-02) — clone `apps/web` + re-wire.** See banner. Item 1 below is promoted from "optimization" to the primary plan; the from-scratch §12 roadmap becomes the fallback.
+
+1. **Clone MCode's `apps/web` wholesale and re-wire (RECOMMENDED).** Both stacks share React 19 + (after adoption) Tailwind v4, so the production UI — chat, terminal (xterm.js + 6 addons), git/diff (@pierre/diffs), kanban (@dnd-kit), settings, markdown (react-markdown + KaTeX), composer (Lexical) — ports with the components intact. The re-wire is the real work:
+   - **Transport/runtime (Effect RPC → JSON-RPC):** the `effect` runtime is confined to **~15 boundary files** (`wsTransport.ts`, RPC hooks, a handful of components) — *not* pervasive across the 752-file tree. Rewrite these to Syncode's plain JSON-RPC-over-WS and strip the Effect runtime.
+   - **Contracts (Effect Schema → ts-rs):** **333 files** import `@t3tools/contracts`, but overwhelmingly for *type-level* `Schema.*` definitions (the DTO surface). Generate a `frontend/src/contracts/` from Syncode's ts-rs output that mirrors that export surface; runtime-Schema use is minimal (`decodeSync` ×5, `fromJsonString` ×6, `is` ×9), so most references are a type-import remap. **This is the dominant cost and the key risk** — Syncode's domain model diverges from MCode (Turn/Message/Activity are first-class aggregates here; MCode only has project + thread), so a reconciliation/adaptation layer is needed where shapes don't match 1:1.
+   - **Shell (Electron → Tauri):** replace `nativeApi.ts` / `wsNativeApi.ts` (Electron bridge) with `@tauri-apps/api` `invoke` IPC.
+   - **Monorepo flatten:** MCode is a Turborepo workspace (`apps/web` + `@t3tools/contracts` + `@t3tools/shared`); Syncode is a single `frontend/` folder — vendor/flatten and drop the workspace deps.
+   - **Build config:** bring Vite 8, `@tailwindcss/vite`, TanStack router-plugin, `babel-plugin-react-compiler` (or drop).
+   - **Risks:** schema-shape divergence (biggest — mitigate by maximizing contracts-bridge overlap); confirm MCode's LICENSE (same author lineage `synara → mcode → syncode`, dayartcrew-web, so internally fine, but verify).
+   - **Effort:** roughly Phase 0 + Phase 1 of §12 plus the re-wire — **~3-6 weeks** for working parity, vs **16-18 weeks** from scratch. UI build (original Phases 2-5) is largely obviated.
+2. **Share contracts (still applies):** the ts-rs auto-generated types are the contracts-bridge substrate above — ensure every RPC method + push channel generates a matching type so the 333-file remap stays mechanical.
+3. **Start with Electron parity:** match MCode's feature set first via the clone, then optimize for Tauri-specific features (smaller bundle, native APIs) — unchanged.
 
 ---
 
