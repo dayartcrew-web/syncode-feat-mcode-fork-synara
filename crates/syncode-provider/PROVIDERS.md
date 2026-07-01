@@ -14,7 +14,7 @@ This document records which providers are **real** (functional) versus
 | anthropic | ✅ Real (HTTP) | reqwest POST | `adapters::AnthropicAdapter` |
 | openai | ✅ Real (HTTP) | reqwest POST | `adapters::OpenAIAdapter` |
 | claude | 🟡 Stub | — | `adapters::ClaudeAdapter` |
-| codex | 🟡 Stub | — | `adapters::CodexAdapter` |
+| codex | ✅ Real (app-server) | stdio NDJSON JSON-RPC | `adapters::CodexAdapter` |
 | opencode | 🟡 Stub | — | `adapters::OpenCodeAdapter` |
 | kilo | 🟡 Stub | — | `adapters::KiloAdapter` |
 | pi | 🟡 Stub | — | `adapters::PiAdapter` |
@@ -51,7 +51,36 @@ unit tests using an in-process duplex fake agent (no real binary needed).
 > real-binary E2E validation is required to confirm interop and surface any
 > provider-specific handling.
 
-## Deferred providers (claude, codex, opencode, kilo, pi)
+## Real app-server provider (codex)
+
+The OpenAI Codex CLI exposes a thread/turn JSON-RPC app-server distinct from
+ACP. It shares the same protocol-agnostic foundation —
+[`JsonRpcTransport`](src/subprocess.rs) — as the ACP providers, but speaks
+Codex's own surface via [`CodexAppServerClient`](src/codex_app_server.rs),
+wrapped by [`CodexAdapter`](src/adapters/codex.rs):
+
+| Provider | Spawn form | Optional flags (config) |
+|----------|------------|-------------------------|
+| codex | `codex app-server` | `CodexConfig.full_auto`, `CodexConfig.sandbox` |
+
+Lifecycle mapping (trait → Codex): `spawn` = launch + `initialize` (no protocol
+version; `capabilities.experimentalApi`) + `initialized`; `start_session` =
+`thread/start`; `send_request` = `turn/start` (streams `item/*` deltas →
+`ProviderEvent`, ends on `turn/completed`/`turn/aborted`); `interrupt` =
+`turn/interrupt`; `health_check` = child liveness; `shutdown` = kill child.
+
+By default `CodexConfig.full_auto` runs with `approvalPolicy: "never"` +
+`sandbox: "workspace-write"` and auto-approves every command/file-change approval
+Codex requests mid-turn, so a headless adapter never deadlocks on a prompt.
+
+### Verifying with real binaries
+
+Codex spawn requires the `codex` CLI installed, so it is gated behind
+`SYNICODE_CODEX_E2E=1` in `tests/codex_e2e.rs` (skips without the gate). The full
+protocol lifecycle is covered by `codex_app_server` / `adapters::codex` unit
+tests using an in-process duplex fake server (no real binary needed).
+
+## Deferred providers (claude, opencode, kilo, pi)
 
 These remain as **non-functional stubs** (`spawn` sets flags; `send_request`
 echoes `{"stub": true}`). They are **not feasible** to port faithfully to Rust
@@ -61,10 +90,9 @@ Rust equivalent — the ACP foundation does not help them.
 | Provider | mcode mechanism | Blocker |
 |----------|-----------------|---------|
 | claude | in-process `@anthropic-ai/claude-agent-sdk` (AsyncIterable) | No Rust SDK; spawns the `claude` CLI internally |
-| codex | HTTP/WebSocket to a managed Codex app-server (SSE+JSON) | No public Rust client for the app-server protocol |
 | opencode | HTTP/SSE to a spawned `opencode` app-server (OpenCode SDK) | TS-only SDK; app-server contract undocumented for Rust |
 | kilo | shares the OpenCode adapter (same SDK/path) | Same as opencode |
-| pi | in-process `@earendil-works/pi-coding-agent` SDK | No Rust SDK |
+| pi | in-process `@earendil-works/pi-coding-agent` SDK | No Rust SDK; in-process TS SDK (no subprocess/HTTP wire protocol, native Node dep) — see `.masday/research/custom-providers.md` §5 |
 
 Restoring any of these requires either an official Rust client or a faithful
 reimplementation of the SDK/app-server contract, which is out of scope for this

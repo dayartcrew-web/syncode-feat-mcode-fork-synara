@@ -1,7 +1,27 @@
-//! Pi adapter — Pi AI coding assistant
+//! Pi adapter — **non-functional stub** (infeasible to port to Rust).
 //!
-//! Pi adapter. Spawns `pi` CLI and communicates
-//! via JSON-RPC over stdin/stdout.
+//! Unlike the real adapters (ACP `cursor`/`grok`/`gemini`, app-server `codex`,
+//! HTTP `anthropic`/`openai`), Pi has **no wire protocol to drive**: mcode runs
+//! Pi entirely in-process via the TypeScript SDK
+//! `@earendil-works/pi-coding-agent` (`SessionManager::create`,
+//! `createAgentSessionRuntime`, `session.subscribe/prompt/...`). There is no
+//! `pi` CLI, no subprocess, and no HTTP server to spawn or connect to.
+//!
+//! # Why this stays a stub
+//!
+//! - **In-process TS SDK only.** The agent loop (model registry, tool
+//!   dispatcher, extension loader, TUI framework) lives inside the Node process
+//!   — a Rust port would mean reimplementing the entire SDK.
+//! - **Native Node dependency** (a clipboard module) makes the SDK impossible to
+//!   `require()` from a non-Node host.
+//! - **No public spec.** Even mcode no-ops ~15 `ExtensionUIContext` methods,
+//!   assuming a TUI mcode itself does not provide.
+//!
+//! `PiAdapter` therefore keeps its trait shape and config (`PiConfig`) so the
+//! registry can list it, but `send_request` echoes `{"stub": true}` — it cannot
+//! produce real output. Pi will remain a stub until the upstream project ships
+//! an official Rust SDK or an HTTP/subprocess server mode. See the feasibility
+//! verdict in `.masday/research/custom-providers.md` §5.
 
 use std::collections::HashMap;
 use std::sync::Arc;
