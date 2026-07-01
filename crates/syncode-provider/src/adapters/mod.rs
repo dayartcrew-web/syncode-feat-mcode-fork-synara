@@ -7,8 +7,8 @@ pub mod cursor;
 pub mod gemini;
 pub mod grok;
 pub mod kilo;
-pub mod opencode;
 pub mod openai;
+pub mod opencode;
 pub mod pi;
 
 // Re-exports
@@ -26,9 +26,9 @@ pub use grok::GrokAdapter;
 pub use grok::GrokConfig;
 pub use kilo::KiloAdapter;
 pub use kilo::KiloConfig;
-pub use opencode::OpenCodeAdapter;
-pub use opencode::OpenCodeConfig;
 pub use openai::OpenAIAdapter;
 pub use openai::OpenAIConfig;
+pub use opencode::OpenCodeAdapter;
+pub use opencode::OpenCodeConfig;
 pub use pi::PiAdapter;
 pub use pi::PiConfig;

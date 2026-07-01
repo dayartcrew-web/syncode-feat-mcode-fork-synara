@@ -4,10 +4,10 @@
 //! via JSON-RPC over stdin/stdout.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use super::super::trait_def::*;
 use crate::session::SessionState;
@@ -78,8 +78,7 @@ impl PiAdapter {
 
     /// Check if the Pi API key is configured
     pub fn has_api_key(&self) -> bool {
-        self.pi_config.api_key.is_some()
-            || std::env::var("PI_API_KEY").is_ok()
+        self.pi_config.api_key.is_some() || std::env::var("PI_API_KEY").is_ok()
     }
 
     fn set_status(&self, status: ProviderStatus) {
@@ -122,10 +121,7 @@ impl ProviderAdapter for PiAdapter {
     }
 
     fn available_models(&self) -> Vec<String> {
-        vec![
-            "pi-3".to_string(),
-            "pi-3-turbo".to_string(),
-        ]
+        vec!["pi-3".to_string(), "pi-3-turbo".to_string()]
     }
 
     // -- Lifecycle ---------------------------------------------------------
@@ -185,7 +181,9 @@ impl ProviderAdapter for PiAdapter {
     async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
         tracing::info!(provider = PROVIDER_PI, session_id, "Interrupting session");
         Ok(())
@@ -193,10 +191,7 @@ impl ProviderAdapter for PiAdapter {
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -214,7 +209,10 @@ impl ProviderAdapter for PiAdapter {
             ctx.working_dir,
         ));
 
-        self.sessions.lock().await.insert(session_id.clone(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
         self.set_status(ProviderStatus::Busy);
 
         tracing::info!(
@@ -229,7 +227,9 @@ impl ProviderAdapter for PiAdapter {
     async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
         tracing::info!(provider = PROVIDER_PI, session_id, "Session resumed");
         Ok(())
@@ -238,7 +238,9 @@ impl ProviderAdapter for PiAdapter {
     async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let mut sessions = self.sessions.lock().await;
         if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
 
         let _ = self.event_tx.send(ProviderEvent::StatusChanged {
@@ -312,8 +314,7 @@ impl ProviderAdapter for PiAdapter {
         if !self.spawned.load(Ordering::Acquire) {
             return Ok(false);
         }
-        Ok(self.status() != ProviderStatus::Disconnected
-            && self.status() != ProviderStatus::Error)
+        Ok(self.status() != ProviderStatus::Disconnected && self.status() != ProviderStatus::Error)
     }
 }
 
@@ -401,7 +402,10 @@ mod tests {
 
         let result = adapter.stop_session("nonexistent").await;
         assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::SessionNotFound(_));
+        matches!(
+            result.unwrap_err(),
+            ProviderAdapterError::SessionNotFound(_)
+        );
     }
 
     #[tokio::test]

@@ -23,12 +23,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::Child;
-use tokio::sync::{oneshot, Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::trait_def::{ProviderError, ProviderRequest, ProviderResponse, ProviderAdapterError};
+use crate::trait_def::{ProviderAdapterError, ProviderError, ProviderRequest, ProviderResponse};
 
 /// Default per-request timeout for [`JsonRpcTransport::send_request`].
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,7 +49,12 @@ pub struct SubprocessSpec {
 
 impl SubprocessSpec {
     pub fn new(command: impl Into<String>) -> Self {
-        Self { command: command.into(), args: Vec::new(), cwd: None, env: Vec::new() }
+        Self {
+            command: command.into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -168,13 +173,21 @@ impl JsonRpcTransport {
             .await
     }
 
-    /// As [`send_request`](Self::send_request) with a caller-supplied timeout.
-    pub async fn send_request_with_timeout(
+    /// Submit a JSON-RPC request WITHOUT awaiting the response.
+    ///
+    /// Allocates an id, registers a pending-response slot, and writes the request
+    /// immediately. Returns the request id and a [`oneshot::Receiver`] that
+    /// resolves with the correlated response (routed by the background reader).
+    ///
+    /// This is the primitive callers need when they must await a response
+    /// *concurrently* with draining interleaved notifications on the same
+    /// transport — e.g. ACP `session/prompt`, where the agent streams
+    /// `session/update` notifications while the prompt response is pending.
+    pub async fn submit_request(
         &self,
         method: &str,
         params: Option<serde_json::Value>,
-        timeout: Duration,
-    ) -> Result<ProviderResponse, ProviderAdapterError> {
+    ) -> Result<(u64, oneshot::Receiver<ProviderResponse>), ProviderAdapterError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -193,7 +206,17 @@ impl JsonRpcTransport {
             writer.write_all(b"\n").await?;
             writer.flush().await?;
         }
+        Ok((id, rx))
+    }
 
+    /// As [`send_request`](Self::send_request) with a caller-supplied timeout.
+    pub async fn send_request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<ProviderResponse, ProviderAdapterError> {
+        let (id, rx) = self.submit_request(method, params).await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => {
@@ -221,10 +244,7 @@ impl JsonRpcTransport {
         let mut envelope = serde_json::Map::new();
         envelope.insert("jsonrpc".into(), "2.0".into());
         envelope.insert("method".into(), method.into());
-        envelope.insert(
-            "params".into(),
-            params.unwrap_or(serde_json::Value::Null),
-        );
+        envelope.insert("params".into(), params.unwrap_or(serde_json::Value::Null));
         let serialized = serde_json::to_string(&serde_json::Value::Object(envelope))?;
 
         let mut writer = self.writer.lock().await;
@@ -316,9 +336,16 @@ async fn read_loop(
                     .and_then(|m| m.as_str())
                     .unwrap_or("")
                     .to_string();
-                let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                let params = value
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 if incoming_tx
-                    .send(IncomingMessage { id: Some(id), method, params })
+                    .send(IncomingMessage {
+                        id: Some(id),
+                        method,
+                        params,
+                    })
                     .await
                     .is_err()
                 {
@@ -342,9 +369,16 @@ async fn read_loop(
                 .and_then(|m| m.as_str())
                 .unwrap_or("")
                 .to_string();
-            let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let params = value
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             if incoming_tx
-                .send(IncomingMessage { id: None, method, params })
+                .send(IncomingMessage {
+                    id: None,
+                    method,
+                    params,
+                })
                 .await
                 .is_err()
             {
@@ -427,7 +461,10 @@ mod tests {
                 let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
                 let id = req["id"].as_u64().unwrap();
                 let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": id });
-                peer_writer.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+                peer_writer
+                    .write_all(format!("{resp}\n").as_bytes())
+                    .await
+                    .unwrap();
                 peer_writer.flush().await.unwrap();
             }
         });
@@ -456,7 +493,9 @@ mod tests {
         let (transport, mut incoming, _peer_reader, mut peer_writer) = harness();
 
         peer_writer
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"x\":1}}\n")
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"x\":1}}\n",
+            )
             .await
             .unwrap();
         peer_writer.flush().await.unwrap();
@@ -499,7 +538,10 @@ mod tests {
             .send_request_with_timeout("noop", None, Duration::from_millis(75))
             .await
             .expect_err("should time out");
-        assert!(matches!(err, ProviderAdapterError::Timeout(_)), "got {err:?}");
+        assert!(
+            matches!(err, ProviderAdapterError::Timeout(_)),
+            "got {err:?}"
+        );
         // Pending entry must be cleaned up.
         assert!(transport.pending.lock().await.is_empty());
         transport.shutdown().await.unwrap();

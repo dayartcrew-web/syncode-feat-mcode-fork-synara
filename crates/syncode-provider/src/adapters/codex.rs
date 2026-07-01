@@ -5,10 +5,10 @@
 //! all other adapters follow.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use super::super::trait_def::*;
 use crate::session::SessionState;
@@ -171,19 +171,22 @@ impl ProviderAdapter for CodexAdapter {
     async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
-        tracing::info!(provider = PROVIDER_CODEX, session_id, "Interrupting session");
+        tracing::info!(
+            provider = PROVIDER_CODEX,
+            session_id,
+            "Interrupting session"
+        );
         // In real implementation: send SIGINT to subprocess
         Ok(())
     }
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -202,7 +205,10 @@ impl ProviderAdapter for CodexAdapter {
             ctx.working_dir,
         ));
 
-        self.sessions.lock().await.insert(session_id.clone(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
         self.set_status(ProviderStatus::Busy);
 
         tracing::info!(
@@ -219,7 +225,9 @@ impl ProviderAdapter for CodexAdapter {
     async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
         tracing::info!(provider = PROVIDER_CODEX, session_id, "Session resumed");
         Ok(())
@@ -228,7 +236,9 @@ impl ProviderAdapter for CodexAdapter {
     async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let mut sessions = self.sessions.lock().await;
         if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
 
         // Broadcast completion
@@ -397,7 +407,10 @@ mod tests {
         // Stopping non-existent session should fail
         let result = adapter.stop_session("nonexistent").await;
         assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::SessionNotFound(_));
+        matches!(
+            result.unwrap_err(),
+            ProviderAdapterError::SessionNotFound(_)
+        );
     }
 
     #[tokio::test]

@@ -7,15 +7,15 @@
 //! start, resume, interrupt, stop — with state validation at each transition.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use syncode_core::EntityId;
 use tokio::sync::RwLock;
 
-use crate::trait_def::*;
 use crate::registry::SharedAdapter;
+use crate::trait_def::*;
 
 // ---------------------------------------------------------------------------
 // Session state machine
@@ -29,9 +29,25 @@ use crate::registry::SharedAdapter;
 /// Pending → Processing → Errored
 /// Any active → Interrupted (user cancel)
 static VALID_TRANSITIONS: &[(SessionStateStatus, &[SessionStateStatus])] = &[
-    (SessionStateStatus::Pending, &[SessionStateStatus::Processing]),
-    (SessionStateStatus::Processing, &[SessionStateStatus::Completed, SessionStateStatus::Interrupted, SessionStateStatus::Errored]),
-    (SessionStateStatus::Interrupted, &[SessionStateStatus::Processing, SessionStateStatus::Completed]),
+    (
+        SessionStateStatus::Pending,
+        &[SessionStateStatus::Processing],
+    ),
+    (
+        SessionStateStatus::Processing,
+        &[
+            SessionStateStatus::Completed,
+            SessionStateStatus::Interrupted,
+            SessionStateStatus::Errored,
+        ],
+    ),
+    (
+        SessionStateStatus::Interrupted,
+        &[
+            SessionStateStatus::Processing,
+            SessionStateStatus::Completed,
+        ],
+    ),
 ];
 
 /// State machine for a provider session
@@ -86,12 +102,7 @@ impl std::fmt::Debug for SessionState {
 
 impl SessionState {
     /// Create a new session state
-    pub fn new(
-        id: String,
-        thread_id: EntityId,
-        turn_id: EntityId,
-        working_dir: String,
-    ) -> Self {
+    pub fn new(id: String, thread_id: EntityId, turn_id: EntityId, working_dir: String) -> Self {
         Self {
             id,
             thread_id,
@@ -221,7 +232,8 @@ impl SessionManager {
             ctx.turn_id,
             ctx.working_dir,
         ));
-        session.transition(SessionStateStatus::Processing)
+        session
+            .transition(SessionStateStatus::Processing)
             .map_err(|e| ProviderAdapterError::Internal(e.to_string()))?;
 
         // Track the session
@@ -257,11 +269,14 @@ impl SessionManager {
         adapter: &SharedAdapter,
         session_id: &str,
     ) -> Result<(), ProviderAdapterError> {
-        let session = self.get_session(session_id).await
+        let session = self
+            .get_session(session_id)
+            .await
             .ok_or_else(|| ProviderAdapterError::SessionNotFound(session_id.to_string()))?;
 
         // Validate transition: Interrupted → Processing
-        session.transition(SessionStateStatus::Processing)
+        session
+            .transition(SessionStateStatus::Processing)
             .map_err(|e| ProviderAdapterError::Internal(e.to_string()))?;
 
         let mut guard = adapter.write().await;
@@ -274,18 +289,25 @@ impl SessionManager {
         adapter: &SharedAdapter,
         session_id: &str,
     ) -> Result<(), ProviderAdapterError> {
-        let session = self.get_session(session_id).await
+        let session = self
+            .get_session(session_id)
+            .await
             .ok_or_else(|| ProviderAdapterError::SessionNotFound(session_id.to_string()))?;
 
         // Any active state → Interrupted
         let current = session.status();
-        if current == SessionStateStatus::Pending || current == SessionStateStatus::Completed || current == SessionStateStatus::Errored {
-            return Err(ProviderAdapterError::Internal(
-                format!("Cannot interrupt session in {:?} state", current)
-            ));
+        if current == SessionStateStatus::Pending
+            || current == SessionStateStatus::Completed
+            || current == SessionStateStatus::Errored
+        {
+            return Err(ProviderAdapterError::Internal(format!(
+                "Cannot interrupt session in {:?} state",
+                current
+            )));
         }
 
-        session.transition(SessionStateStatus::Interrupted)
+        session
+            .transition(SessionStateStatus::Interrupted)
             .map_err(|e| ProviderAdapterError::Internal(e.to_string()))?;
 
         let guard = adapter.read().await;
@@ -298,10 +320,13 @@ impl SessionManager {
         adapter: &SharedAdapter,
         session_id: &str,
     ) -> Result<(), ProviderAdapterError> {
-        let session = self.get_session(session_id).await
+        let session = self
+            .get_session(session_id)
+            .await
             .ok_or_else(|| ProviderAdapterError::SessionNotFound(session_id.to_string()))?;
 
-        session.transition(SessionStateStatus::Completed)
+        session
+            .transition(SessionStateStatus::Completed)
             .map_err(|e| ProviderAdapterError::Internal(e.to_string()))?;
 
         let mut guard = adapter.write().await;
@@ -314,7 +339,9 @@ impl SessionManager {
         adapter: &SharedAdapter,
         session_id: &str,
     ) -> Result<(), ProviderAdapterError> {
-        let session = self.get_session(session_id).await
+        let session = self
+            .get_session(session_id)
+            .await
             .ok_or_else(|| ProviderAdapterError::SessionNotFound(session_id.to_string()))?;
 
         session.deactivate();
@@ -357,7 +384,11 @@ impl SessionManager {
         let sessions = self.sessions.read().await;
         sessions
             .iter()
-            .filter(|(_, s)| s.is_active() && s.status() != SessionStateStatus::Completed && s.status() != SessionStateStatus::Errored)
+            .filter(|(_, s)| {
+                s.is_active()
+                    && s.status() != SessionStateStatus::Completed
+                    && s.status() != SessionStateStatus::Errored
+            })
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -524,24 +555,39 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ProviderAdapter for MockSessionAdapter {
-        fn provider_id(&self) -> &str { "mock-session" }
-        fn capabilities(&self) -> Vec<ProviderCapability> { vec![] }
-        fn status(&self) -> ProviderStatus { ProviderStatus::Idle }
-        fn available_models(&self) -> Vec<String> { vec!["mock".to_string()] }
+        fn provider_id(&self) -> &str {
+            "mock-session"
+        }
+        fn capabilities(&self) -> Vec<ProviderCapability> {
+            vec![]
+        }
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus::Idle
+        }
+        fn available_models(&self) -> Vec<String> {
+            vec!["mock".to_string()]
+        }
 
         async fn spawn(&mut self, _config: ProviderConfig) -> Result<(), ProviderAdapterError> {
-            self.spawned.store(true, std::sync::atomic::Ordering::Release);
+            self.spawned
+                .store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         }
 
         async fn shutdown(&mut self) -> Result<(), ProviderAdapterError> {
-            self.spawned.store(false, std::sync::atomic::Ordering::Release);
+            self.spawned
+                .store(false, std::sync::atomic::Ordering::Release);
             Ok(())
         }
 
-        async fn interrupt(&self, _session_id: &str) -> Result<(), ProviderAdapterError> { Ok(()) }
+        async fn interrupt(&self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
 
-        async fn start_session(&mut self, _ctx: SessionContext) -> Result<String, ProviderAdapterError> {
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, ProviderAdapterError> {
             let sid = format!("mock-{}", uuid::Uuid::new_v4().hyphenated());
             self.sessions.lock().unwrap().push(sid.clone());
             Ok(sid)
@@ -550,7 +596,9 @@ mod tests {
         async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
             let sessions = self.sessions.lock().unwrap();
             if !sessions.contains(&session_id.to_string()) {
-                return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+                return Err(ProviderAdapterError::SessionNotFound(
+                    session_id.to_string(),
+                ));
             }
             Ok(())
         }
@@ -560,12 +608,17 @@ mod tests {
             if let Some(pos) = sessions.iter().position(|s| s == session_id) {
                 sessions.remove(pos);
             } else {
-                return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+                return Err(ProviderAdapterError::SessionNotFound(
+                    session_id.to_string(),
+                ));
             }
             Ok(())
         }
 
-        async fn send_request(&self, _request: ProviderRequest) -> Result<ProviderResponse, ProviderAdapterError> {
+        async fn send_request(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<ProviderResponse, ProviderAdapterError> {
             Ok(ProviderResponse {
                 jsonrpc: "2.0".to_string(),
                 id: Some(1),
@@ -578,7 +631,9 @@ mod tests {
             Ok(Box::pin(tokio_stream::empty()))
         }
 
-        async fn health_check(&self) -> Result<bool, ProviderAdapterError> { Ok(true) }
+        async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
+            Ok(true)
+        }
     }
 
     fn make_shared_mock() -> SharedAdapter {
@@ -694,8 +749,14 @@ mod tests {
         let mgr = SessionManager::new();
         let adapter = make_shared_mock();
 
-        let s1 = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
-        let s2 = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let s1 = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
+        let s2 = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
 
         assert_eq!(mgr.list_active_sessions().await.len(), 2);
 

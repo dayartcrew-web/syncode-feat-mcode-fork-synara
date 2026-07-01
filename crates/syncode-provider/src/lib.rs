@@ -9,8 +9,10 @@
 //! - `session` — `SessionState` tracking per-turn lifecycle
 //! - `registry` — Provider discovery, configuration, status aggregation
 //! - `subprocess` — NDJSON JSON-RPC subprocess transport (foundation for ACP providers)
+//! - `acp` — ACP (Agent Client Protocol) client over the subprocess transport
 //! - `adapters` — Per-provider implementations (Codex is the reference)
 
+pub mod acp;
 pub mod adapters;
 pub mod registry;
 pub mod session;
@@ -18,11 +20,12 @@ pub mod subprocess;
 pub mod trait_def;
 
 // Re-exports for convenience
-pub use trait_def::{
-    ProviderAdapter, ProviderAdapterError, ProviderCapability, ProviderConfig,
-    ProviderError, ProviderEvent, ProviderId, ProviderRequest, ProviderResponse,
-    ProviderStatus, ProviderStream, SessionContext, UsageInfo,
-    PROVIDER_ANTHROPIC, PROVIDER_CLAUDE, PROVIDER_CODEX, PROVIDER_CURSOR, PROVIDER_GEMINI,
-    PROVIDER_GROK, PROVIDER_KILO, PROVIDER_OPENAI, PROVIDER_OPENCODE, PROVIDER_PI, ALL_PROVIDERS,
-};
+pub use acp::{AcpClient, PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, PromptResult};
 pub use session::{SessionManager, SessionState, SessionStateStatus, SessionTransitionError};
+pub use trait_def::{
+    ALL_PROVIDERS, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE, PROVIDER_CODEX, PROVIDER_CURSOR,
+    PROVIDER_GEMINI, PROVIDER_GROK, PROVIDER_KILO, PROVIDER_OPENAI, PROVIDER_OPENCODE, PROVIDER_PI,
+    ProviderAdapter, ProviderAdapterError, ProviderCapability, ProviderConfig, ProviderError,
+    ProviderEvent, ProviderId, ProviderRequest, ProviderResponse, ProviderStatus, ProviderStream,
+    SessionContext, UsageInfo,
+};

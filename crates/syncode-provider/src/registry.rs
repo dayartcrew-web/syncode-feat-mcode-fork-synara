@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::trait_def::*;
@@ -121,11 +121,14 @@ impl ProviderRegistry {
     pub async fn spawn_all(&self, configs: &HashMap<String, ProviderConfig>) -> Vec<SpawnResult> {
         let mut results = Vec::new();
         for (provider_id, adapter) in &self.adapters {
-            let config = configs.get(provider_id).cloned().unwrap_or_else(|| ProviderConfig {
-                provider_id: provider_id.clone(),
-                model: "default".to_string(),
-                ..ProviderConfig::default()
-            });
+            let config = configs
+                .get(provider_id)
+                .cloned()
+                .unwrap_or_else(|| ProviderConfig {
+                    provider_id: provider_id.clone(),
+                    model: "default".to_string(),
+                    ..ProviderConfig::default()
+                });
             let mut guard = adapter.write().await;
             match guard.spawn(config).await {
                 Ok(()) => {
@@ -278,12 +281,14 @@ mod tests {
         }
 
         async fn spawn(&mut self, _config: ProviderConfig) -> Result<(), ProviderAdapterError> {
-            self.spawned.store(true, std::sync::atomic::Ordering::Release);
+            self.spawned
+                .store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         }
 
         async fn shutdown(&mut self) -> Result<(), ProviderAdapterError> {
-            self.spawned.store(false, std::sync::atomic::Ordering::Release);
+            self.spawned
+                .store(false, std::sync::atomic::Ordering::Release);
             Ok(())
         }
 
@@ -291,7 +296,10 @@ mod tests {
             Ok(())
         }
 
-        async fn start_session(&mut self, _ctx: SessionContext) -> Result<String, ProviderAdapterError> {
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, ProviderAdapterError> {
             Ok("mock-session".to_string())
         }
 
@@ -303,7 +311,10 @@ mod tests {
             Ok(())
         }
 
-        async fn send_request(&self, _request: ProviderRequest) -> Result<ProviderResponse, ProviderAdapterError> {
+        async fn send_request(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<ProviderResponse, ProviderAdapterError> {
             Ok(ProviderResponse {
                 jsonrpc: "2.0".to_string(),
                 id: Some(1),

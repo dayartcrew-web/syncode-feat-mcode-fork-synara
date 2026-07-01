@@ -169,7 +169,11 @@ pub enum ProviderEvent {
         usage: Option<UsageInfo>,
     },
     /// Provider reported an error
-    Error { session_id: String, message: String, code: Option<i64> },
+    Error {
+        session_id: String,
+        message: String,
+        code: Option<i64>,
+    },
     /// Provider status change (e.g., idle, busy, disconnected)
     StatusChanged { status: ProviderStatus },
 }
@@ -294,22 +298,13 @@ pub trait ProviderAdapter: Send + Sync {
 
     /// Start a new session for a given turn context.
     /// Returns a session ID that the adapter uses to correlate events.
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError>;
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError>;
 
     /// Resume an existing session (e.g., after a pause).
-    async fn resume_session(
-        &mut self,
-        session_id: &str,
-    ) -> Result<(), ProviderAdapterError>;
+    async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError>;
 
     /// Stop/cancel a session.
-    async fn stop_session(
-        &mut self,
-        session_id: &str,
-    ) -> Result<(), ProviderAdapterError>;
+    async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError>;
 
     // -- Communication -----------------------------------------------------
 
@@ -444,7 +439,8 @@ mod tests {
 
     #[test]
     fn provider_response_error() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}"#;
         let resp: ProviderResponse = serde_json::from_str(json).unwrap();
         assert!(resp.result.is_none());
         let err = resp.error.unwrap();
@@ -455,7 +451,9 @@ mod tests {
     #[test]
     fn provider_event_serialization_roundtrip() {
         let events = vec![
-            ProviderEvent::Started { session_id: "sess-1".to_string() },
+            ProviderEvent::Started {
+                session_id: "sess-1".to_string(),
+            },
             ProviderEvent::Token {
                 session_id: "sess-1".to_string(),
                 content: "hello".to_string(),
@@ -474,7 +472,9 @@ mod tests {
                     total_tokens: 150,
                 }),
             },
-            ProviderEvent::StatusChanged { status: ProviderStatus::Busy },
+            ProviderEvent::StatusChanged {
+                status: ProviderStatus::Busy,
+            },
         ];
 
         for event in events {

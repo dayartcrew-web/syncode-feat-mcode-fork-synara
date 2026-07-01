@@ -6,10 +6,10 @@
 //! Configuration requires an API key (via CLAUDE_API_KEY env var or ProviderConfig).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use super::super::trait_def::*;
 use crate::session::SessionState;
@@ -83,8 +83,7 @@ impl ClaudeAdapter {
 
     /// Check if the Claude API key is configured
     pub fn has_api_key(&self) -> bool {
-        self.claude_config.api_key.is_some()
-            || std::env::var("CLAUDE_API_KEY").is_ok()
+        self.claude_config.api_key.is_some() || std::env::var("CLAUDE_API_KEY").is_ok()
     }
 
     fn set_status(&self, status: ProviderStatus) {
@@ -191,19 +190,22 @@ impl ProviderAdapter for ClaudeAdapter {
     async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
-        tracing::info!(provider = PROVIDER_CLAUDE, session_id, "Interrupting session");
+        tracing::info!(
+            provider = PROVIDER_CLAUDE,
+            session_id,
+            "Interrupting session"
+        );
         // In real implementation: send SIGINT to subprocess
         Ok(())
     }
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -222,7 +224,10 @@ impl ProviderAdapter for ClaudeAdapter {
             ctx.working_dir,
         ));
 
-        self.sessions.lock().await.insert(session_id.clone(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
         self.set_status(ProviderStatus::Busy);
 
         tracing::info!(
@@ -239,7 +244,9 @@ impl ProviderAdapter for ClaudeAdapter {
     async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
         tracing::info!(provider = PROVIDER_CLAUDE, session_id, "Session resumed");
         Ok(())
@@ -248,7 +255,9 @@ impl ProviderAdapter for ClaudeAdapter {
     async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let mut sessions = self.sessions.lock().await;
         if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
 
         // Broadcast status change
@@ -330,8 +339,7 @@ impl ProviderAdapter for ClaudeAdapter {
             return Ok(false);
         }
         // In real implementation: check if subprocess is still running
-        Ok(self.status() != ProviderStatus::Disconnected
-            && self.status() != ProviderStatus::Error)
+        Ok(self.status() != ProviderStatus::Disconnected && self.status() != ProviderStatus::Error)
     }
 }
 
@@ -419,7 +427,10 @@ mod tests {
         // Stopping non-existent session should fail
         let result = adapter.stop_session("nonexistent").await;
         assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::SessionNotFound(_));
+        matches!(
+            result.unwrap_err(),
+            ProviderAdapterError::SessionNotFound(_)
+        );
     }
 
     #[tokio::test]
@@ -494,7 +505,10 @@ mod tests {
         };
         let adapter = ClaudeAdapter::with_claude_config(claude_config);
         assert!(adapter.has_api_key());
-        assert_eq!(adapter.available_models().first().unwrap(), "claude-sonnet-4-20250514");
+        assert_eq!(
+            adapter.available_models().first().unwrap(),
+            "claude-sonnet-4-20250514"
+        );
     }
 
     #[tokio::test]

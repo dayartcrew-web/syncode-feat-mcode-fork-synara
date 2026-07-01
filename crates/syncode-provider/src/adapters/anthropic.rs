@@ -5,10 +5,10 @@
 //! AWS Bedrock / Google Vertex AI Anthropic-compatible gateways.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use super::super::trait_def::*;
 use crate::session::SessionState;
@@ -165,8 +165,7 @@ impl AnthropicAdapter {
 
     /// Check if the Anthropic API key is configured
     pub fn has_api_key(&self) -> bool {
-        self.anthropic_config.api_key.is_some()
-            || std::env::var("ANTHROPIC_API_KEY").is_ok()
+        self.anthropic_config.api_key.is_some() || std::env::var("ANTHROPIC_API_KEY").is_ok()
     }
 
     /// Get the base URL this adapter is configured to use
@@ -194,7 +193,9 @@ impl AnthropicAdapter {
 
     /// Resolve the API key from config or environment
     fn resolve_api_key(&self) -> Option<String> {
-        self.anthropic_config.api_key.clone()
+        self.anthropic_config
+            .api_key
+            .clone()
             .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
             .or_else(|| self.config.as_ref().and_then(|c| c.api_key.clone()))
     }
@@ -245,8 +246,7 @@ impl ProviderAdapter for AnthropicAdapter {
             ));
         }
 
-        let api_key = config.api_key.clone()
-            .or_else(|| self.resolve_api_key());
+        let api_key = config.api_key.clone().or_else(|| self.resolve_api_key());
         let has_key = api_key.is_some();
 
         if !has_key {
@@ -260,9 +260,9 @@ impl ProviderAdapter for AnthropicAdapter {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .map_err(|e| ProviderAdapterError::ConfigError(format!(
-                "Failed to create HTTP client: {e}"
-            )))?;
+            .map_err(|e| {
+                ProviderAdapterError::ConfigError(format!("Failed to create HTTP client: {e}"))
+            })?;
 
         self.client = Some(client);
 
@@ -312,25 +312,31 @@ impl ProviderAdapter for AnthropicAdapter {
         self.spawned.store(false, Ordering::Release);
         self.set_status(ProviderStatus::Disconnected);
 
-        tracing::info!(provider = PROVIDER_ANTHROPIC, "Anthropic HTTP adapter shut down");
+        tracing::info!(
+            provider = PROVIDER_ANTHROPIC,
+            "Anthropic HTTP adapter shut down"
+        );
         Ok(())
     }
 
     async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
-        tracing::info!(provider = PROVIDER_ANTHROPIC, session_id, "Interrupting session");
+        tracing::info!(
+            provider = PROVIDER_ANTHROPIC,
+            session_id,
+            "Interrupting session"
+        );
         Ok(())
     }
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -348,7 +354,10 @@ impl ProviderAdapter for AnthropicAdapter {
             ctx.working_dir,
         ));
 
-        self.sessions.lock().await.insert(session_id.clone(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
         self.set_status(ProviderStatus::Busy);
 
         tracing::info!(
@@ -363,7 +372,9 @@ impl ProviderAdapter for AnthropicAdapter {
     async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
         tracing::info!(provider = PROVIDER_ANTHROPIC, session_id, "Session resumed");
         Ok(())
@@ -372,7 +383,9 @@ impl ProviderAdapter for AnthropicAdapter {
     async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let mut sessions = self.sessions.lock().await;
         if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
 
         let _ = self.event_tx.send(ProviderEvent::StatusChanged {
@@ -398,19 +411,19 @@ impl ProviderAdapter for AnthropicAdapter {
         })?;
 
         let api_key = self.resolve_api_key().ok_or_else(|| {
-            ProviderAdapterError::ConfigError(
-                "No Anthropic API key configured".to_string(),
-            )
+            ProviderAdapterError::ConfigError("No Anthropic API key configured".to_string())
         })?;
 
         // Extract user message from the request params
-        let user_message = request.params
+        let user_message = request
+            .params
             .as_ref()
             .and_then(|p| p.get("message"))
             .and_then(|m| m.as_str())
             .unwrap_or("");
 
-        let system_prompt = request.params
+        let system_prompt = request
+            .params
             .as_ref()
             .and_then(|p| p.get("system_prompt"))
             .and_then(|s| s.as_str())
@@ -444,9 +457,7 @@ impl ProviderAdapter for AnthropicAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderAdapterError::Internal(format!(
-                "HTTP request failed: {e}"
-            )))?;
+            .map_err(|e| ProviderAdapterError::Internal(format!("HTTP request failed: {e}")))?;
 
         let status = response.status();
         let response_body = response.text().await.map_err(|e| {
@@ -470,13 +481,12 @@ impl ProviderAdapter for AnthropicAdapter {
         }
 
         // Parse successful response
-        let anthropic_resp: AnthropicMessagesResponse =
-            serde_json::from_str(&response_body).map_err(|e| {
-                ProviderAdapterError::Serialization(e)
-            })?;
+        let anthropic_resp: AnthropicMessagesResponse = serde_json::from_str(&response_body)
+            .map_err(|e| ProviderAdapterError::Serialization(e))?;
 
         // Extract text content from response blocks
-        let text_content: String = anthropic_resp.content
+        let text_content: String = anthropic_resp
+            .content
             .iter()
             .filter_map(|block| block.text.as_ref())
             .cloned()
@@ -653,7 +663,10 @@ mod tests {
 
         let result = adapter.stop_session("nonexistent").await;
         assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::SessionNotFound(_));
+        matches!(
+            result.unwrap_err(),
+            ProviderAdapterError::SessionNotFound(_)
+        );
     }
 
     #[tokio::test]
@@ -668,14 +681,20 @@ mod tests {
     async fn anthropic_adapter_send_request_no_api_key_fails() {
         let mut adapter = AnthropicAdapter::new();
         // Spawn without API key
-        adapter.spawn(ProviderConfig {
-            provider_id: PROVIDER_ANTHROPIC.to_string(),
-            ..Default::default()
-        }).await.unwrap();
+        adapter
+            .spawn(ProviderConfig {
+                provider_id: PROVIDER_ANTHROPIC.to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
-        let req = ProviderRequest::new("message", Some(serde_json::json!({
-            "message": "hello"
-        })));
+        let req = ProviderRequest::new(
+            "message",
+            Some(serde_json::json!({
+                "message": "hello"
+            })),
+        );
         let result = adapter.send_request(req).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API key"));
@@ -684,9 +703,12 @@ mod tests {
     #[tokio::test]
     async fn anthropic_adapter_send_request_not_spawned_fails() {
         let adapter = AnthropicAdapter::new();
-        let req = ProviderRequest::new("message", Some(serde_json::json!({
-            "message": "hello"
-        })));
+        let req = ProviderRequest::new(
+            "message",
+            Some(serde_json::json!({
+                "message": "hello"
+            })),
+        );
         let result = adapter.send_request(req).await;
         assert!(result.is_err());
         matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);

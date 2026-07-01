@@ -5,10 +5,10 @@
 //! LiteLLM, or any OpenAI-compatible endpoint.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use super::super::trait_def::*;
 use crate::session::SessionState;
@@ -169,8 +169,7 @@ impl OpenAIAdapter {
 
     /// Check if the OpenAI API key is configured
     pub fn has_api_key(&self) -> bool {
-        self.openai_config.api_key.is_some()
-            || std::env::var("OPENAI_API_KEY").is_ok()
+        self.openai_config.api_key.is_some() || std::env::var("OPENAI_API_KEY").is_ok()
     }
 
     /// Get the base URL this adapter is configured to use
@@ -198,7 +197,9 @@ impl OpenAIAdapter {
 
     /// Resolve the API key from config or environment
     fn resolve_api_key(&self) -> Option<String> {
-        self.openai_config.api_key.clone()
+        self.openai_config
+            .api_key
+            .clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .or_else(|| self.config.as_ref().and_then(|c| c.api_key.clone()))
     }
@@ -251,8 +252,7 @@ impl ProviderAdapter for OpenAIAdapter {
             ));
         }
 
-        let api_key = config.api_key.clone()
-            .or_else(|| self.resolve_api_key());
+        let api_key = config.api_key.clone().or_else(|| self.resolve_api_key());
         let has_key = api_key.is_some();
 
         if !has_key {
@@ -266,9 +266,9 @@ impl ProviderAdapter for OpenAIAdapter {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .map_err(|e| ProviderAdapterError::ConfigError(format!(
-                "Failed to create HTTP client: {e}"
-            )))?;
+            .map_err(|e| {
+                ProviderAdapterError::ConfigError(format!("Failed to create HTTP client: {e}"))
+            })?;
 
         self.client = Some(client);
 
@@ -331,18 +331,21 @@ impl ProviderAdapter for OpenAIAdapter {
     async fn interrupt(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
-        tracing::info!(provider = PROVIDER_OPENAI, session_id, "Interrupting session");
+        tracing::info!(
+            provider = PROVIDER_OPENAI,
+            session_id,
+            "Interrupting session"
+        );
         Ok(())
     }
 
     // -- Session management -------------------------------------------------
 
-    async fn start_session(
-        &mut self,
-        ctx: SessionContext,
-    ) -> Result<String, ProviderAdapterError> {
+    async fn start_session(&mut self, ctx: SessionContext) -> Result<String, ProviderAdapterError> {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
@@ -360,7 +363,10 @@ impl ProviderAdapter for OpenAIAdapter {
             ctx.working_dir,
         ));
 
-        self.sessions.lock().await.insert(session_id.clone(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
         self.set_status(ProviderStatus::Busy);
 
         tracing::info!(
@@ -375,7 +381,9 @@ impl ProviderAdapter for OpenAIAdapter {
     async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let sessions = self.sessions.lock().await;
         if !sessions.contains_key(session_id) {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
         tracing::info!(provider = PROVIDER_OPENAI, session_id, "Session resumed");
         Ok(())
@@ -384,7 +392,9 @@ impl ProviderAdapter for OpenAIAdapter {
     async fn stop_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
         let mut sessions = self.sessions.lock().await;
         if sessions.remove(session_id).is_none() {
-            return Err(ProviderAdapterError::SessionNotFound(session_id.to_string()));
+            return Err(ProviderAdapterError::SessionNotFound(
+                session_id.to_string(),
+            ));
         }
 
         let _ = self.event_tx.send(ProviderEvent::StatusChanged {
@@ -410,19 +420,19 @@ impl ProviderAdapter for OpenAIAdapter {
         })?;
 
         let api_key = self.resolve_api_key().ok_or_else(|| {
-            ProviderAdapterError::ConfigError(
-                "No OpenAI API key configured".to_string(),
-            )
+            ProviderAdapterError::ConfigError("No OpenAI API key configured".to_string())
         })?;
 
         // Extract messages and system prompt from request params
-        let user_message = request.params
+        let user_message = request
+            .params
             .as_ref()
             .and_then(|p| p.get("message"))
             .and_then(|m| m.as_str())
             .unwrap_or("");
 
-        let system_prompt = request.params
+        let system_prompt = request
+            .params
             .as_ref()
             .and_then(|p| p.get("system_prompt"))
             .and_then(|s| s.as_str())
@@ -472,9 +482,7 @@ impl ProviderAdapter for OpenAIAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderAdapterError::Internal(format!(
-                "HTTP request failed: {e}"
-            )))?;
+            .map_err(|e| ProviderAdapterError::Internal(format!("HTTP request failed: {e}")))?;
 
         let status = response.status();
         let response_body = response.text().await.map_err(|e| {
@@ -498,13 +506,12 @@ impl ProviderAdapter for OpenAIAdapter {
         }
 
         // Parse successful response
-        let openai_resp: OpenAIChatResponse =
-            serde_json::from_str(&response_body).map_err(|e| {
-                ProviderAdapterError::Serialization(e)
-            })?;
+        let openai_resp: OpenAIChatResponse = serde_json::from_str(&response_body)
+            .map_err(|e| ProviderAdapterError::Serialization(e))?;
 
         // Extract the assistant's message from the first choice
-        let text_content = openai_resp.choices
+        let text_content = openai_resp
+            .choices
             .first()
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
@@ -680,7 +687,10 @@ mod tests {
 
         let result = adapter.stop_session("nonexistent").await;
         assert!(result.is_err());
-        matches!(result.unwrap_err(), ProviderAdapterError::SessionNotFound(_));
+        matches!(
+            result.unwrap_err(),
+            ProviderAdapterError::SessionNotFound(_)
+        );
     }
 
     #[tokio::test]
@@ -694,14 +704,20 @@ mod tests {
     #[tokio::test]
     async fn openai_adapter_send_request_no_api_key_fails() {
         let mut adapter = OpenAIAdapter::new();
-        adapter.spawn(ProviderConfig {
-            provider_id: PROVIDER_OPENAI.to_string(),
-            ..Default::default()
-        }).await.unwrap();
+        adapter
+            .spawn(ProviderConfig {
+                provider_id: PROVIDER_OPENAI.to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
-        let req = ProviderRequest::new("message", Some(serde_json::json!({
-            "message": "hello"
-        })));
+        let req = ProviderRequest::new(
+            "message",
+            Some(serde_json::json!({
+                "message": "hello"
+            })),
+        );
         let result = adapter.send_request(req).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API key"));
@@ -710,9 +726,12 @@ mod tests {
     #[tokio::test]
     async fn openai_adapter_send_request_not_spawned_fails() {
         let adapter = OpenAIAdapter::new();
-        let req = ProviderRequest::new("message", Some(serde_json::json!({
-            "message": "hello"
-        })));
+        let req = ProviderRequest::new(
+            "message",
+            Some(serde_json::json!({
+                "message": "hello"
+            })),
+        );
         let result = adapter.send_request(req).await;
         assert!(result.is_err());
         matches!(result.unwrap_err(), ProviderAdapterError::NotSpawned);
@@ -779,7 +798,10 @@ mod tests {
             ..OpenAIConfig::default()
         };
         let adapter = OpenAIAdapter::with_openai_config(config);
-        assert_eq!(adapter.openai_config.organization_id.as_deref(), Some("org-abc456"));
+        assert_eq!(
+            adapter.openai_config.organization_id.as_deref(),
+            Some("org-abc456")
+        );
     }
 
     #[tokio::test]
