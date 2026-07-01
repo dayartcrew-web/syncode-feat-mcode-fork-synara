@@ -1,9 +1,18 @@
 /// <reference types="vite/client" />
 
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
+import type { NativeApi, DesktopBridge } from "@t3tools/contracts";
+
+interface ImportMetaEnv {
+  readonly APP_VERSION: string;
 }
 
-export {};
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
+declare global {
+  interface Window {
+    nativeApi?: NativeApi;
+    desktopBridge?: DesktopBridge;
+  }
+}
