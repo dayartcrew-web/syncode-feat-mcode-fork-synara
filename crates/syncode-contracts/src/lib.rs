@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod events;
 pub mod rpc;
 pub mod snapshots;
 
@@ -414,5 +415,11 @@ mod tests {
         rpc::PushSubscribeResult::export().expect("export PushSubscribeResult");
         rpc::PushUnsubscribeParams::export().expect("export PushUnsubscribeParams");
         rpc::PushUnsubscribeResult::export().expect("export PushUnsubscribeResult");
+
+        // Tier 2 domain-event discriminated union (see `src/events.rs`).
+        // `DomainEventDto` is the 44-variant tagged union; `CheckpointFileDto`
+        // is a nested type used by the `TurnDiffCompleted` payload.
+        events::DomainEventDto::export().expect("export DomainEventDto");
+        events::CheckpointFileDto::export().expect("export CheckpointFileDto");
     }
 }

@@ -15,3 +15,5 @@ serde_json = { workspace = true }
 ts-rs = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+# Domain source for the Tier 2 DomainEventDto projection (see src/events.rs).
+syncode-core = { workspace = true }

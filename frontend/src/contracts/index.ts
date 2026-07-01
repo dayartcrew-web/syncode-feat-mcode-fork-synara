@@ -94,6 +94,24 @@ export {
   type IsServed,
 } from "./rpc";
 
+// ─── Tier 2: Domain-event discriminated union + typed push views ───────
+// 44-variant tagged union (from crates/syncode-contracts/src/events.rs) +
+// `DomainEventType`/`DomainEventPayload<E>` helpers, `EVENT_TYPES` const,
+// `OrchestrationPushEnvelope`, and runtime guards. See
+// CONTRACTS-BRIDGE-DESIGN.md §4 / §6.3 and `EVENT-MAP.md`.
+export type {
+  DomainEventDto,
+  DomainEventType,
+  DomainEventPayload,
+  OrchestrationPushEnvelope,
+  PushChannelViews,
+} from "./events";
+export {
+  EVENT_TYPES,
+  isDomainEventDto,
+  isOrchestrationPushEnvelope,
+} from "./events";
+
 // ─── Hand-written bridge modules ───────────────────────────────────────
 // Branded IDs (ThreadId, ProjectId, …) — replaces MCode baseSchemas.ts brand set.
 export type {
