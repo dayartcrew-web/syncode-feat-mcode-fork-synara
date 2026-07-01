@@ -688,7 +688,14 @@ impl ProjectionManager {
             // (view_proposed_plans / view_checkpoints) is deferred (like the
             // session blob and the streaming flag).
             | DomainEvent::ProposedPlanUpserted { .. }
-            | DomainEvent::TurnDiffCompleted { .. } => {}
+            | DomainEvent::TurnDiffCompleted { .. }
+            // Revert / conversation-rollback truncate the in-memory read model
+            // only; cascading these deletes through the SQLite view tables is
+            // deferred (consistent with the session/streaming/plan/checkpoint
+            // deferrals). The event store is untouched either way.
+            | DomainEvent::ThreadRevertCompleted { .. }
+            | DomainEvent::ConversationRollbackRequested { .. }
+            | DomainEvent::ConversationRolledBack { .. } => {}
         }
 
         // Update watermark

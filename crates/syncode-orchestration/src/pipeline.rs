@@ -793,7 +793,10 @@ impl Orchestrator {
             Command::AppendAssistantDelta { thread_id, .. }
             | Command::FinalizeAssistantMessage { thread_id, .. }
             | Command::UpsertProposedPlan { thread_id, .. }
-            | Command::CompleteTurnDiff { thread_id, .. } => Some(*thread_id),
+            | Command::CompleteTurnDiff { thread_id, .. }
+            | Command::CompleteRevert { thread_id, .. }
+            | Command::ConversationRollback { thread_id, .. }
+            | Command::ConversationRollbackComplete { thread_id, .. } => Some(*thread_id),
 
             // Turn-level commands
             Command::CompleteTurn { id, .. }
@@ -852,6 +855,9 @@ impl Orchestrator {
             | Command::FinalizeAssistantMessage { .. }
             | Command::UpsertProposedPlan { .. }
             | Command::CompleteTurnDiff { .. }
+            | Command::CompleteRevert { .. }
+            | Command::ConversationRollback { .. }
+            | Command::ConversationRollbackComplete { .. }
             | Command::AppendThreadActivity { .. }
             | Command::AddPinnedMessage { .. }
             | Command::RemovePinnedMessage { .. }

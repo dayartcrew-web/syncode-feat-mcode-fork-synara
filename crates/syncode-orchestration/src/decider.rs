@@ -310,6 +310,33 @@ pub enum Command {
         assistant_message_id: Option<EntityId>,
         completed_at: Timestamp,
     },
+    /// `thread.revert.complete` — truncate a thread to `turn_count` turns.
+    /// Faithful to mcode (orchestration.ts:1308-1313, decider.ts:1569-1588):
+    /// {threadId, turnCount}. Emits a turn-truncation event distinct from the
+    /// git-checkpoint [`Command::RevertToCheckpoint`].
+    CompleteRevert {
+        thread_id: EntityId,
+        turn_count: u32,
+    },
+    /// `thread.conversation.rollback` — request rolling a conversation back to
+    /// a message. Faithful to mcode (orchestration.ts:1296-1306,
+    /// decider.ts:1303-1340): {threadId, messageId, numTurns}. Requested-style
+    /// async — syncode omits mcode's target-message invariant validation (the
+    /// authoritative removed turns are carried by `rollback.complete`).
+    ConversationRollback {
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+    },
+    /// `thread.conversation.rollback.complete` — a conversation rollback was
+    /// applied. Faithful to mcode (orchestration.ts:1315-1327,
+    /// decider.ts:1590-1615): {threadId, messageId, numTurns, removedTurnIds}.
+    ConversationRollbackComplete {
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+        removed_turn_ids: Vec<EntityId>,
+    },
 }
 
 // ─── Decider Errors ──────────────────────────────────────────────
@@ -589,6 +616,32 @@ impl Decider {
                 files,
                 assistant_message_id,
                 completed_at,
+                current_state,
+            ),
+            Command::CompleteRevert {
+                thread_id,
+                turn_count,
+            } => Self::decide_complete_revert(thread_id, turn_count, current_state),
+            Command::ConversationRollback {
+                thread_id,
+                message_id,
+                num_turns,
+            } => Self::decide_conversation_rollback(
+                thread_id,
+                message_id,
+                num_turns,
+                current_state,
+            ),
+            Command::ConversationRollbackComplete {
+                thread_id,
+                message_id,
+                num_turns,
+                removed_turn_ids,
+            } => Self::decide_conversation_rollback_complete(
+                thread_id,
+                message_id,
+                num_turns,
+                removed_turn_ids,
                 current_state,
             ),
         }
@@ -1412,6 +1465,60 @@ impl Decider {
             files,
             assistant_message_id,
             completed_at,
+        }])
+    }
+
+    /// Complete a revert, truncating the thread to `turn_count` turns (mcode
+    /// `thread.revert.complete`). Guards thread existence; the projector
+    /// performs the read-model truncation.
+    fn decide_complete_revert(
+        thread_id: EntityId,
+        turn_count: u32,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        Ok(vec![DomainEvent::ThreadRevertCompleted {
+            thread_id,
+            turn_count,
+            reverted_at: Timestamp::now(),
+        }])
+    }
+
+    /// Request a conversation rollback to a message (mcode
+    /// `thread.conversation.rollback`). Requested-style async; syncode omits
+    /// mcode's target-message invariant (removed turns come via `.complete`).
+    fn decide_conversation_rollback(
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        Ok(vec![DomainEvent::ConversationRollbackRequested {
+            thread_id,
+            message_id,
+            num_turns,
+            requested_at: Timestamp::now(),
+        }])
+    }
+
+    /// Complete a conversation rollback (mcode
+    /// `thread.conversation.rollback.complete`). The projector removes the
+    /// turns in `removed_turn_ids`; the event store is untouched.
+    fn decide_conversation_rollback_complete(
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+        removed_turn_ids: Vec<EntityId>,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        Self::extract_thread_status(state, &thread_id)?;
+        Ok(vec![DomainEvent::ConversationRolledBack {
+            thread_id,
+            message_id,
+            num_turns,
+            removed_turn_ids,
+            rolled_back_at: Timestamp::now(),
         }])
     }
 
@@ -2411,6 +2518,123 @@ mod tests {
                 files: vec![],
                 assistant_message_id: None,
                 completed_at: Timestamp::now(),
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn complete_revert_success() {
+        let tid = EntityId::new();
+        let events = Decider::decide(
+            Command::CompleteRevert {
+                thread_id: tid,
+                turn_count: 2,
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ThreadRevertCompleted { thread_id, turn_count, .. } => {
+                assert_eq!(*thread_id, tid);
+                assert_eq!(*turn_count, 2);
+            }
+            _ => panic!("expected ThreadRevertCompleted"),
+        }
+    }
+
+    #[test]
+    fn complete_revert_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::CompleteRevert {
+                thread_id: tid,
+                turn_count: 0,
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn conversation_rollback_success() {
+        let tid = EntityId::new();
+        let mid = EntityId::new();
+        let events = Decider::decide(
+            Command::ConversationRollback {
+                thread_id: tid,
+                message_id: mid,
+                num_turns: 1,
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ConversationRollbackRequested {
+                thread_id, message_id, num_turns, ..
+            } => {
+                assert_eq!(*thread_id, tid);
+                assert_eq!(*message_id, mid);
+                assert_eq!(*num_turns, 1);
+            }
+            _ => panic!("expected ConversationRollbackRequested"),
+        }
+    }
+
+    #[test]
+    fn conversation_rollback_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::ConversationRollback {
+                thread_id: tid,
+                message_id: tid,
+                num_turns: 1,
+            },
+            None,
+        );
+        assert!(matches!(result.unwrap_err(), DeciderError::ThreadNotFound(_)));
+    }
+
+    #[test]
+    fn conversation_rollback_complete_success() {
+        let tid = EntityId::new();
+        let mid = EntityId::new();
+        let removed = vec![EntityId::new(), EntityId::new()];
+        let events = Decider::decide(
+            Command::ConversationRollbackComplete {
+                thread_id: tid,
+                message_id: mid,
+                num_turns: 2,
+                removed_turn_ids: removed.clone(),
+            },
+            Some(&thread_state_active()),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ConversationRolledBack {
+                thread_id, removed_turn_ids, num_turns, ..
+            } => {
+                assert_eq!(*thread_id, tid);
+                assert_eq!(*num_turns, 2);
+                assert_eq!(removed_turn_ids.len(), 2);
+            }
+            _ => panic!("expected ConversationRolledBack"),
+        }
+    }
+
+    #[test]
+    fn conversation_rollback_complete_unknown_thread_rejected() {
+        let tid = EntityId::new();
+        let result = Decider::decide(
+            Command::ConversationRollbackComplete {
+                thread_id: tid,
+                message_id: tid,
+                num_turns: 1,
+                removed_turn_ids: vec![],
             },
             None,
         );

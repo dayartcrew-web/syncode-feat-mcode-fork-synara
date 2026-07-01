@@ -340,6 +340,40 @@ pub enum DomainEvent {
         completed_at: Timestamp,
     },
 
+    // ─── Revert / Rollback Events (read-model truncation) ─────────────
+    /// `thread.revert.complete` → truncate a thread to `turn_count` turns.
+    /// Distinct from the git-checkpoint [`DomainEvent::ThreadReverted`]: this is
+    /// a turn-sequence truncation (mcode `thread.reverted` {turnCount}). The
+    /// projector removes turns (and their messages/checkpoints/plans) with
+    /// sequence > turn_count; the event store is untouched (ES invariant — the
+    /// read model is a projection, replayed from the full event log).
+    ThreadRevertCompleted {
+        thread_id: EntityId,
+        turn_count: u32,
+        reverted_at: Timestamp,
+    },
+    /// `thread.conversation.rollback` → request rolling a conversation back to
+    /// a message (mcode `thread.conversation-rollback-requested`).
+    /// Requested-style async; the actual removed turns are carried by
+    /// [`DomainEvent::ConversationRolledBack`].
+    ConversationRollbackRequested {
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+        requested_at: Timestamp,
+    },
+    /// `thread.conversation.rollback.complete` → a conversation rollback was
+    /// applied (mcode `thread.conversation-rolled-back`). The projector removes
+    /// the turns in `removed_turn_ids` (and their messages/plans/checkpoints);
+    /// the event store is untouched.
+    ConversationRolledBack {
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+        removed_turn_ids: Vec<EntityId>,
+        rolled_back_at: Timestamp,
+    },
+
     // ─── Activity Events ────────────────────────────────────────────────
     ActivityLogged {
         id: EntityId,
@@ -408,7 +442,10 @@ impl DomainEvent {
             | Self::MarkerDoneSet { thread_id, .. }
             | Self::MarkerLabelSet { thread_id, .. }
             | Self::ProposedPlanUpserted { thread_id, .. }
-            | Self::TurnDiffCompleted { thread_id, .. } => *thread_id,
+            | Self::TurnDiffCompleted { thread_id, .. }
+            | Self::ThreadRevertCompleted { thread_id, .. }
+            | Self::ConversationRollbackRequested { thread_id, .. }
+            | Self::ConversationRolledBack { thread_id, .. } => *thread_id,
         }
     }
 
@@ -455,6 +492,9 @@ impl DomainEvent {
             Self::MessageStreamingFinalized { .. } => "MessageStreamingFinalized",
             Self::ProposedPlanUpserted { .. } => "ProposedPlanUpserted",
             Self::TurnDiffCompleted { .. } => "TurnDiffCompleted",
+            Self::ThreadRevertCompleted { .. } => "ThreadRevertCompleted",
+            Self::ConversationRollbackRequested { .. } => "ConversationRollbackRequested",
+            Self::ConversationRolledBack { .. } => "ConversationRolledBack",
             Self::ActivityLogged { .. } => "ActivityLogged",
         }
     }

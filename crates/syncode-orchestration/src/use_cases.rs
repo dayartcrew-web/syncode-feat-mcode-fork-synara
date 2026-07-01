@@ -452,6 +452,59 @@ impl ApplicationService {
             .await
     }
 
+    /// Complete a revert, truncating the thread to `turn_count` turns. Faithful
+    /// to mcode `thread.revert.complete` {threadId, turnCount}. Truncates the
+    /// read model only; the event store is untouched.
+    pub async fn complete_revert(
+        &self,
+        thread_id: EntityId,
+        turn_count: u32,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::CompleteRevert {
+                thread_id,
+                turn_count,
+            })
+            .await
+    }
+
+    /// Request rolling a conversation back to a message. Faithful to mcode
+    /// `thread.conversation.rollback` {threadId, messageId, numTurns}.
+    pub async fn conversation_rollback(
+        &self,
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::ConversationRollback {
+                thread_id,
+                message_id,
+                num_turns,
+            })
+            .await
+    }
+
+    /// Complete a conversation rollback, removing the given turns. Faithful to
+    /// mcode `thread.conversation.rollback.complete` {threadId, messageId,
+    /// numTurns, removedTurnIds}.
+    pub async fn conversation_rollback_complete(
+        &self,
+        thread_id: EntityId,
+        message_id: EntityId,
+        num_turns: u32,
+        removed_turn_ids: Vec<EntityId>,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::ConversationRollbackComplete {
+                thread_id,
+                message_id,
+                num_turns,
+                removed_turn_ids,
+            })
+            .await
+    }
+
     /// Respond to a pending provider approval request for a thread. Faithful to
     /// mcode `thread.approval.respond`. Records the response; the provider
     /// dispatch is handled by the command reactor when wired.

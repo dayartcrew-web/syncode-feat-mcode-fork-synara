@@ -449,6 +449,46 @@ impl Projector {
                 });
             }
 
+            // Truncate the thread to `turn_count` turns (mcode
+            // `thread.reverted`). Removes turns with sequence > turn_count and
+            // their messages/plans, plus checkpoints beyond the revert point.
+            // Read model only — the event store is untouched (ES invariant).
+            DomainEvent::ThreadRevertCompleted { thread_id, turn_count, reverted_at } => {
+                let tid = thread_id.as_str();
+                let removed: Vec<String> = store
+                    .turns
+                    .values()
+                    .filter(|t| t.thread_id == tid && t.sequence > *turn_count)
+                    .map(|t| t.id.clone())
+                    .collect();
+                Self::remove_turns_and_dependents(store, &removed);
+                store.checkpoints.retain(|_, c| {
+                    !(c.thread_id == tid && c.checkpoint_turn_count > *turn_count)
+                });
+                if let Some(thread) = store.threads.get_mut(&tid) {
+                    thread.updated_at = reverted_at.to_string();
+                }
+            }
+
+            // Transient rollback request (Requested-style async); no read-model
+            // row. The applied rollback is `ConversationRolledBack`.
+            DomainEvent::ConversationRollbackRequested { .. } => {}
+
+            // Remove the turns in `removed_turn_ids` (and their messages/plans/
+            // checkpoints) from the read model (mcode `thread.conversation-
+            // rolled-back`). Event store untouched.
+            DomainEvent::ConversationRolledBack {
+                thread_id, removed_turn_ids, rolled_back_at, ..
+            } => {
+                let tid = thread_id.as_str();
+                let removed: Vec<String> =
+                    removed_turn_ids.iter().map(|t| t.as_str()).collect();
+                Self::remove_turns_and_dependents(store, &removed);
+                if let Some(thread) = store.threads.get_mut(&tid) {
+                    thread.updated_at = rolled_back_at.to_string();
+                }
+            }
+
             DomainEvent::ActivityLogged {
                 id, activity_type, description, thread_id, created_at,
             } => {
@@ -467,6 +507,24 @@ impl Projector {
     }
 
     /// Project multiple events in order (e.g., during replay)
+    /// Remove the given turns and their dependent sub-aggregates (messages,
+    /// proposed plans, checkpoints) from the read model. Used by both revert
+    /// and conversation-rollback truncation. Read model only — the event store
+    /// is untouched (the read model is a projection replayed from events).
+    fn remove_turns_and_dependents(store: &mut ReadModelStore, removed_turn_ids: &[String]) {
+        store.turns.retain(|_, t| !removed_turn_ids.contains(&t.id));
+        store
+            .messages
+            .retain(|_, m| !removed_turn_ids.contains(&m.turn_id));
+        store.proposed_plans.retain(|_, p| match &p.turn_id {
+            None => true,
+            Some(tid) => !removed_turn_ids.contains(tid),
+        });
+        store
+            .checkpoints
+            .retain(|_, c| !removed_turn_ids.contains(&c.turn_id));
+    }
+
     pub fn project_many(events: &[DomainEvent], store: &mut ReadModelStore) {
         for event in events {
             Self::project(event, store);

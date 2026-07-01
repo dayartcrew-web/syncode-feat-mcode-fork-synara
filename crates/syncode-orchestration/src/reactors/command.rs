@@ -234,7 +234,10 @@ impl ProviderCommandReactor {
             | Command::AppendAssistantDelta { .. }
             | Command::FinalizeAssistantMessage { .. }
             | Command::UpsertProposedPlan { .. }
-            | Command::CompleteTurnDiff { .. } => Ok(CommandReaction {
+            | Command::CompleteTurnDiff { .. }
+            | Command::CompleteRevert { .. }
+            | Command::ConversationRollback { .. }
+            | Command::ConversationRollbackComplete { .. } => Ok(CommandReaction {
                 handled: false,
                 session_id: None,
                 events: vec![],
