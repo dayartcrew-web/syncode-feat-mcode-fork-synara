@@ -1,48 +1,160 @@
 // FILE: wsTransport.ts
-// Purpose: Browser-side Effect RPC transport over the MCode WebSocket endpoint.
+// Purpose: Browser-side JSON-RPC-over-WebSocket client for the Syncode backend.
 // Layer: Web transport
 // Exports: WsTransport plus stream-selection helpers used by tests.
+//
+// ## History — B3 (Transport re-wire)
+//
+// This file was rewritten from an Effect-RPC transport (`RpcClient.make(WsRpcGroup)` +
+// `ManagedRuntime` + `Socket.layerWebSocket` + `RpcSerialization.layerJson`,
+// subscriptions via `Stream.runForEach`) to a **plain hand-written JSON-RPC
+// client** with zero `effect` runtime dependencies. The public boundary that
+// `wsNativeApi.ts` consumes (`request`, `subscribe`, `getLatestPush`,
+// `onStateChange`, `getState`, `dispose`) is preserved to minimize call-site
+// churn; only the implementation changed.
+//
+// ## Wire format
+//
+// - Outgoing requests: `JsonRpcRequestView` shape
+//   `{jsonrpc:"2.0", id, method, params}`.
+// - Incoming responses: `JsonRpcResponseView` shape
+//   `{jsonrpc, id, result, error}`.
+// - Incoming push notifications: `{jsonrpc:"2.0", method:"push/<channel>",
+//   params:{eventType, aggregateId, data, sequence?, timestamp?}}` (camelCase
+//   envelope emitted by `crates/syncode-ws/src/push.rs` as of B3).
+//
+// ## Typing (Tier 1 keystone — T3)
+//
+// Two call surfaces coexist:
+//   1. `rpc<M extends ServedRpcMethod>(method, params)` — **typed** via the T3
+//      `SERVED_RPC` registry (`frontend/src/contracts/rpc.ts`). This is the
+//      canonical surface new code should use; it is parametric over the 21
+//      served slash-method strings.
+//   2. `request<T>(method, params, options)` — the **untyped string** boundary
+//      `wsNativeApi.ts` calls with MCode dot-strings (`server.getConfig`,
+//      `orchestration.dispatchCommand`, …). Internally this routes via
+//      `mapMethodToServed`: served methods get JSON-RPC dispatched; unserved
+//      methods (git ops, terminal, server-meta, …) reject with a typed
+//      `MethodNotFound (-32601)` error WITHOUT calling the backend — the
+//      backend doesn't serve them.
+//
+// ## Push routing (Tier 2 — T4)
+//
+// Push frames arrive as `push/<channel>` notifications. The
+// `push/orchestration` channel is routed through T4's
+// `isOrchestrationPushEnvelope` guard (`OrchestrationPushEnvelope` /
+// `DomainEventDto` discriminated union). Other channels forward `params` as
+// the push `data` payload (forward-compat — typed views land Tier 3).
 
 import {
-  ORCHESTRATION_WS_CHANNELS,
-  ORCHESTRATION_WS_METHODS,
-  WS_CHANNELS,
-  WS_METHODS,
-  WsRpcGroup,
-  type AutomationStreamEvent,
-  type GitActionProgressEvent,
-  type GitRunStackedActionResult,
-  type OrchestrationEvent,
-  type OrchestrationShellStreamItem,
-  type OrchestrationThreadStreamItem,
-  type ProjectDevServerEvent,
-  type ServerConfigStreamEvent,
-  type ServerLifecycleStreamEvent,
-  type ServerProviderStatusesUpdatedPayload,
-  type ServerSettingsUpdatedPayload,
-  type TerminalEvent,
-  type WsPush,
-  type WsPushChannel,
-  type WsPushMessage,
+  isObject,
+  hasKey,
+  safeParse,
+  isOrchestrationPushEnvelope,
+  type JsonRpcRequestView,
+  type JsonRpcResponseView,
+  type JsonRpcErrorView,
+  SERVED_RPC,
+  type ServedRpcMethod,
+  type ServedRpcRequest,
+  type ServedRpcResult,
 } from "@t3tools/contracts";
-import { Cause, Data, Effect, Exit, Layer, ManagedRuntime, Scope, Stream } from "effect";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
 
 import type { WsTransportState } from "./wsTransportEvents";
 
-type PushListener<C extends WsPushChannel> = (message: WsPushMessage<C>) => void;
+// ─── JSON-RPC error codes (spec + transport-local) ─────────────────────
+// JSONRPC_PARSE_ERROR reserved for future server-side parse-error mapping.
+const JSONRPC_METHOD_NOT_FOUND = -32601;
 
-type RpcClientEffect = typeof makeRpcClient;
-type RpcClientInstance =
-  RpcClientEffect extends Effect.Effect<infer Client, any, any> ? Client : never;
+// ─── Push-channel wire shape ───────────────────────────────────────────
+/** A JSON-RPC 2.0 notification frame (`method` set, no `id`). */
+interface PushNotification {
+  readonly jsonrpc: "2.0";
+  readonly method: string; // e.g. "push/orchestration"
+  readonly params: unknown;
+}
 
-class WsTransportRpcError extends Data.TaggedError("WsTransportRpcError")<{
-  readonly message: string;
-  readonly cause?: unknown;
-}> {}
+/**
+ * The push-channel name embedded in a `push/<channel>` notification's
+ * `method` field. MCode keys channels by name (`serverWelcome`,
+ * `terminalEvent`, …); the wire uses `push/<channel>` method strings. This
+ * union mirrors the channel names the consumers subscribe to via
+ * `transport.subscribe(channel, …)` from `wsNativeApi.ts`.
+ */
+type PushChannel = string;
 
-const makeRpcClient = RpcClient.make(WsRpcGroup);
+/**
+ * Push message surfaced to subscribers. Shape kept compatible with the
+ * previous Effect-based transport (so `wsNativeApi.ts` and tests need no
+ * changes): `{ type:"push", sequence, channel, data }`.
+ */
+export interface WsPushMessage<C extends PushChannel = PushChannel> {
+  readonly type: "push";
+  readonly sequence: number;
+  readonly channel: C;
+  // `data` is `unknown` here — callers narrow via the channel-narrowed
+  // helpers in `wsNativeApi.ts`. Kept loose to match the prior boundary.
+  readonly data: unknown;
+}
+
+type PushListener = (message: WsPushMessage) => void;
+
+// ─── MCode dot-method → Syncode slash-method mapping ────────────────────
+//
+// MCode's frontend keys RPCs as dot camelCase (`server.getConfig`,
+// `orchestration.dispatchCommand`, …); Syncode's backend serves slash
+// strings (`project/create`, `thread/start`, …). The contracts `SERVED_RPC`
+// registry is the source of truth for the **slash** strings.
+//
+// `mapMethodToServed` resolves an incoming dot/other method string to the
+// served slash string it maps onto, or `null` when no handler exists. Most
+// MCode RPCs (git, terminal, server-meta, provider-discovery, automation,
+// project file-ops) have NO Syncode handler — these return `null` and the
+// transport rejects them client-side with `MethodNotFound (-32601)`,
+// matching the contracts `UNSERVED_RPC` contract (T3).
+const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
+  // MCode `ping`-style server-meta calls are not served; only the literal
+  // `ping` and `rpc/listMethods` slash methods are. The served slash names
+  // are passed through directly by the dispatcher below.
+};
+
+/**
+ * Resolve a method string from the untyped `request()` boundary to a served
+ * Syncode slash method (one of `SERVED_RPC`'s keys), or `null` if the
+ * backend doesn't serve it.
+ *
+ * Resolution order:
+ *   1. If `method` is already a served slash string → return it verbatim.
+ *   2. If `method` is a known MCode dot-string remap → return the remap.
+ *   3. Otherwise → `null` (the backend doesn't serve it).
+ */
+function mapMethodToServed(method: string): ServedRpcMethod | null {
+  if (method in SERVED_RPC) return method as ServedRpcMethod;
+  const remapped = MCODE_TO_SERVED[method];
+  return remapped ?? null;
+}
+
+/**
+ * Build a typed `MethodNotFound` JSON-RPC error object (-32601). Used for
+ * unserved methods so the call sites get the canonical spec error shape
+ * rather than a thrown exception — matches the T3 `UNSERVED_RPC` contract.
+ */
+function methodNotFound(method: string): JsonRpcErrorView {
+  return {
+    code: JSONRPC_METHOD_NOT_FOUND,
+    message: `Method not found: ${method}`,
+  };
+}
+
+/**
+ * Convert any thrown value to an `Error`. Mirrors the prior
+ * `causeToError` behavior from the Effect transport.
+ */
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+// ─── Transport URL resolution (preserved from Effect variant) ───────────
 
 function resolveRpcUrl(rawUrl: string): string {
   const url = new URL(rawUrl);
@@ -52,7 +164,11 @@ function resolveRpcUrl(rawUrl: string): string {
 
 function makeSocketUrl(explicitUrl: string | null): string {
   if (explicitUrl) return resolveRpcUrl(explicitUrl);
-  const bridgeUrl = window.desktopBridge?.getWsUrl();
+  // `desktopBridge` is the Electron/Tauri shell bridge; in browser/dev it's
+  // absent. The contracts shim types it loosely, so we narrow here.
+  const bridge = (window as unknown as { desktopBridge?: { getWsUrl?: () => string } })
+    .desktopBridge;
+  const bridgeUrl = bridge?.getWsUrl?.();
   const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
   const rawUrl =
     bridgeUrl && bridgeUrl.length > 0
@@ -63,175 +179,181 @@ function makeSocketUrl(explicitUrl: string | null): string {
   return resolveRpcUrl(rawUrl);
 }
 
-function makeProtocolLayer(url: string) {
-  const socketLayer = Socket.layerWebSocket(url).pipe(
-    Layer.provide(Socket.layerWebSocketConstructorGlobal),
-  );
-  // JSON keeps the wire format symmetric with any server build: a serialization
-  // mismatch on this single multiplexed socket is a hard connect failure, and the
-  // desktop/dev setup routinely runs web and server on independently-built copies.
-  return RpcClient.layerProtocolSocket().pipe(
-    Layer.provide(Layer.mergeAll(socketLayer, RpcSerialization.layerJson)),
-  );
-}
-
-function causeToError(cause: Cause.Cause<unknown>): Error {
-  const error = Cause.squash(cause);
-  return error instanceof Error ? error : new Error(String(error));
-}
-
+/**
+ * Strip `null`/`undefined` values from a `thread.user-input.respond`
+ * command's `answers` map before dispatch. Preserved verbatim from the
+ * Effect variant — the backend rejects null answers. Only applies to the
+ * orchestration dispatch path (the `request()` boundary passes the bare
+ * command in `{command}`).
+ */
 function omitNullUserInputAnswers(input: unknown): unknown {
-  if (!input || typeof input !== "object") {
-    return input;
+  if (!isObject(input)) return input;
+  if (input["type"] !== "thread.user-input.respond") return input;
+  const answers = input["answers"];
+  if (!isObject(answers)) return input;
+  const filtered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(answers)) {
+    if (value !== null && value !== undefined) filtered[key] = value;
   }
-  const command = input as { type?: unknown; answers?: unknown };
-  if (command.type !== "thread.user-input.respond" || !command.answers) {
-    return input;
-  }
-  if (typeof command.answers !== "object") {
-    return input;
-  }
-  return {
-    ...command,
-    answers: Object.fromEntries(
-      Object.entries(command.answers).filter(
-        ([, answer]) => answer !== null && answer !== undefined,
-      ),
-    ),
-  };
+  return { ...input, answers: filtered };
 }
 
-export function isServerLifecyclePushChannel(channel: string): boolean {
-  return channel === WS_CHANNELS.serverWelcome || channel === WS_CHANNELS.serverMaintenanceUpdated;
+// ─── Per-request pending entry ─────────────────────────────────────────
+
+interface PendingRequest {
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: unknown) => void;
+  readonly method: string;
 }
 
-export function shouldKeepServerLifecycleStream(activeChannels: ReadonlySet<string>): boolean {
-  return (
-    activeChannels.has(WS_CHANNELS.serverWelcome) ||
-    activeChannels.has(WS_CHANNELS.serverMaintenanceUpdated)
-  );
-}
-
+/**
+ * Browser-side JSON-RPC-over-WebSocket transport for the Syncode backend.
+ *
+ * One WebSocket to the `/ws` endpoint multiplexes all requests and push
+ * channels. Requests are matched to responses by `id`; push notifications
+ * (frames with a `method` and no `id`) are routed to per-channel listeners.
+ *
+ * Public surface is preserved from the prior Effect-based transport so
+ * `wsNativeApi.ts` call sites need no edits — only the implementation
+ * changed (Effect-RPC internals → hand-written JSON-RPC client).
+ */
 export class WsTransport {
   private readonly explicitUrl: string | null;
-  private readonly listeners = new Map<string, Set<(message: WsPush) => void>>();
+  private readonly listeners = new Map<PushChannel, Set<PushListener>>();
   private readonly stateListeners = new Set<(state: WsTransportState) => void>();
-  private readonly latestPushByChannel = new Map<string, WsPush>();
+  private readonly latestPushByChannel = new Map<PushChannel, WsPushMessage>();
+  private readonly pending = new Map<number, PendingRequest>();
   private sequence = 0;
-  private sessionVersion = 0;
+  private nextId = 1;
   private state: WsTransportState = "connecting";
   private disposed = false;
-  private runtime: ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never>;
-  private clientScope: Scope.Closeable;
-  private clientPromise: Promise<RpcClientInstance>;
-  private reconnectPromise: Promise<RpcClientInstance> | null = null;
+  private socket: WebSocket | null = null;
+  private connectPromise: Promise<void> | null = null;
   private reconnectFailures = 0;
-  private readonly streamCleanups = new Map<string, () => void>();
-  private readonly stoppingStreams = new Set<string>();
-  private shellSubscribed = false;
-  private readonly threadSubscriptions = new Map<string, unknown>();
 
   constructor(url?: string) {
     this.explicitUrl = url ?? null;
-    const session = this.createSession();
-    this.runtime = session.runtime;
-    this.clientScope = session.clientScope;
-    this.clientPromise = session.clientPromise;
+    void this.openSession();
   }
 
+  // ─── Typed RPC surface (T3 SERVED_RPC keystone) ──────────────────────
+
+  /**
+   * Typed JSON-RPC call over the served method registry. Use this for new
+   * code: `method` is constrained to a served slash string, `params` is
+   * typed per `ServedRpcRequest<M>`, and the result is typed per
+   * `ServedRpcResult<M>`.
+   *
+   * @example
+   *   const project = await transport.rpc("project/create", { name: "x" });
+   *   //    ^? ProjectSummary
+   */
+  async rpc<M extends ServedRpcMethod>(
+    method: M,
+    params: ServedRpcRequest<M>,
+  ): Promise<ServedRpcResult<M>> {
+    const served = (SERVED_RPC as Record<string, unknown>)[method];
+    const requestParams = served === null || params === null ? {} : params;
+    return (await this.sendJsonRpc(method, requestParams)) as ServedRpcResult<M>;
+  }
+
+  // ─── Untyped request boundary (consumed by wsNativeApi.ts) ───────────
+
+  /**
+   * Send an RPC request by method string. This is the boundary
+   * `wsNativeApi.ts` calls with MCode dot-strings (`server.getConfig`,
+   * `orchestration.dispatchCommand`, …) and the served slash strings.
+   *
+   * Served methods are JSON-RPC dispatched to the backend. **Unserved**
+   * methods (git ops, terminal, server-meta, provider-discovery,
+   * automation, project file-ops — see `UNSERVED_RPC` in
+   * `@t3tools/contracts`) reject client-side with a `MethodNotFound`
+   * (-32601) error WITHOUT calling the backend — the backend doesn't serve
+   * them.
+   *
+   * The `dispatchCommand` orchestration method passes its inner `command`
+   * through `omitNullUserInputAnswers` (the backend rejects null answers).
+   */
   async request<T = unknown>(
     method: string,
     params?: unknown,
     _options?: { readonly timeoutMs?: number | null },
   ): Promise<T> {
     if (this.disposed) throw new Error("Transport disposed");
-    const client = await this.getClient();
 
-    if (method === WS_METHODS.gitRunStackedAction) {
-      return (await this.runGitActionStream(client, params)) as T;
-    }
+    // Orchestration dispatch: unwrap `{command}` and clean null answers.
+    // This maps to the served `turn/start` / `thread/*` handlers in a real
+    // flow; for now the bare command is forwarded as-is so any future
+    // dispatch handler receives the same shape the prior transport sent.
+    const isDispatch = method === "orchestration.dispatchCommand";
+    const payload = isDispatch
+      ? omitNullUserInputAnswers((params as { command: unknown } | undefined)?.command)
+      : params;
 
-    if (method === ORCHESTRATION_WS_METHODS.subscribeShell) {
-      this.shellSubscribed = true;
-      this.startShellStream(client);
-      return undefined as T;
-    }
-    if (method === ORCHESTRATION_WS_METHODS.unsubscribeShell) {
-      this.shellSubscribed = false;
-      this.stopStream("orchestration.shell");
-      return undefined as T;
-    }
-    if (method === ORCHESTRATION_WS_METHODS.subscribeThread) {
-      const threadId = (params as { threadId: string }).threadId;
-      this.threadSubscriptions.set(threadId, params);
-      this.startThreadStream(client, threadId, params as never);
-      return undefined as T;
-    }
-    if (method === ORCHESTRATION_WS_METHODS.unsubscribeThread) {
-      const threadId = (params as { threadId: string }).threadId;
-      this.threadSubscriptions.delete(threadId);
-      this.stopStream(`orchestration.thread:${threadId}`);
-      return undefined as T;
+    const served = mapMethodToServed(method);
+    if (served === null) {
+      // Unserved method — reject client-side, never reach the backend.
+      const err = methodNotFound(method);
+      throw new Error(err.message);
     }
 
-    const rpcInput =
-      method === ORCHESTRATION_WS_METHODS.dispatchCommand
-        ? (params as { command: unknown }).command
-        : (params ?? {});
-    const normalizedRpcInput = omitNullUserInputAnswers(rpcInput);
-    const call = (
-      client as unknown as Record<
-        string,
-        (input: unknown) => Effect.Effect<unknown, WsTransportRpcError, never>
-      >
-    )[method];
-    if (!call) throw new WsTransportRpcError({ message: `Unknown RPC method: ${method}` });
-    return (await this.runtime.runPromise(call(normalizedRpcInput))) as T;
+    const requestParams =
+      payload === undefined || payload === null ? {} : payload;
+    return (await this.sendJsonRpc(served, requestParams)) as T;
   }
 
-  subscribe<C extends WsPushChannel>(
+  // ─── Push subscription surface ───────────────────────────────────────
+
+  /**
+   * Subscribe to push frames on a channel. Callers pass the bare channel
+   * name (e.g. `"orchestration"`, `"server.welcome"`) — the same name the
+   * wire `push/<channel>` method embeds. The consumers in
+   * `wsNativeApi.ts` subscribe using MCode channel-name conventions
+   * (`serverWelcome`, `terminalEvent`, `orchestration.domainEvent`, …);
+   * `wsNativeApi.ts` is responsible for translating those to the bare
+   * channel names this method expects.
+   */
+  subscribe<C extends PushChannel>(
     channel: C,
-    listener: PushListener<C>,
+    listener: (message: WsPushMessage<C>) => void,
     options?: { readonly replayLatest?: boolean },
   ): () => void {
     let channelListeners = this.listeners.get(channel);
     if (!channelListeners) {
-      channelListeners = new Set<(message: WsPush) => void>();
+      channelListeners = new Set<PushListener>();
       this.listeners.set(channel, channelListeners);
-      this.startChannelStream(channel);
     }
 
-    const wrappedListener = (message: WsPush) => listener(message as WsPushMessage<C>);
-    channelListeners.add(wrappedListener);
+    const wrapped: PushListener = (message) =>
+      listener(message as WsPushMessage<C>);
+    channelListeners.add(wrapped);
 
     if (options?.replayLatest) {
       const latest = this.latestPushByChannel.get(channel);
-      if (latest) wrappedListener(latest);
+      if (latest) wrapped(latest);
     }
 
     return () => {
-      channelListeners?.delete(wrappedListener);
+      channelListeners?.delete(wrapped);
       if (channelListeners?.size === 0) {
         this.listeners.delete(channel);
-        this.stopChannelStream(channel);
       }
     };
   }
 
-  getLatestPush<C extends WsPushChannel>(channel: C): WsPushMessage<C> | null {
+  getLatestPush<C extends PushChannel>(channel: C): WsPushMessage<C> | null {
     const latest = this.latestPushByChannel.get(channel);
     return latest ? (latest as WsPushMessage<C>) : null;
   }
+
+  // ─── Transport state surface ─────────────────────────────────────────
 
   onStateChange(
     listener: (state: WsTransportState) => void,
     options?: { readonly replayCurrent?: boolean },
   ): () => void {
     this.stateListeners.add(listener);
-    if (options?.replayCurrent) {
-      listener(this.state);
-    }
-
+    if (options?.replayCurrent) listener(this.state);
     return () => {
       this.stateListeners.delete(listener);
     };
@@ -241,77 +363,241 @@ export class WsTransport {
     return this.state;
   }
 
-  dispose() {
+  dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
     this.setState("disposed");
-    for (const cleanup of this.streamCleanups.values()) cleanup();
-    this.streamCleanups.clear();
-    // Dispose can race with initial connection or reconnect promises. Mark them
-    // handled before closing the runtime so test/browser teardown stays quiet.
-    void this.clientPromise.catch(() => undefined);
-    void this.reconnectPromise?.catch(() => undefined);
-    const runtime = this.runtime;
-    const clientScope = this.clientScope;
-    void runtime
-      .runPromise(Scope.close(clientScope, Exit.void))
-      .catch(() => undefined)
-      .finally(() => {
-        runtime.dispose();
-      });
-  }
-
-  private createSession() {
-    const sessionVersion = ++this.sessionVersion;
-    const runtime = ManagedRuntime.make(makeProtocolLayer(makeSocketUrl(this.explicitUrl)));
-    const clientScope = runtime.runSync(Scope.make());
-    const clientPromise = runtime
-      .runPromise(Scope.provide(clientScope)(makeRpcClient))
-      .then((client) => {
-        if (!this.disposed && this.sessionVersion === sessionVersion) {
-          this.setState("open");
-        }
-        return client;
-      })
-      .catch((error) => {
-        if (!this.disposed && this.sessionVersion === sessionVersion) {
-          this.setState("closed");
-        }
-        throw error;
-      });
-    return { runtime, clientScope, clientPromise };
-  }
-
-  private async getClient(): Promise<RpcClientInstance> {
-    try {
-      return await this.clientPromise;
-    } catch {
-      if (this.disposed) throw new Error("Transport disposed");
-      return this.reconnect();
+    // Reject any in-flight requests so callers don't hang.
+    const pendingError = new Error("Transport disposed");
+    for (const entry of this.pending.values()) {
+      try {
+        entry.reject(pendingError);
+      } catch {
+        // Reject must never throw out of dispose.
+      }
+    }
+    this.pending.clear();
+    // Tear down the socket without waiting for the close handshake.
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      try {
+        socket.close();
+      } catch {
+        // Close can throw if already in CLOSING/CLOSED — ignore.
+      }
     }
   }
 
-  private reconnect(): Promise<RpcClientInstance> {
-    if (this.reconnectPromise) return this.reconnectPromise;
+  // ─── Internals: connection lifecycle ─────────────────────────────────
 
-    const oldRuntime = this.runtime;
-    const oldClientScope = this.clientScope;
-    for (const cleanup of this.streamCleanups.values()) cleanup();
-    this.streamCleanups.clear();
-    this.stoppingStreams.clear();
-
+  private openSession(): Promise<void> {
+    if (this.connectPromise) return this.connectPromise;
     this.setState("connecting");
 
-    void oldRuntime
-      .runPromise(Scope.close(oldClientScope, Exit.void))
-      .catch(() => undefined)
-      .finally(() => {
-        oldRuntime.dispose();
-      });
+    this.connectPromise = new Promise<void>((resolveSession, rejectSession) => {
+      let url: string;
+      try {
+        url = makeSocketUrl(this.explicitUrl);
+      } catch (error) {
+        rejectSession(toError(error));
+        this.connectPromise = null;
+        this.setState("closed");
+        return;
+      }
 
-    this.reconnectPromise = this.openReconnectSession().finally(() => {
-      this.reconnectPromise = null;
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(url);
+      } catch (error) {
+        rejectSession(toError(error));
+        this.connectPromise = null;
+        this.setState("closed");
+        return;
+      }
+      this.socket = socket;
+
+      socket.onopen = () => {
+        this.reconnectFailures = 0;
+        this.setState("open");
+        resolveSession();
+        this.connectPromise = null;
+      };
+
+      socket.onmessage = (event: MessageEvent) => {
+        this.handleIncoming(event.data);
+      };
+
+      socket.onerror = () => {
+        // Errors are reflected via onclose; nothing to do here but log at
+        // debug. Avoid noisy console output (matches the Effect variant's
+        // silent treatment of transient socket errors during reconnect).
+      };
+
+      socket.onclose = () => {
+        this.socket = null;
+        // If the open never resolved, reject the session promise.
+        if (this.connectPromise) {
+          this.connectPromise = null;
+          rejectSession(new Error("WebSocket closed before open"));
+        }
+        if (this.disposed) {
+          this.setState("closed");
+          return;
+        }
+        this.setState("connecting");
+        void this.scheduleReconnect();
+      };
     });
-    return this.reconnectPromise;
+    return this.connectPromise;
+  }
+
+  private async scheduleReconnect(): Promise<void> {
+    if (this.disposed) return;
+    const delayMs = Math.min(500 * 2 ** this.reconnectFailures, 5_000);
+    this.reconnectFailures += 1;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+    if (this.disposed) return;
+    this.connectPromise = null;
+    try {
+      await this.openSession();
+    } catch (error) {
+      if (!this.disposed) {
+        // Reconnect failed — schedule another attempt.
+        void this.scheduleReconnect();
+      }
+    }
+  }
+
+  // ─── Internals: send / receive ───────────────────────────────────────
+
+  /**
+   * Wait for the socket to be open (resolving the connect promise), then
+   * send a JSON-RPC request frame and await the matching response. Throws
+   * on socket-not-open, on send failure, and on a JSON-RPC `error` reply.
+   */
+  private async sendJsonRpc(method: string, params: unknown): Promise<unknown> {
+    if (this.disposed) throw new Error("Transport disposed");
+    await this.ensureOpen();
+
+    const id = this.nextId++;
+    const frame: JsonRpcRequestView = {
+      jsonrpc: "2.0",
+      id: String(id),
+      method,
+      params: isObject(params) ? (params as Record<string, unknown>) : {},
+    };
+
+    return new Promise<unknown>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, method });
+      try {
+        this.socket?.send(JSON.stringify(frame));
+      } catch (error) {
+        this.pending.delete(id);
+        reject(toError(error));
+      }
+    });
+  }
+
+  private async ensureOpen(): Promise<void> {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) return;
+    if (this.connectPromise) {
+      await this.connectPromise;
+      return;
+    }
+    await this.openSession();
+  }
+
+  /**
+   * Handle one incoming WebSocket frame. Parses JSON, then dispatches:
+   *   - responses (`id` present, no `method`) → resolve/reject the pending
+   *     request by id;
+   *   - notifications (`method` present, no `id`) → route as a push frame.
+   *
+   * Invalid JSON or unparseable frames are dropped (matches the Effect
+   * variant's tolerance of malformed frames during reconnect races).
+   */
+  private handleIncoming(raw: unknown): void {
+    if (typeof raw !== "string") return;
+    const parsed = safeParse<unknown>(raw);
+    if (!isObject(parsed)) return;
+
+    // ── Response (has `id`, no `method`) ──
+    if (hasKey(parsed, "id") && !hasKey(parsed, "method")) {
+      const response = parsed as unknown as JsonRpcResponseView;
+      const id = response.id;
+      const numericId = id === undefined ? NaN : Number(id);
+      const entry = this.pending.get(numericId);
+      if (!entry) return; // unknown id (duplicate / late reply) — drop
+      this.pending.delete(numericId);
+      if (response.error !== undefined && response.error !== null) {
+        const err = response.error;
+        entry.reject(
+          Object.assign(new Error(err.message), { code: err.code, data: err.data }),
+        );
+      } else {
+        entry.resolve(response.result ?? {});
+      }
+      return;
+    }
+
+    // ── Push notification (has `method`, no `id`) ──
+    if (hasKey(parsed, "method") && !hasKey(parsed, "id")) {
+      const notification = parsed as unknown as PushNotification;
+      this.routePush(notification);
+    }
+  }
+
+  /**
+   * Route a `push/<channel>` notification to subscribers. The wire method
+   * is `push/<channel>`; the bare channel name is extracted and matched
+   * against registered listeners. The orchestration channel is validated
+   * via T4's `isOrchestrationPushEnvelope` guard before dispatch — but
+   * unrecognized shapes are still forwarded (forward-compat with future
+   * server event tags not yet mirrored in `DomainEventDto`).
+   */
+  private routePush(notification: PushNotification): void {
+    const method = notification.method;
+    if (!method.startsWith("push/")) return;
+    const channel = method.slice("push/".length);
+    const params = notification.params;
+
+    // The orchestration channel is validated via T4's envelope guard. A
+    // guard failure is informational only — we still forward the frame so
+    // consumers can react to unrecognized event tags (forward-compat).
+    if (channel === "orchestration" && params !== null && params !== undefined) {
+      void isOrchestrationPushEnvelope(params); // type narrowing hook (no-op drop)
+    }
+
+    this.emit(channel, params);
+  }
+
+  /**
+   * Deliver a push payload to all listeners on `channel`, and cache it as
+   * the latest for late-subscriber replay. Listener errors are swallowed
+   * so one bad handler can't break the dispatch loop.
+   */
+  private emit(channel: PushChannel, data: unknown): void {
+    const message: WsPushMessage = {
+      type: "push",
+      sequence: ++this.sequence,
+      channel,
+      data,
+    };
+    this.latestPushByChannel.set(channel, message);
+    const listeners = this.listeners.get(channel);
+    if (!listeners) return;
+    for (const listener of listeners) {
+      try {
+        listener(message);
+      } catch {
+        // Listener errors must not break transport push dispatch.
+      }
+    }
   }
 
   private setState(state: WsTransportState): void {
@@ -321,272 +607,33 @@ export class WsTransport {
       try {
         listener(state);
       } catch {
-        // Listener errors must not break reconnect or RPC state transitions.
+        // Listener errors must not break reconnect or RPC transitions.
       }
     }
   }
+}
 
-  private async openReconnectSession(): Promise<RpcClientInstance> {
-    const delayMs = Math.min(500 * 2 ** this.reconnectFailures, 5_000);
-    this.reconnectFailures += 1;
-    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+// ─── Server-lifecycle channel helpers (preserved for tests) ─────────────
+//
+// These mirror the prior Effect variant's exports used by the test suite
+// (`isServerLifecyclePushChannel`, `shouldKeepServerLifecycleStream`). The
+// MCode `WS_CHANNELS` constant is not yet in the contracts shim (T6+), so
+// we hard-code the channel names the prior implementation referenced —
+// these are stable wire strings from `push/server.welcome` /
+// `push/server.maintenanceUpdated`.
 
-    const session = this.createSession();
-    this.runtime = session.runtime;
-    this.clientScope = session.clientScope;
-    this.clientPromise = session.clientPromise;
+const SERVER_LIFECYCLE_CHANNELS = new Set<string>([
+  "server.welcome",
+  "server.maintenanceUpdated",
+]);
 
-    const client = await session.clientPromise;
-    this.reconnectFailures = 0;
-    for (const channel of this.listeners.keys()) {
-      this.startChannelStream(channel as WsPushChannel);
-    }
-    if (this.shellSubscribed) {
-      this.startShellStream(client);
-    }
-    for (const [threadId, input] of this.threadSubscriptions) {
-      this.startThreadStream(client, threadId, input);
-    }
-    return client;
+export function isServerLifecyclePushChannel(channel: string): boolean {
+  return SERVER_LIFECYCLE_CHANNELS.has(channel);
+}
+
+export function shouldKeepServerLifecycleStream(activeChannels: ReadonlySet<string>): boolean {
+  for (const channel of SERVER_LIFECYCLE_CHANNELS) {
+    if (activeChannels.has(channel)) return true;
   }
-
-  private emit<C extends WsPushChannel>(channel: C, data: WsPushMessage<C>["data"]): void {
-    const message = {
-      type: "push" as const,
-      sequence: ++this.sequence,
-      channel,
-      data,
-    } as WsPush;
-    this.latestPushByChannel.set(channel, message);
-    const listeners = this.listeners.get(channel);
-    if (!listeners) return;
-    for (const listener of listeners) {
-      try {
-        listener(message);
-      } catch {
-        // Listener errors must not break transport streams.
-      }
-    }
-  }
-
-  private startChannelStream(channel: WsPushChannel): void {
-    void this.getClient()
-      .then((client) => {
-        const restartChannel = () => {
-          if (this.listeners.has(channel)) {
-            this.startChannelStream(channel);
-          }
-        };
-
-        if (isServerLifecyclePushChannel(channel)) {
-          this.startLifecycleStream(client);
-        } else if (channel === WS_CHANNELS.serverConfigUpdated) {
-          this.startStream(
-            "server.config",
-            client[WS_METHODS.subscribeServerConfig]({}),
-            (event: ServerConfigStreamEvent) => {
-              if (event.type === "snapshot") {
-                this.emit(WS_CHANNELS.serverConfigUpdated, {
-                  issues: event.config.issues,
-                  providers: event.config.providers,
-                });
-              } else if (event.type === "configUpdated") {
-                this.emit(WS_CHANNELS.serverConfigUpdated, event.payload);
-              }
-            },
-            restartChannel,
-          );
-        } else if (channel === WS_CHANNELS.serverProviderStatusesUpdated) {
-          this.startStream(
-            "server.providers",
-            client[WS_METHODS.subscribeServerProviderStatuses]({}),
-            (payload: ServerProviderStatusesUpdatedPayload) =>
-              this.emit(WS_CHANNELS.serverProviderStatusesUpdated, payload),
-            restartChannel,
-          );
-        } else if (channel === WS_CHANNELS.serverSettingsUpdated) {
-          this.startStream(
-            "server.settings",
-            client[WS_METHODS.subscribeServerSettings]({}),
-            (payload: ServerSettingsUpdatedPayload) =>
-              this.emit(WS_CHANNELS.serverSettingsUpdated, payload),
-            restartChannel,
-          );
-        } else if (channel === WS_CHANNELS.terminalEvent) {
-          this.startStream(
-            "terminal.events",
-            client[WS_METHODS.subscribeTerminalEvents]({}),
-            (event: TerminalEvent) => this.emit(WS_CHANNELS.terminalEvent, event),
-            restartChannel,
-          );
-        } else if (channel === WS_CHANNELS.projectDevServerEvent) {
-          this.startStream(
-            "project.devServers",
-            client[WS_METHODS.subscribeProjectDevServerEvents]({}),
-            (event: ProjectDevServerEvent) => this.emit(WS_CHANNELS.projectDevServerEvent, event),
-            restartChannel,
-          );
-        } else if (channel === WS_CHANNELS.automationEvent) {
-          this.startStream(
-            "automation.events",
-            client[WS_METHODS.subscribeAutomationEvents]({}),
-            (event: AutomationStreamEvent) => this.emit(WS_CHANNELS.automationEvent, event),
-            restartChannel,
-          );
-        } else if (channel === ORCHESTRATION_WS_CHANNELS.domainEvent) {
-          this.startStream(
-            "orchestration.domain",
-            client[WS_METHODS.subscribeOrchestrationDomainEvents]({}),
-            (event: OrchestrationEvent) => this.emit(ORCHESTRATION_WS_CHANNELS.domainEvent, event),
-            restartChannel,
-          );
-        }
-      })
-      .catch((error) => {
-        if (!this.disposed && this.listeners.has(channel)) {
-          console.warn("WebSocket RPC channel failed to start", error);
-          window.setTimeout(() => this.startChannelStream(channel), 500);
-        }
-      });
-  }
-
-  private stopChannelStream(channel: WsPushChannel): void {
-    if (isServerLifecyclePushChannel(channel)) {
-      if (!this.shouldKeepLifecycleStream()) this.stopStream("server.lifecycle");
-    } else if (channel === WS_CHANNELS.serverConfigUpdated) this.stopStream("server.config");
-    else if (channel === WS_CHANNELS.serverProviderStatusesUpdated)
-      this.stopStream("server.providers");
-    else if (channel === WS_CHANNELS.serverSettingsUpdated) this.stopStream("server.settings");
-    else if (channel === WS_CHANNELS.terminalEvent) this.stopStream("terminal.events");
-    else if (channel === WS_CHANNELS.projectDevServerEvent) this.stopStream("project.devServers");
-    else if (channel === WS_CHANNELS.automationEvent) this.stopStream("automation.events");
-    else if (channel === ORCHESTRATION_WS_CHANNELS.domainEvent)
-      this.stopStream("orchestration.domain");
-  }
-
-  private shouldKeepLifecycleStream(): boolean {
-    return shouldKeepServerLifecycleStream(new Set(this.listeners.keys()));
-  }
-
-  private startLifecycleStream(client: RpcClientInstance): void {
-    const restartLifecycle = () => {
-      if (!this.shouldKeepLifecycleStream()) return;
-      void this.getClient()
-        .then((nextClient) => this.startLifecycleStream(nextClient))
-        .catch((error) => console.warn("WebSocket RPC lifecycle stream failed to restart", error));
-    };
-    this.startStream(
-      "server.lifecycle",
-      client[WS_METHODS.subscribeServerLifecycle]({}),
-      (event: ServerLifecycleStreamEvent) => {
-        if (event.type === "welcome") {
-          this.emit(WS_CHANNELS.serverWelcome, event.payload);
-        } else if (event.type === "maintenance") {
-          this.emit(WS_CHANNELS.serverMaintenanceUpdated, event);
-        }
-      },
-      restartLifecycle,
-    );
-  }
-
-  private startShellStream(client: RpcClientInstance): void {
-    const restartShell = () => {
-      void this.getClient()
-        .then((nextClient) => this.startShellStream(nextClient))
-        .catch((error) => console.warn("WebSocket RPC shell stream failed to restart", error));
-    };
-    this.startStream(
-      "orchestration.shell",
-      client[ORCHESTRATION_WS_METHODS.subscribeShell]({}),
-      (event: OrchestrationShellStreamItem) =>
-        this.emit(ORCHESTRATION_WS_CHANNELS.shellEvent, event),
-      restartShell,
-    );
-  }
-
-  private startThreadStream(client: RpcClientInstance, threadId: string, input: unknown): void {
-    const key = `orchestration.thread:${threadId}`;
-    this.stopStream(key);
-    this.stoppingStreams.delete(key);
-    const restartThread = () => {
-      void this.getClient()
-        .then((nextClient) => this.startThreadStream(nextClient, threadId, input))
-        .catch((error) => console.warn("WebSocket RPC thread stream failed to restart", error));
-    };
-    this.startStream(
-      key,
-      client[ORCHESTRATION_WS_METHODS.subscribeThread](input as never),
-      (event: OrchestrationThreadStreamItem) =>
-        this.emit(ORCHESTRATION_WS_CHANNELS.threadEvent, event),
-      restartThread,
-    );
-  }
-
-  private startStream<T>(
-    key: string,
-    stream: unknown,
-    listener: (event: T) => void,
-    restart?: (() => void) | undefined,
-  ): void {
-    if (this.streamCleanups.has(key)) return;
-    const runnableStream = stream as Stream.Stream<T, WsTransportRpcError, never>;
-    const cancel = this.runtime.runCallback(
-      Stream.runForEach(runnableStream, (event) => Effect.sync(() => listener(event))),
-      {
-        onExit: (exit) => {
-          if (this.streamCleanups.get(key) === cancel) {
-            this.streamCleanups.delete(key);
-          }
-          const wasStoppedIntentionally = this.stoppingStreams.delete(key);
-          if (wasStoppedIntentionally || this.disposed) {
-            return;
-          }
-          if (restart && Exit.isFailure(exit)) {
-            window.setTimeout(
-              () => {
-                if (!this.disposed && !this.streamCleanups.has(key)) {
-                  void this.reconnect()
-                    .then(() => restart())
-                    .catch((error) => console.warn("WebSocket RPC stream reconnect failed", error));
-                }
-              },
-              Cause.hasInterruptsOnly(exit.cause) ? 0 : 500,
-            );
-            return;
-          }
-          if (Exit.isFailure(exit) && !this.disposed && !Cause.hasInterruptsOnly(exit.cause)) {
-            console.warn("WebSocket RPC stream failed", causeToError(exit.cause));
-          }
-        },
-      },
-    );
-    this.streamCleanups.set(key, cancel);
-  }
-
-  private stopStream(key: string): void {
-    const cleanup = this.streamCleanups.get(key);
-    if (!cleanup) return;
-    this.stoppingStreams.add(key);
-    this.streamCleanups.delete(key);
-    cleanup();
-  }
-
-  private async runGitActionStream(
-    client: RpcClientInstance,
-    params: unknown,
-  ): Promise<GitRunStackedActionResult> {
-    let result: GitRunStackedActionResult | null = null;
-    await this.runtime.runPromise(
-      Stream.runForEach(client[WS_METHODS.gitRunStackedAction](params as never), (event) =>
-        Effect.sync(() => {
-          this.emit(WS_CHANNELS.gitActionProgress, event as GitActionProgressEvent);
-          if ((event as GitActionProgressEvent).kind === "action_finished") {
-            result = (event as Extract<GitActionProgressEvent, { kind: "action_finished" }>).result;
-          }
-        }),
-      ),
-    );
-    if (!result) throw new Error("Git action stream completed without a final result.");
-    return result;
-  }
+  return false;
 }

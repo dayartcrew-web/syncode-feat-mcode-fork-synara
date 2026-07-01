@@ -137,7 +137,7 @@ mod tests {
         // Subscribed channel → delivered.
         let _ = state.push_tx.send((
             "orchestration".to_string(),
-            serde_json::json!({"event_type": "ProjectCreated"}),
+            serde_json::json!({"eventType": "ProjectCreated"}),
         ));
         let received = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
         assert!(received.is_ok(), "subscribed channel should be delivered");
@@ -148,7 +148,7 @@ mod tests {
         // Unsubscribed channel → filtered out (recv times out).
         let _ = state.push_tx.send((
             "git".to_string(),
-            serde_json::json!({"event_type": "GitPushed"}),
+            serde_json::json!({"eventType": "GitPushed"}),
         ));
         let filtered = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
         assert!(

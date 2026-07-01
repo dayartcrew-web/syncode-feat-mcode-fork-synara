@@ -92,9 +92,13 @@ impl DomainEventPublisher for WsDomainEventPublisher {
         aggregate_id: &str,
         data: serde_json::Value,
     ) -> Result<(), PortError> {
+        // camelCase keys — wire parity with T4's `OrchestrationPushEnvelope`
+        // type model (frontend/src/contracts/events.ts) and the cloned MCode
+        // frontend's Effect-Schema expectations. See CONTRACTS-BRIDGE-DESIGN
+        // §3.3 (camelCase canonical at the contracts boundary) + B3.
         let envelope = json!({
-            "event_type": event_type,
-            "aggregate_id": aggregate_id,
+            "eventType": event_type,
+            "aggregateId": aggregate_id,
             "data": data,
         });
         // No receivers is not an error — it is normal before any client
@@ -362,8 +366,8 @@ pub async fn emit_snapshot(
         "jsonrpc": "2.0",
         "method": format!("push/{}", channel),
         "params": {
-            "event_type": "snapshot",
-            "aggregate_id": serde_json::Value::Null,
+            "eventType": "snapshot",
+            "aggregateId": serde_json::Value::Null,
             "data": data,
         },
     });
@@ -566,8 +570,8 @@ mod tests {
 
         let (channel, data) = rx.recv().await.expect("should receive the broadcast");
         assert_eq!(channel, "orchestration");
-        assert_eq!(data["event_type"], "ProjectCreated");
-        assert_eq!(data["aggregate_id"], "agg-1");
+        assert_eq!(data["eventType"], "ProjectCreated");
+        assert_eq!(data["aggregateId"], "agg-1");
         assert_eq!(data["data"]["id"], "agg-1");
         assert_eq!(data["data"]["name"], "Demo");
     }
