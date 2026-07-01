@@ -69,6 +69,18 @@ pub trait EventRepository: Send + Sync {
         version: u64,
     ) -> Result<(), PortError>;
 
+    /// Load every stored snapshot, across all aggregates.
+    ///
+    /// Used by the cold-start read-model rebuild to seed the projection from
+    /// snapshots and replay only each aggregate's tail. Each entry is
+    /// `(aggregate_id, state, version)`, where `version` is the per-aggregate
+    /// event count captured by the snapshot (the first `version` events of that
+    /// aggregate's stream are already reflected in `state`). Returns an empty
+    /// vec when no snapshots exist.
+    async fn load_all_snapshots(
+        &self,
+    ) -> Result<Vec<(EntityId, serde_json::Value, u64)>, PortError>;
+
     /// Read all events across all aggregates (for global replay / projections).
     ///
     /// Returns events ordered by timestamp, optionally filtered since a given

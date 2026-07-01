@@ -982,6 +982,21 @@ pub(crate) mod test_helpers {
             Ok(())
         }
 
+        async fn load_all_snapshots(
+            &self,
+        ) -> Result<Vec<(EntityId, serde_json::Value, u64)>, PortError> {
+            let snapshots = self.snapshots.lock().unwrap();
+            // aggregate_id keys are always valid UUID strings (stored via
+            // EntityId::to_string); parse failures here would indicate corruption.
+            let mut out = Vec::with_capacity(snapshots.len());
+            for (id_str, (state, version)) in snapshots.iter() {
+                let id = EntityId::parse(id_str)
+                    .map_err(|e| PortError::Internal(format!("invalid aggregate_id: {e}")))?;
+                out.push((id, state.clone(), *version));
+            }
+            Ok(out)
+        }
+
         async fn replay_all_events(
             &self,
             _since_sequence: Option<u64>,
@@ -1088,6 +1103,12 @@ mod tests {
             version: u64,
         ) -> Result<(), PortError> {
             self.inner.save_snapshot(aggregate_id, state, version).await
+        }
+
+        async fn load_all_snapshots(
+            &self,
+        ) -> Result<Vec<(EntityId, serde_json::Value, u64)>, PortError> {
+            self.inner.load_all_snapshots().await
         }
 
         async fn replay_all_events(
@@ -1241,6 +1262,37 @@ mod tests {
             .await
             .expect("load_snapshot");
         assert!(snap.is_none(), "no snapshot expected below the interval");
+    }
+
+    #[tokio::test]
+    async fn in_memory_repo_enumerates_all_snapshots() {
+        // The in-memory event repo stores snapshots and load_all_snapshots
+        // returns every one, keyed by aggregate id, with state + version intact.
+        let repo = InMemoryEventRepo::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+
+        repo.save_snapshot(a, serde_json::json!({"k": "a"}), 10).await.expect("save a");
+        repo.save_snapshot(b, serde_json::json!({"k": "b"}), 25).await.expect("save b");
+        repo.save_snapshot(c, serde_json::json!({"k": "c"}), 50).await.expect("save c");
+
+        let mut all = repo.load_all_snapshots().await.expect("load all");
+        all.sort_by_key(|(_, _, v)| *v);
+        assert_eq!(all.len(), 3, "all three snapshots enumerated");
+        assert_eq!(all[0].0, a);
+        assert_eq!(all[0].2, 10);
+        assert_eq!(all[1].0, b);
+        assert_eq!(all[2].0, c);
+        assert_eq!(all[2].2, 50);
+
+        // Re-saving a snapshot for an existing aggregate replaces it (no dup).
+        repo.save_snapshot(a, serde_json::json!({"k": "a2"}), 12).await.expect("update a");
+        let all2 = repo.load_all_snapshots().await.expect("load all 2");
+        assert_eq!(all2.len(), 3, "overwrite must not duplicate");
+        let a_entry = all2.into_iter().find(|(id, _, _)| *id == a).expect("a present");
+        assert_eq!(a_entry.2, 12);
+        assert_eq!(a_entry.1["k"], "a2");
     }
 
     #[tokio::test]

@@ -90,6 +90,14 @@ impl EventRepository for SqliteEventRepository {
             .map_err(|e| PortError::Internal(e.to_string()))
     }
 
+    async fn load_all_snapshots(
+        &self,
+    ) -> Result<Vec<(EntityId, serde_json::Value, u64)>, PortError> {
+        crate::snapshot::load_all_snapshots(&self.pool)
+            .await
+            .map_err(|e| PortError::Internal(e.to_string()))
+    }
+
     async fn replay_all_events(
         &self,
         since_sequence: Option<u64>,

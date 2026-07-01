@@ -121,9 +121,10 @@ impl WsState {
         // In-memory event repo for testing
         struct InMemoryRepo {
             events: std::sync::Mutex<std::collections::HashMap<String, Vec<syncode_core::Envelope>>>,
+            snapshots: std::sync::Mutex<std::collections::HashMap<String, (serde_json::Value, u64)>>,
         }
         impl InMemoryRepo {
-            fn new() -> Self { Self { events: std::sync::Mutex::new(std::collections::HashMap::new()) } }
+            fn new() -> Self { Self { events: std::sync::Mutex::new(std::collections::HashMap::new()), snapshots: std::sync::Mutex::new(std::collections::HashMap::new()) } }
         }
         #[async_trait::async_trait]
         impl EventRepository for InMemoryRepo {
@@ -148,8 +149,23 @@ impl WsState {
                 let store = self.events.lock().unwrap();
                 Ok(store.get(&aggregate_id.to_string()).cloned().unwrap_or_default())
             }
-            async fn load_snapshot(&self, _: syncode_core::EntityId) -> Result<Option<(serde_json::Value, u64)>, syncode_core::PortError> { Ok(None) }
-            async fn save_snapshot(&self, _: syncode_core::EntityId, _: serde_json::Value, _: u64) -> Result<(), syncode_core::PortError> { Ok(()) }
+            async fn load_snapshot(&self, aggregate_id: syncode_core::EntityId) -> Result<Option<(serde_json::Value, u64)>, syncode_core::PortError> {
+                Ok(self.snapshots.lock().unwrap().get(&aggregate_id.to_string()).cloned())
+            }
+            async fn save_snapshot(&self, aggregate_id: syncode_core::EntityId, state: serde_json::Value, version: u64) -> Result<(), syncode_core::PortError> {
+                self.snapshots.lock().unwrap().insert(aggregate_id.to_string(), (state, version));
+                Ok(())
+            }
+            async fn load_all_snapshots(&self) -> Result<Vec<(syncode_core::EntityId, serde_json::Value, u64)>, syncode_core::PortError> {
+                let snapshots = self.snapshots.lock().unwrap();
+                let mut out = Vec::with_capacity(snapshots.len());
+                for (id_str, (state, version)) in snapshots.iter() {
+                    let id = syncode_core::EntityId::parse(id_str)
+                        .map_err(|e| syncode_core::PortError::Internal(format!("invalid aggregate_id: {e}")))?;
+                    out.push((id, state.clone(), *version));
+                }
+                Ok(out)
+            }
             async fn replay_all_events(&self, _: Option<u64>, _: u32) -> Result<Vec<syncode_core::Envelope>, syncode_core::PortError> {
                 let store = self.events.lock().unwrap();
                 let mut all: Vec<syncode_core::Envelope> = store.values().flatten().cloned().collect();

@@ -71,6 +71,34 @@ pub async fn load_snapshot(
     }
 }
 
+/// Load every stored snapshot, across all aggregates.
+///
+/// Returns one `(aggregate_id, state, version)` per snapshot. Used by the
+/// cold-start read-model rebuild to seed the projection and replay only each
+/// aggregate's tail. An empty vec means no snapshots exist (the rebuild then
+/// falls back to a full replay).
+pub async fn load_all_snapshots(
+    pool: &SqlitePool,
+) -> Result<Vec<(EntityId, serde_json::Value, u64)>, SnapshotError> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT aggregate_id, data, sequence FROM snapshots",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (id_str, data, version) in rows {
+        // aggregate_id is always stored as a valid UUID string (via
+        // EntityId::to_string); a parse failure here signals corruption.
+        let aggregate_id = EntityId::parse(&id_str)
+            .map_err(|e| SnapshotError::Serialization(format!("invalid aggregate_id: {e}")))?;
+        let state: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|e| SnapshotError::Serialization(e.to_string()))?;
+        out.push((aggregate_id, state, version as u64));
+    }
+    Ok(out)
+}
+
 /// Delete a snapshot for an aggregate.
 pub async fn delete_snapshot(
     pool: &SqlitePool,
@@ -159,5 +187,48 @@ mod tests {
 
         let loaded = load_snapshot(&pool, agg_id).await.expect("load");
         assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_all_snapshots() {
+        // Three distinct aggregates snapshotted at different versions are all
+        // returned by load_all_snapshots, with their state and version intact.
+        let pool = init_database(Path::new("")).await.expect("database");
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+
+        save_snapshot(&pool, a, &serde_json::json!({"k": "a"}), 10)
+            .await
+            .expect("save a");
+        save_snapshot(&pool, b, &serde_json::json!({"k": "b"}), 25)
+            .await
+            .expect("save b");
+        save_snapshot(&pool, c, &serde_json::json!({"k": "c"}), 50)
+            .await
+            .expect("save c");
+
+        let mut all = load_all_snapshots(&pool).await.expect("load all");
+        all.sort_by_key(|(_, _, v)| *v);
+
+        assert_eq!(all.len(), 3, "all three snapshots returned");
+        let (id_a, state_a, ver_a) = &all[0];
+        assert_eq!(*id_a, a);
+        assert_eq!(*ver_a, 10);
+        assert_eq!(state_a["k"], "a");
+        let (id_b, _, ver_b) = &all[1];
+        assert_eq!(*id_b, b);
+        assert_eq!(*ver_b, 25);
+        let (id_c, _, ver_c) = &all[2];
+        assert_eq!(*id_c, c);
+        assert_eq!(*ver_c, 50);
+    }
+
+    #[tokio::test]
+    async fn test_load_all_snapshots_empty() {
+        // A fresh database has no snapshots; load_all_snapshots returns [].
+        let pool = init_database(Path::new("")).await.expect("database");
+        let all = load_all_snapshots(&pool).await.expect("load all");
+        assert!(all.is_empty(), "no snapshots in a fresh database");
     }
 }
