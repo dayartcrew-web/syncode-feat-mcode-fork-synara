@@ -161,7 +161,7 @@ mod tests {
         );
         assert_eq!(def.name, "test-auto");
         assert!(def.enabled);
-        assert!(def.id.as_str().len() > 0);
+        assert!(!def.id.as_str().is_empty());
         assert_eq!(def.max_retries, 3);
     }
 

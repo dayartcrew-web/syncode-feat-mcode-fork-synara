@@ -150,13 +150,13 @@ impl AutomationRun {
     }
 
     fn compute_duration(&mut self) {
-        if let (Some(start), Some(end)) = (&self.started_at, &self.ended_at) {
-            if let (Ok(s), Ok(e)) = (
+        if let (Some(start), Some(end)) = (&self.started_at, &self.ended_at)
+            && let (Ok(s), Ok(e)) = (
                 chrono::DateTime::parse_from_rfc3339(start),
                 chrono::DateTime::parse_from_rfc3339(end),
-            ) {
-                self.duration_ms = Some((e - s).num_milliseconds() as u64);
-            }
+            )
+        {
+            self.duration_ms = Some((e - s).num_milliseconds() as u64);
         }
     }
 }

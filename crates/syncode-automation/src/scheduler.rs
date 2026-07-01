@@ -30,10 +30,13 @@ pub struct Scheduler {
     /// Active runs
     runs: RwLock<HashMap<String, AutomationRun>>,
     /// Retry policy (global default)
+    #[allow(dead_code)] // reserved: per-automation policy overrides (not yet wired)
     default_retry: RetryPolicy,
     /// Misfire policy (global default)
+    #[allow(dead_code)] // reserved: per-automation policy overrides (not yet wired)
     default_misfire: MisfirePolicy,
     /// Completion policy (global default)
+    #[allow(dead_code)] // reserved: per-automation policy overrides (not yet wired)
     default_completion: CompletionPolicy,
 }
 
@@ -249,7 +252,7 @@ mod tests {
     async fn scheduler_register_duplicate_fails() {
         let scheduler = Scheduler::new();
         let def = make_def("test-1");
-        let id = def.id.clone();
+        let id = def.id;
         scheduler.register(def).await.unwrap();
 
         // Try to register another def with the same name but different ID — should succeed
@@ -389,12 +392,12 @@ mod tests {
     async fn scheduler_update() {
         let scheduler = Scheduler::new();
         let def = make_def("test-1");
-        let id = def.id.clone();
+        let id = def.id;
         scheduler.register(def).await.unwrap();
 
         // Create a new def with the same ID but different name
         let mut updated = make_def("test-1-renamed");
-        updated.id = id.clone();
+        updated.id = id;
         scheduler.update(updated).await.unwrap();
 
         let id_str = id.as_str();

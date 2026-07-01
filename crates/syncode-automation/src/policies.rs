@@ -65,10 +65,11 @@ impl RetryPolicy {
 }
 
 /// What to do when a scheduled trigger is missed (e.g., system was down)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MisfirePolicy {
     /// Skip the missed run entirely
+    #[default]
     Skip,
     /// Run immediately when detected
     RunImmediately,
@@ -76,17 +77,12 @@ pub enum MisfirePolicy {
     RunNext,
 }
 
-impl Default for MisfirePolicy {
-    fn default() -> Self {
-        Self::Skip
-    }
-}
-
 /// How to determine if a run completed successfully
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionPolicy {
     /// Consider successful if exit code is 0
+    #[default]
     ExitCodeZero,
     /// Consider successful if exit code is in the allowed list
     AllowedExitCodes(Vec<i32>),
@@ -94,12 +90,6 @@ pub enum CompletionPolicy {
     AlwaysSuccess,
     /// Use AI evaluation to determine success
     AiEvaluated { prompt: String },
-}
-
-impl Default for CompletionPolicy {
-    fn default() -> Self {
-        Self::ExitCodeZero
-    }
 }
 
 impl CompletionPolicy {
