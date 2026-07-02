@@ -103,6 +103,8 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
+  OrchestrationShellStreamItem,
+  OrchestrationThreadStreamItem,
 } from "./tier3/orchestration";
 import type {
   ProviderComposerCapabilities,
@@ -370,8 +372,10 @@ export interface OrchestrationGetFullThreadDiffResult extends OpaqueTransportRes
 // so `Extract<OrchestrationEvent, { type: "thread.message-sent" }>` narrows
 // to a real shape instead of collapsing to `never`.
 export type { OrchestrationEvent } from "./tier3/orchestration";
-export interface OrchestrationShellStreamItem extends OpaqueTransportResult {}
-export interface OrchestrationThreadStreamItem extends OpaqueTransportResult {}
+// Per MCode: shell/thread stream items are `snapshot | event` envelopes (real
+// discriminated unions), not opaque blobs. The vendored UI reads
+// `item.snapshot`/`item.thread`/`item.sequence`/`item.event` off them.
+export type { OrchestrationShellStreamItem, OrchestrationThreadStreamItem } from "./tier3/orchestration";
 export interface OrchestrationSubscribeThreadInput extends OpaqueTransportInput {}
 
 // ─── Desktop-shell types (defined inline, verbatim from MCode ipc.ts) ────

@@ -897,6 +897,27 @@ export type OrchestrationShellStreamEvent =
       readonly threadId: ThreadId;
     };
 
+// ─── Orchestration stream items (snapshot | event envelopes) ──────────
+// Ported from MCode `packages/contracts/src/orchestration.ts`. The shell and
+// thread channels multiplex an initial snapshot item with subsequent
+// delta/event items, discriminated by `kind`. The vendored UI
+// (`routes/__root.tsx` onShellEvent handler, `wsNativeApi.ts`) reads
+// `item.snapshot` / `item.thread` / `item.sequence` / `item.event` off
+// these; the opaque transport stubs collapsed those to `unknown`.
+
+export interface OrchestrationThreadDetailSnapshot {
+  snapshotSequence: NonNegativeInt;
+  thread: OrchestrationThread;
+}
+
+export type OrchestrationShellStreamItem =
+  | { readonly kind: "snapshot"; readonly snapshot: OrchestrationShellSnapshot }
+  | OrchestrationShellStreamEvent;
+
+export type OrchestrationThreadStreamItem =
+  | { readonly kind: "snapshot"; readonly snapshot: OrchestrationThreadDetailSnapshot }
+  | { readonly kind: "event"; readonly event: OrchestrationEvent };
+
 // ─── OrchestrationEvent (34-variant discriminated union) ──────────────
 // Real per-variant modelling: literal `type` discriminator per variant +
 // the shared `EventBaseFields` (sequence, eventId, aggregateKind,
