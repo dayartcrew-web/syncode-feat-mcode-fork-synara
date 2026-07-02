@@ -127,6 +127,37 @@ describe("WsTransport", () => {
     transport.dispose();
   });
 
+  it("targets the standalone WS backend port via VITE_WS_PORT in browser mode", () => {
+    // Browser dev: page served by Vite on :5173, standalone WS backend on :3000.
+    // VITE_WS_PORT must override the page port while keeping the hostname.
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: { protocol: "http:", hostname: "localhost", port: "5173" },
+        desktopBridge: undefined,
+      },
+    });
+    vi.stubEnv("VITE_WS_PORT", "3000");
+
+    const transport = new WsTransport();
+
+    expect(sockets[0]?.url).toBe("ws://localhost:3000/ws");
+
+    transport.dispose();
+  });
+
+  it("prefers VITE_WS_URL over VITE_WS_PORT when both are set", () => {
+    // A full-URL override wins over the port-only override.
+    vi.stubEnv("VITE_WS_URL", "ws://staging.example:9000");
+    vi.stubEnv("VITE_WS_PORT", "3000");
+
+    const transport = new WsTransport();
+
+    expect(sockets[0]?.url).toBe("ws://staging.example:9000/ws");
+
+    transport.dispose();
+  });
+
   it("notifies state listeners and replays the current state on demand", () => {
     const transport = new WsTransport();
     const listener = vi.fn();
