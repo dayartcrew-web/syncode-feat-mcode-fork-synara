@@ -27,6 +27,74 @@ import type { ThreadId } from "./ids";
 // shares the canonical backend type with the served RPC surface.
 import type { AuthBootstrapResult } from "../types/AuthBootstrapResult";
 
+// ─── Tier 3 type imports (real shapes) ────────────────────────────────
+// The symbols below were previously declared in this file as opaque stubs.
+// T5b ported them to real shapes in the `./tier3/*` modules; import them
+// here so the `NativeApi` / `DesktopBridge` interfaces below reference the
+// real types AND the matching `export type { … } from "./tier3/…"`
+// re-exports at the bottom of the re-export block keep the public barrel
+// surface stable.
+import type {
+  EditorId,
+  ContextMenuItem,
+  FilesystemBrowseResult,
+} from "./tier3/misc";
+import type {
+  TerminalSessionSnapshot,
+  TerminalEvent,
+} from "./tier3/terminal";
+import type {
+  ProjectDiscoverScriptsResult,
+  ProjectListDirectoriesResult,
+  ProjectSearchEntriesResult,
+  ProjectSearchLocalEntriesResult,
+  ProjectReadFileResult,
+  ProjectRunDevServerInput,
+  ProjectDevServerEvent,
+} from "./tier3/project";
+import type {
+  GitStashInfoResult,
+  GitResolvePullRequestResult,
+  GitStatusResult,
+  GitReadWorkingTreeDiffInput,
+  GitRunStackedActionResult,
+  GitActionProgressEvent,
+} from "./tier3/git";
+import type {
+  ServerConfig,
+  ServerGenerateAutomationIntentInput,
+  ServerGenerateAutomationIntentResult,
+  ServerGetProviderUsageSnapshotInput,
+  ServerGetProviderUsageSnapshotResult,
+  ServerListProviderUsageInput,
+  ServerListProviderUsageResult,
+  ServerStopLocalServerInput,
+} from "./tier3/server";
+import type {
+  AuthBootstrapInput,
+  AuthBearerBootstrapResult,
+  AuthWebSocketTokenResult,
+  AuthSessionState,
+  AuthCreatePairingCredentialInput,
+  AuthPairingCredentialResult,
+  AuthPairingLink,
+  AuthRevokePairingLinkInput,
+  AuthClientSession,
+  AuthRevokeClientSessionInput,
+} from "./tier3/auth";
+import type {
+  AutomationListResult,
+  AutomationDefinition,
+  AutomationStreamEvent,
+} from "./tier3/automation";
+import type { ProviderComposerCapabilities } from "./tier3/provider";
+import type {
+  StatsGetProfileStatsInput,
+  StatsGetProfileStatsResult,
+  StatsGetProfileTokenStatsInput,
+  StatsGetProfileTokenStatsResult,
+} from "./tier3/stats";
+
 // ─── Self-contained supporting type aliases (deferred Tier 3 modules) ────
 // These narrow the surface this file pulls in. Each is a placeholder for the
 // matching MCode contracts module; method signatures use them only as opaque
@@ -37,8 +105,89 @@ export type OpaqueTransportInput = Readonly<Record<string, unknown>>;
 /** Opaque stand-in for inputs/results routed over the JSON-RPC transport. */
 export type OpaqueTransportResult = Readonly<Record<string, unknown>>;
 
-/** MCode `editor.ts` — `EditorId`. */
-export type EditorId = string;
+// ─── Tier 3 re-exports (real shapes replace prior opaque stubs) ────────
+// The symbols below were previously declared in this file as opaque
+// `extends OpaqueTransportInput/Result {}` stubs. T5b ported them to real
+// shapes in the tier3 sibling modules; re-export those shapes here so the
+// NativeApi/DesktopBridge interfaces (which reference them) get the real
+// types AND the symbol set exported from `./shell` stays consistent for
+// existing importers.
+export type {
+  // editor
+  EditorId,
+} from "./tier3/misc";
+
+export type {
+  TerminalSessionSnapshot,
+  TerminalEvent,
+} from "./tier3/terminal";
+
+export type {
+  ProjectDiscoverScriptsResult,
+  ProjectListDirectoriesResult,
+  ProjectSearchEntriesResult,
+  ProjectSearchLocalEntriesResult,
+  ProjectReadFileResult,
+  ProjectRunDevServerInput,
+  ProjectDevServerEvent,
+} from "./tier3/project";
+
+export type {
+  FilesystemBrowseResult,
+  ContextMenuItem,
+} from "./tier3/misc";
+
+export type {
+  GitStashInfoResult,
+  GitResolvePullRequestResult,
+  GitStatusResult,
+  GitReadWorkingTreeDiffInput,
+  GitRunStackedActionResult,
+  GitActionProgressEvent,
+} from "./tier3/git";
+
+export type {
+  ServerConfig,
+  ServerGenerateAutomationIntentInput,
+  ServerGenerateAutomationIntentResult,
+  ServerGetProviderUsageSnapshotInput,
+  ServerGetProviderUsageSnapshotResult,
+  ServerListProviderUsageInput,
+  ServerListProviderUsageResult,
+  ServerStopLocalServerInput,
+} from "./tier3/server";
+
+export type {
+  AuthBootstrapInput,
+  AuthBearerBootstrapResult,
+  AuthWebSocketTokenResult,
+  AuthSessionState,
+  AuthCreatePairingCredentialInput,
+  AuthPairingCredentialResult,
+  AuthPairingLink,
+  AuthRevokePairingLinkInput,
+  AuthClientSession,
+  AuthRevokeClientSessionInput,
+} from "./tier3/auth";
+
+export type {
+  AutomationListResult,
+  AutomationDefinition,
+  AutomationStreamEvent,
+} from "./tier3/automation";
+
+export type { ProviderComposerCapabilities } from "./tier3/provider";
+
+export type {
+  StatsGetProfileStatsInput,
+  StatsGetProfileStatsResult,
+  StatsGetProfileTokenStatsInput,
+  StatsGetProfileTokenStatsResult,
+} from "./tier3/stats";
+
+// ─── Symbols still opaque (no Tier 3 model yet) ────────────────────────
+// These remain as `extends OpaqueTransport*` stubs — the corresponding
+// MCode modules were not in the T5b scope. T5c+ can model them.
 
 /** MCode `terminal.ts` types (terminal PTY session surface). */
 export interface TerminalOpenInput extends OpaqueTransportInput {}
@@ -48,32 +197,22 @@ export interface TerminalResizeInput extends OpaqueTransportInput {}
 export interface TerminalClearInput extends OpaqueTransportInput {}
 export interface TerminalRestartInput extends OpaqueTransportInput {}
 export interface TerminalCloseInput extends OpaqueTransportInput {}
-export interface TerminalSessionSnapshot extends OpaqueTransportResult {}
-export interface TerminalEvent extends OpaqueTransportResult {}
 
 /** MCode `project.ts` types (project file/dev-server surface). */
 export interface ProjectDiscoverScriptsInput extends OpaqueTransportInput {}
-export interface ProjectDiscoverScriptsResult extends OpaqueTransportResult {}
 export interface ProjectListDirectoriesInput extends OpaqueTransportInput {}
-export interface ProjectListDirectoriesResult extends OpaqueTransportResult {}
 export interface ProjectSearchEntriesInput extends OpaqueTransportInput {}
-export interface ProjectSearchEntriesResult extends OpaqueTransportResult {}
 export interface ProjectSearchLocalEntriesInput extends OpaqueTransportInput {}
-export interface ProjectSearchLocalEntriesResult extends OpaqueTransportResult {}
 export interface ProjectReadFileInput extends OpaqueTransportInput {}
-export interface ProjectReadFileResult extends OpaqueTransportResult {}
 export interface ProjectWriteFileInput extends OpaqueTransportInput {}
 export interface ProjectWriteFileResult extends OpaqueTransportResult {}
-export interface ProjectRunDevServerInput extends OpaqueTransportInput {}
 export interface ProjectRunDevServerResult extends OpaqueTransportResult {}
 export interface ProjectStopDevServerInput extends OpaqueTransportInput {}
 export interface ProjectStopDevServerResult extends OpaqueTransportResult {}
 export interface ProjectListDevServersResult extends OpaqueTransportResult {}
-export interface ProjectDevServerEvent extends OpaqueTransportResult {}
 
 /** MCode `filesystem.ts` types (filesystem browser surface). */
 export interface FilesystemBrowseInput extends OpaqueTransportInput {}
-export interface FilesystemBrowseResult extends OpaqueTransportResult {}
 
 /** MCode `git.ts` types (git branch/worktree/stage/diff/PR surface). */
 export interface GitHubRepositoryInput extends OpaqueTransportInput {}
@@ -90,7 +229,6 @@ export interface GitCheckoutInput extends OpaqueTransportInput {}
 export interface GitStashAndCheckoutInput extends OpaqueTransportInput {}
 export interface GitStashDropInput extends OpaqueTransportInput {}
 export interface GitStashInfoInput extends OpaqueTransportInput {}
-export interface GitStashInfoResult extends OpaqueTransportResult {}
 export interface GitRemoveIndexLockInput extends OpaqueTransportInput {}
 export interface GitInitInput extends OpaqueTransportInput {}
 export interface GitStageFilesInput extends OpaqueTransportInput {}
@@ -100,42 +238,29 @@ export interface GitUnstageFilesResult extends OpaqueTransportResult {}
 export interface GitHandoffThreadInput extends OpaqueTransportInput {}
 export interface GitHandoffThreadResult extends OpaqueTransportResult {}
 export interface GitPullRequestRefInput extends OpaqueTransportInput {}
-export interface GitResolvePullRequestResult extends OpaqueTransportResult {}
 export interface GitPreparePullRequestThreadInput extends OpaqueTransportInput {}
 export interface GitPreparePullRequestThreadResult extends OpaqueTransportResult {}
 export interface GitPullInput extends OpaqueTransportInput {}
 export interface GitPullResult extends OpaqueTransportResult {}
 export interface GitStatusInput extends OpaqueTransportInput {}
-export interface GitStatusResult extends OpaqueTransportResult {}
-export interface GitReadWorkingTreeDiffInput extends OpaqueTransportInput {}
 export interface GitReadWorkingTreeDiffResult extends OpaqueTransportResult {}
 export interface GitSummarizeDiffInput extends OpaqueTransportInput {}
 export interface GitSummarizeDiffResult extends OpaqueTransportResult {}
 export interface GitRunStackedActionInput extends OpaqueTransportInput {}
-export interface GitRunStackedActionResult extends OpaqueTransportResult {}
-export interface GitActionProgressEvent extends OpaqueTransportResult {}
 
 /** MCode `server.ts` types (server meta/settings/providers/diagnostics surface). */
-export interface ServerConfig extends OpaqueTransportResult {}
 export interface ServerGetEnvironmentResult extends OpaqueTransportResult {}
 export interface ServerGetSettingsResult extends OpaqueTransportResult {}
 export interface ServerUpdateSettingsInput extends OpaqueTransportInput {}
 export interface ServerUpdateSettingsResult extends OpaqueTransportResult {}
 export interface ServerDiagnosticsResult extends OpaqueTransportResult {}
-export interface ServerGenerateAutomationIntentInput extends OpaqueTransportInput {}
-export interface ServerGenerateAutomationIntentResult extends OpaqueTransportResult {}
 export interface ServerGenerateThreadRecapInput extends OpaqueTransportInput {}
 export interface ServerGenerateThreadRecapResult extends OpaqueTransportResult {}
-export interface ServerGetProviderUsageSnapshotInput extends OpaqueTransportInput {}
-export interface ServerGetProviderUsageSnapshotResult extends OpaqueTransportResult {}
-export interface ServerListProviderUsageInput extends OpaqueTransportInput {}
-export interface ServerListProviderUsageResult extends OpaqueTransportResult {}
 export interface ServerListLocalServersResult extends OpaqueTransportResult {}
 export interface ServerListWorktreesResult extends OpaqueTransportResult {}
 export interface ServerProviderUpdateInput extends OpaqueTransportInput {}
 export interface ServerProviderUpdateResult extends OpaqueTransportResult {}
 export interface ServerRefreshProvidersResult extends OpaqueTransportResult {}
-export interface ServerStopLocalServerInput extends OpaqueTransportInput {}
 export interface ServerStopLocalServerResult extends OpaqueTransportResult {}
 export interface ServerUpsertKeybindingInput extends OpaqueTransportInput {}
 export interface ServerUpsertKeybindingResult extends OpaqueTransportResult {}
@@ -145,25 +270,12 @@ export interface ServerVoiceTranscriptionResult extends OpaqueTransportResult {}
 /** MCode `auth.ts` types.
  *  NOTE: `AuthBootstrapResult` is intentionally NOT re-declared here — it is
  *  the ts-rs-generated concrete DTO in `../types/AuthBootstrapResult.ts`
- *  (Tier 1). The other auth types remain opaque aliases pending the matching
- *  bridge module.
+ *  (Tier 1).
  */
-export interface AuthBootstrapInput extends OpaqueTransportInput {}
-export interface AuthBearerBootstrapResult extends OpaqueTransportResult {}
-export interface AuthWebSocketTokenResult extends OpaqueTransportResult {}
-export interface AuthSessionState extends OpaqueTransportResult {}
-export interface AuthCreatePairingCredentialInput extends OpaqueTransportInput {}
-export interface AuthPairingCredentialResult extends OpaqueTransportResult {}
-export interface AuthPairingLink extends OpaqueTransportResult {}
-export interface AuthRevokePairingLinkInput extends OpaqueTransportInput {}
-export interface AuthClientSession extends OpaqueTransportResult {}
-export interface AuthRevokeClientSessionInput extends OpaqueTransportInput {}
 
 /** MCode `automation.ts` types. */
 export interface AutomationListInput extends OpaqueTransportInput {}
-export interface AutomationListResult extends OpaqueTransportResult {}
 export interface AutomationCreateInput extends OpaqueTransportInput {}
-export interface AutomationDefinition extends OpaqueTransportResult {}
 export interface AutomationUpdateInput extends OpaqueTransportInput {}
 export interface AutomationDeleteInput extends OpaqueTransportInput {}
 export interface AutomationRunNowInput extends OpaqueTransportInput {}
@@ -173,11 +285,9 @@ export interface AutomationCancelRunResult extends OpaqueTransportResult {}
 export interface AutomationMarkRunReadInput extends OpaqueTransportInput {}
 export interface AutomationRunActionResult extends OpaqueTransportResult {}
 export interface AutomationArchiveRunInput extends OpaqueTransportInput {}
-export interface AutomationStreamEvent extends OpaqueTransportResult {}
 
 /** MCode `providerDiscovery.ts` + `provider.ts` types. */
 export interface ProviderGetComposerCapabilitiesInput extends OpaqueTransportInput {}
-export interface ProviderComposerCapabilities extends OpaqueTransportResult {}
 export interface ProviderCompactThreadInput extends OpaqueTransportInput {}
 export interface ProviderListCommandsInput extends OpaqueTransportInput {}
 export interface ProviderListCommandsResult extends OpaqueTransportResult {}
@@ -193,12 +303,6 @@ export interface ProviderListModelsInput extends OpaqueTransportInput {}
 export interface ProviderListModelsResult extends OpaqueTransportResult {}
 export interface ProviderListAgentsInput extends OpaqueTransportInput {}
 export interface ProviderListAgentsResult extends OpaqueTransportResult {}
-
-/** MCode `stats.ts` types. */
-export interface StatsGetProfileStatsInput extends OpaqueTransportInput {}
-export interface StatsGetProfileStatsResult extends OpaqueTransportResult {}
-export interface StatsGetProfileTokenStatsInput extends OpaqueTransportInput {}
-export interface StatsGetProfileTokenStatsResult extends OpaqueTransportResult {}
 
 /** MCode `orchestration.ts` types (the aggregate stream surface). */
 export interface OrchestrationReadModel extends OpaqueTransportResult {}
@@ -216,14 +320,8 @@ export interface OrchestrationThreadStreamItem extends OpaqueTransportResult {}
 export interface OrchestrationSubscribeThreadInput extends OpaqueTransportInput {}
 
 // ─── Desktop-shell types (defined inline, verbatim from MCode ipc.ts) ────
-
-export interface ContextMenuItem<T extends string = string> {
-  id: T;
-  label: string;
-  /** Starts a new visual group before this actionable row. */
-  separatorBefore?: boolean;
-  destructive?: boolean;
-}
+// `ContextMenuItem` is re-exported from ./tier3/misc above (T5b); the inline
+// declaration was removed to avoid a duplicate-export conflict.
 
 export type DesktopUpdateStatus =
   | "disabled"
