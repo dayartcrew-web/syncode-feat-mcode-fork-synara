@@ -87,6 +87,15 @@ import type {
   AutomationDefinition,
   AutomationStreamEvent,
 } from "./tier3/automation";
+// `ClientOrchestrationCommand` and `OrchestrationEvent` are referenced in
+// the `NativeApi` interface below (dispatchCommand / replayEvents /
+// onDomainEvent). They are also re-exported at the bottom of this module;
+// the `import type` here brings them into local scope for the interface
+// definitions (a bare `export type { X } from "…"` re-export does NOT).
+import type {
+  ClientOrchestrationCommand,
+  OrchestrationEvent,
+} from "./tier3/orchestration";
 import type { ProviderComposerCapabilities } from "./tier3/provider";
 import type {
   StatsGetProfileStatsInput,
@@ -114,8 +123,12 @@ export type OpaqueTransportResult = Readonly<Record<string, unknown>>;
 // existing importers.
 export type {
   // editor
-  EditorId,
 } from "./tier3/misc";
+// `EditorId` is BOTH a type (literal union) AND a value (`Codec<EditorId>`
+// factory used by `useLocalStorage`). A plain `export { … }` re-exports both
+// namespaces; `export type` would drop the value and surface TS2693 at the
+// `useLocalStorage(…, EditorId)` call sites in editorPreferences.ts.
+export { EditorId } from "./tier3/misc";
 
 export type {
   TerminalSessionSnapshot,
@@ -307,14 +320,20 @@ export interface ProviderListAgentsResult extends OpaqueTransportResult {}
 /** MCode `orchestration.ts` types (the aggregate stream surface). */
 export interface OrchestrationReadModel extends OpaqueTransportResult {}
 export interface OrchestrationShellSnapshot extends OpaqueTransportResult {}
-export type ClientOrchestrationCommand = Readonly<Record<string, unknown>> & { type: string };
+// Re-exported from tier3/orchestration (real 28-variant discriminated union)
+// so `Extract<ClientOrchestrationCommand, { type: "thread.create" }>` narrows
+// to a real shape instead of collapsing to `never`.
+export type { ClientOrchestrationCommand } from "./tier3/orchestration";
 export interface OrchestrationImportThreadInput extends OpaqueTransportInput {}
 export interface OrchestrationImportThreadResult extends OpaqueTransportResult {}
 export interface OrchestrationGetTurnDiffInput extends OpaqueTransportInput {}
 export interface OrchestrationGetTurnDiffResult extends OpaqueTransportResult {}
 export interface OrchestrationGetFullThreadDiffInput extends OpaqueTransportInput {}
 export interface OrchestrationGetFullThreadDiffResult extends OpaqueTransportResult {}
-export interface OrchestrationEvent extends OpaqueTransportResult {}
+// Re-exported from tier3/orchestration (real 34-variant discriminated union)
+// so `Extract<OrchestrationEvent, { type: "thread.message-sent" }>` narrows
+// to a real shape instead of collapsing to `never`.
+export type { OrchestrationEvent } from "./tier3/orchestration";
 export interface OrchestrationShellStreamItem extends OpaqueTransportResult {}
 export interface OrchestrationThreadStreamItem extends OpaqueTransportResult {}
 export interface OrchestrationSubscribeThreadInput extends OpaqueTransportInput {}

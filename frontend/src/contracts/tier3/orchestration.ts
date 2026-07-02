@@ -12,7 +12,16 @@
  * Source of truth: /home/vibe-dev/mcode/packages/contracts/src/orchestration.ts
  */
 
-import type { ThreadId, TurnId, MessageId, EventId, ProjectId, CommandId } from "../ids";
+import type {
+  ThreadId,
+  TurnId,
+  MessageId,
+  EventId,
+  ProjectId,
+  CommandId,
+  OrchestrationProposedPlanId,
+  ApprovalRequestId,
+} from "../ids";
 import type {
   TrimmedNonEmptyString,
   NonNegativeInt,
@@ -471,7 +480,11 @@ export interface OrchestrationSession {
 
 // ─── Proposed plan ────────────────────────────────────────────────────
 
-export type OrchestrationProposedPlanId = TrimmedNonEmptyString;
+// Re-exported from ../ids (canonical branded-ID home) as a type+value pair
+// exposing `.makeUnsafe` (12 vendored UI call sites). Was previously a
+// plain `TrimmedNonEmptyString` alias here, which surfaced TS2693 at the
+// `.makeUnsafe` call sites.
+export { OrchestrationProposedPlanId } from "../ids";
 
 export interface OrchestrationProposedPlan {
   id: OrchestrationProposedPlanId;
@@ -514,30 +527,170 @@ export interface OrchestrationThreadPullRequest {
 }
 
 // ─── Token-usage snapshot for thread (used in profile / thread detail) ─
-
-// STUB(T5c): real `ThreadTokenUsageSnapshot` shape pending —vendored UI
-// references it only as an opaque profile projection. Replace once the
-// contracts crate exposes a typed projection.
+// Real shape ported from MCode `packages/contracts/src/providerRuntime.ts`
+// lines 311-331. The vendored UI's `ContextWindowSnapshot` (in
+// `lib/contextWindow.ts`) is a mapped type over this, so the field set
+// here must mirror MCode exactly or `maxTokens`/`usedTokens`/… property
+// accesses surface as TS2339.
 export interface ThreadTokenUsageSnapshot {
-  readonly available: boolean;
-  readonly lifetimeTotalTokens?: number | null;
-  readonly peakDayTokens?: number | null;
-  readonly peakDay?: string | null;
-  readonly heatmap?: readonly unknown[];
+  readonly usedTokens: number;
+  readonly usedPercent?: number;
+  readonly totalProcessedTokens?: number;
+  readonly maxTokens?: number;
+  readonly inputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly outputTokens?: number;
+  readonly reasoningOutputTokens?: number;
+  readonly lastUsedTokens?: number;
+  readonly lastInputTokens?: number;
+  readonly lastCachedInputTokens?: number;
+  readonly lastOutputTokens?: number;
+  readonly lastReasoningOutputTokens?: number;
+  readonly toolUses?: number;
+  readonly durationMs?: number;
+  readonly compactsAutomatically?: boolean;
 }
 
-// ─── ClientOrchestrationCommand (opaque union, ~28 variants) ──────────
-// The vendored UI references this type only as an opaque command payload
-// (it dispatches through `NativeApi.orchestration.dispatchCommand`). The
-// concrete per-variant shapes live in MCode's orchestration.ts; modeled
-// here as a discriminated union keyed on `type` with an opaque payload
-// fallback. Real per-variant modelling is T5c.
-export type ClientOrchestrationCommand = {
-  readonly type: string;
+// ─── ClientOrchestrationCommand (28-variant discriminated union) ──────
+// Real per-variant modelling: literal `type` discriminator per variant +
+// the common identifying fields the vendored UI narrows on (`commandId`,
+// `threadId`, `projectId`, `createdAt`) + a permissive index signature so
+// the deferred nested payload types (ModelSelection, RuntimeMode,
+// ProviderStartOptions, ThreadHandoff, …) don't have to be ported in full
+// here. Source of truth: MCode `packages/contracts/src/orchestration.ts`
+// lines 767-1237. The union members mirror the 28 variants MCode's
+// `ClientOrchestrationCommand` Schema.Union contains; this makes
+// `Extract<ClientOrchestrationCommand, { type: "thread.create" }>` resolve
+// to a real shape (was collapsing to `never` under the old `{type:string}`
+// stub, breaking 24 call sites in threadCreatePromotion.ts).
+export interface ClientOrchestrationCommandBase {
   readonly commandId: CommandId;
   readonly createdAt?: IsoDateTime;
   readonly [key: string]: unknown;
-};
+}
+export type ClientOrchestrationCommand =
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "project.create";
+      readonly projectId?: ProjectId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "project.meta.update";
+      readonly projectId: ProjectId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "project.delete";
+      readonly projectId: ProjectId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.create";
+      readonly threadId: ThreadId;
+      readonly projectId: ProjectId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.handoff.create";
+      readonly threadId: ThreadId;
+      readonly projectId: ProjectId;
+      readonly sourceThreadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.fork.create";
+      readonly threadId: ThreadId;
+      readonly projectId: ProjectId;
+      readonly sourceThreadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.delete";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.archive";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.unarchive";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.meta.update";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.pinned-message.add";
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.pinned-message.remove";
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.pinned-message.done.set";
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.pinned-message.label.set";
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.marker.add";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.marker.remove";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.marker.done.set";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.marker.label.set";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.runtime-mode.set";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.interaction-mode.set";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.turn.start";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.turn.interrupt";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.approval.respond";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.user-input.respond";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.checkpoint.revert";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.message.edit-and-resend";
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.activity.append";
+      readonly threadId: ThreadId;
+    })
+  | (ClientOrchestrationCommandBase & {
+      readonly type: "thread.session.stop";
+      readonly threadId: ThreadId;
+    });
 
 // ─── Orchestration thread (full read-model thread) ────────────────────
 // MCode's `OrchestrationThread` is the full per-thread projection the chat
@@ -662,3 +815,200 @@ export type OrchestrationShellStreamEvent =
       readonly sequence: NonNegativeInt;
       readonly threadId: ThreadId;
     };
+
+// ─── OrchestrationEvent (34-variant discriminated union) ──────────────
+// Real per-variant modelling: literal `type` discriminator per variant +
+// the shared `EventBaseFields` (sequence, eventId, aggregateKind,
+// aggregateId, occurredAt, commandId, …) + a permissive `payload` so the
+// vendored UI's `Extract<OrchestrationEvent, { type: "thread.message-sent" }>`
+// narrows to a real shape (was collapsing to `never` under the old
+// `OpaqueTransportResult` stub in shell.ts, breaking 16 call sites in
+// store.ts that access `event.payload.role` / `.activity.kind` /
+// `.requestId` + `event.sequence`).
+//
+// Source of truth: MCode `packages/contracts/src/orchestration.ts`
+// `OrchestrationEvent` Schema.Union (lines 1712-1884). Payload field sets
+// are modeled permissively (`Record<string, unknown>`) because porting all
+// 34 payload structs is out of T5c scope; the discriminator + base fields
+// are what the vendored UI narrows on. T5d can tighten `payload` per arm.
+export interface OrchestrationEventBase {
+  readonly sequence: NonNegativeInt;
+  readonly eventId: EventId;
+  readonly aggregateKind: "project" | "thread";
+  readonly aggregateId: ProjectId | ThreadId;
+  readonly occurredAt: IsoDateTime;
+  readonly commandId: CommandId | null;
+  readonly causationEventId: EventId | null;
+  readonly correlationId: CommandId | null;
+  readonly metadata: Record<string, unknown>;
+}
+// Permissive payload with the common identifying/temporal fields the
+// vendored UI accesses most often (threadId, projectId, messageId,
+// createdAt, updatedAt, title, requestId, isPinned, …) typed explicitly so
+// `event.payload.threadId` resolves to `ThreadId | undefined` instead of
+// `unknown`. The index signature retains permissiveness for fields not yet
+// ported from MCode's 34 payload structs. T5d can tighten per-variant.
+export interface OrchestrationEventPayload {
+  readonly threadId?: ThreadId;
+  readonly projectId?: ProjectId;
+  readonly messageId?: MessageId;
+  readonly turnId?: TurnId;
+  readonly createdAt?: IsoDateTime;
+  readonly updatedAt?: IsoDateTime;
+  readonly title?: string;
+  readonly requestId?: ApprovalRequestId;
+  readonly isPinned?: boolean;
+  readonly role?: string;
+  readonly streaming?: boolean;
+  readonly activity?: OrchestrationThreadActivity;
+  readonly proposedPlan?: unknown;
+  readonly threadMarkers?: readonly unknown[];
+  readonly subagentAgentId?: string | null;
+  readonly subagentNickname?: string | null;
+  readonly subagentRole?: string | null;
+  readonly parentThreadId?: ThreadId | null;
+  readonly modelSelection?: unknown;
+  readonly runtimeMode?: unknown;
+  readonly interactionMode?: unknown;
+  readonly envMode?: string;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+  readonly [key: string]: unknown;
+}
+export type OrchestrationEvent =
+  | (OrchestrationEventBase & {
+      readonly type: "project.created";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "project.meta-updated";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "project.deleted";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.created";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.deleted";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.archived";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.unarchived";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.meta-updated";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.pinned-message-added";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.pinned-message-removed";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.pinned-message-done-set";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.pinned-message-label-set";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.marker-added";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.marker-removed";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.marker-done-set";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.marker-label-set";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.runtime-mode-set";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.interaction-mode-set";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.session-set";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.activity-appended";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.message-sent";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.turn-start-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.turn-queued";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.turn-interrupt-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.turn-diff-completed";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.approval-response-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.user-input-response-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.checkpoint-revert-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.reverted";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.conversation-rollback-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.conversation-rolled-back";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.message-edit-resend-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.session-stop-requested";
+      readonly payload: OrchestrationEventPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.proposed-plan-upserted";
+      readonly payload: OrchestrationEventPayload;
+    });

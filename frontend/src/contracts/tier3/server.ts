@@ -26,6 +26,8 @@ import type {
   ProviderStartOptions,
   ThreadEnvironmentMode,
 } from "./orchestration";
+import type { ResolvedKeybindingsConfig } from "./keybindings";
+import type { EditorId } from "./misc";
 
 // ─── Server provider status ───────────────────────────────────────────
 
@@ -132,10 +134,10 @@ export interface ServerConfig {
   chatWorkspaceRoot?: TrimmedNonEmptyString;
   worktreesDir: TrimmedNonEmptyString;
   keybindingsConfigPath: TrimmedNonEmptyString;
-  keybindings: readonly unknown[];
+  keybindings: ResolvedKeybindingsConfig;
   issues: readonly ServerConfigIssue[];
   providers: readonly ServerProviderStatus[];
-  availableEditors: readonly string[];
+  availableEditors: readonly EditorId[];
 }
 
 // ─── Server settings ──────────────────────────────────────────────────

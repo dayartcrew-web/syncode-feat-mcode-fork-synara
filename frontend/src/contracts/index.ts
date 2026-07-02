@@ -114,8 +114,18 @@ export {
 
 // ─── Hand-written bridge modules ───────────────────────────────────────
 // Branded IDs (ThreadId, ProjectId, …) — replaces MCode baseSchemas.ts brand set.
-export type {
-  Branded,
+//
+// IMPORTANT: a plain `export { ... }` (NOT `export type { ... }`) is required
+// because each branded ID is declared in `./ids` as BOTH a type AND a const
+// value (the runtime `.makeUnsafe` factory). A type-only re-export would drop
+// the value namespace and surface TS2693 ("only refers to a type, but is
+// being used as a value") at the ~1047 `XxxId.makeUnsafe(...)` call sites in
+// the vendored UI. The plain form re-exports both spaces simultaneously.
+// `Branded` is type-only (no runtime value); `isolatedModules` requires it
+// be re-exported via `export type`. The branded IDs below are type+value
+// pairs (each has a `.makeUnsafe` const), so they use the plain `export`.
+export type { Branded, BrandedIdFactory } from "./ids";
+export {
   ThreadId,
   ProjectId,
   TurnId,
@@ -125,9 +135,17 @@ export type {
   SessionId,
   ProviderItemId,
   RuntimeSessionId,
+  RuntimeItemId,
+  RuntimeRequestId,
+  RuntimeTaskId,
   CheckpointRef,
   AutomationId,
+  AutomationRunId,
   ApprovalRequestId,
+  ThreadMarkerId,
+  OrchestrationProposedPlanId,
+  EnvironmentId,
+  AuthSessionId,
 } from "./ids";
 export {
   asId,
@@ -368,10 +386,10 @@ export type {
   PositiveInt,
   IsoDateTime,
   ProcessEnvRecord,
-  ThreadMarkerId,
-  AutomationRunId,
-  EnvironmentId,
-  AuthSessionId,
+  // ThreadMarkerId / AutomationRunId / EnvironmentId / AuthSessionId are
+  // re-exported from ./ids above (canonical branded-ID home with .makeUnsafe);
+  // tier3/base now re-exports them from ../ids too, so omitting here avoids
+  // duplicate-identifier errors.
 } from "./tier3/base";
 export {
   asThreadMarkerId,
@@ -449,13 +467,13 @@ export type {
   OrchestrationThreadActivityTone,
   OrchestrationThreadActivity,
   OrchestrationSession,
-  OrchestrationProposedPlanId,
+  // OrchestrationProposedPlanId re-exported from ./ids above (branded,
+  // with .makeUnsafe); omitted here to avoid duplicate-identifier.
   OrchestrationProposedPlan,
   OrchestrationLatestTurnState,
   OrchestrationLatestTurn,
   OrchestrationThreadPullRequest,
   ThreadTokenUsageSnapshot,
-  ClientOrchestrationCommand as ClientOrchestrationCommandT3,
   OrchestrationThread,
   OrchestrationProjectShell,
   OrchestrationThreadShell,
