@@ -1,5 +1,5 @@
-import * as Schema from "effect/Schema";
 import {
+  jsonCodec,
   OrchestrationProposedPlanId,
   ProjectId,
   ThreadId,
@@ -594,7 +594,7 @@ describe("composerDraftStore syncPersistedAttachments", () => {
           },
         },
       },
-      Schema.Unknown,
+      jsonCodec,
     );
 
     useComposerDraftStore.getState().syncPersistedAttachments(threadId, [

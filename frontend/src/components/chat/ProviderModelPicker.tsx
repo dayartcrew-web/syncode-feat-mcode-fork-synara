@@ -3,9 +3,8 @@
 // Layer: Chat composer presentation
 // Depends on: provider availability metadata, shared menu primitives, and picker trigger styling.
 
-import { type ModelSlug, type ProviderKind, type ServerProviderStatus } from "@t3tools/contracts";
+import { type Codec, type ModelSlug, type ProviderKind, type ServerProviderStatus } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
-import * as Schema from "effect/Schema";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { type ProviderPickerKind, PROVIDER_OPTIONS } from "../../session-logic";
 import { formatProviderModelOptionName } from "../../providerModelOptions";
@@ -121,7 +120,27 @@ const FAVORITE_MODEL_STORAGE_KEYS = {
   opencode: "mcode:opencode-favourite-models:v1",
   pi: "mcode:pi-favourite-models:v1",
 } as const;
-const FavoriteModelSlugs = Schema.Array(Schema.String);
+/**
+ * Codec for persisted favorite model slugs. Replaces Effect
+ * `Schema.Array(Schema.String)`. Round-trips via JSON; on decode, requires a
+ * string array (throwing on any other shape so {@link useLocalStorage} falls
+ * back to its initial value, mirroring the old Effect behavior).
+ */
+const FavoriteModelSlugs: Codec<string[]> = {
+  encode: (value) => JSON.stringify(value),
+  decode: (text) => {
+    const parsed: unknown = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      throw new Error("Expected a string array");
+    }
+    return parsed.map((entry) => {
+      if (typeof entry !== "string") {
+        throw new Error("Expected a string array");
+      }
+      return entry;
+    });
+  },
+};
 type FavoriteModelProvider = keyof typeof FAVORITE_MODEL_STORAGE_KEYS;
 
 function supportsModelFavorites(provider: ProviderKind): provider is FavoriteModelProvider {
