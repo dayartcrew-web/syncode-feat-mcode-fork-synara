@@ -46,7 +46,9 @@ export interface DeriveWorkLogToolDetailsInput {
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function asTrimmedString(value: unknown): string | null {

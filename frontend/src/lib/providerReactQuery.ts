@@ -68,8 +68,9 @@ type CheckpointDiffRequest =
 function decodeCheckpointDiffRequest(input: CheckpointDiffQueryInput): Option_<CheckpointDiffRequest> {
   // The original Effect Schema decode validated the field shapes and returned
   // None when invalid. The transport input types are now opaque records; the
-  // fields below are already typed by the caller, so we only need a presence
-  // check on the required `threadId` to mirror the former guard.
+  // fields below are already typed by the caller, so we mirror the former
+  // guards: presence of `threadId`, plus the TurnCountRange invariant
+  // (`fromTurnCount <= toTurnCount`) that the Schema enforced for turn diffs.
   if (!input.threadId) {
     return none();
   }
@@ -82,6 +83,15 @@ function decodeCheckpointDiffRequest(input: CheckpointDiffQueryInput): Option_<C
         ignoreWhitespace: input.ignoreWhitespace,
       } as OrchestrationGetFullThreadDiffInput,
     });
+  }
+  // TurnCountRange invariant: fromTurnCount must be <= toTurnCount. An invalid
+  // range decodes to None so the query fails fast without hitting the RPC.
+  if (
+    typeof input.fromTurnCount !== "number" ||
+    typeof input.toTurnCount !== "number" ||
+    input.fromTurnCount > input.toTurnCount
+  ) {
+    return none();
   }
   return some({
     kind: "turnDiff" as const,

@@ -172,8 +172,8 @@ export interface ProviderPluginDetail {
 
 export interface ProviderReasoningEffortDescriptor {
   value: TrimmedNonEmptyString;
-  label?: TrimmedNonEmptyString;
-  description?: TrimmedNonEmptyString;
+  label?: TrimmedNonEmptyString | undefined;
+  description?: TrimmedNonEmptyString | undefined;
 }
 
 export interface ProviderContextWindowDescriptor {
@@ -185,15 +185,15 @@ export interface ProviderContextWindowDescriptor {
 export interface ProviderModelDescriptor {
   slug: TrimmedNonEmptyString;
   name: TrimmedNonEmptyString;
-  upstreamProviderId?: TrimmedNonEmptyString;
-  upstreamProviderName?: TrimmedNonEmptyString;
-  optionDescriptors?: readonly ProviderOptionDescriptor[];
-  supportedReasoningEfforts?: readonly ProviderReasoningEffortDescriptor[];
-  defaultReasoningEffort?: TrimmedNonEmptyString;
-  supportsFastMode?: boolean;
-  supportsThinkingToggle?: boolean;
-  contextWindowOptions?: readonly ProviderContextWindowDescriptor[];
-  defaultContextWindow?: TrimmedNonEmptyString;
+  upstreamProviderId?: TrimmedNonEmptyString | undefined;
+  upstreamProviderName?: TrimmedNonEmptyString | undefined;
+  optionDescriptors?: readonly ProviderOptionDescriptor[] | undefined;
+  supportedReasoningEfforts?: readonly ProviderReasoningEffortDescriptor[] | undefined;
+  defaultReasoningEffort?: TrimmedNonEmptyString | undefined;
+  supportsFastMode?: boolean | undefined;
+  supportsThinkingToggle?: boolean | undefined;
+  contextWindowOptions?: readonly ProviderContextWindowDescriptor[] | undefined;
+  defaultContextWindow?: TrimmedNonEmptyString | undefined;
 }
 
 export interface ProviderAgentDescriptor {

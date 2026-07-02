@@ -26,7 +26,7 @@ describe("pinning.logic", () => {
   });
 
   it("derives pinned ids from persisted order, server pins, and optimistic overrides", () => {
-    const items = [
+    const items: ReadonlyArray<{ id: string; isPinned: boolean }> = [
       { id: "project-1", isPinned: true },
       { id: "project-2", isPinned: true },
       { id: "project-3", isPinned: false },
@@ -36,7 +36,7 @@ describe("pinning.logic", () => {
     expect(
       derivePinnedIds({
         items,
-        persistedPinnedIds: ["project-3", "project-missing"],
+        persistedPinnedIds: ["project-3", "project-missing"] as readonly string[],
         optimisticPinnedStateById: new Map([
           ["project-1", false],
           ["project-3", true],

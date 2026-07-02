@@ -6995,7 +6995,7 @@ export default function ChatView({
           targetProjectCwdForSend = recoveredProject.workspaceRoot;
           targetProjectScriptsForSend =
             (recoveredProject.kind ?? firstSendTarget.creation.kind) === "project"
-              ? [...recoveredProject.scripts]
+              ? [...(recoveredProject.scripts ?? [])]
               : [];
           targetProjectDefaultModelSelectionForSend =
             recoveredProject.defaultModelSelection ??

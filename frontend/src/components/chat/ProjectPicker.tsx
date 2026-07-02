@@ -4,12 +4,9 @@
 // Layer: Chat / empty-state entrypoint
 
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { type ProjectDirectoryEntry } from "@t3tools/contracts";
 import { readNativeApi } from "../../nativeApi";
-import { useStore } from "../../store";
-import { createSidebarDisplayThreadsSelector } from "../../storeSelectors";
 import { ChevronLeftIcon, FolderOpenIcon, PlusIcon, XIcon } from "~/lib/icons";
-import { cn, isLinuxPlatform, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
+import { isLinuxPlatform, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
 import { FolderClosed } from "../FolderClosed";
 import { Input } from "../ui/input";
@@ -27,30 +24,12 @@ interface ProjectPickerProps {
   onResetToHome?: (() => void) | undefined;
 }
 
-interface ActiveFolderOption {
-  cwd: string;
-  primaryLabel: string;
-  secondaryLabel: string | null;
-}
-
 function basenameOfPath(value: string | null | undefined): string | null {
   if (!value) return null;
   const normalized = value.replace(/[\\/]+$/, "");
   const separatorIndex = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
   const basename = separatorIndex === -1 ? normalized : normalized.slice(separatorIndex + 1);
   return basename.length > 0 ? basename : null;
-}
-
-function directorySearchHaystack(entry: ProjectDirectoryEntry): string {
-  return [entry.name, entry.path].join(" ").toLowerCase();
-}
-
-function joinDirectoryPath(rootPath: string, relativePath: string): string {
-  if (!relativePath) return rootPath;
-  const separator = rootPath.includes("\\") ? "\\" : "/";
-  const normalizedRoot = rootPath.endsWith(separator) ? rootPath.slice(0, -1) : rootPath;
-  const normalizedRelative = relativePath.split(/[\\/]+/).join(separator);
-  return `${normalizedRoot}${separator}${normalizedRelative}`;
 }
 
 export const ProjectPicker = memo(function ProjectPicker({
@@ -61,8 +40,6 @@ export const ProjectPicker = memo(function ProjectPicker({
   onSelectWorkspaceRoot,
   onResetToHome,
 }: ProjectPickerProps) {
-  const projects = useStore((state) => state.projects);
-  const sidebarThreads = useStore(useMemo(() => createSidebarDisplayThreadsSelector(), []));
   const homeDir = useWorkspaceStore((state) => state.homeDir);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -93,53 +70,6 @@ export const ProjectPicker = memo(function ProjectPicker({
     setTreeRootPath((current) => current ?? homeDir);
   }, [homeDir, open]);
 
-  const activeFolderOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const nextOptions: ActiveFolderOption[] = [];
-
-    for (const project of projects.filter((project) => project.kind === "project")) {
-      const folderName = basenameOfPath(project.cwd) ?? project.folderName ?? project.name;
-      if (!folderName || folderName.startsWith(".") || seen.has(project.cwd)) {
-        continue;
-      }
-      seen.add(project.cwd);
-      const primaryLabel = project.localName?.trim() || folderName;
-      const secondaryLabel =
-        project.localName?.trim() && project.localName.trim() !== folderName ? folderName : null;
-      nextOptions.push({ cwd: project.cwd, primaryLabel, secondaryLabel });
-    }
-
-    for (const thread of sidebarThreads) {
-      const workspaceRoot = thread.worktreePath ?? null;
-      const folderName = basenameOfPath(workspaceRoot);
-      if (!workspaceRoot || !folderName || folderName.startsWith(".") || seen.has(workspaceRoot)) {
-        continue;
-      }
-      seen.add(workspaceRoot);
-      nextOptions.push({
-        cwd: workspaceRoot,
-        primaryLabel: folderName,
-        secondaryLabel: null,
-      });
-    }
-
-    const selectedFolderName = basenameOfPath(selectedWorkspaceRoot);
-    if (
-      selectedWorkspaceRoot &&
-      selectedFolderName &&
-      !selectedFolderName.startsWith(".") &&
-      !seen.has(selectedWorkspaceRoot)
-    ) {
-      nextOptions.unshift({
-        cwd: selectedWorkspaceRoot,
-        primaryLabel: selectedFolderName,
-        secondaryLabel: null,
-      });
-    }
-
-    return nextOptions;
-  }, [projects, selectedWorkspaceRoot, sidebarThreads]);
-
   const triggerLabel = selectedWorkspaceRoot ? (
     <span className="flex min-w-0 items-baseline gap-1.5">
       <span className="min-w-0 truncate">{basenameOfPath(selectedWorkspaceRoot) ?? selectedWorkspaceRoot}</span>
@@ -155,19 +85,6 @@ export const ProjectPicker = memo(function ProjectPicker({
       setErrorMessage(null);
     }
   }, []);
-
-  // Selecting a folder and closing must not race with Base UI's own selection
-  // handling -- calling setOpen(false) synchronously inside onClick can leave
-  // the trigger's next toggle in a stale state, making the picker feel like it
-  // only responds once. Defer the close to the next frame so the item's native
-  // selection/close runs first.
-  const selectAndClose = useCallback(
-    (cwd: string) => {
-      onSelectWorkspaceRoot?.(cwd);
-      requestAnimationFrame(() => setOpen(false));
-    },
-    [onSelectWorkspaceRoot],
-  );
 
   // Tree selection: persist the selection AND re-root the tree to the picked
   // folder so the popup shows that folder's contents (the "show tree folder

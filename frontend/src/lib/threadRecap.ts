@@ -284,10 +284,11 @@ function buildCurrentState(thread: DeriveThreadRecapSourceInput["thread"]): stri
     index--
   ) {
     const activity = thread.activities[index];
-    if (!activity || (activity.tone === "tool" && activity.summary.trim().length === 0)) {
+    const summary = activity?.summary;
+    if (!activity || !summary || (activity.tone === "tool" && summary.trim().length === 0)) {
       continue;
     }
-    recentActivities.push(`${activity.kind}: ${compactText(activity.summary, MAX_ACTIVITY_CHARS)}`);
+    recentActivities.push(`${activity.kind}: ${compactText(summary, MAX_ACTIVITY_CHARS)}`);
   }
   recentActivities.reverse();
   if (recentActivities.length > 0) {
