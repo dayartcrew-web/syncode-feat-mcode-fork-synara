@@ -21,6 +21,7 @@ import type {
   CommandId,
   OrchestrationProposedPlanId,
   ApprovalRequestId,
+  CheckpointRef,
 } from "../ids";
 import type {
   TrimmedNonEmptyString,
@@ -432,6 +433,31 @@ export interface ThreadHandoffImportedMessage {
   updatedAt: IsoDateTime;
 }
 
+// ─── Orchestration turn-diff checkpoint summary ───────────────────────
+// Ported from MCode `packages/contracts/src/orchestration.ts`. The store
+// reducer (`normalizeTurnDiffSummaries`) reads turnId/checkpointTurnCount/
+// checkpointRef/status/files/assistantMessageId/completedAt off each entry;
+// the prior `readonly unknown[]` typing collapsed every field to `unknown`.
+
+export interface OrchestrationCheckpointFile {
+  path: TrimmedNonEmptyString;
+  kind: TrimmedNonEmptyString;
+  additions: NonNegativeInt;
+  deletions: NonNegativeInt;
+}
+
+export type OrchestrationCheckpointStatus = "ready" | "missing" | "error";
+
+export interface OrchestrationCheckpointSummary {
+  turnId: TurnId;
+  checkpointTurnCount: NonNegativeInt;
+  checkpointRef: CheckpointRef;
+  status: OrchestrationCheckpointStatus;
+  files: readonly OrchestrationCheckpointFile[];
+  assistantMessageId: MessageId | null;
+  completedAt: IsoDateTime;
+}
+
 // ─── Orchestration message + activity + session ───────────────────────
 
 export type OrchestrationMessageRole = "user" | "assistant" | "system";
@@ -730,7 +756,7 @@ export type ClientOrchestrationCommand =
 // use `unknown` where the nested shape is itself a deferred Tier 3 port
 // (chat attachments, activity payloads). T5c can tighten those.
 
-import type { ProjectKind } from "./project";
+import type { ProjectKind, ProjectScript } from "./project";
 
 export interface OrchestrationThread {
   id: ThreadId;
@@ -770,7 +796,7 @@ export interface OrchestrationThread {
   messages: readonly OrchestrationMessage[];
   proposedPlans?: readonly OrchestrationProposedPlan[];
   activities: readonly OrchestrationThreadActivity[];
-  checkpoints?: readonly unknown[];
+  checkpoints?: readonly OrchestrationCheckpointSummary[];
   session: OrchestrationSession | null;
 }
 
@@ -806,7 +832,7 @@ export interface OrchestrationProjectShell {
   title: TrimmedNonEmptyString;
   workspaceRoot: TrimmedNonEmptyString;
   defaultModelSelection: ModelSelection | null;
-  scripts?: readonly unknown[];
+  scripts?: readonly ProjectScript[];
   isPinned?: boolean;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
@@ -913,18 +939,25 @@ export interface OrchestrationEventPayload {
   readonly title?: string;
   readonly requestId?: ApprovalRequestId;
   readonly isPinned?: boolean;
-  readonly role?: string;
+  readonly role?: OrchestrationMessageRole;
+  readonly text?: string;
   readonly streaming?: boolean;
+  readonly dispatchMode?: TurnDispatchMode;
+  readonly source?: OrchestrationMessageSource;
+  readonly attachments?: readonly ChatAttachment[];
+  readonly skills?: readonly ProviderSkillReference[];
+  readonly mentions?: readonly ProviderMentionReference[];
   readonly activity?: OrchestrationThreadActivity;
-  readonly proposedPlan?: unknown;
+  readonly proposedPlan?: OrchestrationProposedPlan;
+  readonly session?: OrchestrationSession;
   readonly threadMarkers?: readonly unknown[];
   readonly subagentAgentId?: string | null;
   readonly subagentNickname?: string | null;
   readonly subagentRole?: string | null;
   readonly parentThreadId?: ThreadId | null;
-  readonly modelSelection?: unknown;
-  readonly runtimeMode?: unknown;
-  readonly interactionMode?: unknown;
+  readonly modelSelection?: ModelSelection;
+  readonly runtimeMode?: RuntimeMode;
+  readonly interactionMode?: ProviderInteractionMode;
   readonly envMode?: string;
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
