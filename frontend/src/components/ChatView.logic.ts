@@ -1,12 +1,15 @@
 import {
   ProjectId,
-  ThreadId,
+  asThreadId,
+  jsonCodec,
+  type Codec,
   type ModelSelection,
   type ModelSlug,
   type ProviderApprovalDecision,
   type ProviderKind,
   type RuntimeMode,
   type ServerProviderAuthStatus,
+  type ThreadId,
   type ThreadId as ThreadIdType,
 } from "@t3tools/contracts";
 import { normalizeModelSlug } from "@t3tools/shared/model";
@@ -22,7 +25,6 @@ import {
   type TurnDiffSummary,
 } from "../types";
 import { type DraftThreadState } from "../composerDraftStore";
-import { Schema } from "effect";
 import {
   filterTerminalContextsWithText,
   stripInlineTerminalContextPlaceholders,
@@ -44,8 +46,15 @@ import type { ProviderModelOption } from "../providerModelOptions";
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "mcode:last-invoked-script-by-project";
 export const DISMISSED_PROVIDER_HEALTH_BANNERS_KEY = "mcode:dismissed-provider-health-banners";
 
-export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
-export const DismissedProviderHealthBannersSchema = Schema.Array(Schema.String);
+// Plain-TS replacements for the former Effect Schema record/array. Both round-
+// trip as plain JSON (the values are already JSON-native: string -> string).
+export type LastInvokedScriptByProject = Record<ProjectId, string>;
+export type DismissedProviderHealthBanners = string[];
+
+export const LastInvokedScriptByProjectCodec: Codec<LastInvokedScriptByProject> =
+  jsonCodec as unknown as Codec<LastInvokedScriptByProject>;
+export const DismissedProviderHealthBannersCodec: Codec<DismissedProviderHealthBanners> =
+  jsonCodec as unknown as Codec<DismissedProviderHealthBanners>;
 
 const ALWAYS_ALLOW_RUNTIME_MODE: RuntimeMode = "full-access";
 
@@ -768,7 +777,7 @@ function resolveTimelineSubagentThread(input: {
 }): Thread | undefined {
   const directThreadId = input.subagent.resolvedThreadId ?? input.subagent.threadId;
   if (directThreadId) {
-    const directMatch = input.threadById.get(ThreadId.makeUnsafe(directThreadId));
+    const directMatch = input.threadById.get(asThreadId(directThreadId));
     if (directMatch) {
       return directMatch;
     }

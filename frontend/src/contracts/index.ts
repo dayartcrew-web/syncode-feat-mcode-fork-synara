@@ -154,7 +154,12 @@ export {
   isBoolean,
   safeParse,
   decodeWithDefault,
+  jsonCodec,
+  stringCodec,
+  numberCodec,
+  objectCodec,
 } from "./runtime";
+export type { Codec } from "./runtime";
 
 // Desktop-shell interfaces (NativeApi / DesktopBridge) + supporting types —
 // full surfaces copied verbatim from MCode ipc.ts during the T6/B4 shell swap.

@@ -1,10 +1,10 @@
 import {
-  KeybindingRule as KeybindingRuleSchema,
+  MAX_KEYBINDING_VALUE_LENGTH,
+  SCRIPT_RUN_COMMAND_PATTERN,
   type KeybindingCommand,
   type KeybindingRule,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
-import { Schema } from "effect";
 
 export const PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE = "Invalid keybinding.";
 
@@ -15,6 +15,21 @@ function normalizeProjectScriptKeybindingInput(
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * Validate a candidate keybinding rule the way the former Effect
+ * `KeybindingRuleSchema` did: the `key` must be non-empty and within
+ * `MAX_KEYBINDING_VALUE_LENGTH`, and the `command` must match the
+ * `script.<id>.run` pattern (the only dynamic command project scripts emit).
+ */
+function isValidKeybindingRule(key: string, command: KeybindingCommand): boolean {
+  if (key.length === 0 || key.length > MAX_KEYBINDING_VALUE_LENGTH) {
+    return false;
+  }
+  // Project-script keybindings always target a `script.<id>.run` command; the
+  // static `KeybindingCommand` literals are not produced by this path.
+  return typeof command === "string" && SCRIPT_RUN_COMMAND_PATTERN.test(command);
+}
+
 export function decodeProjectScriptKeybindingRule(input: {
   keybinding: string | null | undefined;
   command: KeybindingCommand;
@@ -22,14 +37,13 @@ export function decodeProjectScriptKeybindingRule(input: {
   const normalizedKey = normalizeProjectScriptKeybindingInput(input.keybinding);
   if (!normalizedKey) return null;
 
-  const decoded = Schema.decodeUnknownOption(KeybindingRuleSchema)({
-    key: normalizedKey,
-    command: input.command,
-  });
-  if (decoded._tag === "None") {
+  // The original Schema returned None on shape failure and threw on a
+  // structural rule violation. We mirror that: invalid key length or command
+  // pattern throws.
+  if (!isValidKeybindingRule(normalizedKey, input.command)) {
     throw new Error(PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE);
   }
-  return decoded.value;
+  return { key: normalizedKey, command: input.command };
 }
 
 export function keybindingValueForCommand(

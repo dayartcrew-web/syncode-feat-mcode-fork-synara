@@ -5,12 +5,12 @@
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Option, Schema } from "effect";
 import {
   type AssistantDeliveryMode,
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_SERVER_SETTINGS,
-  TrimmedNonEmptyString,
+  type Codec,
+  objectCodec,
   ProviderKind,
   type ProviderStartOptions,
   type ServerSettings,
@@ -23,7 +23,7 @@ import {
   resolveSelectableModel,
 } from "@t3tools/shared/model";
 import { useLocalStorage } from "./hooks/useLocalStorage";
-import { EnvMode } from "./components/BranchToolbar.logic";
+import type { EnvMode } from "./components/BranchToolbar.logic";
 import { formatProviderModelOptionName, type ProviderModelOption } from "./providerModelOptions";
 import {
   DEFAULT_PROVIDER_ORDER,
@@ -70,18 +70,14 @@ export const TERMINAL_FONT_FAMILY_SUGGESTIONS: ReadonlyArray<string> = [
   "Consolas",
 ];
 
-export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
-export type TimestampFormat = typeof TimestampFormat.Type;
+export type TimestampFormat = "locale" | "12-hour" | "24-hour";
 export const DEFAULT_TIMESTAMP_FORMAT: TimestampFormat = "locale";
-export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
-export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
+export type SidebarProjectSortOrder = "updated_at" | "created_at" | "manual";
 export const DEFAULT_SIDEBAR_PROJECT_SORT_ORDER: SidebarProjectSortOrder = "manual";
-export const SidebarThreadSortOrder = Schema.Literals(["updated_at", "created_at"]);
-export type SidebarThreadSortOrder = typeof SidebarThreadSortOrder.Type;
+export type SidebarThreadSortOrder = "updated_at" | "created_at";
 export const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = "updated_at";
 
-export const UiDensity = Schema.Literals(UI_DENSITY_MODES);
-export type UiDensity = typeof UiDensity.Type;
+export type UiDensity = (typeof UI_DENSITY_MODES)[number];
 export { DEFAULT_UI_DENSITY };
 
 export function getDefaultNativeFontSmoothing(platform = globalThis.navigator?.platform ?? "") {
@@ -118,111 +114,72 @@ const BUILT_IN_MODEL_SLUGS_BY_PROVIDER: Record<ProviderKind, ReadonlySet<string>
   pi: new Set(getModelOptions("pi").map((option) => option.slug)),
 };
 
-const withDefaults =
-  <
-    S extends Schema.Top & Schema.WithoutConstructorDefault,
-    D extends S["~type.make.in"] & S["Encoded"],
-  >(
-    fallback: () => D,
-  ) =>
-  (schema: S) =>
-    schema.pipe(
-      Schema.withConstructorDefault(() => Option.some(fallback())),
-      Schema.withDecodingDefault(() => fallback()),
-    );
+// ─── AppSettings shape ────────────────────────────────────────────────
+// Formerly `Schema.Struct({...})` + `Schema.Type<typeof AppSettingsSchema>`.
+// Now a plain interface; defaults live in `DEFAULT_APP_SETTINGS` below and the
+// `appSettingsCodec` fills missing keys on decode (replacing `withDefaults`).
 
-export const AppSettingsSchema = Schema.Struct({
-  claudeBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  uiDensity: UiDensity.pipe(withDefaults(() => DEFAULT_UI_DENSITY)),
-  chatFontSizePx: Schema.Number.pipe(withDefaults(() => DEFAULT_CHAT_FONT_SIZE_PX)),
-  chatCodeFontFamily: Schema.String.check(Schema.isMaxLength(256)).pipe(withDefaults(() => "")),
-  terminalFontSizePx: Schema.Number.pipe(withDefaults(() => DEFAULT_TERMINAL_FONT_SIZE_PX)),
-  terminalFontFamily: Schema.String.check(Schema.isMaxLength(256)).pipe(
-    withDefaults(() => DEFAULT_TERMINAL_FONT_FAMILY),
-  ),
-  codexBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  codexHomePath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  cursorBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  cursorApiEndpoint: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  geminiBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  grokBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  kiloBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  kiloServerUrl: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  kiloServerPassword: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  openCodeBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  piBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  piAgentDir: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  openCodeServerUrl: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
-  openCodeServerPassword: Schema.String.check(Schema.isMaxLength(4096)).pipe(
-    withDefaults(() => ""),
-  ),
-  openCodeExperimentalWebSockets: Schema.Boolean.pipe(withDefaults(() => false)),
-  defaultThreadEnvMode: EnvMode.pipe(withDefaults(() => "local" as const satisfies EnvMode)),
-  confirmThreadDelete: Schema.Boolean.pipe(withDefaults(() => true)),
-  confirmThreadArchive: Schema.Boolean.pipe(withDefaults(() => false)),
-  confirmTerminalTabClose: Schema.Boolean.pipe(withDefaults(() => true)),
-  diffWordWrap: Schema.Boolean.pipe(withDefaults(() => false)),
-  // Local-only UI preference: show prompt suggestions under the composer on the
-  // empty new-thread landing. Off hides the suggestion list entirely.
-  enableComposerSuggestions: Schema.Boolean.pipe(withDefaults(() => true)),
-  // Local-only UI preferences for hiding sidebar surfaces a user doesn't want.
-  // `showChatsSection` controls the standalone "Chats" list in the sidebar footer
-  // (rootless chats not tied to a project). `showWorkspaceSection` controls the
-  // "Workspace" tab in the section switcher. The "Threads"/Projects tab is always
-  // shown, so the switcher is hidden by default and only appears when Workspace is
-  // enabled in Settings (see the sidebar segmented picker).
-  showChatsSection: Schema.Boolean.pipe(withDefaults(() => true)),
-  showWorkspaceSection: Schema.Boolean.pipe(withDefaults(() => false)),
-  // Local-only UI preferences: which optional sections of the chat Environment panel are
-  // shown. The git block (Changes/Worktree/branch/Commit and Push) is always visible; these
-  // toggle the sections beneath it via the panel header's gear menu.
-  showEnvironmentUsage: Schema.Boolean.pipe(withDefaults(() => true)),
-  showEnvironmentRepository: Schema.Boolean.pipe(withDefaults(() => true)),
-  showEnvironmentEditor: Schema.Boolean.pipe(withDefaults(() => true)),
-  showEnvironmentRecap: Schema.Boolean.pipe(withDefaults(() => true)),
-  showEnvironmentPinned: Schema.Boolean.pipe(withDefaults(() => true)),
-  showEnvironmentMarkers: Schema.Boolean.pipe(withDefaults(() => true)),
-  showEnvironmentInstructions: Schema.Boolean.pipe(withDefaults(() => true)),
-  showEnvironmentNotepad: Schema.Boolean.pipe(withDefaults(() => true)),
-  enableAssistantStreaming: Schema.Boolean.pipe(withDefaults(() => false)),
-  enableNativeFontSmoothing: Schema.Boolean.pipe(withDefaults(getDefaultNativeFontSmoothing)),
-  enableTaskCompletionToasts: Schema.Boolean.pipe(withDefaults(() => true)),
-  enableSystemTaskCompletionNotifications: Schema.Boolean.pipe(withDefaults(() => true)),
-  sidebarProjectSortOrder: SidebarProjectSortOrder.pipe(
-    withDefaults(() => DEFAULT_SIDEBAR_PROJECT_SORT_ORDER),
-  ),
-  sidebarThreadSortOrder: SidebarThreadSortOrder.pipe(
-    withDefaults(() => DEFAULT_SIDEBAR_THREAD_SORT_ORDER),
-  ),
-  timestampFormat: TimestampFormat.pipe(withDefaults(() => DEFAULT_TIMESTAMP_FORMAT)),
-  customCodexModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  customClaudeModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  customCursorModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  customGeminiModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  customGrokModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  customKiloModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  customOpenCodeModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  customPiModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
-  textGenerationProvider: ProviderKind.pipe(withDefaults(() => "codex" as const)),
-  textGenerationModel: Schema.optional(TrimmedNonEmptyString),
-  uiFontFamily: Schema.String.check(Schema.isMaxLength(256)).pipe(withDefaults(() => "")),
-  defaultProvider: ProviderKind.pipe(withDefaults(() => "codex" as const)),
-  // Local-only UI preference: providers explicitly hidden from the composer picker.
-  // The active/locked provider for a thread is always shown regardless, so users
-  // never get stuck on a thread whose provider they later chose to hide.
-  hiddenProviders: Schema.Array(ProviderKind).pipe(withDefaults(() => [])),
-  // Local-only UI preference: top-level provider order in Settings and the composer picker.
-  providerOrder: Schema.Array(ProviderKind).pipe(withDefaults(() => [...DEFAULT_PROVIDER_ORDER])),
-  // Deprecated local-only preference kept for backward-compatible decoding.
-  // Model-level hiding caused too many edge cases, so the app now normalizes it away.
-  hiddenModels: Schema.Array(
-    Schema.Struct({
-      provider: ProviderKind,
-      slug: Schema.String,
-    }),
-  ).pipe(withDefaults(() => [])),
-});
-export type AppSettings = typeof AppSettingsSchema.Type;
+export interface AppSettings {
+  claudeBinaryPath: string;
+  uiDensity: UiDensity;
+  chatFontSizePx: number;
+  chatCodeFontFamily: string;
+  terminalFontSizePx: number;
+  terminalFontFamily: string;
+  codexBinaryPath: string;
+  codexHomePath: string;
+  cursorBinaryPath: string;
+  cursorApiEndpoint: string;
+  geminiBinaryPath: string;
+  grokBinaryPath: string;
+  kiloBinaryPath: string;
+  kiloServerUrl: string;
+  kiloServerPassword: string;
+  openCodeBinaryPath: string;
+  piBinaryPath: string;
+  piAgentDir: string;
+  openCodeServerUrl: string;
+  openCodeServerPassword: string;
+  openCodeExperimentalWebSockets: boolean;
+  defaultThreadEnvMode: EnvMode;
+  confirmThreadDelete: boolean;
+  confirmThreadArchive: boolean;
+  confirmTerminalTabClose: boolean;
+  diffWordWrap: boolean;
+  enableComposerSuggestions: boolean;
+  showChatsSection: boolean;
+  showWorkspaceSection: boolean;
+  showEnvironmentUsage: boolean;
+  showEnvironmentRepository: boolean;
+  showEnvironmentEditor: boolean;
+  showEnvironmentRecap: boolean;
+  showEnvironmentPinned: boolean;
+  showEnvironmentMarkers: boolean;
+  showEnvironmentInstructions: boolean;
+  showEnvironmentNotepad: boolean;
+  enableAssistantStreaming: boolean;
+  enableNativeFontSmoothing: boolean;
+  enableTaskCompletionToasts: boolean;
+  enableSystemTaskCompletionNotifications: boolean;
+  sidebarProjectSortOrder: SidebarProjectSortOrder;
+  sidebarThreadSortOrder: SidebarThreadSortOrder;
+  timestampFormat: TimestampFormat;
+  customCodexModels: readonly string[];
+  customClaudeModels: readonly string[];
+  customCursorModels: readonly string[];
+  customGeminiModels: readonly string[];
+  customGrokModels: readonly string[];
+  customKiloModels: readonly string[];
+  customOpenCodeModels: readonly string[];
+  customPiModels: readonly string[];
+  textGenerationProvider: ProviderKind;
+  textGenerationModel: string | undefined;
+  uiFontFamily: string;
+  defaultProvider: ProviderKind;
+  hiddenProviders: ProviderKind[];
+  providerOrder: ProviderKind[];
+  hiddenModels: ReadonlyArray<{ provider: ProviderKind; slug: string }>;
+}
 
 type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
 type MutableServerSettingsPatch = Mutable<ServerSettingsPatch>;
@@ -233,7 +190,83 @@ export interface AppModelOption extends ProviderModelOption {
   isCustom: boolean;
 }
 
-const DEFAULT_APP_SETTINGS = AppSettingsSchema.makeUnsafe({});
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  claudeBinaryPath: "",
+  uiDensity: DEFAULT_UI_DENSITY,
+  chatFontSizePx: DEFAULT_CHAT_FONT_SIZE_PX,
+  chatCodeFontFamily: "",
+  terminalFontSizePx: DEFAULT_TERMINAL_FONT_SIZE_PX,
+  terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
+  codexBinaryPath: "",
+  codexHomePath: "",
+  cursorBinaryPath: "",
+  cursorApiEndpoint: "",
+  geminiBinaryPath: "",
+  grokBinaryPath: "",
+  kiloBinaryPath: "",
+  kiloServerUrl: "",
+  kiloServerPassword: "",
+  openCodeBinaryPath: "",
+  piBinaryPath: "",
+  piAgentDir: "",
+  openCodeServerUrl: "",
+  openCodeServerPassword: "",
+  openCodeExperimentalWebSockets: false,
+  defaultThreadEnvMode: "local",
+  confirmThreadDelete: true,
+  confirmThreadArchive: false,
+  confirmTerminalTabClose: true,
+  diffWordWrap: false,
+  enableComposerSuggestions: true,
+  showChatsSection: true,
+  showWorkspaceSection: false,
+  showEnvironmentUsage: true,
+  showEnvironmentRepository: true,
+  showEnvironmentEditor: true,
+  showEnvironmentRecap: true,
+  showEnvironmentPinned: true,
+  showEnvironmentMarkers: true,
+  showEnvironmentInstructions: true,
+  showEnvironmentNotepad: true,
+  enableAssistantStreaming: false,
+  enableNativeFontSmoothing: getDefaultNativeFontSmoothing(),
+  enableTaskCompletionToasts: true,
+  enableSystemTaskCompletionNotifications: true,
+  sidebarProjectSortOrder: DEFAULT_SIDEBAR_PROJECT_SORT_ORDER,
+  sidebarThreadSortOrder: DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
+  timestampFormat: DEFAULT_TIMESTAMP_FORMAT,
+  customCodexModels: [],
+  customClaudeModels: [],
+  customCursorModels: [],
+  customGeminiModels: [],
+  customGrokModels: [],
+  customKiloModels: [],
+  customOpenCodeModels: [],
+  customPiModels: [],
+  textGenerationProvider: "codex",
+  textGenerationModel: undefined,
+  uiFontFamily: "",
+  defaultProvider: "codex",
+  hiddenProviders: [],
+  providerOrder: [...DEFAULT_PROVIDER_ORDER],
+  hiddenModels: [],
+};
+
+/**
+ * Codec for persisted app settings. Mirrors the former Effect Schema
+ * `AppSettingsSchema` (which used `withDefaults` to fill missing keys on
+ * decode): on read, the parsed object is shallow-merged over
+ * {@link DEFAULT_APP_SETTINGS} so legacy payloads predating newer keys pick
+ * up their defaults. `enableNativeFontSmoothing` is re-evaluated against the
+ * current platform when the stored value is absent.
+ */
+const appSettingsCodec: Codec<AppSettings> = objectCodec<AppSettings>(
+  { ...DEFAULT_APP_SETTINGS, enableNativeFontSmoothing: getDefaultNativeFontSmoothing() },
+  (value): value is AppSettings => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    return true;
+  },
+);
 let serverSettingsMigrationInFlight = false;
 
 const PROVIDER_CUSTOM_MODEL_CONFIG: Record<ProviderKind, ProviderCustomModelConfig> = {
@@ -684,6 +717,15 @@ export function normalizeStoredAppSettings(settings: AppSettings): AppSettings {
   return normalizeAppSettings(settings);
 }
 
+/**
+ * Decode a JSON string into {@link AppSettings}, filling defaults for any
+ * missing keys. Replaces the test-time `Schema.decodeSync(Schema.fromJsonString
+ * (AppSettingsSchema))` call sites.
+ */
+export function decodeAppSettingsFromJson(text: string): AppSettings {
+  return appSettingsCodec.decode(text);
+}
+
 export function getCustomModelsForProvider(
   settings: Pick<AppSettings, CustomModelSettingsKey>,
   provider: ProviderKind,
@@ -1004,7 +1046,7 @@ export function useAppSettings() {
   const [localSettings, setSettings] = useLocalStorage(
     APP_SETTINGS_STORAGE_KEY,
     DEFAULT_APP_SETTINGS,
-    AppSettingsSchema,
+    appSettingsCodec,
   );
   const normalizedStoredSettingsRef = useRef(false);
 

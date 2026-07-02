@@ -4,17 +4,14 @@
 // Layer: web profile feature.
 
 import { useCallback } from "react";
+import { stringCodec } from "@t3tools/contracts";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
-import { Schema } from "effect";
 import { normalizeHandle } from "./profileFormatting";
 
 const PROFILE_HANDLE_STORAGE_KEY = "mcode:profile:handle:v1";
 
-// Empty string means "use the server default".
-const StoredHandleSchema = Schema.String;
-
 export function useProfileHandle(defaultHandle: string) {
-  const [stored, setStored] = useLocalStorage(PROFILE_HANDLE_STORAGE_KEY, "", StoredHandleSchema);
+  const [stored, setStored] = useLocalStorage(PROFILE_HANDLE_STORAGE_KEY, "", stringCodec);
 
   const handle = stored.trim().length > 0 ? normalizeHandle(stored) : defaultHandle;
 
