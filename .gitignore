@@ -44,5 +44,9 @@ contracts/generated/
 # Logs
 *.log
 
-# Masday
-.masday/state/
+# Masday runtime artifacts (ignore everything under .masday/ EXCEPT the
+# intentionally-tracked curated dirs + the shared node_modules helper).
+.masday/*
+!.masday/intel/
+!.masday/research/
+!.masday/link-node-modules.sh
