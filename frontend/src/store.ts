@@ -631,10 +631,10 @@ function normalizeModelSelection<T extends { provider: ProviderKind; model: stri
 }
 
 function normalizeProjectScripts(
-  incoming: ReadModelProject["scripts"],
+  incoming: ReadModelProject["scripts"] | undefined,
   previous: Project["scripts"] | undefined,
 ): Project["scripts"] {
-  const nextScripts = incoming.map((script, index) => {
+  const nextScripts = (incoming ?? []).map((script, index) => {
     const existing = previous?.[index];
     return existing && deepEqualJson(existing, script) ? existing : script;
   });
@@ -798,7 +798,7 @@ function upsertProjectFromShell(state: AppState, incoming: ShellSnapshotProject)
 }
 
 function normalizeChatAttachments(
-  incoming: ReadModelMessage["attachments"],
+  incoming: ReadModelMessage["attachments"] | undefined,
   previous: ChatAttachment[] | undefined,
 ): ChatAttachment[] | undefined {
   if (!incoming || incoming.length === 0) {
@@ -1263,11 +1263,11 @@ function mergeReadModelThreadDetailWithLiveHotPath(
 }
 
 function normalizeProposedPlans(
-  incoming: ReadModelThread["proposedPlans"],
+  incoming: ReadModelThread["proposedPlans"] | undefined,
   previous: Thread["proposedPlans"] | undefined,
 ): Thread["proposedPlans"] {
   const previousById = new Map(previous?.map((plan) => [plan.id, plan] as const));
-  const nextPlans = incoming.map((plan) => {
+  const nextPlans = (incoming ?? []).map((plan) => {
     const existing = previousById.get(plan.id);
     if (
       existing &&
@@ -1335,11 +1335,11 @@ function mergeTurnDiffFilesByPath(
 }
 
 function normalizeTurnDiffSummaries(
-  incoming: ReadModelThread["checkpoints"],
+  incoming: ReadModelThread["checkpoints"] | undefined,
   previous: Thread["turnDiffSummaries"] | undefined,
 ): Thread["turnDiffSummaries"] {
   const previousByTurnId = new Map(previous?.map((summary) => [summary.turnId, summary] as const));
-  const nextSummaries = incoming.map((checkpoint) => {
+  const nextSummaries = (incoming ?? []).map((checkpoint) => {
     const existing = previousByTurnId.get(checkpoint.turnId);
     const files = normalizeTurnDiffFiles(checkpoint.files, existing?.files);
     if (

@@ -1003,6 +1003,24 @@ interface ThreadIdPayload extends OrchestrationEventPayload {
 interface ThreadMessagePayload extends ThreadIdPayload {
   readonly messageId: MessageId;
 }
+/** Payload for `thread.message-sent`: carries the full message envelope
+ *  (MCode `ThreadMessageSentPayload` marks role/text/streaming/turnId/
+ *  createdAt as required). Built via `Omit`+intersection because
+ *  `exactOptionalPropertyTypes` forbids widening optional base fields
+ *  (`role?: T`) to required ones (`role: T`) via interface `extends`. */
+type ThreadMessageSentPayload = Omit<
+  OrchestrationEventPayload,
+  "threadId" | "messageId" | "role" | "text" | "streaming" | "turnId" | "createdAt" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly role: OrchestrationMessageRole;
+  readonly text: string;
+  readonly streaming: boolean;
+  readonly turnId: TurnId | null;
+  readonly createdAt: IsoDateTime;
+  readonly updatedAt: IsoDateTime;
+};
 /** Payload with required `threadId` + `markerId`. */
 interface ThreadMarkerPayload extends ThreadIdPayload {
   readonly markerId: ThreadMarkerId;
@@ -1099,7 +1117,7 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.message-sent";
-      readonly payload: ThreadMessagePayload;
+      readonly payload: ThreadMessageSentPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-start-requested";
