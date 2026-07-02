@@ -192,3 +192,14 @@ export type GitActionProgressEvent =
       readonly phase: GitActionProgressPhase | null;
       readonly message: TrimmedNonEmptyString;
     };
+
+// ─── Git list-branches result (T5d) ───────────────────────────────────
+// Ported from MCode `packages/contracts/src/git.ts`. The vendored UI
+// (GitActionsControl) reads `.branches` off the query result; the opaque
+// transport stub collapsed it to `unknown` (TS18046).
+
+export interface GitListBranchesResult {
+  branches: readonly GitBranch[];
+  isRepo: boolean;
+  hasOriginRemote: boolean;
+}

@@ -53,6 +53,7 @@ import type {
   ProjectDevServerEvent,
 } from "./tier3/project";
 import type {
+  GitListBranchesResult,
   GitStashInfoResult,
   GitResolvePullRequestResult,
   GitStatusResult,
@@ -249,7 +250,9 @@ export interface FilesystemBrowseInput extends OpaqueTransportInput {}
 export interface GitHubRepositoryInput extends OpaqueTransportInput {}
 export interface GitHubRepositoryResult extends OpaqueTransportResult {}
 export interface GitListBranchesInput extends OpaqueTransportInput {}
-export interface GitListBranchesResult extends OpaqueTransportResult {}
+// Per MCode: GitListBranchesResult = { branches, isRepo, hasOriginRemote }.
+// Vendored UI reads .branches; opaque stub collapsed it to unknown.
+export type { GitListBranchesResult } from "./tier3/git";
 export interface GitCreateWorktreeInput extends OpaqueTransportInput {}
 export interface GitCreateWorktreeResult extends OpaqueTransportResult {}
 export interface GitCreateDetachedWorktreeInput extends OpaqueTransportInput {}
