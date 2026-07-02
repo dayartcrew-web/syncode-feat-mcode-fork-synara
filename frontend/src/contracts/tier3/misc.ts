@@ -43,7 +43,7 @@ export interface EditorDefinition {
  * for the `EditorId` literal union below. We expose the full array so any
  * vendored UI site that reads editor metadata resolves at runtime.
  */
-export const EDITORS: readonly EditorDefinition[] = [
+export const EDITORS = [
   { id: "cursor", label: "Cursor", commands: ["cursor"], macApplications: ["Cursor"], launchStyle: "goto" },
   { id: "trae", label: "Trae", commands: ["trae"], macApplications: ["Trae"], launchStyle: "goto" },
   { id: "vscode", label: "VS Code", commands: ["code"], macApplications: ["Visual Studio Code"], launchStyle: "goto" },
@@ -74,10 +74,30 @@ export const EDITORS: readonly EditorDefinition[] = [
   { id: "android-studio", label: "Android Studio", commands: ["studio", "android-studio", "studio.sh"], macApplications: ["Android Studio"], launchStyle: "line-column" },
   { id: "file-manager", label: "File Manager", commands: null, launchStyle: "direct-path" },
   { id: "system-default", label: "Default app", commands: null, launchStyle: "direct-path" },
-];
+] as const satisfies readonly EditorDefinition[];
 
-/** Editor id union (built-in editor ids + arbitrary string fallback). */
-export type EditorId = string;
+/**
+ * Editor id literal union (built from {@link EDITORS}). Mirrors MCode's
+ * `Schema.Literals(EDITORS.map(e => e.id))`. The union is closed over the
+ * known editor ids; arbitrary-string fallback is intentionally excluded so
+ * the type is assignable to `Codec<EditorId>` (the runtime factory below).
+ */
+export type EditorId = (typeof EDITORS)[number]["id"];
+
+/**
+ * Runtime codec value for {@link EditorId}. MCode's `EditorId` is BOTH a
+ * type (the literal union) AND a value (the Effect `Schema.Literals`
+ * factory, used as a codec arg to `useLocalStorage` / `getLocalStorageItem`
+ * / `setLocalStorageItem`). The vendored UI passes `EditorId` as the 3rd
+ * `codec` argument to those hooks, so we expose a `Codec<EditorId>` value
+ * sharing the name (TS type/value namespaces are separate). The codec
+ * round-trips the string via JSON (matching Effect `Schema.String` semantics
+ * for literal unions — the literal narrowing is compile-time only).
+ */
+export const EditorId: import("../runtime").Codec<EditorId> = {
+  encode: (value) => JSON.stringify(value),
+  decode: (text) => JSON.parse(text) as EditorId,
+};
 
 // ─── Context menu item ────────────────────────────────────────────────
 // (also exported from shell.ts; re-declared here so vendored UI importing
@@ -98,20 +118,24 @@ export interface ContextMenuItem<T extends string = string> {
 // toolCallDetails.ts.
 
 export type ToolLifecycleItemType =
-  | "command"
-  | "file-read"
-  | "file-write"
-  | "file-change"
-  | "shell"
-  | "search"
-  | "browser"
-  | "plan"
-  | "diagnostic"
-  | "other";
+  | "command_execution"
+  | "file_change"
+  | "mcp_tool_call"
+  | "dynamic_tool_call"
+  | "collab_agent_tool_call"
+  | "web_search"
+  | "image_view"
+  | "image_generation";
 
 const TOOL_LIFECYCLE_ITEM_TYPES: readonly ToolLifecycleItemType[] = [
-  "command", "file-read", "file-write", "file-change",
-  "shell", "search", "browser", "plan", "diagnostic", "other",
+  "command_execution",
+  "file_change",
+  "mcp_tool_call",
+  "dynamic_tool_call",
+  "collab_agent_tool_call",
+  "web_search",
+  "image_view",
+  "image_generation",
 ];
 
 export function isToolLifecycleItemType(value: unknown): value is ToolLifecycleItemType {
@@ -119,18 +143,22 @@ export function isToolLifecycleItemType(value: unknown): value is ToolLifecycleI
 }
 
 // ─── User-input question (provider-issued prompt for user response) ───
-// STUB(T5c): MCode's UserInputQuestion has a richer discriminated shape
-// (free-text / single-choice / multi-choice). The vendored UI references
-// it as the pendingUserInput store payload. A permissive interface here
-// resolves the import; T5c should port the real union.
+// Real shape ported from MCode `packages/contracts/src/providerRuntime.ts`
+// lines 452-467. MCode models this as a flat struct with an `options` array
+// (each option has `label` + `description`) and a `multiSelect` flag that
+// discriminates single- vs multi-choice behaviour at the call site. The
+// vendored UI's pendingUserInput store reads `.options[].description`,
+// `.id`, `.header`, `.question`, `.multiSelect`.
+export interface UserInputQuestionOption {
+  readonly label: string;
+  readonly description: string;
+}
 export interface UserInputQuestion {
-  readonly prompt?: string;
-  readonly kind?: string;
-  readonly placeholder?: string;
-  readonly options?: readonly { readonly value: string; readonly label?: string }[];
-  readonly defaultAnswer?: string | readonly string[];
-  readonly required?: boolean;
-  readonly [key: string]: unknown;
+  readonly id: string;
+  readonly header: string;
+  readonly question: string;
+  readonly options: readonly UserInputQuestionOption[];
+  readonly multiSelect?: boolean;
 }
 
 // ─── Upload attachment union ──────────────────────────────────────────
@@ -163,15 +191,18 @@ export type UploadChatAttachment =
   | UploadChatAssistantSelectionAttachment;
 
 // ─── Filesystem browse result ─────────────────────────────────────────
-// (shell.ts declares this opaque; re-declared here with a permissive shape
-// so vendored UI property-access type-checks. STUB(T5c): real directory
-// entry shape pending — Syncode's filesystem crate exposes a simpler
-// recursive listing than MCode's Electron-only browser.)
+// Real shape ported from MCode `packages/contracts/src/filesystem.ts`
+// lines 12-22. MCode returns a `parentPath` + flat `entries` array (each
+// entry has `name` + `fullPath`); the vendored UI iterates `entries` and
+// reads `.name` / `.fullPath`. (Syncode's backend filesystem crate will
+// need to project into this shape at the transport boundary.)
+export interface FilesystemBrowseEntry {
+  readonly name: string;
+  readonly fullPath: string;
+}
 export interface FilesystemBrowseResult {
-  readonly path: string;
-  readonly directories: readonly string[];
-  readonly files: readonly string[];
-  readonly [key: string]: unknown;
+  readonly parentPath: string;
+  readonly entries: readonly FilesystemBrowseEntry[];
 }
 
 // ─── Provider send-turn attachment caps (re-export for convenience) ───

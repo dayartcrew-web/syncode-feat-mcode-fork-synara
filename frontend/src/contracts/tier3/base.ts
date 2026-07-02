@@ -28,17 +28,28 @@ export type IsoDateTime = string;
 /** POSIX-style environment record. */
 export type ProcessEnvRecord = Record<string, string>;
 
-// ─── Extra branded IDs (not in Tier 0 ids.ts) ──────────────────────────
-// These mirror MCode's baseSchemas.ts `makeEntityId` brands that the vendored
-// UI references but Tier 0's ids.ts did not yet include.
+// ─── Extra branded IDs ─────────────────────────────────────────────────
+// These branded IDs were originally declared here (type-only) because Tier
+// 0's ids.ts did not yet include them. They have now been consolidated into
+// `../ids` (the canonical branded-ID home) as type+value pairs exposing the
+// `.makeUnsafe` runtime factory the vendored UI calls. Re-exported here so
+// existing `import { AutomationRunId, … } from "@t3tools/contracts"` sites
+// that resolve through tier3/base keep working, and so the value namespace
+// (`.makeUnsafe`) flows through.
+export {
+  ThreadMarkerId,
+  AutomationRunId,
+  EnvironmentId,
+  AuthSessionId,
+} from "../ids";
 
-export type ThreadMarkerId = Branded<"ThreadMarkerId">;
-export type AutomationRunId = Branded<"AutomationRunId">;
-export type EnvironmentId = Branded<"EnvironmentId">;
-export type AuthSessionId = Branded<"AuthSessionId">;
-
-// Cast helpers for the extra branded IDs.
-export const asThreadMarkerId = (s: string): ThreadMarkerId => s as ThreadMarkerId;
-export const asAutomationRunId = (s: string): AutomationRunId => s as AutomationRunId;
-export const asEnvironmentId = (s: string): EnvironmentId => s as EnvironmentId;
-export const asAuthSessionId = (s: string): AuthSessionId => s as AuthSessionId;
+// Cast helpers for the extra branded IDs (kept for backward-compat with
+// the barrel re-export at `contracts/index.ts`).
+export const asThreadMarkerId = (s: string): Branded<"ThreadMarkerId"> =>
+  s as Branded<"ThreadMarkerId">;
+export const asAutomationRunId = (s: string): Branded<"AutomationRunId"> =>
+  s as Branded<"AutomationRunId">;
+export const asEnvironmentId = (s: string): Branded<"EnvironmentId"> =>
+  s as Branded<"EnvironmentId">;
+export const asAuthSessionId = (s: string): Branded<"AuthSessionId"> =>
+  s as Branded<"AuthSessionId">;
