@@ -3113,7 +3113,7 @@ function applyOrchestrationEvent(
         title: event.payload.title,
         workspaceRoot: event.payload.workspaceRoot,
         defaultModelSelection: event.payload.defaultModelSelection,
-        scripts: event.payload.scripts,
+        scripts: event.payload.scripts ?? [],
         isPinned: event.payload.isPinned ?? false,
         createdAt: event.payload.createdAt,
         updatedAt: event.payload.updatedAt,

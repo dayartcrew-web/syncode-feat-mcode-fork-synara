@@ -101,15 +101,18 @@ export interface ChatMessage {
   id: MessageId;
   role: "user" | "assistant" | "system";
   text: string;
-  attachments?: ChatAttachment[];
-  skills?: ProviderSkillReference[];
-  mentions?: ProviderMentionReference[];
-  dispatchMode?: TurnDispatchMode;
-  turnId?: TurnId | null;
+  // T5e: optionals widened with `| undefined` so the store reducer's
+  // conditional-spread object construction (`...(x ? { x } : {})`) type-checks
+  // under `exactOptionalPropertyTypes: true` (TS2375).
+  attachments?: ChatAttachment[] | undefined;
+  skills?: ProviderSkillReference[] | undefined;
+  mentions?: ProviderMentionReference[] | undefined;
+  dispatchMode?: TurnDispatchMode | undefined;
+  turnId?: TurnId | null | undefined;
   createdAt: string;
   completedAt?: string | undefined;
   streaming: boolean;
-  source?: OrchestrationMessageSource;
+  source?: OrchestrationMessageSource | undefined;
 }
 
 export interface ProposedPlan {

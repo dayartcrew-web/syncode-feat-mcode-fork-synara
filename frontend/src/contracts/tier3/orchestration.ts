@@ -497,13 +497,16 @@ export interface OrchestrationMessage {
   id: MessageId;
   role: OrchestrationMessageRole;
   text: string;
-  attachments?: readonly ChatAttachment[];
-  skills?: readonly ProviderSkillReference[];
-  mentions?: readonly ProviderMentionReference[];
-  dispatchMode?: TurnDispatchMode;
+  // T5e: optionals widened with `| undefined` so the vendored store reducer's
+  // conditional-spread object construction type-checks under
+  // `exactOptionalPropertyTypes: true` (TS2375).
+  attachments?: readonly ChatAttachment[] | undefined;
+  skills?: readonly ProviderSkillReference[] | undefined;
+  mentions?: readonly ProviderMentionReference[] | undefined;
+  dispatchMode?: TurnDispatchMode | undefined;
   turnId: TurnId | null;
   streaming: boolean;
-  source?: OrchestrationMessageSource;
+  source?: OrchestrationMessageSource | undefined;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }
@@ -516,12 +519,12 @@ export type OrchestrationThreadActivityTone =
 
 export interface OrchestrationThreadActivity {
   id: EventId;
-  tone: OrchestrationThreadActivityTone;
+  tone?: OrchestrationThreadActivityTone | undefined;
   kind: TrimmedNonEmptyString;
-  summary: TrimmedNonEmptyString;
+  summary?: TrimmedNonEmptyString | undefined;
   payload: unknown;
   turnId: TurnId | null;
-  sequence?: NonNegativeInt;
+  sequence?: NonNegativeInt | undefined;
   createdAt: IsoDateTime;
 }
 
@@ -819,12 +822,33 @@ export interface OrchestrationShellSnapshot {
 
 export interface OrchestrationReadModel {
   snapshotSequence: NonNegativeInt;
-  projects: readonly OrchestrationProjectShell[];
+  projects: readonly OrchestrationProject[];
   threads: readonly OrchestrationThread[];
   updatedAt: IsoDateTime;
 }
 
 // ─── Orchestration shell snapshot thread (lighter projection) ──────────
+
+// T5e: full `OrchestrationProject` projection (read-model). MCode's
+// `OrchestrationReadModel.projects` uses the full `OrchestrationProject`
+// (which carries `deletedAt`) — not the lighter `OrchestrationProjectShell`
+// used by `OrchestrationShellSnapshot`. The vendored store filters on
+// `.deletedAt` (`syncServerReadModel`) and the `project.created` event
+// reducer builds a project shell with `deletedAt: null`, so the read-model
+// project type must expose `deletedAt`. Source of truth: MCode
+// `packages/contracts/src/orchestration.ts` lines 370-381.
+export interface OrchestrationProject {
+  id: ProjectId;
+  kind?: ProjectKind | undefined;
+  title: TrimmedNonEmptyString;
+  workspaceRoot: TrimmedNonEmptyString;
+  defaultModelSelection: ModelSelection | null;
+  scripts: readonly ProjectScript[];
+  isPinned?: boolean | undefined;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  deletedAt: IsoDateTime | null;
+}
 
 export interface OrchestrationProjectShell {
   id: ProjectId;
@@ -971,7 +995,7 @@ export interface OrchestrationEventPayload {
   readonly activity?: OrchestrationThreadActivity;
   readonly proposedPlan?: OrchestrationProposedPlan;
   readonly session?: OrchestrationSession;
-  readonly threadMarkers?: readonly unknown[];
+  readonly threadMarkers?: readonly ThreadMarker[];
   readonly subagentAgentId?: string | null;
   readonly subagentNickname?: string | null;
   readonly subagentRole?: string | null;
@@ -979,9 +1003,43 @@ export interface OrchestrationEventPayload {
   readonly modelSelection?: ModelSelection;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode;
-  readonly envMode?: string;
+  readonly envMode?: ThreadEnvironmentMode;
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
+  // T5e: fields the vendored store reducer reads off `event.payload.X` that
+  // previously fell through to the index signature's `unknown`. Typed here so
+  // `event.payload.kind` / `.scripts` / `.marker` / … resolve to real shapes
+  // instead of `unknown` (TS2322/2345/18046). The index signature is retained
+  // for fields not yet ported from MCode's 34 payload structs.
+  readonly associatedWorktreePath?: string | null;
+  readonly associatedWorktreeBranch?: string | null;
+  readonly associatedWorktreeRef?: string | null;
+  readonly createBranchFlowCompleted?: boolean;
+  readonly notes?: string | undefined;
+  readonly pinnedMessages?: readonly PinnedMessage[];
+  readonly kind?: ProjectKind;
+  readonly workspaceRoot?: string;
+  readonly defaultModelSelection?: ModelSelection | null;
+  readonly scripts?: readonly ProjectScript[];
+  readonly archivedAt?: IsoDateTime | null;
+  // Pinned-message + marker event payloads.
+  readonly pin?: PinnedMessage;
+  readonly label?: PinnedMessageLabel | null;
+  readonly done?: boolean;
+  readonly marker?: ThreadMarker;
+  readonly markerId?: ThreadMarkerId;
+  readonly decision?: ProviderApprovalDecision;
+  // Turn-diff + revert + rollback payloads.
+  readonly completedAt?: IsoDateTime;
+  readonly status?: OrchestrationCheckpointStatus;
+  readonly files?: readonly OrchestrationCheckpointFile[];
+  readonly checkpointRef?: CheckpointRef;
+  readonly assistantMessageId?: MessageId | null;
+  readonly checkpointTurnCount?: NonNegativeInt;
+  readonly turnCount?: number;
+  readonly numTurns?: number;
+  readonly removedTurnIds?: readonly TurnId[];
+  readonly sourceProposedPlan?: OrchestrationLatestTurn["sourceProposedPlan"];
   readonly [key: string]: unknown;
 }
 // ─── Per-variant event payloads (T5d) ────────────────────────────────
@@ -1007,10 +1065,28 @@ interface ThreadMessagePayload extends ThreadIdPayload {
  *  (MCode `ThreadMessageSentPayload` marks role/text/streaming/turnId/
  *  createdAt as required). Built via `Omit`+intersection because
  *  `exactOptionalPropertyTypes` forbids widening optional base fields
- *  (`role?: T`) to required ones (`role: T`) via interface `extends`. */
+ *  (`role?: T`) to required ones (`role: T`) via interface `extends`.
+ *
+ *  T5e: the optional message fields (dispatchMode/source/attachments/skills/
+ *  mentions) are also omitted+re-declared because TypeScript loses the
+ *  explicit optional-property types when `Omit` is applied to an interface
+ *  carrying a string index signature (`[key: string]: unknown`) — the index
+ *  signature would otherwise swallow them and resolve reads to `unknown`. */
 type ThreadMessageSentPayload = Omit<
   OrchestrationEventPayload,
-  "threadId" | "messageId" | "role" | "text" | "streaming" | "turnId" | "createdAt" | "updatedAt"
+  | "threadId"
+  | "messageId"
+  | "role"
+  | "text"
+  | "streaming"
+  | "turnId"
+  | "createdAt"
+  | "updatedAt"
+  | "dispatchMode"
+  | "source"
+  | "attachments"
+  | "skills"
+  | "mentions"
 > & {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
@@ -1020,22 +1096,286 @@ type ThreadMessageSentPayload = Omit<
   readonly turnId: TurnId | null;
   readonly createdAt: IsoDateTime;
   readonly updatedAt: IsoDateTime;
+  readonly dispatchMode?: TurnDispatchMode | undefined;
+  readonly source?: OrchestrationMessageSource | undefined;
+  readonly attachments?: readonly ChatAttachment[] | undefined;
+  readonly skills?: readonly ProviderSkillReference[] | undefined;
+  readonly mentions?: readonly ProviderMentionReference[] | undefined;
 };
-/** Payload with required `threadId` + `markerId`. */
-interface ThreadMarkerPayload extends ThreadIdPayload {
+// ─── T5e per-variant payloads (required fields the store reducer reads) ──
+// These re-declare the fields MCode marks REQUIRED for each event variant on
+// top of the permissive {@link OrchestrationEventPayload} base. Built via
+// `Omit`+intersection (same pattern as `ThreadMessageSentPayload`) for two
+// reasons: (1) `exactOptionalPropertyTypes` forbids widening optional base
+// fields (`session?: T`) to required ones (`session: T`) via `extends`;
+// (2) `Omit` on an interface with a string index signature would otherwise
+// swallow the explicit optional-property types of sibling fields and resolve
+// reads to `unknown`. The fields the store reducer treats as required are
+// omitted from the base then re-declared as required.
+/** Payload for `thread.session-set`: required `session`. */
+type ThreadSessionSetPayload = Omit<OrchestrationEventPayload, "session"> & {
+  readonly threadId: ThreadId;
+  readonly session: OrchestrationSession;
+};
+/** Payload for `thread.activity-appended`: required `activity`. */
+type ThreadActivityAppendedPayload = Omit<OrchestrationEventPayload, "activity"> & {
+  readonly threadId: ThreadId;
+  readonly activity: OrchestrationThreadActivity;
+};
+/** Payload for `thread.proposed-plan-upserted`: required `proposedPlan`. */
+type ThreadProposedPlanUpsertedPayload = Omit<OrchestrationEventPayload, "proposedPlan"> & {
+  readonly threadId: ThreadId;
+  readonly proposedPlan: OrchestrationProposedPlan;
+};
+/** Payload for `thread.reverted`: required `turnCount`. */
+type ThreadRevertedPayload = Omit<OrchestrationEventPayload, "turnCount"> & {
+  readonly threadId: ThreadId;
+  readonly turnCount: number;
+};
+/** `project.meta-updated` (MCode `ProjectMetaUpdatedPayload`): `updatedAt`
+ *  required; `kind`/`title`/`workspaceRoot`/`defaultModelSelection`/`scripts`/
+ *  `isPinned` optional. Built via Omit+intersection so the optional fields
+ *  keep their precise types (defeating the index-signature/Omit swallow). */
+type ProjectMetaUpdatedPayload = Omit<
+  OrchestrationEventPayload,
+  | "projectId"
+  | "updatedAt"
+  | "kind"
+  | "title"
+  | "workspaceRoot"
+  | "defaultModelSelection"
+  | "scripts"
+  | "isPinned"
+> & {
+  readonly projectId: ProjectId;
+  readonly kind?: ProjectKind;
+  readonly title?: string;
+  readonly workspaceRoot?: string;
+  readonly defaultModelSelection?: ModelSelection | null;
+  readonly scripts?: readonly ProjectScript[];
+  readonly isPinned?: boolean;
+  readonly updatedAt: IsoDateTime;
+};
+
+// T5e: additional per-variant payloads whose required fields the store
+// reducer reads (pin/marker/meta/turn/diff events). Each omits the
+// fields it re-declares as required (to defeat the index-signature/Omit
+// interaction and exactOptional widening). Source of truth: MCode
+// `packages/contracts/src/orchestration.ts` payload structs (lines 1476-1689).
+/** `thread.meta-updated`: `updatedAt` required; rest optional per MCode.
+ *  T5e: re-declares ALL optional fields the store reducer reads because
+ *  `Omit` on an interface with a string index signature swallows the
+ *  sibling optional-property types (resolves reads to `unknown`). */
+type ThreadMetaUpdatedPayload = Omit<
+  OrchestrationEventPayload,
+  | "threadId"
+  | "updatedAt"
+  | "title"
+  | "modelSelection"
+  | "envMode"
+  | "branch"
+  | "worktreePath"
+  | "associatedWorktreePath"
+  | "associatedWorktreeBranch"
+  | "associatedWorktreeRef"
+  | "createBranchFlowCompleted"
+  | "isPinned"
+  | "parentThreadId"
+  | "subagentAgentId"
+  | "subagentNickname"
+  | "subagentRole"
+  | "handoff"
+  | "lastKnownPr"
+  | "pinnedMessages"
+  | "threadMarkers"
+  | "notes"
+> & {
+  readonly threadId: ThreadId;
+  readonly title?: string;
+  readonly modelSelection?: ModelSelection;
+  readonly envMode?: ThreadEnvironmentMode;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+  readonly associatedWorktreePath?: string | null;
+  readonly associatedWorktreeBranch?: string | null;
+  readonly associatedWorktreeRef?: string | null;
+  readonly createBranchFlowCompleted?: boolean;
+  readonly isPinned?: boolean;
+  readonly parentThreadId?: ThreadId | null;
+  readonly subagentAgentId?: string | null;
+  readonly subagentNickname?: string | null;
+  readonly subagentRole?: string | null;
+  readonly handoff?: ThreadHandoff | null;
+  readonly lastKnownPr?: OrchestrationThreadPullRequest | null;
+  readonly pinnedMessages?: readonly PinnedMessage[];
+  readonly threadMarkers?: readonly ThreadMarker[];
+  readonly notes?: string;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.pinned-message-added`: `pin` + `updatedAt` required. */
+type ThreadPinnedMessageAddedPayload = Omit<
+  OrchestrationEventPayload,
+  "pin" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly pin: PinnedMessage;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.pinned-message-removed`: `messageId` + `updatedAt` required. */
+type ThreadPinnedMessageRemovedPayload = Omit<
+  OrchestrationEventPayload,
+  "messageId" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.pinned-message-done-set`: `messageId`/`done`/`updatedAt` required. */
+type ThreadPinnedMessageDoneSetPayload = Omit<
+  OrchestrationEventPayload,
+  "messageId" | "done" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly done: boolean;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.pinned-message-label-set`: `messageId`/`label`/`updatedAt` required. */
+type ThreadPinnedMessageLabelSetPayload = Omit<
+  OrchestrationEventPayload,
+  "messageId" | "label" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly label: PinnedMessageLabel | null;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.marker-added`: `marker` + `updatedAt` required. */
+type ThreadMarkerAddedPayload = Omit<
+  OrchestrationEventPayload,
+  "marker" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly marker: ThreadMarker;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.marker-done-set`: `markerId`/`done`/`updatedAt` required. */
+type ThreadMarkerDoneSetPayload = Omit<
+  OrchestrationEventPayload,
+  "markerId" | "done" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
   readonly markerId: ThreadMarkerId;
-}
-/** Payload with required `threadId` + `requestId`. */
-interface ThreadRequestPayload extends ThreadIdPayload {
+  readonly done: boolean;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.marker-removed`: `markerId`/`updatedAt` required. */
+type ThreadMarkerRemovedPayload = Omit<
+  OrchestrationEventPayload,
+  "markerId" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly markerId: ThreadMarkerId;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.marker-label-set`: `markerId`/`label`/`updatedAt` required. */
+type ThreadMarkerLabelSetPayload = Omit<
+  OrchestrationEventPayload,
+  "markerId" | "label" | "updatedAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly markerId: ThreadMarkerId;
+  readonly label: TrimmedNonEmptyString | null;
+  readonly updatedAt: IsoDateTime;
+};
+/** `thread.turn-start-requested`: `createdAt`/`runtimeMode`/`interactionMode`
+ *  required; `modelSelection`/`sourceProposedPlan` optional. T5e: the
+ *  optional fields are omitted+re-declared so the index signature doesn't
+ *  swallow them after `Omit`. */
+type ThreadTurnStartRequestedPayload = Omit<
+  OrchestrationEventPayload,
+  | "createdAt"
+  | "runtimeMode"
+  | "interactionMode"
+  | "modelSelection"
+  | "sourceProposedPlan"
+> & {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly modelSelection?: ModelSelection;
+  readonly sourceProposedPlan?: OrchestrationLatestTurn["sourceProposedPlan"];
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly createdAt: IsoDateTime;
+};
+/** `thread.session-stop-requested`: `createdAt` required. */
+type ThreadSessionStopRequestedPayload = Omit<
+  OrchestrationEventPayload,
+  "createdAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly createdAt: IsoDateTime;
+};
+/** `thread.turn-diff-completed`: all diff fields required. */
+type ThreadTurnDiffCompletedPayload = Omit<
+  OrchestrationEventPayload,
+  | "turnId"
+  | "completedAt"
+  | "status"
+  | "files"
+  | "checkpointRef"
+  | "assistantMessageId"
+  | "checkpointTurnCount"
+> & {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly completedAt: IsoDateTime;
+  readonly status: OrchestrationCheckpointStatus;
+  readonly files: readonly OrchestrationCheckpointFile[];
+  readonly checkpointRef: CheckpointRef;
+  readonly assistantMessageId: MessageId | null;
+  readonly checkpointTurnCount: NonNegativeInt;
+};
+/** `thread.approval-response-requested`: `decision` + `createdAt` required. */
+type ThreadApprovalResponseRequestedPayload = Omit<
+  OrchestrationEventPayload,
+  "decision" | "createdAt"
+> & {
+  readonly threadId: ThreadId;
   readonly requestId: ApprovalRequestId;
-}
+  readonly decision: ProviderApprovalDecision;
+  readonly createdAt: IsoDateTime;
+};
+/** `thread.user-input-response-requested`: `createdAt` required. */
+type ThreadUserInputResponseRequestedPayload = Omit<
+  OrchestrationEventPayload,
+  "createdAt"
+> & {
+  readonly threadId: ThreadId;
+  readonly requestId: ApprovalRequestId;
+  readonly createdAt: IsoDateTime;
+};
+/** `thread.conversation-rolled-back`: `messageId`/`numTurns` required. */
+type ThreadConversationRolledBackPayload = Omit<
+  OrchestrationEventPayload,
+  "messageId" | "numTurns" | "removedTurnIds"
+> & {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly numTurns: number;
+  readonly removedTurnIds?: readonly TurnId[];
+};
 /** Payload with a required `projectId`. */
 interface ProjectIdPayload extends OrchestrationEventPayload {
   readonly projectId: ProjectId;
 }
 /** Payload for `project.created` (MCode `ProjectCreatedPayload`): kind/title/
  *  workspaceRoot/defaultModelSelection/scripts/createdAt/updatedAt required.
- *  Built via Omit+intersection for exactOptionalPropertyTypes compatibility. */
+ *  Built via Omit+intersection for exactOptionalPropertyTypes compatibility.
+ *  T5e: `defaultModelSelection` typed as `ModelSelection | null` (was `unknown`)
+ *  and `isPinned` omitted+re-declared so the index signature doesn't swallow
+ *  them after `Omit` (same index-signature/Omit interaction as
+ *  `ThreadMessageSentPayload`). */
 type ProjectCreatedPayload = Omit<
   OrchestrationEventPayload,
   | "projectId"
@@ -1046,13 +1386,15 @@ type ProjectCreatedPayload = Omit<
   | "workspaceRoot"
   | "defaultModelSelection"
   | "scripts"
+  | "isPinned"
 > & {
   readonly projectId: ProjectId;
   readonly kind?: ProjectKind;
   readonly title: string;
   readonly workspaceRoot: string;
-  readonly defaultModelSelection: unknown;
+  readonly defaultModelSelection: ModelSelection | null;
   readonly scripts?: readonly ProjectScript[];
+  readonly isPinned?: boolean;
   readonly createdAt: IsoDateTime;
   readonly updatedAt: IsoDateTime;
 };
@@ -1064,7 +1406,7 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "project.meta-updated";
-      readonly payload: ProjectIdPayload;
+      readonly payload: ProjectMetaUpdatedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "project.deleted";
@@ -1088,39 +1430,39 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.meta-updated";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadMetaUpdatedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-added";
-      readonly payload: ThreadMessagePayload;
+      readonly payload: ThreadPinnedMessageAddedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-removed";
-      readonly payload: ThreadMessagePayload;
+      readonly payload: ThreadPinnedMessageRemovedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-done-set";
-      readonly payload: ThreadMessagePayload;
+      readonly payload: ThreadPinnedMessageDoneSetPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-label-set";
-      readonly payload: ThreadMessagePayload;
+      readonly payload: ThreadPinnedMessageLabelSetPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-added";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadMarkerAddedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-removed";
-      readonly payload: ThreadMarkerPayload;
+      readonly payload: ThreadMarkerRemovedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-done-set";
-      readonly payload: ThreadMarkerPayload;
+      readonly payload: ThreadMarkerDoneSetPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-label-set";
-      readonly payload: ThreadMarkerPayload;
+      readonly payload: ThreadMarkerLabelSetPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.runtime-mode-set";
@@ -1132,11 +1474,11 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.session-set";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadSessionSetPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.activity-appended";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadActivityAppendedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.message-sent";
@@ -1144,7 +1486,7 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-start-requested";
-      readonly payload: ThreadMessagePayload;
+      readonly payload: ThreadTurnStartRequestedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-queued";
@@ -1156,15 +1498,15 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-diff-completed";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadTurnDiffCompletedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.approval-response-requested";
-      readonly payload: ThreadRequestPayload;
+      readonly payload: ThreadApprovalResponseRequestedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.user-input-response-requested";
-      readonly payload: ThreadRequestPayload;
+      readonly payload: ThreadUserInputResponseRequestedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.checkpoint-revert-requested";
@@ -1172,7 +1514,7 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.reverted";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadRevertedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.conversation-rollback-requested";
@@ -1180,7 +1522,7 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.conversation-rolled-back";
-      readonly payload: ThreadMessagePayload;
+      readonly payload: ThreadConversationRolledBackPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.message-edit-resend-requested";
@@ -1188,9 +1530,9 @@ export type OrchestrationEvent =
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.session-stop-requested";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadSessionStopRequestedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.proposed-plan-upserted";
-      readonly payload: ThreadIdPayload;
+      readonly payload: ThreadProposedPlanUpsertedPayload;
     });
