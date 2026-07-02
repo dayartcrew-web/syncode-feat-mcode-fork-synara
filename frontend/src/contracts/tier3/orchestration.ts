@@ -427,7 +427,7 @@ export interface ThreadHandoffImportedMessage {
   messageId: MessageId;
   role: "user" | "assistant";
   text: string;
-  attachments?: readonly unknown[];
+  attachments?: readonly ChatAttachment[];
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }
@@ -436,11 +436,42 @@ export interface ThreadHandoffImportedMessage {
 
 export type OrchestrationMessageRole = "user" | "assistant" | "system";
 
+// Chat attachments (ported from MCode `packages/contracts/src/orchestration.ts`).
+// The vendored UI's `normalizeChatAttachments` reducer reads `.type`/`.id`/
+// `.name`/`.mimeType`/`.sizeBytes`/`.assistantMessageId`/`.text` off each
+// attachment, so the prior `readonly unknown[]` typing collapsed every field
+// access to `unknown` (TS18046). The shared `@t3tools/shared` `ChatAttachment`
+// is structurally identical to this union.
+export interface ChatImageAttachment {
+  type: "image";
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: NonNegativeInt;
+}
+export interface ChatFileAttachment {
+  type: "file";
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: NonNegativeInt;
+}
+export interface ChatAssistantSelectionAttachment {
+  type: "assistant-selection";
+  id: string;
+  assistantMessageId: MessageId;
+  text: string;
+}
+export type ChatAttachment =
+  | ChatImageAttachment
+  | ChatFileAttachment
+  | ChatAssistantSelectionAttachment;
+
 export interface OrchestrationMessage {
   id: MessageId;
   role: OrchestrationMessageRole;
   text: string;
-  attachments?: readonly unknown[];
+  attachments?: readonly ChatAttachment[];
   skills?: readonly ProviderSkillReference[];
   mentions?: readonly ProviderMentionReference[];
   dispatchMode?: TurnDispatchMode;
@@ -743,6 +774,30 @@ export interface OrchestrationThread {
   session: OrchestrationSession | null;
 }
 
+// ─── Orchestration snapshots (read model + shell) ─────────────────────
+// Ported from MCode `packages/contracts/src/orchestration.ts`. The full
+// `OrchestrationReadModel` uses `OrchestrationProject`/`OrchestrationThread`
+// (the rich projections); we don't yet port those, but the shell projections
+// are structurally compatible supersets of the fields the UI consumes, so
+// `OrchestrationReadModel` reuses the shell arrays. This satisfies the
+// `SnapshotWithProjects<T>` structural constraint in `projectCreateRecovery.ts`
+// (which only needs `projects: readonly T[]` where T matches
+// `DuplicateProjectCreateRecoveryCandidate`: id/kind?/workspaceRoot/deletedAt?).
+
+export interface OrchestrationShellSnapshot {
+  snapshotSequence: NonNegativeInt;
+  projects: readonly OrchestrationProjectShell[];
+  threads: readonly OrchestrationThreadShell[];
+  updatedAt: IsoDateTime;
+}
+
+export interface OrchestrationReadModel {
+  snapshotSequence: NonNegativeInt;
+  projects: readonly OrchestrationProjectShell[];
+  threads: readonly OrchestrationThread[];
+  updatedAt: IsoDateTime;
+}
+
 // ─── Orchestration shell snapshot thread (lighter projection) ──────────
 
 export interface OrchestrationProjectShell {
@@ -875,140 +930,172 @@ export interface OrchestrationEventPayload {
   readonly worktreePath?: string | null;
   readonly [key: string]: unknown;
 }
+// ─── Per-variant event payloads (T5d) ────────────────────────────────
+// Ported from MCode `packages/contracts/src/orchestration.ts`. Each variant
+// re-declares the fields MCode's schema marks REQUIRED for that event
+// (threadId / messageId / projectId / turnId / markerId / requestId / …) on
+// top of the permissive {@link OrchestrationEventPayload} base. The base's
+// index signature is retained so unported optional fields still resolve to
+// `unknown` rather than failing compile — but the required IDs the
+// reducer/UI threads through branded constructors (ThreadId.makeUnsafe etc.)
+// are now precise, eliminating the `ThreadId | undefined`/`unknown` drift at
+// the call sites.
+
+/** Payload with a required `threadId`. */
+interface ThreadIdPayload extends OrchestrationEventPayload {
+  readonly threadId: ThreadId;
+}
+/** Payload with required `threadId` + `messageId`. */
+interface ThreadMessagePayload extends ThreadIdPayload {
+  readonly messageId: MessageId;
+}
+/** Payload with required `threadId` + `markerId`. */
+interface ThreadMarkerPayload extends ThreadIdPayload {
+  readonly markerId: ThreadMarkerId;
+}
+/** Payload with required `threadId` + `requestId`. */
+interface ThreadRequestPayload extends ThreadIdPayload {
+  readonly requestId: ApprovalRequestId;
+}
+/** Payload with a required `projectId`. */
+interface ProjectIdPayload extends OrchestrationEventPayload {
+  readonly projectId: ProjectId;
+}
+
 export type OrchestrationEvent =
   | (OrchestrationEventBase & {
       readonly type: "project.created";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ProjectIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "project.meta-updated";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ProjectIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "project.deleted";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ProjectIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.created";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.deleted";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.archived";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.unarchived";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.meta-updated";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-added";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-removed";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-done-set";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.pinned-message-label-set";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-added";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-removed";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMarkerPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-done-set";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMarkerPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.marker-label-set";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMarkerPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.runtime-mode-set";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.interaction-mode-set";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.session-set";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.activity-appended";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.message-sent";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-start-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-queued";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-interrupt-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.turn-diff-completed";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.approval-response-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadRequestPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.user-input-response-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadRequestPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.checkpoint-revert-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.reverted";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.conversation-rollback-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.conversation-rolled-back";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.message-edit-resend-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadMessagePayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.session-stop-requested";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "thread.proposed-plan-upserted";
-      readonly payload: OrchestrationEventPayload;
+      readonly payload: ThreadIdPayload;
     });

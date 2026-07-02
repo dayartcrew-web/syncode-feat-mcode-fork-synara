@@ -68,6 +68,10 @@ import type {
   ServerGetProviderUsageSnapshotResult,
   ServerListProviderUsageInput,
   ServerListProviderUsageResult,
+  ServerProviderStatusesUpdatedPayload,
+  ServerSettings,
+  ServerSettingsPatch,
+  ServerSettingsUpdatedPayload,
   ServerStopLocalServerInput,
 } from "./tier3/server";
 import type {
@@ -83,9 +87,11 @@ import type {
   AuthRevokeClientSessionInput,
 } from "./tier3/auth";
 import type {
+  AutomationCreateInput,
   AutomationListResult,
   AutomationDefinition,
   AutomationStreamEvent,
+  AutomationUpdateInput,
 } from "./tier3/automation";
 // `ClientOrchestrationCommand` and `OrchestrationEvent` are referenced in
 // the `NativeApi` interface below (dispatchCommand / replayEvents /
@@ -95,6 +101,8 @@ import type {
 import type {
   ClientOrchestrationCommand,
   OrchestrationEvent,
+  OrchestrationReadModel,
+  OrchestrationShellSnapshot,
 } from "./tier3/orchestration";
 import type { ProviderComposerCapabilities } from "./tier3/provider";
 import type {
@@ -263,17 +271,25 @@ export interface GitRunStackedActionInput extends OpaqueTransportInput {}
 
 /** MCode `server.ts` types (server meta/settings/providers/diagnostics surface). */
 export interface ServerGetEnvironmentResult extends OpaqueTransportResult {}
-export interface ServerGetSettingsResult extends OpaqueTransportResult {}
-export interface ServerUpdateSettingsInput extends OpaqueTransportInput {}
-export interface ServerUpdateSettingsResult extends OpaqueTransportResult {}
+// Per MCode `packages/contracts/src/server.ts`: `ServerGetSettingsResult =
+// ServerSettings`, `ServerUpdateSettingsInput = ServerSettingsPatch`,
+// `ServerUpdateSettingsResult = ServerSettings`. The vendored UI relies on
+// these being structurally identical (assignable both directions), so we alias
+// them to the real Tier-3 shapes rather than the opaque transport stubs.
+export type ServerGetSettingsResult = ServerSettings;
+export type ServerUpdateSettingsInput = ServerSettingsPatch;
+export type ServerUpdateSettingsResult = ServerSettings;
 export interface ServerDiagnosticsResult extends OpaqueTransportResult {}
 export interface ServerGenerateThreadRecapInput extends OpaqueTransportInput {}
 export interface ServerGenerateThreadRecapResult extends OpaqueTransportResult {}
 export interface ServerListLocalServersResult extends OpaqueTransportResult {}
 export interface ServerListWorktreesResult extends OpaqueTransportResult {}
 export interface ServerProviderUpdateInput extends OpaqueTransportInput {}
-export interface ServerProviderUpdateResult extends OpaqueTransportResult {}
-export interface ServerRefreshProvidersResult extends OpaqueTransportResult {}
+// Per MCode: `ServerProviderUpdateResult = ServerProviderStatusesUpdatedPayload`
+// and `ServerRefreshProvidersResult = ServerProviderStatusesUpdatedPayload`.
+export type ServerProviderUpdateResult = ServerProviderStatusesUpdatedPayload;
+export type ServerRefreshProvidersResult = ServerProviderStatusesUpdatedPayload;
+export type ServerSettingsUpdatedResult = ServerSettingsUpdatedPayload;
 export interface ServerStopLocalServerResult extends OpaqueTransportResult {}
 export interface ServerUpsertKeybindingInput extends OpaqueTransportInput {}
 export interface ServerUpsertKeybindingResult extends OpaqueTransportResult {}
@@ -288,8 +304,11 @@ export interface ServerVoiceTranscriptionResult extends OpaqueTransportResult {}
 
 /** MCode `automation.ts` types. */
 export interface AutomationListInput extends OpaqueTransportInput {}
-export interface AutomationCreateInput extends OpaqueTransportInput {}
-export interface AutomationUpdateInput extends OpaqueTransportInput {}
+// Per MCode: `AutomationCreateInput = AutomationDefinitionConfig` and
+// `AutomationUpdateInput` is the id-keyed partial. The vendored UI reads
+// concrete fields off these (enabled/stopOnError/mode/…), so the opaque stub
+// would surface `{}` field accesses. Alias to the real Tier-3 shapes.
+export type { AutomationCreateInput, AutomationUpdateInput } from "./tier3/automation";
 export interface AutomationDeleteInput extends OpaqueTransportInput {}
 export interface AutomationRunNowInput extends OpaqueTransportInput {}
 export interface AutomationRunNowResult extends OpaqueTransportResult {}
@@ -318,8 +337,12 @@ export interface ProviderListAgentsInput extends OpaqueTransportInput {}
 export interface ProviderListAgentsResult extends OpaqueTransportResult {}
 
 /** MCode `orchestration.ts` types (the aggregate stream surface). */
-export interface OrchestrationReadModel extends OpaqueTransportResult {}
-export interface OrchestrationShellSnapshot extends OpaqueTransportResult {}
+// Per MCode `packages/contracts/src/orchestration.ts`: `OrchestrationReadModel`
+// and `OrchestrationShellSnapshot` are concrete aggregate snapshots (not opaque
+// transport blobs). The vendored UI threads them through
+// `SnapshotWithProjects<T>` (projectCreateRecovery), so the opaque stub would
+// break structural assignability. Alias to the real Tier-3 shapes.
+export type { OrchestrationReadModel, OrchestrationShellSnapshot } from "./tier3/orchestration";
 // Re-exported from tier3/orchestration (real 28-variant discriminated union)
 // so `Extract<ClientOrchestrationCommand, { type: "thread.create" }>` narrows
 // to a real shape instead of collapsing to `never`.
