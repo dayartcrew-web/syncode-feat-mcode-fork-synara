@@ -1033,11 +1033,34 @@ interface ThreadRequestPayload extends ThreadIdPayload {
 interface ProjectIdPayload extends OrchestrationEventPayload {
   readonly projectId: ProjectId;
 }
+/** Payload for `project.created` (MCode `ProjectCreatedPayload`): kind/title/
+ *  workspaceRoot/defaultModelSelection/scripts/createdAt/updatedAt required.
+ *  Built via Omit+intersection for exactOptionalPropertyTypes compatibility. */
+type ProjectCreatedPayload = Omit<
+  OrchestrationEventPayload,
+  | "projectId"
+  | "title"
+  | "createdAt"
+  | "updatedAt"
+  | "kind"
+  | "workspaceRoot"
+  | "defaultModelSelection"
+  | "scripts"
+> & {
+  readonly projectId: ProjectId;
+  readonly kind?: ProjectKind;
+  readonly title: string;
+  readonly workspaceRoot: string;
+  readonly defaultModelSelection: unknown;
+  readonly scripts?: readonly ProjectScript[];
+  readonly createdAt: IsoDateTime;
+  readonly updatedAt: IsoDateTime;
+};
 
 export type OrchestrationEvent =
   | (OrchestrationEventBase & {
       readonly type: "project.created";
-      readonly payload: ProjectIdPayload;
+      readonly payload: ProjectCreatedPayload;
     })
   | (OrchestrationEventBase & {
       readonly type: "project.meta-updated";
