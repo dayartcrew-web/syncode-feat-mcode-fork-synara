@@ -104,7 +104,15 @@ import type {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
 } from "./tier3/orchestration";
-import type { ProviderComposerCapabilities } from "./tier3/provider";
+import type {
+  ProviderComposerCapabilities,
+  ProviderListAgentsResult,
+  ProviderListCommandsResult,
+  ProviderListModelsResult,
+  ProviderListPluginsResult,
+  ProviderListSkillsResult,
+  ProviderSkillsCatalogResult,
+} from "./tier3/provider";
 import type {
   StatsGetProfileStatsInput,
   StatsGetProfileStatsResult,
@@ -322,19 +330,24 @@ export interface AutomationArchiveRunInput extends OpaqueTransportInput {}
 export interface ProviderGetComposerCapabilitiesInput extends OpaqueTransportInput {}
 export interface ProviderCompactThreadInput extends OpaqueTransportInput {}
 export interface ProviderListCommandsInput extends OpaqueTransportInput {}
-export interface ProviderListCommandsResult extends OpaqueTransportResult {}
+// Per MCode `providerDiscovery.ts`: each list-result is a struct with an array
+// field (models/skills/commands/agents/marketplaces) + optional source/cached.
+// The vendored UI reads these arrays directly (e.g. `query.data?.models ?? []`),
+// so the opaque stubs collapsed the array to `{}` and broke the `?? []`
+// fallback. Alias to the real Tier-3 shapes.
+export type { ProviderListCommandsResult } from "./tier3/provider";
 export interface ProviderListSkillsInput extends OpaqueTransportInput {}
-export interface ProviderListSkillsResult extends OpaqueTransportResult {}
+export type { ProviderListSkillsResult } from "./tier3/provider";
 export interface ProviderSkillsCatalogInput extends OpaqueTransportInput {}
-export interface ProviderSkillsCatalogResult extends OpaqueTransportResult {}
+export type { ProviderSkillsCatalogResult } from "./tier3/provider";
 export interface ProviderListPluginsInput extends OpaqueTransportInput {}
-export interface ProviderListPluginsResult extends OpaqueTransportResult {}
+export type { ProviderListPluginsResult } from "./tier3/provider";
 export interface ProviderReadPluginInput extends OpaqueTransportInput {}
 export interface ProviderReadPluginResult extends OpaqueTransportResult {}
 export interface ProviderListModelsInput extends OpaqueTransportInput {}
-export interface ProviderListModelsResult extends OpaqueTransportResult {}
+export type { ProviderListModelsResult } from "./tier3/provider";
 export interface ProviderListAgentsInput extends OpaqueTransportInput {}
-export interface ProviderListAgentsResult extends OpaqueTransportResult {}
+export type { ProviderListAgentsResult } from "./tier3/provider";
 
 /** MCode `orchestration.ts` types (the aggregate stream surface). */
 // Per MCode `packages/contracts/src/orchestration.ts`: `OrchestrationReadModel`

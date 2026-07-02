@@ -203,6 +203,51 @@ export interface ProviderAgentDescriptor {
   model?: TrimmedNonEmptyString;
 }
 
+// ─── Provider discovery list-results (T5d) ────────────────────────────
+// Ported from MCode `packages/contracts/src/providerDiscovery.ts`. The vendored
+// UI reads `.models` / `.skills` / `.commands` / `.agents` arrays off these
+// (e.g. `useProviderModelCatalog` does `query.data?.models ?? []`), so the
+// opaque transport stubs collapsed the array field to `{}` and broke the `?? []`
+// fallback. Real shapes restore proper array typing.
+
+export interface ProviderListSkillsResult {
+  skills: readonly ProviderSkillDescriptor[];
+  source?: TrimmedNonEmptyString;
+  cached?: boolean;
+}
+
+export interface ProviderSkillsCatalogResult {
+  skills: readonly ProviderSkillDescriptor[];
+  mcodeSkillsDir?: TrimmedNonEmptyString;
+}
+
+export interface ProviderListCommandsResult {
+  commands: readonly ProviderNativeCommandDescriptor[];
+  source?: TrimmedNonEmptyString;
+  cached?: boolean;
+}
+
+export interface ProviderListPluginsResult {
+  marketplaces: readonly ProviderPluginMarketplaceDescriptor[];
+  marketplaceLoadErrors: readonly ProviderPluginMarketplaceLoadError[];
+  remoteSyncError: TrimmedNonEmptyString | null;
+  featuredPluginIds: readonly TrimmedNonEmptyString[];
+  source?: TrimmedNonEmptyString;
+  cached?: boolean;
+}
+
+export interface ProviderListModelsResult {
+  models: readonly ProviderModelDescriptor[];
+  source?: TrimmedNonEmptyString;
+  cached?: boolean;
+}
+
+export interface ProviderListAgentsResult {
+  agents: readonly ProviderAgentDescriptor[];
+  source?: TrimmedNonEmptyString;
+  cached?: boolean;
+}
+
 // ─── Agent mention aliases ────────────────────────────────────────────
 
 type AgentAliasColor =
