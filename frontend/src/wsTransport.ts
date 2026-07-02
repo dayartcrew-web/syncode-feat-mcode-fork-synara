@@ -175,12 +175,25 @@ function makeSocketUrl(explicitUrl: string | null): string {
     .desktopBridge;
   const bridgeUrl = bridge?.getWsUrl?.();
   const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
+  // Port-only override for browser/dev mode: the web UI is typically served
+  // by Vite on a different port (e.g. :5173) than the standalone WS backend
+  // (`cargo run -p syncode-ws --bin server`, default :3000). `VITE_WS_PORT`
+  // targets that backend while keeping the page hostname/protocol — without
+  // needing a full `VITE_WS_URL`. Lower priority than the desktop bridge and
+  // `VITE_WS_URL`; higher than the page-port fallback.
+  const envPort = import.meta.env.VITE_WS_PORT as string | undefined;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const host = window.location.hostname;
+  const envPortUrl =
+    envPort && envPort.length > 0
+      ? `${protocol}://${host}:${envPort}`
+      : `${protocol}://${host}:${window.location.port}`;
   const rawUrl =
     bridgeUrl && bridgeUrl.length > 0
       ? bridgeUrl
       : envUrl && envUrl.length > 0
         ? envUrl
-        : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${window.location.port}`;
+        : envPortUrl;
   return resolveRpcUrl(rawUrl);
 }
 
