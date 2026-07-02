@@ -4,19 +4,17 @@
 // Layer: web profile feature.
 
 import { useCallback } from "react";
-import { Schema } from "effect";
+import { stringCodec } from "@t3tools/contracts";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 
 const PROFILE_AVATAR_IMAGE_STORAGE_KEY = "mcode:profile:avatarImage:v1";
 
 // Empty string means "no photo".
-const StoredImageSchema = Schema.String;
-
 export function useProfileAvatarImage() {
   const [stored, setStored] = useLocalStorage(
     PROFILE_AVATAR_IMAGE_STORAGE_KEY,
     "",
-    StoredImageSchema,
+    stringCodec,
   );
 
   const image = stored.trim().length > 0 ? stored : null;

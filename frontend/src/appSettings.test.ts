@@ -3,11 +3,10 @@
 // Layer: Web settings tests
 // Exports: Vitest suites for appSettings.ts
 
-import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
-  AppSettingsSchema,
+  decodeAppSettingsFromJson,
   DEFAULT_CHAT_FONT_SIZE_PX,
   DEFAULT_SIDEBAR_PROJECT_SORT_ORDER,
   DEFAULT_TERMINAL_FONT_SIZE_PX,
@@ -323,13 +322,13 @@ describe("normalizeStoredAppSettings", () => {
   });
 
   it("uses the current platform default for existing settings without a stored value", () => {
-    const decodedSettings = Schema.decodeSync(Schema.fromJsonString(AppSettingsSchema))("{}");
+    const decodedSettings = decodeAppSettingsFromJson("{}");
 
     expect(decodedSettings.enableNativeFontSmoothing).toBe(getDefaultNativeFontSmoothing());
   });
 
   it("preserves an explicitly stored updated_at project sort order", () => {
-    const decodedSettings = Schema.decodeSync(Schema.fromJsonString(AppSettingsSchema))(
+    const decodedSettings = decodeAppSettingsFromJson(
       JSON.stringify({
         sidebarProjectSortOrder: "updated_at",
         chatFontSizePx: 99,
@@ -347,7 +346,7 @@ describe("normalizeStoredAppSettings", () => {
   });
 
   it("drops default provider command names so they do not look like custom paths", () => {
-    const decodedSettings = Schema.decodeSync(Schema.fromJsonString(AppSettingsSchema))(
+    const decodedSettings = decodeAppSettingsFromJson(
       JSON.stringify({
         claudeBinaryPath: "claude",
         codexBinaryPath: "codex",
@@ -681,7 +680,7 @@ describe("provider-indexed custom model settings", () => {
 
 describe("AppSettingsSchema", () => {
   it("fills decoding defaults for persisted settings that predate newer keys", () => {
-    const decode = Schema.decodeSync(Schema.fromJsonString(AppSettingsSchema));
+    const decode = decodeAppSettingsFromJson;
 
     expect(
       decode(

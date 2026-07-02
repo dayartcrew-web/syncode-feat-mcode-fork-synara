@@ -80,3 +80,71 @@ export const decodeWithDefault = <T>(
   if (guard && !guard(parsed)) return fallback;
   return parsed as T;
 };
+
+/**
+ * Minimal JSON codec contract — replaces Effect `Schema.Codec` for the
+ * localStorage round-trip helpers (`useLocalStorage`, `getLocalStorageItem`,
+ * `setLocalStorageItem`).
+ *
+ * A codec is just a typed pair of `encode` (value -> JSON string) and
+ * `decode` (JSON string -> value). The default {@link jsonCodec} round-trips
+ * via `JSON.stringify` / `JSON.parse`. Callers that previously passed an
+ * Effect `Schema.String`, `Schema.Finite`, or `Schema.Struct({...})` now
+ * pass a tiny codec built with {@link stringCodec}, {@link numberCodec}, or
+ * {@link objectCodec}.
+ */
+export interface Codec<T> {
+  readonly encode: (value: T) => string;
+  readonly decode: (text: string) => T;
+}
+
+/** Default codec: plain `JSON.stringify` / `JSON.parse`. */
+export const jsonCodec: Codec<unknown> = {
+  encode: (value) => JSON.stringify(value),
+  decode: (text) => JSON.parse(text) as unknown,
+};
+
+/**
+ * String codec: the value is stored as a raw JSON string (so `Schema.String`
+ * semantics — `JSON.stringify("hi")` -> `"hi"` -> `JSON.parse` -> `"hi"`).
+ */
+export const stringCodec: Codec<string> = {
+  encode: (value) => JSON.stringify(value),
+  decode: (text) => JSON.parse(text) as string,
+};
+
+/** Number codec for finite numbers (replaces `Schema.Finite`). */
+export const numberCodec: Codec<number> = {
+  encode: (value) => JSON.stringify(value),
+  decode: (text) => {
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== "number" || !Number.isFinite(parsed)) {
+      throw new Error("Expected a finite number");
+    }
+    return parsed;
+  },
+};
+
+/**
+ * Object codec with an optional guard + default-filling. Mirrors the
+ * `decodeUnknownSync`-with-defaults pattern used by `AppSettings`:
+ *   objectCodec<AppSettings>(DEFAULT_APP_SETTINGS, isAppSettings)
+ *
+ * On decode, the parsed value is merged over the fallback (so missing keys
+ * pick up defaults) and the optional guard may reject entirely.
+ */
+export const objectCodec = <T>(
+  fallback: T,
+  guard?: (value: unknown) => value is T,
+): Codec<T> => ({
+  encode: (value) => JSON.stringify(value),
+  decode: (text) => {
+    const parsed = safeParse<T>(text);
+    if (parsed === null) return fallback;
+    if (guard && !guard(parsed)) return fallback;
+    if (isObject(fallback) && isObject(parsed)) {
+      return { ...fallback, ...parsed } as T;
+    }
+    return parsed;
+  },
+});

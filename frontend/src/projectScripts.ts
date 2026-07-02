@@ -4,7 +4,6 @@ import {
   type KeybindingCommand,
   type ProjectScript,
 } from "@t3tools/contracts";
-import { Schema } from "effect";
 
 function normalizeScriptId(value: string): string {
   const cleaned = value
@@ -21,16 +20,22 @@ function normalizeScriptId(value: string): string {
   return cleaned.slice(0, MAX_SCRIPT_ID_LENGTH).replace(/-+$/g, "") || "script";
 }
 
+// `SCRIPT_RUN_COMMAND_PATTERN` matches `script.<id>.run`. The original Effect
+// Schema template-literal exposed `.makeUnsafe(s)` (cast) and `.parts` (the
+// literal prefix/suffix used to slice out the id). The Tier-3 contract ships a
+// plain RegExp, so we derive the prefix/suffix here.
+const SCRIPT_COMMAND_PREFIX = "script.";
+const SCRIPT_COMMAND_SUFFIX = ".run";
+
 export const commandForProjectScript = (scriptId: string): KeybindingCommand =>
-  SCRIPT_RUN_COMMAND_PATTERN.makeUnsafe(`script.${scriptId}.run`);
+  `${SCRIPT_COMMAND_PREFIX}${scriptId}${SCRIPT_COMMAND_SUFFIX}` as KeybindingCommand;
 
 export function projectScriptIdFromCommand(command: string): string | null {
   const trimmed = command.trim();
-  if (!Schema.is(SCRIPT_RUN_COMMAND_PATTERN)(trimmed)) {
+  if (!SCRIPT_RUN_COMMAND_PATTERN.test(trimmed)) {
     return null;
   }
-  const [prefix, , suffix] = SCRIPT_RUN_COMMAND_PATTERN.parts;
-  return trimmed.slice(prefix.literal.length, -suffix.literal.length);
+  return trimmed.slice(SCRIPT_COMMAND_PREFIX.length, -SCRIPT_COMMAND_SUFFIX.length);
 }
 
 export function nextProjectScriptId(name: string, existingIds: Iterable<string>): string {

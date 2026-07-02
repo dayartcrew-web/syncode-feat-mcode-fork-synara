@@ -1,5 +1,4 @@
-import * as Schema from "effect/Schema";
-import * as Record from "effect/Record";
+import { type Codec, jsonCodec } from "@t3tools/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const isomorphicLocalStorage: Storage =
@@ -9,33 +8,45 @@ const isomorphicLocalStorage: Storage =
         const store = new Map<string, string>();
         return {
           clear: () => store.clear(),
-          getItem: (_) => store.get(_) ?? null,
-          key: (_) => Record.keys(store).at(_) ?? null,
+          getItem: (key: string) => store.get(key) ?? null,
+          key: (index: number) => Array.from(store.keys()).at(index) ?? null,
           get length() {
             return store.size;
           },
-          removeItem: (_) => store.delete(_),
-          setItem: (_, value) => store.set(_, value),
+          removeItem: (key: string) => {
+            store.delete(key);
+          },
+          setItem: (key: string, value: string) => {
+            store.set(key, value);
+          },
         };
       })();
 
-const decode = <T, E>(schema: Schema.Codec<T, E>, value: string) =>
-  Schema.decodeSync(Schema.fromJsonString(schema))(value);
-
-const encode = <T, E>(schema: Schema.Codec<T, E>, value: T) =>
-  Schema.encodeSync(Schema.fromJsonString(schema))(value);
-
-export const getLocalStorageItem = <T, E>(key: string, schema: Schema.Codec<T, E>): T | null => {
+/**
+ * Read a typed value from localStorage, or null when missing/invalid.
+ *
+ * Replaces the previous Effect `Schema.Codec` overload. The {@link codec}
+ * defaults to plain JSON round-trip.
+ */
+export const getLocalStorageItem = <T>(key: string, codec: Codec<T>): T | null => {
   const item = isomorphicLocalStorage.getItem(key);
-  return item ? decode(schema, item) : null;
+  if (item === null) return null;
+  try {
+    return codec.decode(item);
+  } catch {
+    return null;
+  }
 };
 
-export const setLocalStorageItem = <T, E>(key: string, value: T, schema: Schema.Codec<T, E>) => {
-  const valueToSet = encode(schema, value);
+/**
+ * Write a typed value to localStorage via the codec's encoder.
+ */
+export const setLocalStorageItem = <T>(key: string, value: T, codec: Codec<T>): void => {
+  const valueToSet = codec.encode(value);
   isomorphicLocalStorage.setItem(key, valueToSet);
 };
 
-export const removeLocalStorageItem = (key: string) => {
+export const removeLocalStorageItem = (key: string): void => {
   isomorphicLocalStorage.removeItem(key);
 };
 
@@ -45,7 +56,7 @@ interface LocalStorageChangeDetail {
   key: string;
 }
 
-function dispatchLocalStorageChange(key: string) {
+function dispatchLocalStorageChange(key: string): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(
     new CustomEvent<LocalStorageChangeDetail>(LOCAL_STORAGE_CHANGE_EVENT, {
@@ -54,15 +65,15 @@ function dispatchLocalStorageChange(key: string) {
   );
 }
 
-export function useLocalStorage<T, E>(
+export function useLocalStorage<T>(
   key: string,
   initialValue: T,
-  schema: Schema.Codec<T, E>,
+  codec: Codec<T> = jsonCodec as unknown as Codec<T>,
 ): [T, (value: T | ((val: T) => T)) => void] {
   // Get the initial value from localStorage or use the provided initialValue
   const [storedValue, setStoredValue] = useState<T>(() => {
     try {
-      const item = getLocalStorageItem(key, schema);
+      const item = getLocalStorageItem(key, codec);
       return item ?? initialValue;
     } catch (error) {
       console.error("[LOCALSTORAGE] Error:", error);
@@ -79,7 +90,7 @@ export function useLocalStorage<T, E>(
           if (valueToStore === null) {
             removeLocalStorageItem(key);
           } else {
-            setLocalStorageItem(key, valueToStore, schema);
+            setLocalStorageItem(key, valueToStore, codec);
           }
           // Dispatch event after state update completes to avoid nested state updates
           queueMicrotask(() => dispatchLocalStorageChange(key));
@@ -89,7 +100,7 @@ export function useLocalStorage<T, E>(
         console.error("[LOCALSTORAGE] Error:", error);
       }
     },
-    [key, schema],
+    [key, codec],
   );
 
   const prevKeyRef = useRef(key);
@@ -99,19 +110,19 @@ export function useLocalStorage<T, E>(
     if (prevKeyRef.current !== key) {
       prevKeyRef.current = key;
       try {
-        const newValue = getLocalStorageItem(key, schema);
+        const newValue = getLocalStorageItem(key, codec);
         setStoredValue(newValue ?? initialValue);
       } catch (error) {
         console.error("[LOCALSTORAGE] Error:", error);
       }
     }
-  }, [key, initialValue, schema]);
+  }, [key, initialValue, codec]);
 
   // Listen for storage events from other tabs AND custom events from the same tab
   useEffect(() => {
     const syncFromStorage = () => {
       try {
-        const newValue = getLocalStorageItem(key, schema);
+        const newValue = getLocalStorageItem(key, codec);
         setStoredValue(newValue ?? initialValue);
       } catch (error) {
         console.error("[LOCALSTORAGE] Error:", error);
@@ -137,7 +148,7 @@ export function useLocalStorage<T, E>(
       window.removeEventListener("storage", handleStorageChange);
       window.removeEventListener(LOCAL_STORAGE_CHANGE_EVENT, handleLocalChange as EventListener);
     };
-  }, [key, initialValue, schema]);
+  }, [key, initialValue, codec]);
 
   return [storedValue, setValue];
 }

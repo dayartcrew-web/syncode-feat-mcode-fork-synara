@@ -7,7 +7,7 @@
 // Layer: hook — glue between `logic.ts` (pure rules), the changelog data, and
 // the popout + dialog components.
 
-import { Schema } from "effect";
+import { objectCodec } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { APP_VERSION } from "../branding";
@@ -22,15 +22,16 @@ import {
 
 const WHATS_NEW_STORAGE_KEY = "mcode:whats-new:v1";
 
-// Using an Option<string> via Schema.NullOr keeps the "never seen" sentinel
-// explicit on disk. Omitting the field (undefined) would round-trip poorly
-// through JSON; `null` stays faithful across reloads.
-const WhatsNewStorageSchema = Schema.Struct({
-  lastSeenVersion: Schema.NullOr(Schema.String),
-});
-type WhatsNewStorage = typeof WhatsNewStorageSchema.Type;
+// `lastSeenVersion` keeps the "never seen" sentinel explicit on disk. Omitting
+// the field (undefined) would round-trip poorly through JSON; `null` stays
+// faithful across reloads.
+interface WhatsNewStorage {
+  lastSeenVersion: string | null;
+}
 
 const INITIAL_STORAGE: WhatsNewStorage = { lastSeenVersion: null };
+
+const whatsNewStorageCodec = objectCodec<WhatsNewStorage>(INITIAL_STORAGE);
 
 export interface UseWhatsNewResult {
   /**
@@ -88,7 +89,7 @@ export function useWhatsNew(options?: {
   const [storage, setStorage] = useLocalStorage(
     WHATS_NEW_STORAGE_KEY,
     INITIAL_STORAGE,
-    WhatsNewStorageSchema,
+    whatsNewStorageCodec,
   );
 
   // Snapshot the decision once per mount using the initial storage value so

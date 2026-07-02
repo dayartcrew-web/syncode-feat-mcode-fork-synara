@@ -4,7 +4,7 @@
 // Layer: web profile feature.
 
 import { useCallback } from "react";
-import { Schema } from "effect";
+import { stringCodec } from "@t3tools/contracts";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 
 const PROFILE_AVATAR_COLOR_STORAGE_KEY = "mcode:profile:avatarColor:v1";
@@ -24,13 +24,11 @@ export const PROFILE_AVATAR_COLORS: readonly string[] = [
 const DEFAULT_AVATAR_COLOR = PROFILE_AVATAR_COLORS[0]!;
 
 // Empty string means "use the default".
-const StoredColorSchema = Schema.String;
-
 export function useProfileAvatarColor() {
   const [stored, setStored] = useLocalStorage(
     PROFILE_AVATAR_COLOR_STORAGE_KEY,
     "",
-    StoredColorSchema,
+    stringCodec,
   );
 
   const color = stored.trim().length > 0 ? stored.trim() : DEFAULT_AVATAR_COLOR;

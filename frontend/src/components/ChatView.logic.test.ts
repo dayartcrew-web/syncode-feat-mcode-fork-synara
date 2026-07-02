@@ -1,4 +1,4 @@
-import { ThreadId, TurnId, type ModelSlug } from "@t3tools/contracts";
+import { asThreadId, asTurnId, type ModelSlug } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -365,14 +365,14 @@ describe("environment panel visibility", () => {
 
 describe("resolveActiveTurnLiveDiffState", () => {
   it("uses only the diff summary for the active turn", () => {
-    const activeTurnId = TurnId.makeUnsafe("turn-active");
+    const activeTurnId = asTurnId("turn-active");
 
     expect(
       resolveActiveTurnLiveDiffState({
         latestTurnId: activeTurnId,
         turnDiffSummaries: [
           {
-            turnId: TurnId.makeUnsafe("turn-previous"),
+            turnId: asTurnId("turn-previous"),
             completedAt: "2026-06-13T10:00:00.000Z",
             files: [{ path: "old.ts", additions: 100, deletions: 50 }],
           },
@@ -398,10 +398,10 @@ describe("resolveActiveTurnLiveDiffState", () => {
   it("returns zero totals before the active turn has a diff summary or file-edit work", () => {
     expect(
       resolveActiveTurnLiveDiffState({
-        latestTurnId: TurnId.makeUnsafe("turn-active"),
+        latestTurnId: asTurnId("turn-active"),
         turnDiffSummaries: [
           {
-            turnId: TurnId.makeUnsafe("turn-previous"),
+            turnId: asTurnId("turn-previous"),
             completedAt: "2026-06-13T10:00:00.000Z",
             files: [{ path: "old.ts", additions: 100, deletions: 50 }],
           },
@@ -417,7 +417,7 @@ describe("resolveActiveTurnLiveDiffState", () => {
   });
 
   it("falls back to in-turn file-edit work before the diff summary lands", () => {
-    const activeTurnId = TurnId.makeUnsafe("turn-active");
+    const activeTurnId = asTurnId("turn-active");
 
     expect(
       resolveActiveTurnLiveDiffState({
@@ -425,7 +425,7 @@ describe("resolveActiveTurnLiveDiffState", () => {
         turnDiffSummaries: [],
         workLogEntries: [
           // Other turn / non-edit work is ignored.
-          { turnId: TurnId.makeUnsafe("turn-previous"), itemType: "file_change" },
+          { turnId: asTurnId("turn-previous"), itemType: "file_change" },
           { turnId: activeTurnId, requestKind: "command" },
           {
             turnId: activeTurnId,
@@ -445,7 +445,7 @@ describe("resolveActiveTurnLiveDiffState", () => {
   });
 
   it("surfaces a stat-less strip when file-edit work has no changed paths yet", () => {
-    const activeTurnId = TurnId.makeUnsafe("turn-active");
+    const activeTurnId = asTurnId("turn-active");
 
     expect(
       resolveActiveTurnLiveDiffState({
@@ -612,7 +612,7 @@ describe("deriveComposerSendState", () => {
       terminalContexts: [
         {
           id: "ctx-expired",
-          threadId: ThreadId.makeUnsafe("thread-1"),
+          threadId: asThreadId("thread-1"),
           terminalId: "default",
           terminalLabel: "Terminal 1",
           lineStart: 4,
@@ -640,7 +640,7 @@ describe("deriveComposerSendState", () => {
       terminalContexts: [
         {
           id: "ctx-expired",
-          threadId: ThreadId.makeUnsafe("thread-1"),
+          threadId: asThreadId("thread-1"),
           terminalId: "default",
           terminalLabel: "Terminal 1",
           lineStart: 4,

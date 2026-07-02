@@ -4,12 +4,11 @@
 // Depends on: native API bridge, orchestration contracts, and React Query.
 
 import {
-  OrchestrationGetFullThreadDiffInput,
-  OrchestrationGetTurnDiffInput,
-  ThreadId,
+  type OrchestrationGetFullThreadDiffInput,
+  type OrchestrationGetTurnDiffInput,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { queryOptions } from "@tanstack/react-query";
-import { Option, Schema } from "effect";
 import { ensureNativeApi } from "../nativeApi";
 
 interface CheckpointDiffQueryInput {
@@ -20,6 +19,21 @@ interface CheckpointDiffQueryInput {
   cacheScope?: string | null;
   enabled?: boolean;
 }
+
+// Minimal Option stand-in — replaces the Effect `Option` shape used by the
+// former `Schema.decodeUnknownOption(...).pipe(Option.map(...))` chain. Only
+// the `_tag` discriminator and `value` are consumed by this module.
+interface Some<T> {
+  readonly _tag: "Some";
+  readonly value: T;
+}
+interface None {
+  readonly _tag: "None";
+}
+type Option_<T> = Some<T> | None;
+
+const some = <T>(value: T): Option_<T> => ({ _tag: "Some", value });
+const none = (): None => ({ _tag: "None" });
 
 export const providerQueryKeys = {
   all: ["providers"] as const,
@@ -47,21 +61,37 @@ function shouldUseFullThreadDiffApi(input: CheckpointDiffQueryInput): boolean {
   );
 }
 
-function decodeCheckpointDiffRequest(input: CheckpointDiffQueryInput) {
+type CheckpointDiffRequest =
+  | { readonly kind: "fullThreadDiff"; readonly input: OrchestrationGetFullThreadDiffInput }
+  | { readonly kind: "turnDiff"; readonly input: OrchestrationGetTurnDiffInput };
+
+function decodeCheckpointDiffRequest(input: CheckpointDiffQueryInput): Option_<CheckpointDiffRequest> {
+  // The original Effect Schema decode validated the field shapes and returned
+  // None when invalid. The transport input types are now opaque records; the
+  // fields below are already typed by the caller, so we only need a presence
+  // check on the required `threadId` to mirror the former guard.
+  if (!input.threadId) {
+    return none();
+  }
   if (shouldUseFullThreadDiffApi(input)) {
-    return Schema.decodeUnknownOption(OrchestrationGetFullThreadDiffInput)({
+    return some({
+      kind: "fullThreadDiff" as const,
+      input: {
+        threadId: input.threadId,
+        toTurnCount: input.toTurnCount,
+        ignoreWhitespace: input.ignoreWhitespace,
+      } as OrchestrationGetFullThreadDiffInput,
+    });
+  }
+  return some({
+    kind: "turnDiff" as const,
+    input: {
       threadId: input.threadId,
+      fromTurnCount: input.fromTurnCount,
       toTurnCount: input.toTurnCount,
       ignoreWhitespace: input.ignoreWhitespace,
-    }).pipe(Option.map((fields) => ({ kind: "fullThreadDiff" as const, input: fields })));
-  }
-
-  return Schema.decodeUnknownOption(OrchestrationGetTurnDiffInput)({
-    threadId: input.threadId,
-    fromTurnCount: input.fromTurnCount,
-    toTurnCount: input.toTurnCount,
-    ignoreWhitespace: input.ignoreWhitespace,
-  }).pipe(Option.map((fields) => ({ kind: "turnDiff" as const, input: fields })));
+    } as OrchestrationGetTurnDiffInput,
+  });
 }
 
 function asCheckpointErrorMessage(error: unknown): string {

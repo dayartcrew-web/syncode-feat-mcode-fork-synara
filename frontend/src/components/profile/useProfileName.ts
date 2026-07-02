@@ -4,16 +4,14 @@
 // Layer: web profile feature.
 
 import { useCallback } from "react";
-import { Schema } from "effect";
+import { stringCodec } from "@t3tools/contracts";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 
 const PROFILE_NAME_STORAGE_KEY = "mcode:profile:name:v1";
 
 // Empty string means "use the server default".
-const StoredNameSchema = Schema.String;
-
 export function useProfileName(defaultName: string) {
-  const [stored, setStored] = useLocalStorage(PROFILE_NAME_STORAGE_KEY, "", StoredNameSchema);
+  const [stored, setStored] = useLocalStorage(PROFILE_NAME_STORAGE_KEY, "", stringCodec);
 
   const name = stored.trim().length > 0 ? stored.trim() : defaultName;
 

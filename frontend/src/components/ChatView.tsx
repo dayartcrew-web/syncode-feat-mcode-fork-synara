@@ -480,7 +480,7 @@ import {
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   DISMISSED_PROVIDER_HEALTH_BANNERS_KEY,
-  DismissedProviderHealthBannersSchema,
+  DismissedProviderHealthBannersCodec,
   shouldRenderTerminalWorkspace,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
@@ -488,7 +488,7 @@ import {
   filterSidechatTranscriptMessages,
   hasServerAcknowledgedLocalDispatch,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
-  LastInvokedScriptByProjectSchema,
+  LastInvokedScriptByProjectCodec,
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   shouldRenderProviderHealthBanner,
@@ -1126,12 +1126,12 @@ export default function ChatView({
   const [lastInvokedScriptByProjectId, setLastInvokedScriptByProjectId] = useLocalStorage(
     LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
     {},
-    LastInvokedScriptByProjectSchema,
+    LastInvokedScriptByProjectCodec,
   );
   const [dismissedProviderHealthBannerKeys, setDismissedProviderHealthBannerKeys] = useLocalStorage(
     DISMISSED_PROVIDER_HEALTH_BANNERS_KEY,
     [],
-    DismissedProviderHealthBannersSchema,
+    DismissedProviderHealthBannersCodec,
   );
   const [dismissedRateLimitBannerKey, setDismissedRateLimitBannerKey] = useState<string | null>(
     null,

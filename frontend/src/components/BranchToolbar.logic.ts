@@ -3,10 +3,8 @@ import {
   deriveAssociatedWorktreeMetadata,
   type AssociatedWorktreeMetadata,
 } from "@t3tools/shared/threadWorkspace";
-import { Schema } from "effect";
 
-export const EnvMode = Schema.Literals(["local", "worktree"]);
-export type EnvMode = typeof EnvMode.Type;
+export type EnvMode = "local" | "worktree";
 
 export function resolveEffectiveEnvMode(input: {
   activeWorktreePath: string | null;

@@ -9,6 +9,7 @@ import {
   ThreadId,
   type ThreadId as ThreadIdType,
   type TurnId,
+  numberCodec,
 } from "@t3tools/contracts";
 import type { FileDiffMetadata } from "@pierre/diffs/react";
 import { isWorkspaceRelativePathSafe } from "@t3tools/shared/path";
@@ -27,7 +28,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { Schema } from "effect";
 
 import ChatView from "../components/ChatView";
 import BrowserPanel from "../components/BrowserPanel";
@@ -267,11 +267,11 @@ function SplitPaneEmbeddedPanel(props: {
   const minPanelWidth =
     props.panel === "browser" ? BROWSER_PANEL_MIN_WIDTH : SINGLE_PANEL_MIN_WIDTH;
   const [panelWidth, setPanelWidth] = useState<number>(() => {
-    return getLocalStorageItem(storageKey, Schema.Finite) ?? defaultPanelWidth;
+    return getLocalStorageItem(storageKey, numberCodec) ?? defaultPanelWidth;
   });
 
   useEffect(() => {
-    setPanelWidth(getLocalStorageItem(storageKey, Schema.Finite) ?? defaultPanelWidth);
+    setPanelWidth(getLocalStorageItem(storageKey, numberCodec) ?? defaultPanelWidth);
   }, [defaultPanelWidth, storageKey]);
 
   const shouldAcceptEmbeddedWidth = useCallback(
@@ -312,7 +312,7 @@ function SplitPaneEmbeddedPanel(props: {
           return;
         }
         setPanelWidth(nextWidth);
-        setLocalStorageItem(storageKey, nextWidth, Schema.Finite);
+        setLocalStorageItem(storageKey, nextWidth, numberCodec);
       };
 
       const onPointerUp = () => {

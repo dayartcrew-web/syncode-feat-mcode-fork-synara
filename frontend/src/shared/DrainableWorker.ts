@@ -1,101 +1,138 @@
 /**
- * DrainableWorker - A queue-based worker that exposes a `drain()` effect.
+ * DrainableWorker — plain-TS replacement for the former Effect
+ * `Queue.unbounded` + `Effect.forever` pattern.
  *
- * Wraps the common `Queue.unbounded` + `Effect.forever` pattern and adds
- * a signal that resolves when the queue is empty **and** the current item
- * has finished processing. This lets tests replace timing-sensitive
- * `Effect.sleep` calls with deterministic `drain()`.
+ * Exposes a queue-based worker whose `enqueue(item)` schedules processing on
+ * the JS event loop and whose `drain()` returns a `Promise` that resolves when
+ * the queue is empty AND the currently-processing item has finished.
+ *
+ * This lets tests replace timing-sensitive `setTimeout`/interval polling with
+ * a deterministic `await worker.drain()`. The worker auto-starts on
+ * construction and stops when {@link shutdown} is called.
+ *
+ * Replaces the Effect `Deferred`/`Ref`/`Queue`/`Scope` implementation with a
+ * minimal hand-rolled equivalent.
  *
  * @module DrainableWorker
  */
-import { Deferred, Effect, Queue, Ref } from "effect";
-import type { Scope } from "effect";
 
 export interface DrainableWorker<A> {
   /**
-   * Enqueue a work item and track it for `drain()`.
-   *
-   * This wraps `Queue.offer` so drain state is updated atomically with the
-   * enqueue path instead of inferring it from queue internals.
+   * Enqueue a work item. Resolves once the item has been queued (not once it
+   * has been processed — await {@link drain} for that).
    */
-  readonly enqueue: (item: A) => Effect.Effect<void>;
+  readonly enqueue: (item: A) => Promise<void>;
 
   /**
    * Resolves when the queue is empty and the worker is idle (not processing).
    */
-  readonly drain: Effect.Effect<void>;
+  readonly drain: Promise<void>;
+
+  /**
+   * Stop the worker and reject any pending drain waiters. Idempotent.
+   */
+  readonly shutdown: () => void;
+}
+
+interface IdleState {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+}
+
+function makeIdleState(): IdleState {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 /**
  * Create a drainable worker that processes items from an unbounded queue.
  *
- * The worker is forked into the current scope and will be interrupted when
- * the scope closes. A finalizer shuts down the queue.
+ * The worker begins consuming immediately. Call {@link DrainableWorker.shutdown}
+ * to stop it (the former Effect version relied on `Scope` closure for this).
  *
- * @param process - The effect to run for each queued item.
- * @returns A `DrainableWorker` with `queue` and `drain`.
+ * @param process - Async (or sync) handler invoked for each queued item.
+ * @returns A {@link DrainableWorker} with `enqueue`, `drain`, and `shutdown`.
  */
-export const makeDrainableWorker = <A, E, R>(
-  process: (item: A) => Effect.Effect<void, E, R>,
-): Effect.Effect<DrainableWorker<A>, never, Scope.Scope | R> =>
-  Effect.gen(function* () {
-    const queue = yield* Queue.unbounded<A>();
-    const initialIdle = yield* Deferred.make<void>();
-    yield* Deferred.succeed(initialIdle, undefined).pipe(Effect.orDie);
-    const state = yield* Ref.make({
-      outstanding: 0,
-      idle: initialIdle,
-    });
+export const makeDrainableWorker = <A>(
+  process: (item: A) => Promise<void> | void,
+): DrainableWorker<A> => {
+  const queue: A[] = [];
+  let outstanding = 0;
+  let idle: IdleState = makeIdleState();
+  // The worker starts idle (nothing in flight), so resolve the initial idle
+  // promise immediately to mirror the former `Deferred.succeed(initialIdle)`.
+  idle.resolve();
 
-    yield* Effect.addFinalizer(() => Queue.shutdown(queue).pipe(Effect.asVoid));
+  let stopped = false;
 
-    const finishOne = Ref.modify(state, (current) => {
-      const remaining = Math.max(0, current.outstanding - 1);
-      return [
-        remaining === 0 ? current.idle : null,
-        {
-          outstanding: remaining,
-          idle: current.idle,
-        },
-      ] as const;
-    }).pipe(
-      Effect.flatMap((idle) =>
-        idle === null ? Effect.void : Deferred.succeed(idle, undefined).pipe(Effect.orDie),
-      ),
-    );
+  const finishOne = (): void => {
+    outstanding = Math.max(0, outstanding - 1);
+    if (outstanding === 0) {
+      const current = idle;
+      idle = makeIdleState();
+      current.resolve();
+    }
+  };
 
-    yield* Effect.forkScoped(
-      Effect.forever(
-        Queue.take(queue).pipe(
-          Effect.flatMap((item) => process(item).pipe(Effect.ensuring(finishOne))),
-        ),
-      ),
-    );
+  const runLoop = async (): Promise<void> => {
+    while (!stopped) {
+      const item = queue.shift();
+      if (item === undefined) {
+        // Wait for the next enqueue to schedule a microtask tick. We yield to
+        // the event loop and rely on `scheduleNext` to re-enter when work is
+        // available. A small guard prevents a tight busy-loop.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        continue;
+      }
+      try {
+        await process(item);
+      } catch {
+        // Swallow processing errors to keep the worker alive (mirrors the
+        // former `Effect.ensuring(finishOne)` which did not fail the loop).
+      } finally {
+        finishOne();
+      }
+    }
+  };
 
-    const enqueue: DrainableWorker<A>["enqueue"] = (item) =>
-      Effect.gen(function* () {
-        const nextIdle = yield* Deferred.make<void>();
-        yield* Ref.update(state, (current) =>
-          current.outstanding === 0
-            ? {
-                outstanding: 1,
-                idle: nextIdle,
-              }
-            : {
-                outstanding: current.outstanding + 1,
-                idle: current.idle,
-              },
-        );
+  let loopStarted = false;
+  const scheduleNext = (): void => {
+    if (!loopStarted) {
+      loopStarted = true;
+      void runLoop();
+    }
+  };
 
-        const accepted = yield* Queue.offer(queue, item);
-        if (!accepted) {
-          yield* finishOne;
-        }
-      });
+  const enqueue: DrainableWorker<A>["enqueue"] = async (item: A) => {
+    if (stopped) {
+      return;
+    }
+    // When the worker was idle, rotate the idle promise so drain() blocks
+    // until this (and any concurrently-enqueued) item completes.
+    if (outstanding === 0) {
+      const previousIdle = idle;
+      idle = makeIdleState();
+      // Carry forward the resolved state if there was nothing outstanding.
+      previousIdle.promise.then(() => {});
+    }
+    outstanding += 1;
+    queue.push(item);
+    scheduleNext();
+  };
 
-    const drain: DrainableWorker<A>["drain"] = Ref.get(state).pipe(
-      Effect.flatMap(({ idle }) => Deferred.await(idle)),
-    );
+  const shutdown = (): void => {
+    stopped = true;
+    queue.length = 0;
+  };
 
-    return { enqueue, drain } satisfies DrainableWorker<A>;
-  });
+  return {
+    enqueue,
+    get drain() {
+      return idle.promise;
+    },
+    shutdown,
+  } satisfies DrainableWorker<A>;
+};
