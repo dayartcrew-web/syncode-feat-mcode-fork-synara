@@ -6979,7 +6979,7 @@ function SidebarSearchPaletteController(props: {
   const sidebarDisplayThreads = useStore(selectSidebarDisplayThreads);
   const importProviders: ReadonlyArray<ImportProviderKind> = (
     ["codex", "claudeAgent", "cursor", "kilo", "opencode"] as const
-  ).filter((provider, index) => supportsThreadImport(importProviderCapabilityQueries[index]?.data));
+  ).filter((_provider, index) => supportsThreadImport(importProviderCapabilityQueries[index]?.data));
   const searchPaletteThreads = useMemo<SidebarSearchThread[]>(() => {
     const threadById = new Map(threads.map((thread) => [thread.id, thread] as const));
     return sidebarDisplayThreads.flatMap((threadSummary) => {

@@ -34,6 +34,8 @@ import type { AuthBootstrapResult } from "../types/AuthBootstrapResult";
 // real types AND the matching `export type { … } from "./tier3/…"`
 // re-exports at the bottom of the re-export block keep the public barrel
 // surface stable.
+import type { IsoDateTime } from "./tier3/base";
+import type { KeybindingRule } from "./tier3/keybindings";
 import type {
   EditorId,
   ContextMenuItem,
@@ -50,12 +52,14 @@ import type {
   ProjectSearchLocalEntriesResult,
   ProjectReadFileResult,
   ProjectRunDevServerInput,
+  ProjectDevServer,
   ProjectDevServerEvent,
 } from "./tier3/project";
 import type {
   GitListBranchesResult,
   GitStashInfoResult,
   GitResolvePullRequestResult,
+  GitResolvedPullRequest,
   GitStatusResult,
   GitReadWorkingTreeDiffInput,
   GitRunStackedActionResult,
@@ -69,6 +73,7 @@ import type {
   ServerGetProviderUsageSnapshotResult,
   ServerListProviderUsageInput,
   ServerListProviderUsageResult,
+  ServerLocalServerProcess,
   ServerProviderStatusesUpdatedPayload,
   ServerSettings,
   ServerSettingsPatch,
@@ -91,6 +96,7 @@ import type {
   AutomationCreateInput,
   AutomationListResult,
   AutomationDefinition,
+  AutomationRun,
   AutomationStreamEvent,
   AutomationUpdateInput,
 } from "./tier3/automation";
@@ -106,6 +112,7 @@ import type {
   OrchestrationShellSnapshot,
   OrchestrationShellStreamItem,
   OrchestrationThreadStreamItem,
+  ThreadEnvironmentMode,
 } from "./tier3/orchestration";
 import type {
   ProviderComposerCapabilities,
@@ -237,26 +244,48 @@ export interface ProjectSearchEntriesInput extends OpaqueTransportInput {}
 export interface ProjectSearchLocalEntriesInput extends OpaqueTransportInput {}
 export interface ProjectReadFileInput extends OpaqueTransportInput {}
 export interface ProjectWriteFileInput extends OpaqueTransportInput {}
-export interface ProjectWriteFileResult extends OpaqueTransportResult {}
-export interface ProjectRunDevServerResult extends OpaqueTransportResult {}
+export interface ProjectWriteFileResult {
+  relativePath: string;
+}
+export interface ProjectRunDevServerResult {
+  server: ProjectDevServer;
+}
 export interface ProjectStopDevServerInput extends OpaqueTransportInput {}
 export interface ProjectStopDevServerResult extends OpaqueTransportResult {}
-export interface ProjectListDevServersResult extends OpaqueTransportResult {}
+export interface ProjectListDevServersResult {
+  servers: readonly ProjectDevServer[];
+}
 
 /** MCode `filesystem.ts` types (filesystem browser surface). */
 export interface FilesystemBrowseInput extends OpaqueTransportInput {}
 
 /** MCode `git.ts` types (git branch/worktree/stage/diff/PR surface). */
 export interface GitHubRepositoryInput extends OpaqueTransportInput {}
-export interface GitHubRepositoryResult extends OpaqueTransportResult {}
+export interface GitHubRepositoryResult {
+  repository: {
+    nameWithOwner: string;
+    url: string;
+  } | null;
+}
 export interface GitListBranchesInput extends OpaqueTransportInput {}
 // Per MCode: GitListBranchesResult = { branches, isRepo, hasOriginRemote }.
 // Vendored UI reads .branches; opaque stub collapsed it to unknown.
 export type { GitListBranchesResult } from "./tier3/git";
 export interface GitCreateWorktreeInput extends OpaqueTransportInput {}
-export interface GitCreateWorktreeResult extends OpaqueTransportResult {}
+export interface GitCreateWorktreeResult {
+  worktree: {
+    path: string;
+    branch: string;
+  };
+}
 export interface GitCreateDetachedWorktreeInput extends OpaqueTransportInput {}
-export interface GitCreateDetachedWorktreeResult extends OpaqueTransportResult {}
+export interface GitCreateDetachedWorktreeResult {
+  worktree: {
+    path: string;
+    ref: string;
+    branch: string | null;
+  };
+}
 export interface GitRemoveWorktreeInput extends OpaqueTransportInput {}
 export interface GitCreateBranchInput extends OpaqueTransportInput {}
 export interface GitCheckoutInput extends OpaqueTransportInput {}
@@ -266,18 +295,38 @@ export interface GitStashInfoInput extends OpaqueTransportInput {}
 export interface GitRemoveIndexLockInput extends OpaqueTransportInput {}
 export interface GitInitInput extends OpaqueTransportInput {}
 export interface GitStageFilesInput extends OpaqueTransportInput {}
-export interface GitStageFilesResult extends OpaqueTransportResult {}
+export interface GitStageFilesResult {
+  ok: boolean;
+}
 export interface GitUnstageFilesInput extends OpaqueTransportInput {}
-export interface GitUnstageFilesResult extends OpaqueTransportResult {}
+export interface GitUnstageFilesResult {
+  ok: boolean;
+}
 export interface GitHandoffThreadInput extends OpaqueTransportInput {}
-export interface GitHandoffThreadResult extends OpaqueTransportResult {}
+export interface GitHandoffThreadResult {
+  targetMode: ThreadEnvironmentMode;
+  branch: string | null;
+  worktreePath: string | null;
+  associatedWorktreePath: string | null;
+  associatedWorktreeBranch: string | null;
+  associatedWorktreeRef: string | null;
+  changesTransferred: boolean;
+  conflictsDetected: boolean;
+  message: string | null;
+}
 export interface GitPullRequestRefInput extends OpaqueTransportInput {}
 export interface GitPreparePullRequestThreadInput extends OpaqueTransportInput {}
-export interface GitPreparePullRequestThreadResult extends OpaqueTransportResult {}
+export interface GitPreparePullRequestThreadResult {
+  pullRequest: GitResolvedPullRequest;
+  branch: string;
+  worktreePath: string | null;
+}
 export interface GitPullInput extends OpaqueTransportInput {}
 export interface GitPullResult extends OpaqueTransportResult {}
 export interface GitStatusInput extends OpaqueTransportInput {}
-export interface GitReadWorkingTreeDiffResult extends OpaqueTransportResult {}
+export interface GitReadWorkingTreeDiffResult {
+  patch: string;
+}
 export interface GitSummarizeDiffInput extends OpaqueTransportInput {}
 export interface GitSummarizeDiffResult extends OpaqueTransportResult {}
 export interface GitRunStackedActionInput extends OpaqueTransportInput {}
@@ -294,9 +343,20 @@ export type ServerUpdateSettingsInput = ServerSettingsPatch;
 export type ServerUpdateSettingsResult = ServerSettings;
 export interface ServerDiagnosticsResult extends OpaqueTransportResult {}
 export interface ServerGenerateThreadRecapInput extends OpaqueTransportInput {}
-export interface ServerGenerateThreadRecapResult extends OpaqueTransportResult {}
-export interface ServerListLocalServersResult extends OpaqueTransportResult {}
-export interface ServerListWorktreesResult extends OpaqueTransportResult {}
+export interface ServerGenerateThreadRecapResult {
+  recap: string;
+}
+export interface ServerListLocalServersResult {
+  generatedAt: IsoDateTime;
+  servers: readonly ServerLocalServerProcess[];
+}
+export interface ServerManagedWorktree {
+  path: string;
+  workspaceRoot: string;
+}
+export interface ServerListWorktreesResult {
+  worktrees: readonly ServerManagedWorktree[];
+}
 export interface ServerProviderUpdateInput extends OpaqueTransportInput {}
 // Per MCode: `ServerProviderUpdateResult = ServerProviderStatusesUpdatedPayload`
 // and `ServerRefreshProvidersResult = ServerProviderStatusesUpdatedPayload`.
@@ -304,10 +364,12 @@ export type ServerProviderUpdateResult = ServerProviderStatusesUpdatedPayload;
 export type ServerRefreshProvidersResult = ServerProviderStatusesUpdatedPayload;
 export type ServerSettingsUpdatedResult = ServerSettingsUpdatedPayload;
 export interface ServerStopLocalServerResult extends OpaqueTransportResult {}
-export interface ServerUpsertKeybindingInput extends OpaqueTransportInput {}
+export type ServerUpsertKeybindingInput = KeybindingRule;
 export interface ServerUpsertKeybindingResult extends OpaqueTransportResult {}
 export interface ServerVoiceTranscriptionInput extends OpaqueTransportInput {}
-export interface ServerVoiceTranscriptionResult extends OpaqueTransportResult {}
+export interface ServerVoiceTranscriptionResult {
+  text: string;
+}
 
 /** MCode `auth.ts` types.
  *  NOTE: `AuthBootstrapResult` is intentionally NOT re-declared here — it is
@@ -324,11 +386,17 @@ export interface AutomationListInput extends OpaqueTransportInput {}
 export type { AutomationCreateInput, AutomationUpdateInput } from "./tier3/automation";
 export interface AutomationDeleteInput extends OpaqueTransportInput {}
 export interface AutomationRunNowInput extends OpaqueTransportInput {}
-export interface AutomationRunNowResult extends OpaqueTransportResult {}
+export interface AutomationRunNowResult {
+  run: AutomationRun;
+}
 export interface AutomationCancelRunInput extends OpaqueTransportInput {}
-export interface AutomationCancelRunResult extends OpaqueTransportResult {}
+export interface AutomationCancelRunResult {
+  run: AutomationRun;
+}
 export interface AutomationMarkRunReadInput extends OpaqueTransportInput {}
-export interface AutomationRunActionResult extends OpaqueTransportResult {}
+export interface AutomationRunActionResult {
+  run: AutomationRun;
+}
 export interface AutomationArchiveRunInput extends OpaqueTransportInput {}
 
 /** MCode `providerDiscovery.ts` + `provider.ts` types. */
@@ -368,9 +436,13 @@ export type { ClientOrchestrationCommand } from "./tier3/orchestration";
 export interface OrchestrationImportThreadInput extends OpaqueTransportInput {}
 export interface OrchestrationImportThreadResult extends OpaqueTransportResult {}
 export interface OrchestrationGetTurnDiffInput extends OpaqueTransportInput {}
-export interface OrchestrationGetTurnDiffResult extends OpaqueTransportResult {}
+export interface OrchestrationGetTurnDiffResult {
+  diff: string;
+}
 export interface OrchestrationGetFullThreadDiffInput extends OpaqueTransportInput {}
-export interface OrchestrationGetFullThreadDiffResult extends OpaqueTransportResult {}
+export interface OrchestrationGetFullThreadDiffResult {
+  diff: string;
+}
 // Re-exported from tier3/orchestration (real 34-variant discriminated union)
 // so `Extract<OrchestrationEvent, { type: "thread.message-sent" }>` narrows
 // to a real shape instead of collapsing to `never`.

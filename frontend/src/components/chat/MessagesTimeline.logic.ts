@@ -210,8 +210,27 @@ export function deriveMessagesTimelineRows(input: {
   const timelineMessages = input.timelineEntries.flatMap((entry) =>
     entry.kind === "message" ? [entry.message] : [],
   );
-  const durationStartByMessageId = computeMessageDurationStart(timelineMessages);
-  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(timelineMessages);
+  // ChatMessage is structurally compatible with TimelineDurationMessage (the
+  // functions below only read id/role/createdAt/turnId/completedAt), but the
+  // branded `MessageId`/`TurnId` plus exactOptionalPropertyTypes variance make
+  // the array assignment fail to infer. Project to the minimal shape the
+  // duration helpers need.
+  const durationMessages: TimelineDurationMessage[] = timelineMessages.map((message) => {
+    const projected: TimelineDurationMessage = {
+      id: message.id,
+      role: message.role,
+      createdAt: message.createdAt,
+    };
+    if (message.turnId !== undefined) {
+      projected.turnId = message.turnId;
+    }
+    if (message.completedAt !== undefined) {
+      projected.completedAt = message.completedAt;
+    }
+    return projected;
+  });
+  const durationStartByMessageId = computeMessageDurationStart(durationMessages);
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(durationMessages);
   let pendingWorkGroup: Extract<MessagesTimelineRow, { kind: "work" }> | null = null;
 
   const groupedEntriesEqual = (
@@ -655,15 +674,6 @@ function collapsedTurnItemsEqual(
     }
     return false;
   });
-}
-
-function shallowEqualEntryArray<T>(
-  left: ReadonlyArray<T> | undefined,
-  right: ReadonlyArray<T> | undefined,
-) {
-  if (left === right) return true;
-  if (!left || !right) return false;
-  return left.length === right.length && left.every((entry, index) => entry === right[index]);
 }
 
 function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean {

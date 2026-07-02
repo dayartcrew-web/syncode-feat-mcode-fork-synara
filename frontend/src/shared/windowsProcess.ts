@@ -131,22 +131,26 @@ export function resolveWindowsCommandPath(
     return command;
   }
 
-  const candidates = (result.stdout ?? "")
+  const stdout =
+    typeof result.stdout === "string" ? result.stdout : result.stdout?.toString("utf8") ?? "";
+  const candidates = stdout
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map((line: string) => line.trim())
     .filter(Boolean);
   if (pathLikeCommand) {
     return candidates[0] ?? command;
   }
   const nonLocalCandidates = candidates.filter(
-    (candidate) => !isFromCurrentDirectory(candidate, cwd),
+    (candidate: string) => !isFromCurrentDirectory(candidate, cwd),
   );
   // Prefer a candidate with an executable extension (.cmd/.bat/.exe) so that
   // npm-global CLIs (which ship as both an extensionless shim and a `.cmd`)
   // resolve to the batch file `prepareWindowsSafeProcess` can wrap via cmd.exe.
   // Spawning the extensionless shim directly with `shell: false` ENOENTs on Windows.
   return (
-    nonLocalCandidates.find((candidate) => WINDOWS_EXECUTABLE_EXTENSION_PATTERN.test(candidate)) ??
+    nonLocalCandidates.find((candidate: string) =>
+      WINDOWS_EXECUTABLE_EXTENSION_PATTERN.test(candidate),
+    ) ??
     nonLocalCandidates[0] ??
     command
   );

@@ -57,7 +57,7 @@ export function extendButtonIconChildSelectors(className: string): string {
 
   result = result.replace(
     /\[&_svg\]:([a-z0-9\-/[\].]+)/g,
-    (match, util) => `[&_svg,&_[data-slot=${CENTRAL_ICON_SLOT}]]:${util}`,
+    (_match, util) => `[&_svg,&_[data-slot=${CENTRAL_ICON_SLOT}]]:${util}`,
   );
 
   return result;

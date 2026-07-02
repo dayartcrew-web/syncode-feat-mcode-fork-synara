@@ -898,8 +898,8 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     id: activity.id,
     createdAt: activity.createdAt,
     ...(activity.turnId !== null ? { turnId: activity.turnId } : {}),
-    label: activity.summary,
-    tone: activity.tone === "approval" ? "info" : activity.tone,
+    label: activity.summary ?? "",
+    tone: activity.tone === "approval" ? "info" : (activity.tone ?? "info"),
     activityKind: activity.kind,
     ...(toolName ? { toolName } : {}),
     ...(toolCallId ? { toolCallId } : {}),
@@ -957,7 +957,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     extractCollabActionTitle(payload) ??
     deriveReadableToolTitle({
       title: commandActionDisplay?.title ?? title,
-      fallbackLabel: activity.summary,
+      fallbackLabel: activity.summary ?? "",
       itemType,
       requestKind,
       command: commandPreview.command,

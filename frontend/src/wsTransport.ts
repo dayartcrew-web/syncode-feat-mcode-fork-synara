@@ -578,7 +578,7 @@ export class WsTransport {
       void isOrchestrationPushEnvelope(params); // type narrowing hook (no-op drop)
     }
 
-    this.emit(channel, params);
+    this.emit(channel as PushChannel, params);
   }
 
   /**
@@ -591,7 +591,7 @@ export class WsTransport {
       type: "push",
       sequence: ++this.sequence,
       channel,
-      data,
+      data: data as WsPushData<typeof channel>,
     };
     this.latestPushByChannel.set(channel, message);
     const listeners = this.listeners.get(channel);

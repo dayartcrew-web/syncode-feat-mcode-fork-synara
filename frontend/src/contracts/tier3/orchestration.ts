@@ -30,6 +30,7 @@ import type {
   IsoDateTime,
   ThreadMarkerId,
 } from "./base";
+import type { ProviderOptionDescriptor } from "./provider";
 
 // ─── Provider kind + interaction / runtime modes ──────────────────────
 
@@ -103,21 +104,21 @@ export interface ClaudeModelOptions {
   contextWindow?: string;
 }
 export interface CursorModelOptions {
-  reasoningEffort?: TrimmedNonEmptyString;
-  fastMode?: boolean;
-  thinking?: boolean;
-  contextWindow?: string;
+  reasoningEffort?: TrimmedNonEmptyString | undefined;
+  fastMode?: boolean | undefined;
+  thinking?: boolean | undefined;
+  contextWindow?: string | undefined;
 }
 export interface GeminiModelOptions {
-  thinkingLevel?: GeminiThinkingLevel;
-  thinkingBudget?: GeminiThinkingBudget;
+  thinkingLevel?: GeminiThinkingLevel | undefined;
+  thinkingBudget?: GeminiThinkingBudget | undefined;
 }
 export interface GrokModelOptions {
-  reasoningEffort?: GrokReasoningEffort;
+  reasoningEffort?: GrokReasoningEffort | undefined;
 }
 export interface OpenCodeModelOptions {
-  variant?: TrimmedNonEmptyString;
-  agent?: TrimmedNonEmptyString;
+  variant?: TrimmedNonEmptyString | undefined;
+  agent?: TrimmedNonEmptyString | undefined;
 }
 // Kilo reuses OpenCodeModelOptions.
 export type KiloModelOptions = OpenCodeModelOptions;
@@ -139,42 +140,42 @@ export interface ProviderModelOptions {
 export interface CodexModelSelection {
   provider: "codex";
   model: TrimmedNonEmptyString;
-  options?: CodexModelOptions;
+  options?: CodexModelOptions | undefined;
 }
 export interface ClaudeModelSelection {
   provider: "claudeAgent";
   model: TrimmedNonEmptyString;
-  options?: ClaudeModelOptions;
+  options?: ClaudeModelOptions | undefined;
 }
 export interface CursorModelSelection {
   provider: "cursor";
   model: TrimmedNonEmptyString;
-  options?: CursorModelOptions;
+  options?: CursorModelOptions | undefined;
 }
 export interface GeminiModelSelection {
   provider: "gemini";
   model: TrimmedNonEmptyString;
-  options?: GeminiModelOptions;
+  options?: GeminiModelOptions | undefined;
 }
 export interface GrokModelSelection {
   provider: "grok";
   model: TrimmedNonEmptyString;
-  options?: GrokModelOptions;
+  options?: GrokModelOptions | undefined;
 }
 export interface OpenCodeModelSelection {
   provider: "opencode";
   model: TrimmedNonEmptyString;
-  options?: OpenCodeModelOptions;
+  options?: OpenCodeModelOptions | undefined;
 }
 export interface KiloModelSelection {
   provider: "kilo";
   model: TrimmedNonEmptyString;
-  options?: OpenCodeModelOptions;
+  options?: OpenCodeModelOptions | undefined;
 }
 export interface PiModelSelection {
   provider: "pi";
   model: TrimmedNonEmptyString;
-  options?: PiModelOptions;
+  options?: PiModelOptions | undefined;
 }
 
 export type ModelSelection =
@@ -370,7 +371,7 @@ export interface ContextWindowOption {
   readonly isDefault?: true;
 }
 export interface ModelCapabilities {
-  readonly optionDescriptors?: readonly unknown[];
+  readonly optionDescriptors?: readonly ProviderOptionDescriptor[] | undefined;
   readonly reasoningEffortLevels: readonly EffortOption[];
   readonly supportsFastMode: boolean;
   readonly supportsThinkingToggle: boolean;
@@ -574,7 +575,7 @@ export interface OrchestrationLatestTurn {
   sourceProposedPlan?: {
     threadId: ThreadId;
     planId: OrchestrationProposedPlanId;
-  };
+  } | undefined;
 }
 
 export interface OrchestrationThreadPullRequest {
@@ -852,12 +853,12 @@ export interface OrchestrationProject {
 
 export interface OrchestrationProjectShell {
   id: ProjectId;
-  kind?: ProjectKind;
+  kind?: ProjectKind | undefined;
   title: TrimmedNonEmptyString;
   workspaceRoot: TrimmedNonEmptyString;
   defaultModelSelection: ModelSelection | null;
-  scripts?: readonly ProjectScript[];
-  isPinned?: boolean;
+  scripts?: readonly ProjectScript[] | undefined;
+  isPinned?: boolean | undefined;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }
@@ -869,30 +870,30 @@ export interface OrchestrationThreadShell {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
-  envMode?: ThreadEnvironmentMode;
+  envMode?: ThreadEnvironmentMode | undefined;
   branch: TrimmedNonEmptyString | null;
   worktreePath: TrimmedNonEmptyString | null;
-  associatedWorktreePath?: TrimmedNonEmptyString | null;
-  associatedWorktreeBranch?: TrimmedNonEmptyString | null;
-  associatedWorktreeRef?: TrimmedNonEmptyString | null;
-  createBranchFlowCompleted?: boolean;
-  isPinned?: boolean;
-  parentThreadId?: ThreadId | null;
-  subagentAgentId?: TrimmedNonEmptyString | null;
-  subagentNickname?: TrimmedNonEmptyString | null;
-  subagentRole?: TrimmedNonEmptyString | null;
-  forkSourceThreadId?: ThreadId | null;
-  sidechatSourceThreadId?: ThreadId | null;
-  lastKnownPr?: OrchestrationThreadPullRequest | null;
+  associatedWorktreePath?: TrimmedNonEmptyString | null | undefined;
+  associatedWorktreeBranch?: TrimmedNonEmptyString | null | undefined;
+  associatedWorktreeRef?: TrimmedNonEmptyString | null | undefined;
+  createBranchFlowCompleted?: boolean | undefined;
+  isPinned?: boolean | undefined;
+  parentThreadId?: ThreadId | null | undefined;
+  subagentAgentId?: TrimmedNonEmptyString | null | undefined;
+  subagentNickname?: TrimmedNonEmptyString | null | undefined;
+  subagentRole?: TrimmedNonEmptyString | null | undefined;
+  forkSourceThreadId?: ThreadId | null | undefined;
+  sidechatSourceThreadId?: ThreadId | null | undefined;
+  lastKnownPr?: OrchestrationThreadPullRequest | null | undefined;
   latestTurn: OrchestrationLatestTurn | null;
-  latestUserMessageAt?: IsoDateTime | null;
-  hasPendingApprovals?: boolean;
-  hasPendingUserInput?: boolean;
-  hasActionableProposedPlan?: boolean;
+  latestUserMessageAt?: IsoDateTime | null | undefined;
+  hasPendingApprovals?: boolean | undefined;
+  hasPendingUserInput?: boolean | undefined;
+  hasActionableProposedPlan?: boolean | undefined;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
-  archivedAt?: IsoDateTime | null;
-  handoff?: ThreadHandoff | null;
+  archivedAt?: IsoDateTime | null | undefined;
+  handoff?: ThreadHandoff | null | undefined;
   session: OrchestrationSession | null;
 }
 

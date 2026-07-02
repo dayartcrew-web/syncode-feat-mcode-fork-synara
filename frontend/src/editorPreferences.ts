@@ -1,11 +1,15 @@
-import { EDITORS, EditorId, NativeApi } from "@t3tools/contracts";
+import { EDITORS, EditorId, NativeApi, type Codec } from "@t3tools/contracts";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "./hooks/useLocalStorage";
 import { useMemo } from "react";
 
 const LAST_EDITOR_KEY = "mcode:last-editor";
 
 export function usePreferredEditor(availableEditors: ReadonlyArray<EditorId>) {
-  const [lastEditor, setLastEditor] = useLocalStorage(LAST_EDITOR_KEY, null, EditorId);
+  const [lastEditor, setLastEditor] = useLocalStorage<EditorId | null>(
+    LAST_EDITOR_KEY,
+    null,
+    EditorId as unknown as Codec<EditorId | null>,
+  );
 
   const effectiveEditor = useMemo(() => {
     if (lastEditor && availableEditors.includes(lastEditor)) return lastEditor;

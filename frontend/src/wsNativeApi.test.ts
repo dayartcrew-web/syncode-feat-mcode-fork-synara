@@ -86,10 +86,10 @@ function emitPush<C extends WsPushChannel>(channel: C, data: WsPushData<C>): voi
     channel,
     data,
   } as WsPushMessage<C>;
-  latestPushByChannel.set(channel, message);
+  latestPushByChannel.set(channel, message as WsPush);
   if (!listeners) return;
   for (const listener of listeners) {
-    listener(message);
+    listener(message as WsPush);
   }
 }
 

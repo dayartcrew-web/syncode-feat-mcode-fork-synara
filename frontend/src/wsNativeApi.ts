@@ -62,7 +62,7 @@ function omitNullUserInputAnswers(
   return {
     ...command,
     answers: Object.fromEntries(
-      Object.entries(command.answers).filter(
+      Object.entries(command.answers as Record<string, unknown>).filter(
         ([, answer]) => answer !== null && answer !== undefined,
       ),
     ),

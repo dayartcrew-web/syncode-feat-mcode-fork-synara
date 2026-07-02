@@ -209,7 +209,6 @@ export type {
   BrowserCopyLinkEvent,
   DesktopNotificationInput,
   DesktopWindowState,
-  EditorId,
   // Supporting transport type aliases (terminal/git/project/server/auth/
   // automation/provider/stats/orchestration/filesystem). Self-contained in
   // shell.ts; replace with `import type` when the matching Tier 1/2/3 modules
@@ -774,6 +773,7 @@ export type {
 } from "./tier3/misc";
 export {
   EDITORS,
+  EditorId,
   isToolLifecycleItemType,
   DEFAULT_PROVIDER_KIND,
 } from "./tier3/misc";
