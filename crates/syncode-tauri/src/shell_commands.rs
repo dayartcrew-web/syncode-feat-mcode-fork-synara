@@ -31,8 +31,6 @@ pub async fn shell_open_editor(cwd: String, editor: Option<String>) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn shell_open_editor_resolves_default_opener() {
         // Exercise the default-opener resolution path without spawning.
