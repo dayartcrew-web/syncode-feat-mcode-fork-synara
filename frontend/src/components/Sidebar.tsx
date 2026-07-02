@@ -238,7 +238,6 @@ import {
 } from "./ui/sidebar";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
-import { isNonEmpty as isNonEmptyString } from "effect/String";
 import {
   describeAddProjectError,
   buildSettingsBackAvailableThreadIds,
@@ -2335,7 +2334,7 @@ export default function Sidebar() {
 
         const projectId = newProjectId();
         const createdAt = new Date().toISOString();
-        const title = cwd.split(/[/\\]/).findLast(isNonEmptyString) ?? cwd;
+        const title = cwd.split(/[/\\]/).findLast((segment) => segment.length > 0) ?? cwd;
         await api.orchestration.dispatchCommand({
           type: "project.create",
           commandId: newCommandId(),

@@ -5,6 +5,7 @@
 
 import {
   type ClaudeCodeEffort,
+  type Codec,
   type CodexReasoningEffort,
   type CursorModelOptions,
   type GeminiThinkingBudget,
@@ -27,9 +28,6 @@ import {
   RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
-import * as Equal from "effect/Equal";
-import { DeepMutable } from "effect/Types";
 import {
   getDefaultModel,
   normalizeModelSlug,
@@ -72,9 +70,8 @@ import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "mcode:composer-drafts:v1";
 const COMPOSER_DRAFT_STORAGE_VERSION = 5;
-const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
-export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
-const DraftThreadEntryPointSchema = Schema.Literals(["chat", "terminal"]);
+export type DraftThreadEnvMode = "local" | "worktree";
+type DraftThreadEntryPoint = "chat" | "terminal";
 const COMPOSER_PROVIDER_KINDS = [
   "codex",
   "claudeAgent",
@@ -85,7 +82,9 @@ const COMPOSER_PROVIDER_KINDS = [
   "opencode",
   "pi",
 ] as const satisfies readonly ProviderKind[];
-const isProviderKind = Schema.is(ProviderKind);
+const PROVIDER_KIND_SET: ReadonlySet<string> = new Set<string>(COMPOSER_PROVIDER_KINDS);
+const isProviderKind = (value: unknown): value is ProviderKind =>
+  typeof value === "string" && PROVIDER_KIND_SET.has(value);
 const GROK_REASONING_EFFORT_SET = new Set<string>(GROK_REASONING_EFFORT_OPTIONS);
 
 const COMPOSER_PERSIST_DEBOUNCE_MS = 300;
@@ -103,14 +102,85 @@ if (typeof window !== "undefined") {
   });
 }
 
-export const PersistedComposerImageAttachment = Schema.Struct({
-  id: Schema.String,
-  name: Schema.String,
-  mimeType: Schema.String,
-  sizeBytes: Schema.Number,
-  dataUrl: Schema.String,
-});
-export type PersistedComposerImageAttachment = typeof PersistedComposerImageAttachment.Type;
+// ─── Plain-TS helpers (replace Effect's `Equal.equals` + `DeepMutable`) ──
+// `DeepMutable<T>` recursively strips `readonly` modifiers so persisted-shape
+// mutations compile. Equivalent to Effect's `Types.DeepMutable<T>`.
+// The leading `string | number | boolean | symbol | bigint` guards prevent
+// recursion into branded primitives like `ThreadId` (`string & {__brand}`):
+// without them, the intersection satisfies `T extends object` and the brand
+// gets exploded into a method-heavy object literal, breaking assignability.
+type DeepMutable<T> = T extends string | number | boolean | symbol | bigint
+  ? T
+  : T extends ReadonlyArray<infer U>
+    ? Array<DeepMutable<U>>
+    : T extends object
+      ? { -readonly [K in keyof T]: DeepMutable<T[K]> }
+      : T;
+
+/**
+ * Structural deep-equality for plain JSON-shaped values. Replaces Effect
+ * `Equal.equals`. Handles primitives, arrays, and plain objects; treats
+ * `undefined` and missing keys as equal (mirroring JSON serde semantics, which
+ * is what persisted drafts round-trip through). Returns `false` for any value
+ * pair where structural comparison isn't applicable (functions, symbols).
+ */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== "object") return false; // primitives already handled by ===
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  const aObj = a as Record<string, unknown>;
+  const bObj = b as Record<string, unknown>;
+  const aKeys = new Set(Object.keys(aObj));
+  const bKeys = new Set(Object.keys(bObj));
+  // Keys present in either side must match (a key missing on one side is
+  // treated as `undefined`, equal to an explicit `undefined` on the other).
+  for (const key of aKeys) {
+    if (!deepEqual(aObj[key], key in bObj ? bObj[key] : undefined)) return false;
+  }
+  for (const key of bKeys) {
+    if (!aKeys.has(key) && bObj[key] !== undefined) return false;
+  }
+  return true;
+}
+
+// ─── Plain-TS shape guards (replace Effect `Schema.is` on contract types) ─
+function isStringRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+// `ProviderSkillReference` / `ProviderMentionReference` are both
+// `{ name: string; path: string }`. Persisted entries were written by this
+// store, so a structural {name,path}-string check is sufficient on hydration.
+const isProviderSkillReference = (value: unknown): value is ProviderSkillReference =>
+  isStringRecord(value) && isString(value.name) && isString(value.path);
+const isProviderMentionReference = (value: unknown): value is ProviderMentionReference =>
+  isStringRecord(value) && isString(value.name) && isString(value.path);
+
+// `ProviderStartOptions` is a record of optional per-provider sub-objects.
+// Persisted values originate from this store, so a plain-object check is the
+// right hydration gate (the typed field is consumed verbatim after the guard).
+const isProviderStartOptions = (value: unknown): value is ProviderStartOptions =>
+  isStringRecord(value);
+
+export interface PersistedComposerImageAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  dataUrl: string;
+}
 
 export interface ComposerImageAttachment extends Omit<ChatImageAttachment, "previewUrl"> {
   previewUrl: string;
@@ -171,157 +241,150 @@ export interface QueuedComposerPlanFollowUp {
 
 export type QueuedComposerTurn = QueuedComposerChatTurn | QueuedComposerPlanFollowUp;
 
-const PersistedTerminalContextDraft = Schema.Struct({
-  id: Schema.String,
-  threadId: ThreadId,
-  createdAt: Schema.String,
-  terminalId: Schema.String,
-  terminalLabel: Schema.String,
-  lineStart: Schema.Number,
-  lineEnd: Schema.Number,
-});
-type PersistedTerminalContextDraft = typeof PersistedTerminalContextDraft.Type;
+interface PersistedTerminalContextDraft {
+  id: string;
+  threadId: ThreadId;
+  createdAt: string;
+  terminalId: string;
+  terminalLabel: string;
+  lineStart: number;
+  lineEnd: number;
+}
 
-const PersistedQueuedTerminalContextDraft = Schema.Struct({
-  id: Schema.String,
-  threadId: ThreadId,
-  createdAt: Schema.String,
-  terminalId: Schema.String,
-  terminalLabel: Schema.String,
-  lineStart: Schema.Number,
-  lineEnd: Schema.Number,
-  text: Schema.String,
-});
-type PersistedQueuedTerminalContextDraft = typeof PersistedQueuedTerminalContextDraft.Type;
+interface PersistedQueuedTerminalContextDraft {
+  id: string;
+  threadId: ThreadId;
+  createdAt: string;
+  terminalId: string;
+  terminalLabel: string;
+  lineStart: number;
+  lineEnd: number;
+  text: string;
+}
 
 // File comments always carry their authored text (no live source to re-derive
 // from), so a single schema covers both live drafts and queued turns.
-const PersistedFileCommentDraft = Schema.Struct({
-  id: Schema.String,
-  path: Schema.String,
-  startLine: Schema.Number,
-  endLine: Schema.Number,
-  text: Schema.String,
-});
-type PersistedFileCommentDraft = typeof PersistedFileCommentDraft.Type;
+interface PersistedFileCommentDraft {
+  id: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  text: string;
+}
 
 // Pasted text always carries its full content (the chip is the only copy), so a
 // single schema covers both live drafts and queued turns. Line/char metrics are
 // recomputed on hydration, so they are not persisted.
-const PersistedPastedTextDraft = Schema.Struct({
-  id: Schema.String,
-  createdAt: Schema.String,
-  text: Schema.String,
-});
-type PersistedPastedTextDraft = typeof PersistedPastedTextDraft.Type;
+interface PersistedPastedTextDraft {
+  id: string;
+  createdAt: string;
+  text: string;
+}
 
-const PersistedSourceProposedPlanReference = Schema.Struct({
-  threadId: ThreadId,
-  planId: OrchestrationProposedPlanId,
-});
+interface PersistedSourceProposedPlanReference {
+  threadId: ThreadId;
+  planId: OrchestrationProposedPlanId;
+}
+const isPersistedSourceProposedPlanReference = (
+  value: unknown,
+): value is PersistedSourceProposedPlanReference =>
+  isStringRecord(value) &&
+  typeof value.threadId === "string" &&
+  typeof value.planId === "string";
 
-const PersistedRestoredSourceProposedPlan = Schema.Struct({
-  threadId: ThreadId,
-  restoredPrompt: Schema.String,
-  sourceProposedPlan: PersistedSourceProposedPlanReference,
-});
+interface PersistedRestoredSourceProposedPlan {
+  threadId: ThreadId;
+  restoredPrompt: string;
+  sourceProposedPlan: PersistedSourceProposedPlanReference;
+}
+const isPersistedRestoredSourceProposedPlan = (
+  value: unknown,
+): value is PersistedRestoredSourceProposedPlan =>
+  isStringRecord(value) &&
+  typeof value.threadId === "string" &&
+  typeof value.restoredPrompt === "string" &&
+  isPersistedSourceProposedPlanReference(value.sourceProposedPlan);
 
-const PersistedQueuedComposerChatTurn = Schema.Struct({
-  id: Schema.String,
-  kind: Schema.Literal("chat"),
-  createdAt: Schema.String,
-  previewText: Schema.String,
-  prompt: Schema.String,
-  images: Schema.Array(PersistedComposerImageAttachment),
-  assistantSelections: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        id: Schema.String,
-        assistantMessageId: Schema.String,
-        text: Schema.String,
-      }),
-    ),
-  ),
-  terminalContexts: Schema.Array(PersistedQueuedTerminalContextDraft),
-  fileComments: Schema.optionalKey(Schema.Array(PersistedFileCommentDraft)),
-  pastedTexts: Schema.optionalKey(Schema.Array(PersistedPastedTextDraft)),
-  skills: Schema.Array(ProviderSkillReference),
-  mentions: Schema.Array(ProviderMentionReference),
-  selectedProvider: ProviderKind,
-  selectedModel: Schema.NullOr(Schema.String),
-  selectedPromptEffort: Schema.NullOr(Schema.String),
-  modelSelection: ModelSelection,
-  providerOptionsForDispatch: Schema.optionalKey(ProviderStartOptions),
-  sourceProposedPlan: Schema.optionalKey(PersistedSourceProposedPlanReference),
-  runtimeMode: RuntimeMode,
-  interactionMode: ProviderInteractionMode,
-  envMode: DraftThreadEnvModeSchema,
-});
-type PersistedQueuedComposerChatTurn = typeof PersistedQueuedComposerChatTurn.Type;
+interface PersistedAssistantSelectionEntry {
+  id: string;
+  assistantMessageId: string;
+  text: string;
+}
 
-const PersistedQueuedComposerPlanFollowUp = Schema.Struct({
-  id: Schema.String,
-  kind: Schema.Literal("plan-follow-up"),
-  createdAt: Schema.String,
-  previewText: Schema.String,
-  text: Schema.String,
-  interactionMode: ProviderInteractionMode,
-  selectedProvider: ProviderKind,
-  selectedModel: Schema.NullOr(Schema.String),
-  selectedPromptEffort: Schema.NullOr(Schema.String),
-  modelSelection: ModelSelection,
-  providerOptionsForDispatch: Schema.optionalKey(ProviderStartOptions),
-  runtimeMode: RuntimeMode,
-});
-type PersistedQueuedComposerPlanFollowUp = typeof PersistedQueuedComposerPlanFollowUp.Type;
+interface PersistedQueuedComposerChatTurn {
+  id: string;
+  kind: "chat";
+  createdAt: string;
+  previewText: string;
+  prompt: string;
+  images: PersistedComposerImageAttachment[];
+  assistantSelections?: PersistedAssistantSelectionEntry[];
+  terminalContexts: PersistedQueuedTerminalContextDraft[];
+  fileComments?: PersistedFileCommentDraft[];
+  pastedTexts?: PersistedPastedTextDraft[];
+  skills: ProviderSkillReference[];
+  mentions: ProviderMentionReference[];
+  selectedProvider: ProviderKind;
+  selectedModel: string | null;
+  selectedPromptEffort: string | null;
+  modelSelection: ModelSelection;
+  providerOptionsForDispatch?: ProviderStartOptions;
+  sourceProposedPlan?: PersistedSourceProposedPlanReference;
+  runtimeMode: RuntimeMode;
+  interactionMode: ProviderInteractionMode;
+  envMode: DraftThreadEnvMode;
+}
 
-const PersistedQueuedComposerTurn = Schema.Union([
-  PersistedQueuedComposerChatTurn,
-  PersistedQueuedComposerPlanFollowUp,
-]);
-type PersistedQueuedComposerTurn = typeof PersistedQueuedComposerTurn.Type;
+interface PersistedQueuedComposerPlanFollowUp {
+  id: string;
+  kind: "plan-follow-up";
+  createdAt: string;
+  previewText: string;
+  text: string;
+  interactionMode: ProviderInteractionMode;
+  selectedProvider: ProviderKind;
+  selectedModel: string | null;
+  selectedPromptEffort: string | null;
+  modelSelection: ModelSelection;
+  providerOptionsForDispatch?: ProviderStartOptions;
+  runtimeMode: RuntimeMode;
+}
 
-const PersistedComposerThreadDraftState = Schema.Struct({
-  prompt: Schema.String,
-  attachments: Schema.Array(PersistedComposerImageAttachment),
-  assistantSelections: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        id: Schema.String,
-        assistantMessageId: Schema.String,
-        text: Schema.String,
-      }),
-    ),
-  ),
-  terminalContexts: Schema.optionalKey(Schema.Array(PersistedTerminalContextDraft)),
-  fileComments: Schema.optionalKey(Schema.Array(PersistedFileCommentDraft)),
-  pastedTexts: Schema.optionalKey(Schema.Array(PersistedPastedTextDraft)),
-  skills: Schema.optionalKey(Schema.Array(ProviderSkillReference)),
-  mentions: Schema.optionalKey(Schema.Array(ProviderMentionReference)),
-  queuedTurns: Schema.optionalKey(Schema.Array(PersistedQueuedComposerTurn)),
-  restoredSourceProposedPlan: Schema.optionalKey(PersistedRestoredSourceProposedPlan),
-  modelSelectionByProvider: Schema.optionalKey(
-    Schema.Record(ProviderKind, Schema.optionalKey(ModelSelection)),
-  ),
-  activeProvider: Schema.optionalKey(Schema.NullOr(ProviderKind)),
-  runtimeMode: Schema.optionalKey(RuntimeMode),
-  interactionMode: Schema.optionalKey(ProviderInteractionMode),
-});
-type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
+type PersistedQueuedComposerTurn =
+  | PersistedQueuedComposerChatTurn
+  | PersistedQueuedComposerPlanFollowUp;
 
-const LegacyCodexFields = Schema.Struct({
-  effort: Schema.optionalKey(Schema.String),
-  codexFastMode: Schema.optionalKey(Schema.Boolean),
-  serviceTier: Schema.optionalKey(Schema.String),
-});
-type LegacyCodexFields = typeof LegacyCodexFields.Type;
+interface PersistedComposerThreadDraftState {
+  prompt: string;
+  attachments: PersistedComposerImageAttachment[];
+  // `| undefined` mirrors Effect `Schema.optionalKey`'s type output, which
+  // keeps these fields assignable under `exactOptionalPropertyTypes: true`
+  // when they are set via conditional spreads on hydration / partialization.
+  assistantSelections?: PersistedAssistantSelectionEntry[] | undefined;
+  terminalContexts?: PersistedTerminalContextDraft[] | undefined;
+  fileComments?: PersistedFileCommentDraft[] | undefined;
+  pastedTexts?: PersistedPastedTextDraft[] | undefined;
+  skills?: ProviderSkillReference[] | undefined;
+  mentions?: ProviderMentionReference[] | undefined;
+  queuedTurns?: PersistedQueuedComposerTurn[] | undefined;
+  restoredSourceProposedPlan?: PersistedRestoredSourceProposedPlan | undefined;
+  modelSelectionByProvider?: Partial<Record<ProviderKind, ModelSelection>> | undefined;
+  activeProvider?: ProviderKind | null | undefined;
+  runtimeMode?: RuntimeMode | undefined;
+  interactionMode?: ProviderInteractionMode | undefined;
+}
 
-const LegacyThreadModelFields = Schema.Struct({
-  provider: Schema.optionalKey(ProviderKind),
-  model: Schema.optionalKey(Schema.String),
-  modelOptions: Schema.optionalKey(Schema.NullOr(ProviderModelOptions)),
-});
-type LegacyThreadModelFields = typeof LegacyThreadModelFields.Type;
+interface LegacyCodexFields {
+  effort?: string;
+  codexFastMode?: boolean;
+  serviceTier?: string;
+}
+
+interface LegacyThreadModelFields {
+  provider?: ProviderKind;
+  model?: string;
+  modelOptions?: ProviderModelOptions | null;
+}
 
 type LegacyV2ThreadDraftFields = {
   modelSelection?: ModelSelection | null;
@@ -333,12 +396,11 @@ type LegacyPersistedComposerThreadDraftState = PersistedComposerThreadDraftState
   LegacyThreadModelFields &
   LegacyV2ThreadDraftFields;
 
-const LegacyStickyModelFields = Schema.Struct({
-  stickyProvider: Schema.optionalKey(ProviderKind),
-  stickyModel: Schema.optionalKey(Schema.String),
-  stickyModelOptions: Schema.optionalKey(Schema.NullOr(ProviderModelOptions)),
-});
-type LegacyStickyModelFields = typeof LegacyStickyModelFields.Type;
+interface LegacyStickyModelFields {
+  stickyProvider?: ProviderKind;
+  stickyModel?: string;
+  stickyModelOptions?: ProviderModelOptions | null;
+}
 
 type LegacyV2StoreFields = {
   stickyModelSelection?: ModelSelection | null;
@@ -349,36 +411,41 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
   LegacyStickyModelFields &
   LegacyV2StoreFields;
 
-const PersistedDraftThreadState = Schema.Struct({
-  projectId: ProjectId,
-  createdAt: Schema.String,
-  runtimeMode: RuntimeMode,
-  interactionMode: ProviderInteractionMode,
-  entryPoint: DraftThreadEntryPointSchema.pipe(Schema.withDecodingDefault(() => "chat")),
-  branch: Schema.NullOr(Schema.String),
-  worktreePath: Schema.NullOr(Schema.String),
-  lastKnownPr: Schema.optionalKey(Schema.NullOr(OrchestrationThreadPullRequest)),
-  envMode: DraftThreadEnvModeSchema,
-  isTemporary: Schema.optionalKey(Schema.Boolean),
-  promotedTo: Schema.optionalKey(ThreadId),
-});
-type PersistedDraftThreadState = typeof PersistedDraftThreadState.Type;
+interface PersistedDraftThreadState {
+  projectId: ProjectId;
+  createdAt: string;
+  runtimeMode: RuntimeMode;
+  interactionMode: ProviderInteractionMode;
+  entryPoint: DraftThreadEntryPoint;
+  branch: string | null;
+  worktreePath: string | null;
+  lastKnownPr?: OrchestrationThreadPullRequest | null;
+  envMode: DraftThreadEnvMode;
+  isTemporary?: boolean;
+  promotedTo?: ThreadId;
+}
 
-const PersistedComposerDraftStoreState = Schema.Struct({
-  draftsByThreadId: Schema.Record(ThreadId, PersistedComposerThreadDraftState),
-  draftThreadsByThreadId: Schema.Record(ThreadId, PersistedDraftThreadState),
-  projectDraftThreadIdByProjectId: Schema.Record(ProjectId, ThreadId),
-  stickyModelSelectionByProvider: Schema.optionalKey(
-    Schema.Record(ProviderKind, Schema.optionalKey(ModelSelection)),
-  ),
-  stickyActiveProvider: Schema.optionalKey(Schema.NullOr(ProviderKind)),
-});
-type PersistedComposerDraftStoreState = typeof PersistedComposerDraftStoreState.Type;
+interface PersistedComposerDraftStoreState {
+  draftsByThreadId: Record<ThreadId, PersistedComposerThreadDraftState>;
+  draftThreadsByThreadId: Record<ThreadId, PersistedDraftThreadState>;
+  projectDraftThreadIdByProjectId: Record<ProjectId, ThreadId>;
+  stickyModelSelectionByProvider?: Partial<Record<ProviderKind, ModelSelection>>;
+  stickyActiveProvider?: ProviderKind | null;
+}
 
-const PersistedComposerDraftStoreStorage = Schema.Struct({
-  version: Schema.Number,
-  state: PersistedComposerDraftStoreState,
-});
+interface PersistedComposerDraftStoreStorage {
+  version: number;
+  state: PersistedComposerDraftStoreState;
+}
+// Codec for the persisted storage envelope. Replaces the former Effect
+// `Schema.Struct({ version, state })` value passed to `getLocalStorageItem`.
+// Round-trips via JSON; decode returns the parsed object typed as the envelope
+// (best-effort — `getLocalStorageItem` wraps decode in try/catch and falls
+// back to null on any failure, matching the prior `Schema.decodeUnknownSync`).
+const PersistedComposerDraftStoreStorageCodec: Codec<PersistedComposerDraftStoreStorage> = {
+  encode: (value) => JSON.stringify(value),
+  decode: (text) => JSON.parse(text) as PersistedComposerDraftStoreStorage,
+};
 
 export interface ComposerThreadDraftState {
   prompt: string;
@@ -1732,12 +1799,12 @@ function normalizePersistedQueuedTurns(
           ? candidate.selectedPromptEffort
           : null;
     const modelSelection = normalizeModelSelection(candidate.modelSelection);
-    const providerOptionsForDispatch = Schema.is(ProviderStartOptions)(
+    const providerOptionsForDispatch = isProviderStartOptions(
       candidate.providerOptionsForDispatch,
     )
       ? candidate.providerOptionsForDispatch
       : undefined;
-    const sourceProposedPlan = Schema.is(PersistedSourceProposedPlanReference)(
+    const sourceProposedPlan = isPersistedSourceProposedPlanReference(
       candidate.sourceProposedPlan,
     )
       ? candidate.sourceProposedPlan
@@ -1790,10 +1857,10 @@ function normalizePersistedQueuedTurns(
           })
         : [];
       const skills = Array.isArray(candidate.skills)
-        ? candidate.skills.filter(Schema.is(ProviderSkillReference))
+        ? candidate.skills.filter(isProviderSkillReference)
         : [];
       const mentions = Array.isArray(candidate.mentions)
-        ? candidate.mentions.filter(Schema.is(ProviderMentionReference))
+        ? candidate.mentions.filter(isProviderMentionReference)
         : [];
       const interactionMode =
         candidate.interactionMode === "default" || candidate.interactionMode === "plan"
@@ -1903,13 +1970,11 @@ function normalizePersistedDraftThreads(
         candidateDraftThread.lastKnownPr &&
         typeof candidateDraftThread.lastKnownPr === "object"
       ) {
-        try {
-          lastKnownPr = Schema.decodeUnknownSync(OrchestrationThreadPullRequest)(
-            candidateDraftThread.lastKnownPr,
-          );
-        } catch {
-          lastKnownPr = null;
-        }
+        // Persisted PR objects are authored by this store from a real
+        // `OrchestrationThreadPullRequest`; on read we accept the structurally-
+        // object value verbatim (best-effort, mirroring the prior
+        // `Schema.decodeUnknownSync` which also round-tripped author-owned data).
+        lastKnownPr = candidateDraftThread.lastKnownPr as OrchestrationThreadPullRequest;
       }
       const normalizedWorktreePath = typeof worktreePath === "string" ? worktreePath : null;
       const isTemporary = candidateDraftThread.isTemporary === true ? true : undefined;
@@ -2043,10 +2108,10 @@ function normalizePersistedDraftsByThreadId(
         })
       : [];
     const skills = Array.isArray(draftCandidate.skills)
-      ? draftCandidate.skills.filter(Schema.is(ProviderSkillReference))
+      ? draftCandidate.skills.filter(isProviderSkillReference)
       : [];
     const mentions = Array.isArray(draftCandidate.mentions)
-      ? draftCandidate.mentions.filter(Schema.is(ProviderMentionReference))
+      ? draftCandidate.mentions.filter(isProviderMentionReference)
       : [];
     const queuedTurns = normalizePersistedQueuedTurns(draftCandidate.queuedTurns);
     const runtimeMode =
@@ -2109,7 +2174,7 @@ function normalizePersistedDraftsByThreadId(
     }
 
     const normalizedQueuedTurns = queuedTurns ?? [];
-    const restoredSourceProposedPlan = Schema.is(PersistedRestoredSourceProposedPlan)(
+    const restoredSourceProposedPlan = isPersistedRestoredSourceProposedPlan(
       draftCandidate.restoredSourceProposedPlan,
     )
       ? draftCandidate.restoredSourceProposedPlan
@@ -2422,7 +2487,7 @@ function readPersistedAttachmentIdsFromStorage(threadId: ThreadId): string[] {
   try {
     const persisted = getLocalStorageItem(
       COMPOSER_DRAFT_STORAGE_KEY,
-      PersistedComposerDraftStoreStorage,
+      PersistedComposerDraftStoreStorageCodec,
     );
     if (!persisted || persisted.version !== COMPOSER_DRAFT_STORAGE_VERSION) {
       return [];
@@ -2691,7 +2756,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             existingThread.entryPoint === nextDraftThread.entryPoint &&
             existingThread.branch === nextDraftThread.branch &&
             existingThread.worktreePath === nextDraftThread.worktreePath &&
-            Equal.equals(existingThread.lastKnownPr ?? null, nextDraftThread.lastKnownPr ?? null) &&
+            deepEqual(existingThread.lastKnownPr ?? null, nextDraftThread.lastKnownPr ?? null) &&
             existingThread.envMode === nextDraftThread.envMode &&
             (existingThread.isTemporary === true) === (nextDraftThread.isTemporary === true) &&
             existingThread.promotedTo === nextDraftThread.promotedTo;
@@ -2810,7 +2875,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             nextDraftThread.entryPoint === existing.entryPoint &&
             nextDraftThread.branch === existing.branch &&
             nextDraftThread.worktreePath === existing.worktreePath &&
-            Equal.equals(nextDraftThread.lastKnownPr ?? null, existing.lastKnownPr ?? null) &&
+            deepEqual(nextDraftThread.lastKnownPr ?? null, existing.lastKnownPr ?? null) &&
             nextDraftThread.envMode === existing.envMode &&
             (nextDraftThread.isTemporary === true) === (existing.isTemporary === true) &&
             nextDraftThread.promotedTo === existing.promotedTo;
@@ -3019,7 +3084,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             ...state.stickyModelSelectionByProvider,
             [normalized.provider]: normalized,
           };
-          if (Equal.equals(state.stickyModelSelectionByProvider, nextMap)) {
+          if (deepEqual(state.stickyModelSelectionByProvider, nextMap)) {
             return state.stickyActiveProvider === normalized.provider
               ? state
               : { stickyActiveProvider: normalized.provider };
@@ -3053,7 +3118,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             }
           }
           if (
-            Equal.equals(base.modelSelectionByProvider, nextMap) &&
+            deepEqual(base.modelSelectionByProvider, nextMap) &&
             base.activeProvider === stickyActiveProvider
           ) {
             return state;
@@ -3122,7 +3187,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         const nextSkills = [...skills];
         set((state) => {
           const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
-          if (Equal.equals(existing.skills, nextSkills)) {
+          if (deepEqual(existing.skills, nextSkills)) {
             return state;
           }
           const nextDraft: ComposerThreadDraftState = {
@@ -3145,7 +3210,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         const nextMentions = [...mentions];
         set((state) => {
           const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
-          if (Equal.equals(existing.mentions, nextMentions)) {
+          if (deepEqual(existing.mentions, nextMentions)) {
             return state;
           }
           const nextDraft: ComposerThreadDraftState = {
@@ -3189,7 +3254,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           }
           const nextActiveProvider = normalized?.provider ?? base.activeProvider;
           if (
-            Equal.equals(base.modelSelectionByProvider, nextMap) &&
+            deepEqual(base.modelSelectionByProvider, nextMap) &&
             base.activeProvider === nextActiveProvider
           ) {
             return state;
@@ -3234,7 +3299,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
               nextMap[provider] = buildModelSelection(provider, current.model);
             }
           }
-          if (Equal.equals(base.modelSelectionByProvider, nextMap)) {
+          if (deepEqual(base.modelSelectionByProvider, nextMap)) {
             return state;
           }
           const nextDraft: ComposerThreadDraftState = {
@@ -3320,8 +3385,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           }
 
           if (
-            Equal.equals(base.modelSelectionByProvider, nextMap) &&
-            Equal.equals(state.stickyModelSelectionByProvider, nextStickyMap) &&
+            deepEqual(base.modelSelectionByProvider, nextMap) &&
+            deepEqual(state.stickyModelSelectionByProvider, nextStickyMap) &&
             state.stickyActiveProvider === nextStickyActiveProvider
           ) {
             return state;
@@ -4017,7 +4082,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             targetThreadId,
           });
           const currentTargetDraft = state.draftsByThreadId[targetThreadId];
-          if (Equal.equals(currentTargetDraft, nextDraft)) {
+          if (deepEqual(currentTargetDraft, nextDraft)) {
             return state;
           }
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
