@@ -205,6 +205,66 @@ export interface AutomationListResult {
   runs: readonly AutomationRun[];
 }
 
+// Ported from MCode `packages/contracts/src/automation.ts`. The vendored UI
+// constructs `AutomationDefinition`s from these create/update inputs (e.g.
+// `createAutomationDefinitionFromCreateRequest` casts a WS body to
+// `AutomationCreateInput` and reads `input.enabled`, `input.stopOnError`,
+// etc.). Without real shapes those field accesses collapse to `{}` and break
+// boolean/string assignments under `exactOptionalPropertyTypes`.
+
+/** Subset of {@link AutomationDefinition} that the client supplies on create
+ *  (omits server-managed runtime fields: id, nextRunAt, iterationCount,
+ *  completionPolicyVersion/UpdatedAt, createdAt/updatedAt/archivedAt). */
+export interface AutomationCreateInput {
+  projectId: ProjectId;
+  sourceThreadId?: ThreadId | null;
+  name: TrimmedNonEmptyString;
+  prompt: TrimmedNonEmptyString;
+  schedule: AutomationSchedule;
+  enabled?: boolean;
+  modelSelection: ModelSelection;
+  providerOptions?: ProviderStartOptions;
+  runtimeMode?: RuntimeMode;
+  interactionMode?: ProviderInteractionMode;
+  worktreeMode?: AutomationWorktreeMode;
+  mode?: AutomationMode;
+  targetThreadId?: ThreadId | null;
+  maxIterations?: PositiveInt | null;
+  stopOnError?: boolean;
+  completionPolicy?: AutomationCompletionPolicy;
+  minimumIntervalSeconds?: PositiveInt;
+  maxRuntimeSeconds?: PositiveInt | null;
+  retryPolicy?: AutomationRetryPolicy;
+  misfirePolicy?: AutomationMisfirePolicy;
+  acknowledgedRisks?: readonly ("full-access" | "local-checkout" | "fast-interval")[];
+}
+
+/** Partial update input: id + any subset of the create fields. */
+export interface AutomationUpdateInput {
+  id: AutomationId;
+  projectId?: ProjectId;
+  sourceThreadId?: ThreadId | null;
+  name?: TrimmedNonEmptyString;
+  prompt?: TrimmedNonEmptyString;
+  schedule?: AutomationSchedule;
+  enabled?: boolean;
+  modelSelection?: ModelSelection;
+  providerOptions?: ProviderStartOptions;
+  runtimeMode?: RuntimeMode;
+  interactionMode?: ProviderInteractionMode;
+  worktreeMode?: AutomationWorktreeMode;
+  mode?: AutomationMode;
+  targetThreadId?: ThreadId | null;
+  maxIterations?: PositiveInt | null;
+  stopOnError?: boolean;
+  completionPolicy?: AutomationCompletionPolicy;
+  minimumIntervalSeconds?: PositiveInt;
+  maxRuntimeSeconds?: PositiveInt | null;
+  retryPolicy?: AutomationRetryPolicy;
+  misfirePolicy?: AutomationMisfirePolicy;
+  acknowledgedRisks?: readonly ("full-access" | "local-checkout" | "fast-interval")[];
+}
+
 export type AutomationStreamEvent =
   | {
       readonly type: "snapshot";

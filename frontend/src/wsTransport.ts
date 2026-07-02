@@ -58,6 +58,8 @@ import {
   type ServedRpcMethod,
   type ServedRpcRequest,
   type ServedRpcResult,
+  type WsPushChannel,
+  type WsPushData,
 } from "@t3tools/contracts";
 
 import type { WsTransportState } from "./wsTransportEvents";
@@ -81,7 +83,12 @@ interface PushNotification {
  * union mirrors the channel names the consumers subscribe to via
  * `transport.subscribe(channel, …)` from `wsNativeApi.ts`.
  */
-type PushChannel = string;
+// `PushChannel` is the contracts' channel-keyed union (`WsPushChannel`) so
+// `WsPushMessage<C>.data` narrows to the typed payload per channel (e.g.
+// `WsWelcomePayload` for `serverWelcome`). Previously this was `string` with
+// `data: unknown`, which forced ~12 call-site casts in `wsNativeApi.ts` and
+// surfaced TS2345 (`unknown` not assignable to typed payload).
+type PushChannel = WsPushChannel;
 
 /**
  * Push message surfaced to subscribers. Shape kept compatible with the
@@ -92,9 +99,7 @@ export interface WsPushMessage<C extends PushChannel = PushChannel> {
   readonly type: "push";
   readonly sequence: number;
   readonly channel: C;
-  // `data` is `unknown` here — callers narrow via the channel-narrowed
-  // helpers in `wsNativeApi.ts`. Kept loose to match the prior boundary.
-  readonly data: unknown;
+  readonly data: WsPushData<C>;
 }
 
 type PushListener = (message: WsPushMessage) => void;
