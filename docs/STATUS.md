@@ -49,7 +49,9 @@
 | `server.subscribeLifecycle` | 🟡 STUB | no maintenance-task push subsystem |
 | `server.transcribeVoice` / `voiceStart` / `voiceStop` | 🟡 STUB | graceful "STT not configured" (no whisper/ffmpeg) — served, no MethodNotFound |
 | `server.generateAutomationIntent` | ✅ REAL | LLM via provider CLI (invoke_llm_oneshot — prompt→AutomationDef JSON) |
-| `server.patchSettings` / `listProviderUsage` / `getProviderUsageSnapshot` / `startLocalServer` / `stopLocalServer` | 🟡 STUB | no persistence/usage/localServer subsystem — graceful defaults |
+| `server.patchSettings` | ✅ REAL | merge into ServerSettingsState (same as updateSettings) |
+| `server.listProviderUsage` / `getProviderUsageSnapshot` | ✅ REAL | `UsageStore` (in-memory) — records token usage from LLM ops (invoke_llm_oneshot → ProviderResponse.result usage extraction); aggregates by provider |
+| `server.startLocalServer` / `stopLocalServer` | 🟡 STUB | no local-server process-mgmt subsystem |
 | _(remaining 48 in UNSERVED_RPC)_ | ⛔ non-actively-called | legacy aliases + list/process RPCs the vendored UI doesn't invoke |
 
 ### Terminal (Terminal panel)
