@@ -39,6 +39,33 @@ pub fn required_permission(method: &str) -> Option<Permission> {
         "project/list" | "project/get" => Some(Permission::Read),
         "thread/list" | "thread/get" => Some(Permission::Read),
         "turn/list" | "turn/get" => Some(Permission::Read),
+        // Server config/settings/lifecycle read RPCs (T6c-4). These surface
+        // server-side configuration + diagnostics — observability-tier, so
+        // Read. The slash keys are the canonical dispatch targets (the dot
+        // forms route through authz under whatever string the client sends,
+        // but `required_permission` is keyed on the slash form the dispatcher
+        // invokes after `authorize`; the authz gate runs on the raw method
+        // string before dispatch — we cover both forms defensively).
+        "server/getConfig"
+        | "server/getSettings"
+        | "server/getEnvironment"
+        | "server/getDiagnostics"
+        | "server/welcome"
+        | "server.getConfig"
+        | "server.getSettings"
+        | "server.getEnvironment"
+        | "server.getDiagnostics"
+        | "server.welcome" => Some(Permission::Read),
+        // Server push subscriptions (T6c-4 stubs). Treated as Read like
+        // `push/subscribe`.
+        "server/subscribeConfig"
+        | "server/subscribeSettings"
+        | "server/subscribeProviderStatuses"
+        | "server/subscribeLifecycle"
+        | "server.subscribeConfig"
+        | "server.subscribeSettings"
+        | "server.subscribeProviderStatuses"
+        | "server.subscribeLifecycle" => Some(Permission::Read),
 
         // ─── Write methods (mutate domain state) ────────────────────────
         "project/create" => Some(Permission::Write),
