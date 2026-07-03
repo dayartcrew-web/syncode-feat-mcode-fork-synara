@@ -50,7 +50,7 @@ async fn automation_e2e_manual_trigger_and_complete() {
         "echo hello".into(),
         syncode_automation::ScheduleType::Manual,
     );
-    let id = def.id.clone();
+    let id = def.id;
     let id_str = id.as_str().to_string();
     scheduler.register(def).await.expect("register");
 
