@@ -5190,7 +5190,24 @@ fn run_to_mcode_run(
     map.entry("threadCreateCommandId").or_insert(Value::Null);
     map.entry("turnStartCommandId").or_insert(Value::Null);
     map.entry("messageId").or_insert(Value::Null);
-    map.entry("result").or_insert(Value::Null);
+    // MCode places `unread` + `archivedAt` on `AutomationRunResult` (which
+    // lives under `result`). The syncode `AutomationRun` lifts these to the
+    // run itself for simplicity, so we mirror them into a `result` sub-object
+    // (creating or merging) for contract compatibility with the UI.
+    let unread = run.unread;
+    let archived_at = run.archived_at.clone();
+    let result_value = map
+        .get("result")
+        .cloned()
+        .filter(|v| !v.is_null())
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    if let Value::Object(mut result_map) = result_value {
+        result_map.entry("unread").or_insert(Value::Bool(unread));
+        result_map
+            .entry("archivedAt")
+            .or_insert(archived_at.clone().map(Value::String).unwrap_or(Value::Null));
+        map.insert("result".to_string(), Value::Object(result_map));
+    }
     map.entry("permissionSnapshot")
         .or_insert(serde_json::json!({
             "provider": "claude",
@@ -5556,9 +5573,9 @@ async fn handle_automation_cancel_run(
     )
 }
 
-/// `automation.markRunRead` — mark a run as read. The syncode run type + repo
-/// port don't model a `read`/`unread` flag, so this is a STUB that returns the
-/// current run unchanged. Returns `{ run: AutomationRun }`.
+/// `automation.markRunRead` — mark a run as read. Persists the change through
+/// the scheduler (`Scheduler::mark_run_read` flips the run's `unread` flag and
+/// upserts via the repo). Returns `{ run: AutomationRun }` with `unread=false`.
 async fn handle_automation_mark_run_read(
     state: &WsState,
     id: Value,
@@ -5579,13 +5596,20 @@ async fn handle_automation_mark_run_read(
         }
     };
     let scheduler = state.automation_scheduler.clone();
-    let run = match scheduler.get_run(&run_id).await {
-        Some(r) => r,
-        None => {
+    let run = match scheduler.mark_run_read(&run_id).await {
+        Ok(r) => r,
+        Err(syncode_automation::SchedulerError::NotFound(_)) => {
             return automation_error(
                 id,
                 crate::error_codes::INVALID_PARAMS,
                 format!("automation.markRunRead: not found: {run_id}"),
+            );
+        }
+        Err(e) => {
+            return automation_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("automation.markRunRead: {e}"),
             );
         }
     };
@@ -5600,9 +5624,9 @@ async fn handle_automation_mark_run_read(
     )
 }
 
-/// `automation.archiveRun` — archive a run. The syncode run type + repo port
-/// don't model `archivedAt`, so this is a STUB that returns the current run
-/// unchanged. Returns `{ run: AutomationRun }`.
+/// `automation.archiveRun` — archive a run. Persists the change through the
+/// scheduler (`Scheduler::archive_run` stamps `archived_at` and upserts via the
+/// repo). Returns `{ run: AutomationRun }` with `archivedAt` set.
 async fn handle_automation_archive_run(
     state: &WsState,
     id: Value,
@@ -5623,13 +5647,20 @@ async fn handle_automation_archive_run(
         }
     };
     let scheduler = state.automation_scheduler.clone();
-    let run = match scheduler.get_run(&run_id).await {
-        Some(r) => r,
-        None => {
+    let run = match scheduler.archive_run(&run_id).await {
+        Ok(r) => r,
+        Err(syncode_automation::SchedulerError::NotFound(_)) => {
             return automation_error(
                 id,
                 crate::error_codes::INVALID_PARAMS,
                 format!("automation.archiveRun: not found: {run_id}"),
+            );
+        }
+        Err(e) => {
+            return automation_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("automation.archiveRun: {e}"),
             );
         }
     };
@@ -9159,16 +9190,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automation_mark_run_read_and_archive_are_stubs() {
-        // Verdict: markRunRead/archiveRun are stubs (syncode run type/repo
-        // don't model read/archived). Both must return the run unchanged in
-        // the AutomationRunActionResult shape (`{ run: ... }`).
+    async fn automation_mark_run_read_and_archive_persist() {
+        // markRunRead/archiveRun are REAL: they mutate the run via the
+        // scheduler (`mark_run_read`/`archive_run`) and persist through the
+        // repo's upsert. The returned run must reflect `unread=false` (after
+        // markRunRead) and `archivedAt` set (after archiveRun).
         let state = WsState::new_in_memory(16);
 
         // Create + runNow to seed a run.
         let create = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "automation.create",
-            "params": { "name": "Stub-test", "schedule": { "type": "manual" } }
+            "params": { "name": "Read-archive-test", "schedule": { "type": "manual" } }
         });
         let resp = auto_rpc(&state, &create).await;
         let auto_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
@@ -9182,23 +9214,90 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // markRunRead.
+        // Newly-created runs surface as unread under `result`.
+        let fresh = auto_rpc(&state, &run_now).await;
+        let fresh_result = fresh.result.expect("runNow succeeds");
+        let fresh_unread = fresh_result["run"]["result"]["unread"].as_bool();
+        assert_eq!(
+            fresh_unread,
+            Some(true),
+            "newly created run should surface result.unread=true (got {fresh_unread:?})"
+        );
+
+        // markRunRead → unread flips to false, persisted.
         let mark = serde_json::json!({
             "jsonrpc": "2.0", "id": 3, "method": "automation.markRunRead",
             "params": { "runId": run_id }
         });
         let resp = auto_rpc(&state, &mark).await;
         assert!(resp.error.is_none(), "markRunRead: {:?}", resp.error);
-        assert_eq!(resp.result.unwrap()["run"]["id"], run_id);
+        let result = resp.result.unwrap();
+        assert_eq!(result["run"]["id"], run_id);
+        assert_eq!(
+            result["run"]["result"]["unread"], false,
+            "markRunRead must flip result.unread to false"
+        );
 
-        // archiveRun.
+        // Re-fetch via automation.list to confirm persistence.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 99, "method": "automation.list"
+        });
+        let list_resp = auto_rpc(&state, &list).await;
+        let list_result = list_resp.result.expect("automation.list succeeds");
+        let persisted_unread = &list_result["runs"]
+            .as_array()
+            .expect("runs is an array")
+            .iter()
+            .find(|r| r["id"] == run_id)
+            .expect("seeded run present in list")["result"]["unread"];
+        assert_eq!(*persisted_unread, false, "markRunRead must persist");
+
+        // archiveRun → archivedAt becomes non-null, persisted.
         let archive = serde_json::json!({
             "jsonrpc": "2.0", "id": 4, "method": "automation.archiveRun",
             "params": { "runId": run_id }
         });
         let resp = auto_rpc(&state, &archive).await;
         assert!(resp.error.is_none(), "archiveRun: {:?}", resp.error);
-        assert_eq!(resp.result.unwrap()["run"]["id"], run_id);
+        let result = resp.result.unwrap();
+        assert_eq!(result["run"]["id"], run_id);
+        assert!(
+            !result["run"]["result"]["archivedAt"].is_null(),
+            "archiveRun must set result.archivedAt"
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_mark_run_read_missing_is_error() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.markRunRead",
+            "params": { "runId": "no-such-run" }
+        });
+        let resp = auto_rpc(&state, &req).await;
+        assert!(resp.error.is_some(), "missing run should error");
+    }
+
+    #[tokio::test]
+    async fn automation_archive_run_missing_is_error() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.archiveRun",
+            "params": { "runId": "no-such-run" }
+        });
+        let resp = auto_rpc(&state, &req).await;
+        assert!(resp.error.is_some(), "missing run should error");
+    }
+
+    #[tokio::test]
+    async fn automation_mark_run_read_requires_run_id() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.markRunRead",
+            "params": {}
+        });
+        let resp = auto_rpc(&state, &req).await;
+        assert!(resp.error.is_some(), "missing runId should be INVALID_PARAMS");
     }
 
     #[tokio::test]
