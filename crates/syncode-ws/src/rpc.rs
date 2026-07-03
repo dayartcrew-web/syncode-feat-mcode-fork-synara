@@ -348,8 +348,9 @@ async fn dispatch_method(
         //   - `server.subscribeConfig` / `subscribeSettings` /
         //     `subscribeProviderStatuses` — T6c-18 REAL: register on the
         //     matching `server.*Updated` push channel + emit a snapshot of the
-        //     current stored state. `subscribeLifecycle` remains a stub (no
-        //     maintenance-task push in syncode).
+        //     current stored state. `subscribeLifecycle` is REAL as of
+        //     T6c-phase-27: it registers on `server.lifecycle` and emits an
+        //     initial `welcome` event (same shape as `server.welcome`).
         //
         // T6c-18 makes `getConfig`/`getSettings` read from the in-memory
         // `ServerSettingsState` (persists edits for the server session) and
@@ -386,12 +387,15 @@ async fn dispatch_method(
         "server.subscribeProviderStatuses" | "server/subscribeProviderStatuses" => {
             handle_server_subscribe_provider_statuses(state, conn_id, id).await
         }
-        // stub: no lifecycle push subsystem (no server-maintenance task). The
-        // welcome payload is delivered as a one-shot RPC response by
-        // `server.welcome`; subscribe remains a no-op ack so the UI's
-        // subscribe call resolves.
+        // T6c-phase-27: REAL subscription. Registers the connection on the
+        // `server.lifecycle` push channel and emits an initial `welcome` event
+        // (the same payload `server.welcome` returns) so a freshly-subscribed
+        // client has a baseline. Mirrors the snapshot-then-stream pattern used
+        // by `subscribeConfig`/`subscribeSettings`/`subscribeProviderStatuses`
+        // (T6c-18). Future server-lifecycle broadcasts (e.g. shutdown notices)
+        // will fan out via the delivery loop's `is_subscribed` check.
         "server.subscribeLifecycle" | "server/subscribeLifecycle" => {
-            handle_server_subscribe_stub(id, "lifecycle")
+            handle_server_subscribe_lifecycle(state, conn_id, id).await
         }
 
         // ─── Server write-side stubs (T6c-10) ───────────────────────────────
@@ -1844,6 +1848,14 @@ async fn handle_server_get_settings(state: &WsState, id: Value) -> JsonRpcRespon
 /// from the cwd's last path segment (best-effort) and leave the optional
 /// bootstrap ids absent (no project/thread auto-bootstrap in syncode).
 async fn handle_server_welcome(state: &WsState, id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, build_server_welcome_payload(state))
+}
+
+/// Build the `server.welcome` payload — shared between the `server.welcome`
+/// one-shot RPC response and the initial `welcome` event pushed by
+/// `server.subscribeLifecycle` (T6c-phase-27). The lifecycle channel carries
+/// this same shape as its snapshot baseline.
+fn build_server_welcome_payload(state: &WsState) -> Value {
     let cwd = server_cwd();
     let home = server_home_dir();
     let project_name = cwd
@@ -1875,7 +1887,7 @@ async fn handle_server_welcome(state: &WsState, id: Value) -> JsonRpcResponse {
     if let (Some(h), Some(obj)) = (home, payload.as_object_mut()) {
         obj.insert("homeDir".into(), Value::String(h));
     }
-    JsonRpcResponse::success(id, payload)
+    payload
 }
 
 /// `server.getEnvironment` — return `ExecutionEnvironmentDescriptor`. Maps
@@ -1965,18 +1977,49 @@ async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcRes
     JsonRpcResponse::success(id, result)
 }
 
-/// Generic subscribe-stub for the `server.subscribe*` RPCs that have no
-/// real push subsystem. Only `server.subscribeLifecycle` reaches this today
-/// (the lifecycle channel has no maintenance-task push in syncode). The
-/// config/settings/providerStatuses channels each have a dedicated handler
-/// that records a real subscription + emits an initial snapshot (T6c-18).
-fn handle_server_subscribe_stub(id: Value, channel: &str) -> JsonRpcResponse {
+/// `server.subscribeLifecycle` (T6c-phase-27 — REAL) — register on
+/// `server.lifecycle` and emit an initial `welcome` event as the snapshot
+/// baseline. The payload mirrors `server.welcome` so a client that subscribes
+/// to lifecycle (rather than calling `server.welcome` directly) still receives
+/// the same bootstrap state. Future server-lifecycle broadcasts (e.g. shutdown
+/// notices) will fan out via the delivery loop's `is_subscribed` check on this
+/// channel.
+///
+/// The push uses the same snapshot-then-stream pattern as
+/// `subscribeConfig`/`subscribeSettings`: register the connection, then send
+/// a single best-effort `push/server.lifecycle` notification with the welcome
+/// shape. The notification is broadcast via `push_tx` so the test harness can
+/// observe it (matching the delivery-loop seam used by the other channels).
+async fn handle_server_subscribe_lifecycle(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_SERVER_LIFECYCLE);
+    // Build the welcome payload and broadcast it as the initial `welcome`
+    // event on the lifecycle channel. Best-effort: no subscribers is not an
+    // error (matches the `WsDomainEventPublisher` convention).
+    let welcome = build_server_welcome_payload(state);
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_SERVER_LIFECYCLE.to_string(),
+        serde_json::json!({
+            "eventType": "welcome",
+            "aggregateId": Value::Null,
+            "data": welcome.clone(),
+        }),
+    ));
     JsonRpcResponse::success(
         id,
         serde_json::json!({
             "subscribed": true,
-            "channel": format!("server.{}", channel),
-            "note": "stub: no push delivery for this channel",
+            "channel": crate::channels::CHANNEL_SERVER_LIFECYCLE,
+            "added": added,
+            "snapshotEmitted": true,
+            "welcome": welcome,
         }),
     )
 }
@@ -12495,6 +12538,83 @@ mod tests {
 
         let msg = rx.recv().await.unwrap();
         assert!(msg.contains("push/server.providerStatusesUpdated"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_emits_welcome_and_registers_channel() {
+        // T6c-phase-27: subscribeLifecycle registers the connection on
+        // `server.lifecycle` and pushes an initial `welcome` event on push_tx
+        // (observable via a broadcast subscriber). The welcome payload must
+        // mirror server.welcome (cwd, projectName, serverVersion, authRequired,
+        // mode). Mirrors the subscribe_config snapshot-then-stream test.
+        let state = std::sync::Arc::new(WsState::new_in_memory(16));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx.clone()).await;
+        // Spawn the delivery loop so the broadcast on push_tx forwards onto
+        // the connection's mpsc tx (mirrors the production server.rs handler).
+        let _delivery = tokio::spawn(crate::server::run_push_delivery(
+            std::sync::Arc::clone(&state),
+            1,
+            tx,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Independent broadcast subscriber — observes the welcome push even
+        // if the per-connection delivery path races.
+        let mut bcast_rx = state.push_tx.subscribe();
+
+        let resp = rpc_success(
+            &state,
+            "server.subscribeLifecycle",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["subscribed"], true);
+        assert_eq!(result["channel"], crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert_eq!(result["snapshotEmitted"], true);
+        // The response includes the welcome payload so callers can use either
+        // server.welcome or server.subscribeLifecycle for bootstrap.
+        assert!(result["welcome"]["cwd"].is_string());
+        assert!(result["welcome"]["projectName"].is_string());
+        assert!(result["welcome"]["serverVersion"].is_string());
+        assert!(result["welcome"]["authRequired"].is_boolean());
+        assert!(result["welcome"]["mode"].is_string());
+
+        // The broadcast bus carries the welcome event on the lifecycle channel.
+        let (channel, data) = tokio::time::timeout(std::time::Duration::from_millis(500), bcast_rx.recv())
+            .await
+            .expect("lifecycle welcome push should arrive on push_tx")
+            .unwrap();
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert_eq!(data["eventType"], "welcome");
+        // The welcome payload data mirrors server.welcome.
+        assert!(data["data"]["cwd"].is_string());
+        assert!(data["data"]["projectName"].is_string());
+        assert!(data["data"]["serverVersion"].is_string());
+
+        // The forwarded per-connection frame arrives too (delivered by
+        // run_push_delivery). It should be a `push/server.lifecycle` message
+        // with `eventType: "welcome"`.
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("welcome push should arrive on connection tx")
+            .unwrap();
+        assert!(msg.contains("push/server.lifecycle"));
+        assert!(msg.contains("welcome"));
+
+        // The subscription is recorded — conn 1 is now on the lifecycle channel.
+        let subscribers = state
+            .subscriptions
+            .read()
+            .await
+            .subscribers_for(crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert!(
+            subscribers.contains(&1),
+            "conn 1 should be subscribed to server.lifecycle (got {:?})",
+            subscribers
+        );
     }
 
     #[tokio::test]
