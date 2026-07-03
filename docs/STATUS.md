@@ -93,6 +93,7 @@
 | Component | Status |
 |---|---|
 | Cloned MCode UI (`apps/web` → `frontend/`) | ✅ vendored (753 files + 35 shared modules), type-clean |
+| **Chat (turn → provider → AI response)** | ✅ **ProviderCommandReactor wired** — turns invoke providers (default `claude`, configurable via `SYNCODE_DEFAULT_PROVIDER`); responses stream back → push to subscribed clients. Graceful fallback if CLI absent. |
 | Contracts bridge (`@t3tools/contracts` shim) | ✅ complete — 139 Tier-3 symbols + RPC registry + 44-event union + branded IDs |
 | Transport (`wsTransport` JSON-RPC) | ✅ Effect-free; `MCODE_TO_SERVED` (88 mappings) |
 | Standalone WS backend | ✅ `cargo run -p syncode-ws --bin server` (SQLite, env-configurable) |
