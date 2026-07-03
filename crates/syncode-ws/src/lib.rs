@@ -169,7 +169,10 @@ impl WsState {
                 syncode_terminal::SessionManager::new(),
             )),
             terminal_readers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            automation_scheduler: Arc::new(syncode_automation::Scheduler::new()),
+            automation_scheduler: Arc::new(syncode_automation::Scheduler::new_with_deps(
+                Arc::new(syncode_automation::InMemoryAutomationRepository::new()),
+                Arc::new(syncode_automation::ProcessRunExecutor::new()),
+            )),
         }
     }
 
