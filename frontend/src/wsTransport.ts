@@ -198,6 +198,30 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "terminal.restart": "terminal/restart",
   "terminal.subscribeEvents": "terminal/subscribe-events",
   "terminal.subscribe": "terminal/subscribe-events",
+
+  // Automation RPCs (T6c-6): the cloned MCode Automations panel calls these
+  // `automation.*` dot-strings (`tauriNativeApi.ts` →
+  // `callTransport("automation/list", …)`, `callTransport("automation/create")`,
+  // …). The syncode-ws backend now serves them via
+  // `syncode-automation::Scheduler` handlers — map every MCode dot-name the UI
+  // uses to the served slash dispatch key so the calls reach the backend
+  // instead of being client-stubbed with MethodNotFound (which would leave the
+  // Automations panel empty). The backend dispatch also accepts the dot-name
+  // directly (arms cover both forms) so this remap is belt-and-braces
+  // robustness. Note: `automation.runNow` (MCode UI form) and `automation.run`
+  // (alternate form) both map to `automation/run-now`.
+  "automation.list": "automation/list",
+  "automation.create": "automation/create",
+  "automation.get": "automation/get",
+  "automation.update": "automation/update",
+  "automation.delete": "automation/delete",
+  "automation.runNow": "automation/run-now",
+  "automation.run": "automation/run-now",
+  "automation.cancelRun": "automation/cancel-run",
+  "automation.markRunRead": "automation/mark-run-read",
+  "automation.archiveRun": "automation/archive-run",
+  "automation.subscribe": "automation/subscribe",
+  "automation.unsubscribe": "automation/subscribe",
 };
 
 /**
