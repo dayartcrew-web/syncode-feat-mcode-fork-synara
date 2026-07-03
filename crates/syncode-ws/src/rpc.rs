@@ -142,6 +142,17 @@ async fn dispatch_method(
                     "automation/mark-run-read",
                     "automation/archive-run",
                     "automation/subscribe",
+                    "provider/list-models",
+                    "provider/list-skills",
+                    "provider/list-skills-catalog",
+                    "provider/list-plugins",
+                    "provider/read-plugin",
+                    "provider/list-commands",
+                    "provider/list-agents",
+                    "provider/get-composer-capabilities",
+                    "provider/list-options",
+                    "provider/read-skill",
+                    "provider/compact-thread",
                 ]
             }),
         ),
@@ -461,6 +472,64 @@ async fn dispatch_method(
         | "automation/subscribe"
         | "automation.unsubscribe"
         | "automation/unsubscribe" => handle_automation_subscribe_stub(id, &request.method),
+
+        // ─── Provider discovery RPCs (T6c-7) ─────────────────────
+        //
+        // The cloned MCode UI's composer/agent-mention/SkillsPanel/plugin layer
+        // calls these `provider.*` discovery RPCs on bootstrap + on-demand
+        // (`provider.listModels`, `provider.listSkills`, `provider.listPlugins`,
+        // `provider.listCommands`, `provider.listAgents`, …). Syncode has no
+        // native skill/plugin/agent discovery subsystem (no
+        // `~/.mcode/skills|plugins|agents` scan; no marketplace loader), so each
+        // handler returns a **minimal valid MCode shape** — required top-level
+        // fields present, arrays empty, optionals null — so the UI's `.map`/
+        // `.filter`/`.length` reads render "nothing configured yet" rather than
+        // crashing on `MethodNotFound`. Two of the list RPCs (`listModels`,
+        // `listAgents`) are cheaply populated from the syncode-provider
+        // `ALL_PROVIDERS` static (a `&[&str]` constant, no registry/state
+        // needed) — the UI's model picker + agent-mention autocomplete show the
+        // real provider set instead of an empty list. `compactThread` is a real
+        // op the composer calls to compact conversation context; we return a
+        // `{ ok: true }` stub (no LLM compaction wired here — deferred).
+        //
+        // Shape references (Tier-3 `frontend/src/contracts/tier3/provider.ts`,
+        // mirrored from MCode `providerDiscovery.ts`):
+        //   - ProviderListModelsResult         { models: ProviderModelDescriptor[],
+        //                                         source?, cached? }
+        //   - ProviderListSkillsResult         { skills: ProviderSkillDescriptor[],
+        //                                         source?, cached? }
+        //   - ProviderSkillsCatalogResult      { skills: ProviderSkillDescriptor[],
+        //                                         mcodeSkillsDir? }
+        //   - ProviderListPluginsResult        { marketplaces,
+        //                                         marketplaceLoadErrors,
+        //                                         remoteSyncError,
+        //                                         featuredPluginIds, source?, cached? }
+        //   - ProviderListCommandsResult       { commands: ProviderNativeCommandDescriptor[],
+        //                                         source?, cached? }
+        //   - ProviderListAgentsResult         { agents: ProviderAgentDescriptor[],
+        //                                         source?, cached? }
+        //   - ProviderComposerCapabilities     { provider, supportsSkillMentions, … }
+        //   - readPlugin/readSkill             → { plugin: null } / { skill: null }
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form for
+        // robustness (the wsNativeApi sends dot, the tauriNativeApi sends slash
+        // — both must resolve). Entry order matches the MCODE_TO_SERVED append
+        // block to ease parallel-merge conflict resolution.
+        "provider.listModels" | "provider/list-models" => handle_provider_list_models(id),
+        "provider.listSkills" | "provider/list-skills" => handle_provider_list_skills(id),
+        "provider.listSkillsCatalog" | "provider/list-skills-catalog" => {
+            handle_provider_list_skills_catalog(id)
+        }
+        "provider.listPlugins" | "provider/list-plugins" => handle_provider_list_plugins(id),
+        "provider.readPlugin" | "provider/read-plugin" => handle_provider_read_plugin(id),
+        "provider.listCommands" | "provider/list-commands" => handle_provider_list_commands(id),
+        "provider.listAgents" | "provider/list-agents" => handle_provider_list_agents(id),
+        "provider.getComposerCapabilities" | "provider/get-composer-capabilities" => {
+            handle_provider_get_composer_capabilities(id, &request.params)
+        }
+        "provider.listOptions" | "provider/list-options" => handle_provider_list_options(id),
+        "provider.readSkill" | "provider/read-skill" => handle_provider_read_skill(id),
+        "provider.compactThread" | "provider/compact-thread" => handle_provider_compact_thread(id),
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -3023,6 +3092,199 @@ fn handle_automation_subscribe_stub(id: Value, method: &str) -> JsonRpcResponse 
     )
 }
 
+// ─── Provider discovery Handlers (T6c-7) ─────────────────────────
+//
+// Syncode has no native skill/plugin/agent discovery subsystem, so the list
+// handlers return **minimal valid MCode shapes** (required top-level fields
+// present, arrays empty, optionals null). The UI's `.map`/`.filter`/`.length`
+// reads render "nothing configured yet" rather than crashing on `MethodNotFound`.
+//
+// `listModels` and `listAgents` are cheaply populated from the syncode-provider
+// `ALL_PROVIDERS` static (a `&[&str]` constant — no registry/state lookup
+// needed). The MCode `ProviderKind` union is narrower than syncode's
+// `ALL_PROVIDERS` (it has `claudeAgent` not `claude`, and excludes
+// `anthropic`/`openai`); we map `claude → claudeAgent` and skip the
+// non-MCode provider ids so the model picker/agent-mention autocomplete only
+// show valid MCode providers.
+//
+// Caveats / known gaps:
+//   - Each `ProviderModelDescriptor` carries only `slug` + `name` (the
+//     schema-required fields); the rich option fields (reasoning efforts,
+//     context-window options, …) are omitted — the UI tolerates their absence
+//     (Schema.optional). A real per-provider model catalog would require
+//     enumerating each adapter's `available_models()` — deferred (would need
+//     `ProviderRegistry` plumbed into `WsState`).
+//   - `getComposerCapabilities` returns an all-false/empty descriptor for the
+//     requested provider (read from `provider` param; defaults to `codex` when
+//     absent or unknown). The composer renders without skill/plugin/@-mention
+//     discovery — the user can still type plain prompts.
+//   - `compactThread` is a real op the composer calls to compact conversation
+//     context before the LLM round-trip; we return `{ ok: true }` (no LLM
+//     compaction wired here — deferred).
+
+/// Map a syncode `ALL_PROVIDERS` id onto the MCode `ProviderKind` union. Returns
+/// `None` for provider ids that don't exist in the MCode kind union
+/// (`anthropic`, `openai`). The `claude → claudeAgent` rename reflects MCode's
+/// composer-facing naming (the agent is `claudeAgent`, the binary is `claude`).
+fn to_mcode_provider_kind(syncode_id: &str) -> Option<&'static str> {
+    match syncode_id {
+        syncode_provider::PROVIDER_CODEX => Some("codex"),
+        syncode_provider::PROVIDER_CLAUDE => Some("claudeAgent"),
+        syncode_provider::PROVIDER_CURSOR => Some("cursor"),
+        syncode_provider::PROVIDER_GEMINI => Some("gemini"),
+        syncode_provider::PROVIDER_GROK => Some("grok"),
+        syncode_provider::PROVIDER_KILO => Some("kilo"),
+        syncode_provider::PROVIDER_OPENCODE => Some("opencode"),
+        syncode_provider::PROVIDER_PI => Some("pi"),
+        // anthropic/openai are syncode-internal upstream ids not present in the
+        // MCode `ProviderKind` union — skip.
+        _ => None,
+    }
+}
+
+/// `provider.listModels` — return `ProviderListModelsResult` with one
+/// `ProviderModelDescriptor` per known MCode-valid provider (slug + name only;
+/// rich option fields omitted as Schema.optional). An empty `source`-less
+/// result is the safe fallback; populating from `ALL_PROVIDERS` keeps the model
+/// picker non-empty so the user can actually select a provider without the
+/// "no models" empty state blocking thread creation.
+fn handle_provider_list_models(id: Value) -> JsonRpcResponse {
+    let models: Vec<Value> = syncode_provider::ALL_PROVIDERS
+        .iter()
+        .filter_map(|p| to_mcode_provider_kind(p))
+        .map(|kind| {
+            serde_json::json!({
+                "slug": kind,
+                "name": kind,
+            })
+        })
+        .collect();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "models": models,
+            "source": "syncode",
+        }),
+    )
+}
+
+/// `provider.listSkills` — return `ProviderListSkillsResult` with an empty
+/// `skills` array. Syncode has no skill-discovery subsystem.
+fn handle_provider_list_skills(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "skills": [] }))
+}
+
+/// `provider.listSkillsCatalog` — return `ProviderSkillsCatalogResult` with an
+/// empty `skills` array. The catalog is a UI-side aggregated skill index;
+/// syncode has no skill loader.
+fn handle_provider_list_skills_catalog(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "skills": [] }))
+}
+
+/// `provider.listPlugins` — return `ProviderListPluginsResult` with empty
+/// marketplaces/errors and a null `remoteSyncError`. Syncode has no plugin
+/// marketplace loader.
+fn handle_provider_list_plugins(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "marketplaces": [],
+            "marketplaceLoadErrors": [],
+            "remoteSyncError": Value::Null,
+            "featuredPluginIds": [],
+        }),
+    )
+}
+
+/// `provider.readPlugin` — return `{ plugin: null }`. The UI's readPlugin
+/// consumer (`PluginDetailSheet`) renders an empty/not-found state when the
+/// plugin is null; the MCode schema marks plugin as `Schema.Null`able.
+fn handle_provider_read_plugin(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null }))
+}
+
+/// `provider.listCommands` — return `ProviderListCommandsResult` with an empty
+/// `commands` array. Syncode has no native slash-command discovery.
+fn handle_provider_list_commands(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "commands": [] }))
+}
+
+/// `provider.listAgents` — return `ProviderListAgentsResult` with one
+/// `ProviderAgentDescriptor` per known MCode-valid provider (name + displayName
+/// only). Populating from `ALL_PROVIDERS` keeps the agent-mention autocomplete
+/// non-empty; each entry is a provider-shell agent (the UI's actual agent
+/// definitions come from `AGENT_MENTION_ALIASES` on the client side — this RPC
+/// is the live discovery complement).
+fn handle_provider_list_agents(id: Value) -> JsonRpcResponse {
+    let agents: Vec<Value> = syncode_provider::ALL_PROVIDERS
+        .iter()
+        .filter_map(|p| to_mcode_provider_kind(p))
+        .map(|kind| {
+            serde_json::json!({
+                "name": kind,
+                "displayName": kind,
+            })
+        })
+        .collect();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "agents": agents,
+            "source": "syncode",
+        }),
+    )
+}
+
+/// `provider.getComposerCapabilities` — return a `ProviderComposerCapabilities`
+/// descriptor for the requested provider with every support flag `false`. The
+/// `provider` field is read from the request params (defaults to `codex` when
+/// absent or unrecognized) so the UI's per-provider capability gating sees a
+/// valid `ProviderKind`. All discovery flags false renders a plain-prompt
+/// composer (no skill/plugin/@-mention autocomplete) — functional baseline.
+fn handle_provider_get_composer_capabilities(id: Value, params: &Value) -> JsonRpcResponse {
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("codex");
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "provider": provider,
+            "supportsSkillMentions": false,
+            "supportsSkillDiscovery": false,
+            "supportsNativeSlashCommandDiscovery": false,
+            "supportsPluginMentions": false,
+            "supportsPluginDiscovery": false,
+            "supportsRuntimeModelList": false,
+            "supportsThreadCompaction": false,
+            "supportsThreadImport": false,
+        }),
+    )
+}
+
+/// `provider.listOptions` — return `{ options: [] }`. Syncode has no
+/// per-provider option descriptor subsystem (the MCode `ProviderOptionDescriptor`
+/// surface drives provider-specific settings UIs we don't render).
+fn handle_provider_list_options(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "options": [] }))
+}
+
+/// `provider.readSkill` — return `{ skill: null }`. Mirrors readPlugin: the
+/// skill-detail consumer renders an empty state when the skill is null.
+fn handle_provider_read_skill(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null }))
+}
+
+/// `provider.compactThread` — STUB. The composer calls this to compact the
+/// conversation context before an LLM round-trip (a real op). Syncode has no
+/// LLM-side compaction wired into the WS layer — return `{ ok: true }` so the
+/// composer treats the compaction as a no-op success. Real compaction would
+/// route through the provider adapter's session — deferred.
+fn handle_provider_compact_thread(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4688,5 +4950,267 @@ mod tests {
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             assert_eq!(resp.result.unwrap()["subscribed"], true);
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ─── Provider discovery RPCs (T6c-7) ────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Test helper scoped to provider RPCs (mirrors `auto_rpc`).
+    async fn provider_rpc(state: &WsState, req: &serde_json::Value) -> JsonRpcResponse {
+        let raw = handle_rpc(state, 1, &req.to_string()).await;
+        serde_json::from_str(&raw.unwrap_or_default()).unwrap()
+    }
+
+    /// All 11 provider discovery RPCs must resolve (no MethodNotFound) under
+    /// BOTH the MCode dot-name AND the slash form, and each must return a
+    /// success envelope. The dot-form is what the wsNativeApi sends (after
+    /// remap it becomes slash, but the dispatch must still accept the raw
+    /// dot-name); the slash form is what tauriNativeApi sends.
+    #[tokio::test]
+    async fn provider_rpcs_resolve_both_forms() {
+        let state = WsState::new_in_memory(16);
+        // (dot-name, slash-name)
+        let cases: &[(&str, &str)] = &[
+            ("provider.listModels", "provider/list-models"),
+            ("provider.listSkills", "provider/list-skills"),
+            ("provider.listSkillsCatalog", "provider/list-skills-catalog"),
+            ("provider.listPlugins", "provider/list-plugins"),
+            ("provider.readPlugin", "provider/read-plugin"),
+            ("provider.listCommands", "provider/list-commands"),
+            ("provider.listAgents", "provider/list-agents"),
+            (
+                "provider.getComposerCapabilities",
+                "provider/get-composer-capabilities",
+            ),
+            ("provider.listOptions", "provider/list-options"),
+            ("provider.readSkill", "provider/read-skill"),
+            ("provider.compactThread", "provider/compact-thread"),
+        ];
+        for (dot, slash) in cases {
+            for method in [*dot, *slash] {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": method
+                });
+                let resp = provider_rpc(&state, &req).await;
+                assert!(
+                    resp.error.is_none(),
+                    "{method} failed: {:?}",
+                    resp.error
+                );
+                assert!(resp.result.is_some(), "{method} returned null result");
+            }
+        }
+    }
+
+    /// rpc/listMethods must advertise the new provider methods so the UI's
+    /// capability discovery sees them.
+    #[tokio::test]
+    async fn provider_rpcs_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods"
+        });
+        let resp = provider_rpc(&state, &req).await;
+        let methods = resp.result.unwrap()["methods"]
+            .as_array()
+            .expect("methods is an array")
+            .clone();
+        let listed: std::collections::HashSet<String> = methods
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        for expected in [
+            "provider/list-models",
+            "provider/list-skills",
+            "provider/list-skills-catalog",
+            "provider/list-plugins",
+            "provider/read-plugin",
+            "provider/list-commands",
+            "provider/list-agents",
+            "provider/get-composer-capabilities",
+            "provider/list-options",
+            "provider/read-skill",
+            "provider/compact-thread",
+        ] {
+            assert!(
+                listed.contains(expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
+    }
+
+    /// listModels must be populated from the syncode-provider ALL_PROVIDERS
+    /// static (one entry per MCode-valid provider), each carrying the
+    /// schema-required `slug` + `name` fields. The MCode `ProviderKind` union
+    /// excludes `anthropic`/`openai` and renames `claude → claudeAgent`, so
+    /// those transformations must be reflected in the model slugs.
+    #[tokio::test]
+    async fn provider_list_models_populated_from_all_providers() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listModels"
+        });
+        let resp = provider_rpc(&state, &req).await;
+        let result = resp.result.unwrap();
+        let models = result["models"].as_array().expect("models is an array");
+        // 8 MCode-valid providers (claude/cursor/gemini/grok/kilo/opencode/pi +
+        // codex); anthropic + openai filtered out.
+        assert_eq!(models.len(), 8, "expected 8 MCode-valid provider models");
+        let slugs: Vec<&str> = models
+            .iter()
+            .map(|m| m["slug"].as_str().unwrap())
+            .collect();
+        // The claude → claudeAgent rename must be applied.
+        assert!(slugs.contains(&"claudeAgent"), "claude should map to claudeAgent");
+        assert!(
+            !slugs.contains(&"anthropic"),
+            "anthropic is not a MCode ProviderKind"
+        );
+        assert!(
+            !slugs.contains(&"openai"),
+            "openai is not a MCode ProviderKind"
+        );
+        // Each model must carry the schema-required slug + name.
+        for m in models {
+            assert!(m["slug"].is_string(), "model missing slug");
+            assert!(m["name"].is_string(), "model missing name");
+        }
+    }
+
+    /// listAgents mirrors listModels: one entry per MCode-valid provider with
+    /// name + displayName.
+    #[tokio::test]
+    async fn provider_list_agents_populated_from_all_providers() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listAgents"
+        });
+        let resp = provider_rpc(&state, &req).await;
+        let result = resp.result.unwrap();
+        let agents = result["agents"].as_array().expect("agents is an array");
+        assert_eq!(agents.len(), 8, "expected 8 MCode-valid provider agents");
+        for a in agents {
+            assert!(a["name"].is_string(), "agent missing name");
+            assert!(a["displayName"].is_string(), "agent missing displayName");
+        }
+    }
+
+    /// The empty-list RPCs (skills, plugins, commands, options) must return
+    /// the MCode-required top-level fields with empty arrays/null so the UI's
+    /// `.map`/`.length` reads don't crash. readPlugin/readSkill must return
+    /// null descriptors.
+    #[tokio::test]
+    async fn provider_empty_list_rpcs_return_minimal_shapes() {
+        let state = WsState::new_in_memory(16);
+
+        // listSkills → { skills: [] }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listSkills"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+
+        // listSkillsCatalog → { skills: [] }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listSkillsCatalog"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+
+        // listCommands → { commands: [] }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listCommands"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["commands"].as_array().unwrap().len(), 0);
+
+        // listOptions → { options: [] }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["options"].as_array().unwrap().len(), 0);
+
+        // readPlugin → { plugin: null }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.readPlugin",
+            "params": { "pluginId": "x" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert!(result["plugin"].is_null(), "readPlugin should return null plugin");
+
+        // readSkill → { skill: null }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.readSkill",
+            "params": { "name": "x" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert!(result["skill"].is_null(), "readSkill should return null skill");
+    }
+
+    /// listPlugins must return the full ProviderListPluginsResult shape with
+    /// empty marketplaces + a null remoteSyncError (the UI's plugins panel
+    /// reads all four top-level fields).
+    #[tokio::test]
+    async fn provider_list_plugins_returns_full_shape() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listPlugins"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert!(result["marketplaces"].is_array());
+        assert_eq!(result["marketplaces"].as_array().unwrap().len(), 0);
+        assert!(result["marketplaceLoadErrors"].is_array());
+        assert!(result["remoteSyncError"].is_null());
+        assert!(result["featuredPluginIds"].is_array());
+    }
+
+    /// getComposerCapabilities must echo the requested `provider` and return
+    /// every support flag as false (the composer renders a plain-prompt UI).
+    /// Defaults to "codex" when the provider param is absent.
+    #[tokio::test]
+    async fn provider_get_composer_capabilities_all_false() {
+        let state = WsState::new_in_memory(16);
+
+        // Explicit provider request.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.getComposerCapabilities",
+            "params": { "provider": "gemini" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["provider"], "gemini");
+        for flag in [
+            "supportsSkillMentions",
+            "supportsSkillDiscovery",
+            "supportsNativeSlashCommandDiscovery",
+            "supportsPluginMentions",
+            "supportsPluginDiscovery",
+            "supportsRuntimeModelList",
+            "supportsThreadCompaction",
+            "supportsThreadImport",
+        ] {
+            assert_eq!(result[flag], false, "{flag} should be false");
+        }
+
+        // Default when provider param absent.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.getComposerCapabilities"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["provider"], "codex", "default provider should be codex");
+    }
+
+    /// compactThread is a stub — returns { ok: true } so the composer treats
+    /// compaction as a no-op success.
+    #[tokio::test]
+    async fn provider_compact_thread_returns_ok_stub() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.compactThread",
+            "params": { "threadId": "thr_123" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["ok"], true);
     }
 }

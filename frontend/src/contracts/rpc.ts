@@ -114,6 +114,23 @@ import type {
   AutomationRunNowResult,
 } from "./shell";
 import type { WsWelcomePayload } from "./tier3/ws";
+// Provider discovery Tier-3 result types (T6c-7 provider RPC exposure). The
+// backend `crates/syncode-ws/src/rpc.rs` `handle_provider_*` handlers return
+// minimal valid MCode shapes (empty arrays/null descriptors, except listModels/
+// listAgents which are cheaply populated from the syncode-provider
+// `ALL_PROVIDERS` static) — see `frontend/src/contracts/tier3/provider.ts` for
+// the canonical shapes.
+import type {
+  ProviderComposerCapabilities,
+  ProviderListAgentsResult,
+  ProviderListCommandsResult,
+  ProviderListModelsResult,
+  ProviderListPluginsResult,
+  ProviderListSkillsResult,
+  ProviderPluginDetail,
+  ProviderSkillsCatalogResult,
+  ProviderSkillDescriptor,
+} from "./tier3/provider";
 
 // Minimal git input shapes for the served slash dispatch keys. The MCode UI
 // sends params under these camelCase keys (`cwd`, `branch`, `paths`,
@@ -281,8 +298,47 @@ interface TerminalSubscribeStubResult {
   note?: string;
 }
 
+// ─── Provider discovery minimal input/result shapes (T6c-7) ────────────
+// The backend handlers return minimal MCode shapes: arrays empty, optionals
+// null. `readPlugin`/`readSkill` return a null descriptor (the UI renders an
+// empty/not-found state); `compactThread` returns `{ ok: true }` (stub — no
+// LLM-side compaction wired in the WS layer). The list RPCs reuse the full
+// Tier-3 result types from `./tier3/provider` directly. See
+// `handle_provider_*` in `crates/syncode-ws/src/rpc.rs`.
+interface ProviderReadPluginInput {
+  /** MCode marketplace + plugin id pair (the UI sends the marketplace name +
+   * plugin id it wants detail for; backend ignores both — returns null). */
+  marketplaceName?: string;
+  pluginId?: string;
+}
+interface ProviderReadPluginResult {
+  plugin: ProviderPluginDetail | null;
+}
+interface ProviderGetComposerCapabilitiesInput {
+  /** MCode `ProviderKind` the composer is querying capabilities for. */
+  provider: string;
+}
+interface ProviderListOptionsResult {
+  options: readonly never[];
+}
+interface ProviderReadSkillInput {
+  /** Skill name/path the UI wants detail for (backend ignores — returns null). */
+  name?: string;
+  path?: string;
+}
+interface ProviderReadSkillResult {
+  skill: ProviderSkillDescriptor | null;
+}
+interface ProviderCompactThreadInput {
+  /** Thread id to compact (backend ignores — returns `{ ok: true }` stub). */
+  threadId?: string;
+}
+interface ProviderCompactThreadResult {
+  ok: boolean;
+}
+
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 41 entries (T6c-4 adds 9 server.*, T6c-5 adds 9 terminal.*) ──
+// ─── SERVED_RPC — 63 entries (T6c-4 server.* +9, T6c-5 terminal.* +9, T6c-6 automation.* +11, T6c-7 provider.* +11) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -569,6 +625,68 @@ export const SERVED_RPC = {
   "push/unsubscribe": {
     request: null as unknown as PushUnsubscribeParams,
     result: null as unknown as PushUnsubscribeResult,
+  },
+
+  // ─── Provider discovery (syncode-provider-backed, T6c-7) ─────────────
+  // The cloned MCode UI's composer/agent-mention/SkillsPanel/plugin layer
+  // calls these `provider.*` dot-strings (`wsNativeApi.ts` →
+  // `callTransport("provider.listModels", …)`, `provider.getComposerCapabili-
+  // ties`, …). The transport remaps the MCode dot-strings onto these slash
+  // keys (see `MCODE_TO_SERVED` in `wsTransport.ts`). The backend
+  // `crates/syncode-ws/src/rpc.rs` `handle_provider_*` handlers return minimal
+  // valid MCode shapes (empty arrays/null descriptors, except listModels/
+  // listAgents which are cheaply populated from the syncode-provider
+  // `ALL_PROVIDERS` static). Entries appended at the END to ease parallel-
+  // merge conflict resolution.
+  //
+  // `provider` param type for getComposerCapabilities: the MCode `ProviderKind`
+  // union (string literal). We use `ProviderComposerCapabilities` itself as
+  // the request carrier isn't right (it's the result); the handler reads a
+  // loose `{ provider?: string }` so a minimal local input type suffices — but
+  // reusing the schema-required shape keeps the contract honest.
+  "provider/list-models": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderListModelsResult,
+  },
+  "provider/list-skills": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderListSkillsResult,
+  },
+  "provider/list-skills-catalog": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderSkillsCatalogResult,
+  },
+  "provider/list-plugins": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderListPluginsResult,
+  },
+  "provider/read-plugin": {
+    request: null as unknown as ProviderReadPluginInput,
+    result: null as unknown as ProviderReadPluginResult,
+  },
+  "provider/list-commands": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderListCommandsResult,
+  },
+  "provider/list-agents": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderListAgentsResult,
+  },
+  "provider/get-composer-capabilities": {
+    request: null as unknown as ProviderGetComposerCapabilitiesInput,
+    result: null as unknown as ProviderComposerCapabilities,
+  },
+  "provider/list-options": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderListOptionsResult,
+  },
+  "provider/read-skill": {
+    request: null as unknown as ProviderReadSkillInput,
+    result: null as unknown as ProviderReadSkillResult,
+  },
+  "provider/compact-thread": {
+    request: null as unknown as ProviderCompactThreadInput,
+    result: null as unknown as ProviderCompactThreadResult,
   },
 } as const;
 
