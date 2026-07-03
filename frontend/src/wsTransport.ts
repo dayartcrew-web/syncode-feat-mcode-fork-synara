@@ -343,6 +343,18 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "server.transcribeVoice": "server/transcribe-voice",
   "server.voiceStart": "server/voice-start",
   "server.voiceStop": "server/voice-stop",
+
+  // ─── T6c-16: git stacked/detached-worktree/progress RPCs ─────────────
+  // The last 3 git niche RPCs the vendored MCode UI's GitActionsControl
+  // calls. The backend serves them via `syncode_git::stacked_actions`
+  // (runStackedAction), `git worktree add --detach` (createDetachedWorktree),
+  // and a graceful stub (subscribeActionProgress). Map every MCode dot-name
+  // to the served slash dispatch key so the calls reach the backend (instead
+  // of being client-stubbed with MethodNotFound). Entries appended at the
+  // END to ease parallel-merge conflict resolution.
+  "git.runStackedAction": "git/run-stacked-action",
+  "git.createDetachedWorktree": "git/create-detached-worktree",
+  "git.subscribeActionProgress": "git/subscribe-action-progress",
 };
 
 /**

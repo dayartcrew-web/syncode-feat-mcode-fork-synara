@@ -75,6 +75,7 @@ import type { PushUnsubscribeResult } from "../types/PushUnsubscribeResult";
 import type {
   GitBranch,
   GitReadWorkingTreeDiffInput,
+  GitRunStackedActionResult,
   GitStashInfoResult,
   GitStatusResult,
 } from "./tier3/git";
@@ -129,6 +130,10 @@ import type {
   GitHandoffThreadResult,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
+  // T6c-16 git stacked-action / detached-worktree / progress RPCs.
+  GitCreateDetachedWorktreeInput,
+  GitCreateDetachedWorktreeResult,
+  GitRunStackedActionInput,
 } from "./shell";
 import type { WsWelcomePayload } from "./tier3/ws";
 // Provider discovery Tier-3 result types (T6c-7 provider RPC exposure). The
@@ -561,7 +566,7 @@ interface ProviderCompactThreadResult {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 99 entries (latest: T6c-15 voice STT not-configured stubs +3) ──
+// ─── SERVED_RPC — 102 entries (latest: T6c-16 git stacked/detached-worktree/progress +3) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -1132,6 +1137,37 @@ export const SERVED_RPC = {
     request: null as unknown as Record<string, unknown>,
     result: null as unknown as Record<string, unknown>,
   },
+
+  // ─── Git stacked actions / detached worktree / progress (T6c-16) ──────
+  // The last 3 git niche RPCs the vendored MCode UI's GitActionsControl
+  // calls. The backend `crates/syncode-ws/src/rpc.rs` handlers:
+  //   - `git/run-stacked-action` — REUSES `syncode_git::stacked_actions`
+  //     (StackedPipeline / StackedAction) to execute a commit/push/PR
+  //     pipeline. Maps MCode `GitStackedAction` (`commit | push | create_pr |
+  //     commit_push | commit_push_pr`) onto a sequence of syncode stacked
+  //     actions and projects per-step `ActionResult` into the MCode
+  //     `GitRunStackedActionResult` shape (`{ action, branch, commit, push,
+  //     pr }` with per-step status enums).
+  //   - `git/create-detached-worktree` — REAL: `git worktree add --detach`
+  //     (libgit2 rejects non-branch refs for the worktree HEAD, so the CLI is
+  //     the canonical path). Returns MCode `GitCreateDetachedWorktreeResult`
+  //     (`{ worktree: { path, ref, branch: null } }`).
+  //   - `git/subscribe-action-progress` — GRACEFUL STUB: stacked actions are
+  //     synchronous (no real progress push channel); returns
+  //     `{ subscribed: true }`. T6c-future could stream progress via the
+  //     existing `push/subscribe` bus when stacked actions become long-running.
+  "git/run-stacked-action": {
+    request: null as unknown as GitRunStackedActionInput,
+    result: null as unknown as GitRunStackedActionResult,
+  },
+  "git/create-detached-worktree": {
+    request: null as unknown as GitCreateDetachedWorktreeInput,
+    result: null as unknown as GitCreateDetachedWorktreeResult,
+  },
+  "git/subscribe-action-progress": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -1189,19 +1225,17 @@ export const UNSERVED_RPC = [
   // advanced ops (stash/network/worktree/init/removeIndexLock) are NOW ALSO
   // SERVED as of T6c-9 (mapped via MCODE_TO_SERVED to `git/stash-*`,
   // `git/fetch`, `git/pull`, `git/push`, `git/worktree-*`, `git/init`,
-  // `git/remove-index-lock`). The ops below remain unserved — they need
-  // services syncode does not have:
-  //   - LLM (runStackedAction) — needs provider wiring (multi-phase commit/push/PR)
-  //   - detached worktree (createDetachedWorktree) — niche variant of
-  //     worktreeCreate; deferred
-  //   - push channel (subscribeActionProgress) — T6c-future push delivery
+  // `git/remove-index-lock`). ALL git.* RPCs the vendored UI calls are now
+  // SERVED as of T6c-16:
+  //   - `git.runStackedAction` + `git.createDetachedWorktree` +
+  //     `git.subscribeActionProgress` were the last 3 unserved git RPCs;
+  //     they are NOW SERVED as of T6c-16 (see SERVED_RPC).
   //   (NOTE: `git.summarizeDiff` was served in T6c-13 — LLM-backed one-shot.
   //   `git.githubRepository` + `git.resolvePullRequest` + `git.handoffThread`
   //   + `git.preparePullRequestThread` were UNSERVED until T6c-14; they are
   //   NOW SERVED via the gh-CLI-backed GitHub-API ops — see SERVED_RPC.)
-  "git.runStackedAction",
-  "git.createDetachedWorktree",
-  "git.subscribeActionProgress",
+  // No git.* RPCs remain unserved at the transport layer — this git block is
+  // intentionally empty (kept as a marker for the domain).
 
   // ─── Terminal (CORE ops SERVED in T6c-5, advanced deferred) ──────────
   // The core Terminal panel ops (open/new, write, resize, close/kill, ack,
