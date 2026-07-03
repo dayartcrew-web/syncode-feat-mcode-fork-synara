@@ -904,13 +904,15 @@ async fn dispatch_method(
         "server.patchSettings" | "server/patch-settings" => {
             handle_server_patch_settings(state, id, &request.params).await
         }
-        // stub: no usage-tracking subsystem — empty usage list.
+        // T6c-19 REAL: aggregate the in-memory usage log into per-provider
+        // snapshots. Acknowledges the optional `forceRefresh` param.
         "server.listProviderUsage" | "server/list-provider-usage" => {
-            handle_server_list_provider_usage(id, &request.params)
+            handle_server_list_provider_usage(state, id, &request.params).await
         }
-        // stub: no usage-tracking subsystem — null snapshot.
+        // T6c-19 REAL: single-provider usage snapshot from the log; null when
+        // the provider has no recorded usage. Validates `provider` non-empty.
         "server.getProviderUsageSnapshot" | "server/get-provider-usage-snapshot" => {
-            handle_server_get_provider_usage_snapshot(id, &request.params)
+            handle_server_get_provider_usage_snapshot(state, id, &request.params).await
         }
         // stub: no local-server process-mgmt subsystem — graceful not-supported.
         "server.startLocalServer" | "server/start-local-server" => {
@@ -2519,22 +2521,50 @@ fn strip_markdown_fence(s: &str) -> String {
     s.to_string()
 }
 
-/// `server.listProviderUsage` — return empty usage list. MCode's contract is
-/// `ServerListProviderUsageResult = readonly ServerProviderUsageSnapshot[]`;
-/// syncode has no usage-tracking subsystem, so we return an empty array
-/// (acknowledging the optional `forceRefresh` param without erroring).
-fn handle_server_list_provider_usage(id: Value, params: &Value) -> JsonRpcResponse {
-    let _ = params; // ack `forceRefresh` etc. — no behavior.
-    // stub: no usage-tracking subsystem — empty list.
-    JsonRpcResponse::success(id, serde_json::json!([]))
+/// `server.listProviderUsage` — REAL (T6c-19): aggregates the in-memory usage
+/// log into one `ServerProviderUsageSnapshot` per provider that has recorded
+/// usage. MCode's contract is `ServerListProviderUsageResult = readonly
+/// ServerProviderUsageSnapshot[]`. Syncode now backs this with actual usage
+/// captured from successful LLM one-shot ops (`compactThread`, `summarizeDiff`,
+/// `generateThreadRecap`, `generateAutomationIntent`) via the `invoke()`
+/// helper. Providers with no recorded usage are omitted (an empty array means
+/// "no usage yet this session" — the UI surfaces an empty state).
+///
+/// The optional `forceRefresh` param is acknowledged but has no effect
+/// (syncode's log is always live in-memory; there's no cached snapshot to
+/// invalidate). Returns at most one snapshot per provider id, sorted
+/// alphabetically.
+async fn handle_server_list_provider_usage(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let _ = params; // ack `forceRefresh` etc. — no behavior (live log).
+    let store = state.usage.read().await;
+    let aggregates = store.aggregate_by_provider();
+    let snapshots: Vec<Value> = aggregates
+        .into_iter()
+        .map(|agg| usage_snapshot_json(&agg, "syncode-usage-log"))
+        .collect();
+    JsonRpcResponse::success(id, Value::Array(snapshots))
 }
 
-/// `server.getProviderUsageSnapshot` — return null snapshot. MCode's contract
-/// is `ServerGetProviderUsageSnapshotResult = ServerProviderUsageSnapshot |
-/// null`; syncode has no usage-tracking subsystem, so we return `null`.
-/// Validates that `params.provider` is a non-empty string to give a typed
-/// error rather than a silent null when the caller omits it.
-fn handle_server_get_provider_usage_snapshot(id: Value, params: &Value) -> JsonRpcResponse {
+/// `server.getProviderUsageSnapshot` — REAL (T6c-19): returns a single
+/// provider's usage snapshot aggregated from the in-memory log. MCode's
+/// contract is `ServerGetProviderUsageSnapshotResult =
+/// ServerProviderUsageSnapshot | null`. We return `null` when the provider
+/// has no recorded usage (the UI treats null as "no data"); otherwise a
+/// snapshot whose `usageLines` carry the aggregate token counts.
+///
+/// Validates that `params.provider` is a non-empty string (the MCode input
+/// shape marks it required). The provider id is matched case-sensitively
+/// against what the `invoke()` helper recorded (the resolved registry id —
+/// e.g. `claude`, `codex`, `gemini`, …).
+async fn handle_server_get_provider_usage_snapshot(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
     let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("");
     if provider.trim().is_empty() {
         return JsonRpcResponse::error(
@@ -2543,8 +2573,67 @@ fn handle_server_get_provider_usage_snapshot(id: Value, params: &Value) -> JsonR
             "Invalid params: 'provider' must be a non-empty string",
         );
     }
-    // stub: no usage-tracking subsystem — null snapshot.
-    JsonRpcResponse::success(id, Value::Null)
+    let store = state.usage.read().await;
+    match store.aggregate_for(provider) {
+        Some(agg) => JsonRpcResponse::success(
+            id,
+            usage_snapshot_json(&agg, "syncode-usage-log"),
+        ),
+        None => {
+            // No usage recorded for this provider → null (UI shows empty state).
+            JsonRpcResponse::success(id, Value::Null)
+        }
+    }
+}
+
+/// Build a `ServerProviderUsageSnapshot` JSON value from a usage aggregate.
+///
+/// Matches the MCode contract (`frontend/src/contracts/tier3/server.ts`).
+/// Field mapping:
+///
+/// - `provider`: the provider id (`ProviderKind`).
+/// - `updatedAt`: ISO-8601 timestamp of the most-recent entry.
+/// - `limits`: empty array. Syncode has no rate-limit tracking; the
+///   `ServerProviderUsageLimit` shape is for windowed quotas we don't model
+///   (left as a follow-up).
+/// - `usageLines`: label/value lines for input, output, total tokens + call
+///   count.
+/// - `source`: opaque origin tag (caller-supplied; the handlers pass
+///   `"syncode-usage-log"` so the UI can label the source).
+/// - `status`: `"ok"`. We only record successful ops; a non-ok status would
+///   come from a rate-limit probe, which we lack.
+///
+/// `usageLines` use the `ServerProviderUsageLine` shape `{ label, value,
+/// subtitle? }`. Values are formatted as human-readable strings (the contract
+/// types `value` as `TrimmedNonEmptyString`, not a number — the UI renders
+/// them as-is).
+fn usage_snapshot_json(agg: &crate::usage::ProviderUsageAggregate, source: &str) -> Value {
+    let updated_at = agg
+        .last_used_at
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    serde_json::json!({
+        "provider": agg.provider_id,
+        "updatedAt": updated_at,
+        "limits": [],
+        "usageLines": [
+            { "label": "Input tokens",  "value": agg.total_input.to_string() },
+            { "label": "Output tokens", "value": agg.total_output.to_string() },
+            { "label": "Total tokens",  "value": agg.total_tokens.to_string() },
+            {
+                "label": "Calls",
+                "value": agg.call_count.to_string(),
+                "subtitle": "LLM round trips recorded this session"
+            },
+        ],
+        "source": source,
+        "status": "ok",
+        "planName": null,
+        "detail": format!(
+            "Aggregated from {} recorded call(s); model last used: {}",
+            agg.call_count, agg.model
+        ),
+    })
 }
 
 /// `server.startLocalServer` — return a graceful not-supported result.
@@ -5895,7 +5984,25 @@ async fn invoke(
         .ok_or_else(|| format!("provider '{resolved}' lookup failed"))?;
     drop(registry);
 
-    crate::llm::invoke_llm_oneshot(&adapter, &resolved, model, Some(system), prompt).await
+    let outcome =
+        crate::llm::invoke_llm_oneshot(&adapter, &resolved, model, Some(system), prompt).await?;
+
+    // Record token usage (best-effort telemetry). A `None` usage (provider
+    // reported none, or all-zero) is silently skipped — the reply text is
+    // the load-bearing return; usage is opportunistic aggregation feed.
+    if let Some(usage) = &outcome.usage {
+        let entry = crate::usage::UsageEntry {
+            provider_id: resolved.clone(),
+            model: outcome.model.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            timestamp: chrono::Utc::now(),
+        };
+        state.usage.write().await.record(entry);
+    }
+
+    Ok(outcome.text)
 }
 
 /// Read a thread's messages from the read model and render them as a flat
@@ -9737,9 +9844,11 @@ mod tests {
         }
     }
 
-    /// listProviderUsage returns an empty array under BOTH forms.
+    /// listProviderUsage with NO recorded usage returns an empty array
+    /// (REAL: aggregates the in-memory log, which starts empty). Under BOTH
+    /// dot-name AND slash form.
     #[tokio::test]
-    async fn server_list_provider_usage_returns_empty_array() {
+    async fn server_list_provider_usage_empty_when_no_usage_recorded() {
         let state = WsState::new_in_memory(16);
         for method in ["server.listProviderUsage", "server/list-provider-usage"] {
             let req = serde_json::json!({
@@ -9750,44 +9859,206 @@ mod tests {
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
             assert!(result.is_array(), "{}: result must be array", method);
-            assert!(result.as_array().unwrap().is_empty(), "{}: must be empty", method);
+            assert!(
+                result.as_array().unwrap().is_empty(),
+                "{}: must be empty when no usage recorded",
+                method
+            );
         }
     }
 
-    /// getProviderUsageSnapshot returns null (and validates `provider`).
+    /// listProviderUsage returns one snapshot per provider after usage is
+    /// recorded, aggregating token counts across calls. Records entries
+    /// directly into the store (the same path `invoke()` writes through),
+    /// then asserts the snapshot carries the summed totals.
     #[tokio::test]
-    async fn server_get_provider_usage_snapshot_returns_null_and_validates() {
+    async fn server_list_provider_usage_aggregates_recorded_entries() {
         let state = WsState::new_in_memory(16);
+        {
+            let mut store = state.usage.write().await;
+            store.record(crate::usage::UsageEntry {
+                provider_id: "claude".into(),
+                model: "sonnet".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                timestamp: chrono::Utc::now(),
+            });
+            store.record(crate::usage::UsageEntry {
+                provider_id: "claude".into(),
+                model: "sonnet".into(),
+                input_tokens: 30,
+                output_tokens: 20,
+                total_tokens: 50,
+                timestamp: chrono::Utc::now(),
+            });
+            store.record(crate::usage::UsageEntry {
+                provider_id: "codex".into(),
+                model: "gpt-5".into(),
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+                timestamp: chrono::Utc::now(),
+            });
+        }
 
-        // Happy path: provider non-empty → null snapshot. NOTE: a `Value::Null`
-        // result round-trips through JSON (serialize → deserialize) as `None`
-        // (serde's `Option<Value>` deserializes JSON `null` to `None`), so we
-        // accept EITHER `None` or `Some(Value::Null)` here — both mean the
-        // handler returned a null snapshot.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.listProviderUsage"
+        });
+        let result = rpc(&state, 1, &req).await.result.unwrap();
+        let arr = result.as_array().expect("array of snapshots");
+        assert_eq!(arr.len(), 2, "one snapshot per provider");
+
+        // Sorted alphabetically: claude first, codex second.
+        let claude = &arr[0];
+        assert_eq!(claude["provider"], "claude");
+        assert_eq!(claude["status"], "ok");
+        // Find the "Total tokens" usage line and assert it sums (150 + 50 = 200).
+        let lines = claude["usageLines"].as_array().expect("usageLines array");
+        let total_line = lines
+            .iter()
+            .find(|l| l["label"] == "Total tokens")
+            .expect("total tokens line");
+        assert_eq!(total_line["value"], "200", "claude total aggregated");
+        let calls_line = lines
+            .iter()
+            .find(|l| l["label"] == "Calls")
+            .expect("calls line");
+        assert_eq!(calls_line["value"], "2", "claude call count");
+
+        let codex = &arr[1];
+        assert_eq!(codex["provider"], "codex");
+        let codex_total = codex["usageLines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["label"] == "Total tokens")
+            .unwrap();
+        assert_eq!(codex_total["value"], "15");
+    }
+
+    /// getProviderUsageSnapshot returns null when the provider has no usage,
+    /// and a snapshot otherwise. Validates `provider` non-empty. Under BOTH
+    /// forms.
+    #[tokio::test]
+    async fn server_get_provider_usage_snapshot_real_aggregation() {
+        let state = WsState::new_in_memory(16);
+        // Seed usage for "claude" only.
+        state.usage.write().await.record(crate::usage::UsageEntry {
+            provider_id: "claude".into(),
+            model: "sonnet".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            timestamp: chrono::Utc::now(),
+        });
+
+        // Provider WITH usage → snapshot (not null).
         for method in [
             "server.getProviderUsageSnapshot",
             "server/get-provider-usage-snapshot",
         ] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
-                "params": { "provider": "codex" }
+                "params": { "provider": "claude" }
             });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
-            match resp.result {
-                None => {} // null result deserialized to None (serde quirk).
-                Some(v) => assert!(v.is_null(), "{}: must be null, got {v}", method),
-            }
+            let result = resp.result.expect("non-null snapshot for claude");
+            assert_eq!(result["provider"], "claude");
+            assert_eq!(result["status"], "ok");
+            assert!(
+                result["updatedAt"].as_str().is_some(),
+                "snapshot must carry updatedAt"
+            );
+            let total = result["usageLines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|l| l["label"] == "Total tokens")
+                .unwrap();
+            assert_eq!(total["value"], "150");
+        }
+
+        // Provider WITHOUT usage → null (UI empty state).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "server.getProviderUsageSnapshot",
+            "params": { "provider": "codex" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none());
+        match resp.result {
+            None => {}
+            Some(v) => assert!(v.is_null(), "no-usage provider must be null, got {v}"),
         }
 
         // Validation: missing provider → InvalidParams.
         let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": "server/get-provider-usage-snapshot",
+            "jsonrpc": "2.0", "id": 3, "method": "server/get-provider-usage-snapshot",
             "params": {}
         });
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_some(), "missing provider must reject");
         assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    /// End-to-end: a real LLM-backed RPC (`git.summarizeDiff`) records usage
+    /// into the store, and `listProviderUsage` then surfaces it. Proves the
+    /// instrumentation seam (invoke → record → aggregate) is wired through.
+    #[tokio::test]
+    async fn llm_op_records_usage_visible_in_list_provider_usage() {
+        use crate::llm::SharedAdapter;
+        use syncode_provider::UsageInfo;
+        use tokio::sync::RwLock;
+
+        let state = WsState::new_in_memory(16);
+        // Register a mock provider configured with canned usage — when
+        // `git.summarizeDiff` invokes it, the response carries usage that
+        // `invoke()` must record.
+        let mock: SharedAdapter = Arc::new(RwLock::new(
+            crate::llm::MockLlmAdapter::new("Refactors the auth module.").with_usage(UsageInfo {
+                input_tokens: 200,
+                output_tokens: 40,
+                total_tokens: 240,
+            }),
+        ));
+        state
+            .provider_registry
+            .write()
+            .await
+            .register_shared("claude".to_string(), mock);
+
+        // 1. Run an LLM-backed op (summarizeDiff with a caller-supplied diff).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.summarizeDiff",
+            "params": { "diff": "diff --git a/x b/x\n- old\n+ new" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["summary"], "Refactors the auth module.");
+
+        // 2. The usage store now has one entry for claude.
+        {
+            let store = state.usage.read().await;
+            assert_eq!(store.len(), 1, "exactly one usage entry recorded");
+            let agg = store.aggregate_for("claude").expect("claude aggregate");
+            assert_eq!(agg.total_tokens, 240);
+        }
+
+        // 3. listProviderUsage surfaces the recorded usage.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "server.listProviderUsage"
+        });
+        let result = rpc(&state, 1, &req).await.result.unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "one provider with usage");
+        assert_eq!(arr[0]["provider"], "claude");
+        let total = arr[0]["usageLines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["label"] == "Total tokens")
+            .unwrap();
+        assert_eq!(total["value"], "240");
     }
 
     /// startLocalServer returns graceful not-supported; stopLocalServer

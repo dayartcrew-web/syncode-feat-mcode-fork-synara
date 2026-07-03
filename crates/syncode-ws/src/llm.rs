@@ -35,7 +35,7 @@ use std::sync::Arc;
 use syncode_core::EntityId;
 use syncode_provider::{
     ProviderAdapter, ProviderAdapterError, ProviderCapability, ProviderConfig, ProviderEvent,
-    ProviderRequest, ProviderResponse, ProviderStatus, ProviderStream, SessionContext,
+    ProviderRequest, ProviderResponse, ProviderStatus, ProviderStream, SessionContext, UsageInfo,
 };
 use syncode_provider::{PROVIDER_CLAUDE, PROVIDER_CODEX};
 use tokio::sync::RwLock;
@@ -74,7 +74,7 @@ const ONESHOT_WORKING_DIR: &str = "/";
 pub type LlmError = String;
 
 /// Run a single prompt through a provider adapter and return the model's reply
-/// text.
+/// text **and** any token-usage metadata the response carried.
 ///
 /// The adapter is expected to be **unspawned** (the helper calls `spawn`). It
 /// is spawned once per call — one-shot ops are infrequent (composer compaction,
@@ -90,13 +90,18 @@ pub type LlmError = String;
 /// Returns `Err` if any lifecycle step fails (spawn / start_session /
 /// send_request) or if the response carries a JSON-RPC error or yields no
 /// extractable text. The error string is safe to return to the client.
+///
+/// On success the returned [`InvokeOutcome`] carries the reply text plus the
+/// parsed token usage (`usage` is `None` when the provider did not report
+/// any). Callers that want usage tracking persist the `usage` into a
+/// [`crate::usage::UsageStore`]; callers that don't simply ignore it.
 pub async fn invoke_llm_oneshot(
     adapter: &SharedAdapter,
     provider_id: &str,
     model: Option<&str>,
     system: Option<&str>,
     prompt: &str,
-) -> Result<String, LlmError> {
+) -> Result<InvokeOutcome, LlmError> {
     // 1. spawn
     let config = ProviderConfig {
         provider_id: provider_id.to_string(),
@@ -114,7 +119,8 @@ pub async fn invoke_llm_oneshot(
     // Defer shutdown so we always tear the subprocess down on exit (success or
     // error). Best-effort: a shutdown failure does not override a successful
     // response, but is logged for diagnostics.
-    let result = run_session(adapter, system, prompt).await;
+    let model_token = model.unwrap_or(DEFAULT_MODEL).to_string();
+    let result = run_session(adapter, &model_token, system, prompt).await;
 
     // best-effort shutdown
     if let Err(e) = adapter.write().await.shutdown().await {
@@ -124,14 +130,39 @@ pub async fn invoke_llm_oneshot(
     result
 }
 
+/// The outcome of a successful one-shot invocation: the reply text plus any
+/// token-usage metadata the provider reported. The model field echoes the
+/// effective model token used (the value placed into `ProviderConfig.model`),
+/// so the caller can record it without re-deriving it.
+#[derive(Debug, Clone)]
+pub struct InvokeOutcome {
+    /// The reply text (non-empty; same as the historical `String` return).
+    pub text: String,
+    /// Token usage reported by the provider, if any. `None` when the
+    /// provider's response carried no recognizable usage block.
+    pub usage: Option<UsageInfo>,
+    /// The effective model token for the call (the value the helper placed
+    /// into `ProviderConfig.model`). Echoed back so callers don't need to
+    /// recompute it when recording a usage entry.
+    pub model: String,
+}
+
+impl InvokeOutcome {
+    /// Convenience accessor preserving the historical `String` return shape.
+    pub fn into_text(self) -> String {
+        self.text
+    }
+}
+
 /// Build the SessionContext + ProviderRequest, run the session, and extract
-/// the reply text. Factored out of [`invoke_llm_oneshot`] so the shutdown
-/// guard wraps a single expression.
+/// the reply text + usage. Factored out of [`invoke_llm_oneshot`] so the
+/// shutdown guard wraps a single expression.
 async fn run_session(
     adapter: &SharedAdapter,
+    model: &str,
     system: Option<&str>,
     prompt: &str,
-) -> Result<String, LlmError> {
+) -> Result<InvokeOutcome, LlmError> {
     let ctx = SessionContext {
         thread_id: EntityId::new(),
         turn_id: EntityId::new(),
@@ -166,7 +197,18 @@ async fn run_session(
         })?
     };
 
-    extract_reply_text(&response)
+    // Extract reply text first (surfaces rpc/empty errors as before). Then
+    // parse any token-usage block from the SAME response.result JSON so we
+    // can hand it back to the caller for usage tracking. The two extractions
+    // are independent — a missing/zero usage block never blocks a successful
+    // text reply (best-effort telemetry).
+    let text = extract_reply_text(&response)?;
+    let usage = extract_usage_from_response(&response);
+    Ok(InvokeOutcome {
+        text,
+        usage,
+        model: model.to_string(),
+    })
 }
 
 /// Pull the model's reply text out of a [`ProviderResponse`].
@@ -206,6 +248,92 @@ fn extract_reply_text(response: &ProviderResponse) -> Result<String, LlmError> {
         return Err("provider returned an empty response".to_string());
     }
     Ok(trimmed.to_string())
+}
+
+/// Best-effort extraction of token-usage metadata from a [`ProviderResponse`].
+///
+/// `ProviderResponse` itself has no `usage` field — usage lives inside the
+/// `result` JSON, and different providers serialize it under different keys:
+///   - **ACP** (`claude`/`codex`/`cursor`/`gemini`/`grok` via AcpProvider):
+///     `result.usage = { inputTokens, outputTokens, totalTokens }` (camelCase).
+///   - **codex_app_server / opencode / kilo**: snake_case
+///     `result.usage = { input_tokens, output_tokens, total_tokens }` (and
+///     sometimes a `last_token_usage` / `lastTokenUsage` nested block — we
+///     fall back to that if the top-level `usage` is absent).
+///   - **anthropic HTTP adapter**: emits snake_case inside the result it
+///     builds.
+///
+/// We probe `usage` (top-level) first, accepting either casing for the
+/// token-count fields, then fall back to `last_token_usage` /
+/// `lastTokenUsage`. Returns `None` if no recognizable usage block is found
+/// OR every probed block yields all-zero counts (a degenerate "present but
+/// empty" we treat as no-usage — recording zeros would pollute aggregates).
+///
+/// Never errors: a malformed usage block is silently ignored (usage is
+/// best-effort telemetry; the reply text is the load-bearing extraction).
+fn extract_usage_from_response(response: &ProviderResponse) -> Option<UsageInfo> {
+    let result = response.result.as_ref()?;
+    // Top-level `usage` block (the common case for ACP + codex).
+    if let Some(usage) = result.get("usage")
+        && let Some(info) = parse_usage_block(usage)
+    {
+        return Some(info);
+    }
+    // Fallback: nested `last_token_usage` / `lastTokenUsage` (codex streams
+    // per-token usage under this key; the final response sometimes surfaces
+    // it instead of a top-level `usage`).
+    for key in ["last_token_usage", "lastTokenUsage"] {
+        if let Some(usage) = result.get(key)
+            && let Some(info) = parse_usage_block(usage)
+        {
+            return Some(info);
+        }
+    }
+    None
+}
+
+/// Parse a JSON usage block into [`UsageInfo`], accepting either camelCase
+/// (`inputTokens`) or snake_case (`input_tokens`) field names. Returns
+/// `None` for an all-zero block (treated as no-usage to avoid polluting
+/// aggregates with empty observations).
+fn parse_usage_block(value: &serde_json::Value) -> Option<UsageInfo> {
+    let input = num_field(value, "inputTokens").or_else(|| num_field(value, "input_tokens"));
+    let output = num_field(value, "outputTokens").or_else(|| num_field(value, "output_tokens"));
+    let total = num_field(value, "totalTokens").or_else(|| num_field(value, "total_tokens"));
+
+    // Require at least one field to be present (otherwise this isn't a usage
+    // block at all — it's just some other object that happens to sit under
+    // `usage`). If only some fields are present, the missing ones default to 0
+    // and total is recomputed when it's absent (a common provider omission).
+    if input.is_none() && output.is_none() && total.is_none() {
+        return None;
+    }
+    let input = input.unwrap_or(0);
+    let output = output.unwrap_or(0);
+    let total = total.unwrap_or(input + output);
+    // Suppress degenerate all-zero blocks (provider reported usage structurally
+    // but with no real counts — e.g. a failed/aborted turn that still echoed
+    // the shape). Recording zeros would skew averages and inflate call counts.
+    if input == 0 && output == 0 && total == 0 {
+        return None;
+    }
+    Some(UsageInfo {
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+    })
+}
+
+/// Read a u32 field from a JSON object by key. Returns `None` if the key is
+/// absent or the value isn't an unsigned integer.
+fn num_field(value: &serde_json::Value, key: &str) -> Option<u32> {
+    value.get(key).and_then(|v| v.as_u64()).and_then(|n| {
+        if n <= u32::MAX as u64 {
+            Some(n as u32)
+        } else {
+            None
+        }
+    })
 }
 
 /// Outcome of probing a response result for reply text.
@@ -308,6 +436,11 @@ pub struct MockLlmAdapter {
     canned: String,
     spawned: std::sync::atomic::AtomicBool,
     session_id: std::sync::Mutex<Option<String>>,
+    /// Optional canned `usage` block to emit in the response JSON (so tests
+    /// can exercise the usage-extraction → recording path without a real
+    /// provider). `None` → no `usage` key in the response (matches the
+    /// historical mock behavior — usage tracking sees nothing).
+    canned_usage: Option<UsageInfo>,
 }
 
 impl MockLlmAdapter {
@@ -317,6 +450,7 @@ impl MockLlmAdapter {
             canned: canned.into(),
             spawned: std::sync::atomic::AtomicBool::new(false),
             session_id: std::sync::Mutex::new(None),
+            canned_usage: None,
         }
     }
 
@@ -324,6 +458,14 @@ impl MockLlmAdapter {
     /// sentinel — lets a test assert the *exact* prompt reached the adapter.
     pub fn echoing() -> Self {
         Self::new("__ECHO__".to_string())
+    }
+
+    /// Attach a canned `usage` block (camelCase wire shape) to every response.
+    /// Lets usage-tracking tests assert the extract → record → aggregate path
+    /// without depending on a real provider.
+    pub fn with_usage(mut self, usage: UsageInfo) -> Self {
+        self.canned_usage = Some(usage);
+        self
     }
 }
 
@@ -402,10 +544,26 @@ impl ProviderAdapter for MockLlmAdapter {
             self.canned.clone()
         };
 
+        // Build the result JSON: always an `output` key (the reply text the
+        // extractor probes), plus an optional `usage` block (camelCase ACP
+        // shape) when the mock was configured with canned usage. The usage
+        // key is what [`extract_usage_from_response`] looks for.
+        let result = match &self.canned_usage {
+            Some(u) => serde_json::json!({
+                "output": body,
+                "usage": {
+                    "inputTokens": u.input_tokens,
+                    "outputTokens": u.output_tokens,
+                    "totalTokens": u.total_tokens,
+                }
+            }),
+            None => serde_json::json!({ "output": body }),
+        };
+
         Ok(ProviderResponse {
             jsonrpc: "2.0".to_string(),
             id: Some(request.id),
-            result: Some(serde_json::json!({ "output": body })),
+            result: Some(result),
             error: None,
         })
     }
@@ -446,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn oneshot_returns_canned_text() {
         let adapter = mock_shared("compacted conversation summary");
-        let text = invoke_llm_oneshot(
+        let outcome = invoke_llm_oneshot(
             &adapter,
             "mock-llm",
             None,
@@ -455,7 +613,9 @@ mod tests {
         )
         .await
         .expect("oneshot should succeed");
-        assert_eq!(text, "compacted conversation summary");
+        assert_eq!(outcome.text, "compacted conversation summary");
+        assert!(outcome.usage.is_none(), "plain mock reports no usage");
+        assert_eq!(outcome.model, DEFAULT_MODEL);
     }
 
     #[tokio::test]
@@ -463,7 +623,7 @@ mod tests {
         // The echoing mock surfaces the prompt body — proves the helper
         // forwards the user prompt verbatim (not the system prompt).
         let adapter: SharedAdapter = Arc::new(RwLock::new(MockLlmAdapter::echoing()));
-        let text = invoke_llm_oneshot(
+        let outcome = invoke_llm_oneshot(
             &adapter,
             "mock-llm",
             None,
@@ -473,13 +633,109 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            text.contains("USER-PROMPT-BODY"),
-            "echo should carry the user prompt; got: {text}"
+            outcome.text.contains("USER-PROMPT-BODY"),
+            "echo should carry the user prompt; got: {}",
+            outcome.text
         );
         assert!(
-            !text.contains("SYSTEM-INSTRUCTION"),
+            !outcome.text.contains("SYSTEM-INSTRUCTION"),
             "system prompt should not leak into the echoed user body"
         );
+    }
+
+    #[tokio::test]
+    async fn oneshot_extracts_camelcase_usage_from_response() {
+        // A mock configured with canned usage → the outcome carries it back,
+        // parsed from the camelCase wire shape into UsageInfo.
+        let adapter: SharedAdapter = Arc::new(RwLock::new(
+            MockLlmAdapter::new("summary").with_usage(UsageInfo {
+                input_tokens: 120,
+                output_tokens: 30,
+                total_tokens: 150,
+            }),
+        ));
+        let outcome = invoke_llm_oneshot(&adapter, "mock-llm", Some("sonnet"), None, "x")
+            .await
+            .expect("oneshot should succeed");
+        let usage = outcome.usage.expect("usage should be parsed");
+        assert_eq!((usage.input_tokens, usage.output_tokens, usage.total_tokens), (120, 30, 150));
+        assert_eq!(outcome.model, "sonnet", "model token echoes back");
+    }
+
+    #[test]
+    fn extract_usage_handles_camelcase_and_snake_case() {
+        let camel = ProviderResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "output": "x",
+                "usage": { "inputTokens": 10, "outputTokens": 5, "totalTokens": 15 }
+            })),
+            error: None,
+        };
+        let u = extract_usage_from_response(&camel).expect("camel usage");
+        assert_eq!((u.input_tokens, u.output_tokens, u.total_tokens), (10, 5, 15));
+
+        let snake = ProviderResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "output": "x",
+                "usage": { "input_tokens": 7, "output_tokens": 3, "total_tokens": 10 }
+            })),
+            error: None,
+        };
+        let u = extract_usage_from_response(&snake).expect("snake usage");
+        assert_eq!(u.total_tokens, 10);
+
+        // last_token_usage fallback (codex wire shape).
+        let last = ProviderResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "output": "x",
+                "last_token_usage": { "input_tokens": 2, "output_tokens": 1 }
+            })),
+            error: None,
+        };
+        let u = extract_usage_from_response(&last).expect("last_token_usage fallback");
+        assert_eq!(u.total_tokens, 3, "total recomputed when absent");
+    }
+
+    #[test]
+    fn extract_usage_returns_none_for_zero_or_missing() {
+        // No usage key at all.
+        let no_usage = ProviderResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(1),
+            result: Some(serde_json::json!({ "output": "x" })),
+            error: None,
+        };
+        assert!(extract_usage_from_response(&no_usage).is_none());
+
+        // All-zero usage block → treated as no-usage (avoid polluting aggregates).
+        let zero = ProviderResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "output": "x",
+                "usage": { "inputTokens": 0, "outputTokens": 0, "totalTokens": 0 }
+            })),
+            error: None,
+        };
+        assert!(
+            extract_usage_from_response(&zero).is_none(),
+            "all-zero usage must be suppressed"
+        );
+
+        // No result at all.
+        let no_result = ProviderResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(1),
+            result: None,
+            error: None,
+        };
+        assert!(extract_usage_from_response(&no_result).is_none());
     }
 
     #[tokio::test]
