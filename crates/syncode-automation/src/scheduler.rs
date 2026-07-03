@@ -313,6 +313,40 @@ impl Scheduler {
         self.repo.save_run(updated).await.map_err(repo_err)
     }
 
+    /// Mark a run as read (seen) by the user. Persists the updated run via
+    /// the repository's upsert (`save_run`). Returns the updated run, or
+    /// `SchedulerError::NotFound` if no run matches `run_id`.
+    pub async fn mark_run_read(&self, run_id: &str) -> Result<AutomationRun, SchedulerError> {
+        let payload = self
+            .repo
+            .get_run(run_id)
+            .await
+            .map_err(repo_err)?
+            .ok_or_else(|| SchedulerError::NotFound(run_id.to_string()))?;
+        let mut run: AutomationRun = serde_json::from_value(payload).map_err(serialization_err)?;
+        run.mark_read();
+        let updated = serde_json::to_value(&run).map_err(serialization_err)?;
+        self.repo.save_run(updated).await.map_err(repo_err)?;
+        Ok(run)
+    }
+
+    /// Archive a run, stamping `archived_at` with the current time. Persists
+    /// the updated run via the repository's upsert (`save_run`). Returns the
+    /// updated run, or `SchedulerError::NotFound` if no run matches `run_id`.
+    pub async fn archive_run(&self, run_id: &str) -> Result<AutomationRun, SchedulerError> {
+        let payload = self
+            .repo
+            .get_run(run_id)
+            .await
+            .map_err(repo_err)?
+            .ok_or_else(|| SchedulerError::NotFound(run_id.to_string()))?;
+        let mut run: AutomationRun = serde_json::from_value(payload).map_err(serialization_err)?;
+        run.archive(Utc::now().to_rfc3339());
+        let updated = serde_json::to_value(&run).map_err(serialization_err)?;
+        self.repo.save_run(updated).await.map_err(repo_err)?;
+        Ok(run)
+    }
+
     /// Get a run by ID
     pub async fn get_run(&self, run_id: &str) -> Option<AutomationRun> {
         self.repo
@@ -556,6 +590,69 @@ mod tests {
         scheduler.cancel_run(&run.id).await.unwrap();
         let fetched = scheduler.get_run(&run.id).await.unwrap();
         assert_eq!(fetched.status, RunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn scheduler_mark_run_read_flips_unread_and_persists() {
+        let scheduler = Scheduler::new();
+        let run = AutomationRun::new("auto-1".to_string());
+        let run_id = run.id.clone();
+        // New runs are unread by default.
+        assert!(run.unread);
+        scheduler
+            .repo
+            .save_run(serde_json::to_value(&run).unwrap())
+            .await
+            .unwrap();
+
+        let updated = scheduler.mark_run_read(&run_id).await.unwrap();
+        assert!(!updated.unread);
+
+        // Persisted: re-fetching reflects the change.
+        let fetched = scheduler.get_run(&run_id).await.unwrap();
+        assert!(!fetched.unread);
+        assert!(fetched.archived_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn scheduler_mark_run_read_missing_returns_not_found() {
+        let scheduler = Scheduler::new();
+        let err = scheduler
+            .mark_run_read("does-not-exist")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SchedulerError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn scheduler_archive_run_sets_archived_at_and_persists() {
+        let scheduler = Scheduler::new();
+        let run = AutomationRun::new("auto-1".to_string());
+        let run_id = run.id.clone();
+        assert!(run.archived_at.is_none());
+        scheduler
+            .repo
+            .save_run(serde_json::to_value(&run).unwrap())
+            .await
+            .unwrap();
+
+        let updated = scheduler.archive_run(&run_id).await.unwrap();
+        assert!(updated.archived_at.is_some(), "archived_at must be set");
+        // unread is untouched by archive_run.
+        assert!(updated.unread);
+
+        let fetched = scheduler.get_run(&run_id).await.unwrap();
+        assert!(fetched.archived_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn scheduler_archive_run_missing_returns_not_found() {
+        let scheduler = Scheduler::new();
+        let err = scheduler
+            .archive_run("does-not-exist")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SchedulerError::NotFound(_)));
     }
 
     #[tokio::test]

@@ -80,6 +80,15 @@ pub struct AutomationRun {
     pub ended_at: Option<String>,
     /// Duration in milliseconds
     pub duration_ms: Option<u64>,
+    /// Whether the run is still unread (unseen) by the user.
+    /// New runs default to `true`; `automation.markRunRead` flips it to `false`.
+    /// Mirrors MCode's `AutomationRunResult.unread` (lifted to the run for the
+    /// simpler syncode shape).
+    pub unread: bool,
+    /// When the run was archived (RFC-3339), or `None` if not archived.
+    /// Set by `automation.archiveRun`. Mirrors MCode's
+    /// `AutomationRunResult.archivedAt`.
+    pub archived_at: Option<String>,
 }
 
 impl AutomationRun {
@@ -97,6 +106,8 @@ impl AutomationRun {
             started_at: None,
             ended_at: None,
             duration_ms: None,
+            unread: true,
+            archived_at: None,
         }
     }
 
@@ -147,6 +158,18 @@ impl AutomationRun {
     pub fn mark_retrying(&mut self, attempt: u32) {
         self.attempt = attempt;
         self.status = RunStatus::Retrying;
+    }
+
+    /// Mark the run as read (seen) by the user. Idempotent — flipping an
+    /// already-read run to `unread=false` is a no-op.
+    pub fn mark_read(&mut self) {
+        self.unread = false;
+    }
+
+    /// Archive the run, stamping `archived_at` with the supplied timestamp
+    /// (RFC-3339). Idempotent — re-archiving overwrites `archived_at`.
+    pub fn archive(&mut self, archived_at: String) {
+        self.archived_at = Some(archived_at);
     }
 
     fn compute_duration(&mut self) {
@@ -248,8 +271,53 @@ mod tests {
         let json = serde_json::to_string(&run).unwrap();
         assert!(json.contains("automationId"));
         assert!(json.contains("run-"));
+        assert!(json.contains("unread"));
+        assert!(json.contains("archivedAt"));
         let back: AutomationRun = serde_json::from_str(&json).unwrap();
         assert_eq!(back.automation_id, "auto-123");
+        // Defaults round-trip.
+        assert!(back.unread);
+        assert!(back.archived_at.is_none());
+    }
+
+    #[test]
+    fn automation_run_new_defaults_unread_and_archived_at() {
+        let run = AutomationRun::new("auto-1".to_string());
+        assert!(run.unread, "new runs default to unread=true");
+        assert!(run.archived_at.is_none(), "new runs default to archived_at=None");
+    }
+
+    #[test]
+    fn automation_run_mark_read_flips_unread() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        assert!(run.unread);
+        run.mark_read();
+        assert!(!run.unread);
+        // Idempotent.
+        run.mark_read();
+        assert!(!run.unread);
+    }
+
+    #[test]
+    fn automation_run_archive_sets_archived_at() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        assert!(run.archived_at.is_none());
+        run.archive("2026-07-04T12:00:00+00:00".to_string());
+        assert_eq!(run.archived_at.as_deref(), Some("2026-07-04T12:00:00+00:00"));
+        // Idempotent overwrite.
+        run.archive("2026-07-04T13:00:00+00:00".to_string());
+        assert_eq!(run.archived_at.as_deref(), Some("2026-07-04T13:00:00+00:00"));
+    }
+
+    #[test]
+    fn automation_run_unread_archived_at_round_trip() {
+        let mut run = AutomationRun::new("auto-1".to_string());
+        run.mark_read();
+        run.archive("2026-07-04T12:00:00+00:00".to_string());
+        let json = serde_json::to_string(&run).unwrap();
+        let back: AutomationRun = serde_json::from_str(&json).unwrap();
+        assert!(!back.unread);
+        assert_eq!(back.archived_at.as_deref(), Some("2026-07-04T12:00:00+00:00"));
     }
 
     #[test]

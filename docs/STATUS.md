@@ -65,7 +65,7 @@
 | RPC | Status | Backed by |
 |---|---|---|
 | `automation.list` / `create` / `get` / `update` / `delete` / `runNow` / `cancelRun` | ✅ REAL | `syncode-automation::Scheduler` + **`ProcessRunExecutor`** (automations **actually execute** via `sh -c`) |
-| `automation.markRunRead` / `archiveRun` | 🟡 STUB | (needs AutomationRun type extension) |
+| `automation.markRunRead` / `archiveRun` | ✅ REAL | `Scheduler::mark_run_read` / `archive_run` (persisted via repo upsert; `AutomationRun` carries `unread` + `archived_at`) |
 | `automation.subscribe` / `unsubscribe` / `automation.event` (push) | 🟡 STUB | `{subscribed:true}` — no run-event push |
 | `automation.get` (single) | ✅ REAL | Scheduler.get |
 
@@ -111,7 +111,6 @@
 - **GitHub-API ops** — achievable via `gh api` subprocess (gh CLI authed); niche PR-handoff flow.
 - **voice ops** (transcribeVoice/…) — STT subsystem (different from LLM-text).
 - **Real persistence for server settings** — currently write-stubs (no settings store).
-- **markRunRead/archiveRun** real impl — needs AutomationRun type extension.
 - **Desktop GUI boot E2E** — needs a display (headless-blocked).
 
 ---
