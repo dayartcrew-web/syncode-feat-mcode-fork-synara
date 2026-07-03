@@ -180,6 +180,9 @@ async fn dispatch_method(
                     "git/resolve-pull-request",
                     "git/handoff-thread",
                     "git/prepare-pull-request-thread",
+                    "server/transcribe-voice",
+                    "server/voice-start",
+                    "server/voice-stop",
                 ]
             }),
         ),
@@ -783,6 +786,39 @@ async fn dispatch_method(
         | "git/prepare-pull-request-thread"
         | "git/preparePullRequestThread" => {
             handle_git_prepare_pull_request_thread(id, &request.params).await
+        }
+
+        // ─── Voice STT Methods (T6c-15 — graceful not-configured stubs) ──
+        //
+        // The cloned MCode UI's voice panel calls these `server.*` RPCs to
+        // drive speech-to-text (STT):
+        //
+        //   - `server.transcribeVoice` — submit an audio blob for transcription
+        //     (the UI captures mic input, encodes it, and posts it here)
+        //   - `server.voiceStart`     — begin a streaming listening session
+        //   - `server.voiceStop`      — end a streaming listening session
+        //
+        // Syncode has NO STT backend (no whisper/ffmpeg CLI installed, no STT
+        // API configured), so each handler is a GRACEFUL STUB: it reads the
+        // params (audio blob / start-stop flags) without processing them and
+        // returns a typed "STT not configured" result so the UI surfaces a
+        // clear status instead of MethodNotFound or a crash.
+        //
+        // Dispatch accepts BOTH dot-name AND slash form (the wsNativeApi sends
+        // dot, the tauriNativeApi sends slash — both must resolve).
+        //
+        // stub: no STT backend (T6c-future — install whisper/ffmpeg or wire a
+        // STT provider) — returns a not-configured result.
+        "server.transcribeVoice"
+        | "server/transcribe-voice"
+        | "server/transcribeVoice" => handle_server_transcribe_voice(id, &request.params),
+        // stub: no STT backend — can't start listening.
+        "server.voiceStart" | "server/voice-start" | "server/voiceStart" => {
+            handle_server_voice_start(id, &request.params)
+        }
+        // stub: no STT backend — no-op stop.
+        "server.voiceStop" | "server/voice-stop" | "server/voiceStop" => {
+            handle_server_voice_stop(id, &request.params)
         }
 
         // ─── Push Subscription Methods ───────────────────────────
@@ -1932,6 +1968,71 @@ fn handle_server_upsert_keybinding(id: Value, params: &Value) -> JsonRpcResponse
     JsonRpcResponse::success(
         id,
         serde_json::json!({ "keybindings": [], "issues": [] }),
+    )
+}
+
+// ─── Voice STT Handlers (T6c-15 — graceful not-configured stubs) ──
+//
+// Syncode has no STT backend (no whisper/ffmpeg CLI, no STT API), so these
+// handlers do NOT process audio. They read the params (to accept the MCode
+// voice-input shapes without erroring) and return a typed "STT not
+// configured" result so the UI can surface a clear status. Real STT wiring
+// (whisper CLI subprocess, or a STT provider adapter) is deferred to
+// T6c-future.
+
+/// `server.transcribeVoice` — submit an audio blob for transcription. The
+/// MCode input carries an encoded audio blob (base64/binary) + format hint;
+/// we read `params` purely to acknowledge the call (we do not decode or
+/// process the blob) and return an empty-text / not-configured result. The
+/// UI then knows transcription is unavailable rather than receiving
+/// MethodNotFound.
+fn handle_server_transcribe_voice(id: Value, params: &Value) -> JsonRpcResponse {
+    // Acknowledge the audio blob param without processing it. We do not
+    // validate its shape strictly (the MCode contract is not in tier3), so
+    // any JSON object/array/primitive is tolerated — the result is the same
+    // "not configured" payload regardless.
+    let _ = params;
+    // stub: no STT backend (T6c-future — install whisper/ffmpeg or wire a
+    // STT provider) — return a not-configured transcription result.
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "text": "",
+            "error": "STT not configured — install whisper + ffmpeg (or configure a STT provider) to enable voice transcription"
+        }),
+    )
+}
+
+/// `server.voiceStart` — begin a streaming listening session. Without a STT
+/// backend we cannot capture or transcribe audio, so we return
+/// `{ ok: false, listening: false, reason: "STT not configured" }`. Reads
+/// `params` to acknowledge the call but performs no listening-side setup.
+fn handle_server_voice_start(id: Value, params: &Value) -> JsonRpcResponse {
+    let _ = params;
+    // stub: no STT backend — can't start listening.
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "ok": false,
+            "listening": false,
+            "reason": "STT not configured"
+        }),
+    )
+}
+
+/// `server.voiceStop` — end a streaming listening session. Since
+/// `voiceStart` never actually starts listening, this is a no-op that
+/// returns `{ ok: true, listening: false }`. Reads `params` to acknowledge
+/// the call.
+fn handle_server_voice_stop(id: Value, params: &Value) -> JsonRpcResponse {
+    let _ = params;
+    // stub: no STT backend — no-op stop.
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "ok": true,
+            "listening": false
+        }),
     )
 }
 
@@ -6989,6 +7090,87 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_some(), "array params should reject");
         assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    // ─── Voice STT stub tests (T6c-15) ─────────────────────────────────
+    //
+    // The 3 voice RPCs must dispatch BOTH dot-form and slash-form, must NOT
+    // MethodNotFound, and must return the documented "STT not configured"
+    // result shapes (no real STT backend exists).
+
+    #[tokio::test]
+    async fn server_transcribe_voice_returns_not_configured() {
+        let state = WsState::new_in_memory(16);
+        for method in [
+            "server.transcribeVoice",
+            "server/transcribe-voice",
+            "server/transcribeVoice",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "audio": "base64-blob", "format": "webm" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            // Empty text + not-configured error string (no crash).
+            assert_eq!(result["text"], serde_json::Value::String("".into()), "{}: text", method);
+            let err = result["error"].as_str().unwrap_or("");
+            assert!(!err.trim().is_empty(), "{}: error should be non-empty", method);
+            assert!(err.contains("STT not configured"), "{}: error mentions STT not configured (got {})", method, err);
+        }
+    }
+
+    #[tokio::test]
+    async fn server_voice_start_returns_not_listening() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.voiceStart", "server/voice-start", "server/voiceStart"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": {}
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["ok"], serde_json::Value::Bool(false), "{}: ok", method);
+            assert_eq!(result["listening"], serde_json::Value::Bool(false), "{}: listening", method);
+            assert_eq!(
+                result["reason"].as_str().unwrap_or(""),
+                "STT not configured",
+                "{}: reason",
+                method
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn server_voice_stop_returns_noop_success() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.voiceStop", "server/voice-stop", "server/voiceStop"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": {}
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["ok"], serde_json::Value::Bool(true), "{}: ok", method);
+            assert_eq!(result["listening"], serde_json::Value::Bool(false), "{}: listening", method);
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_methods_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let resp = rpc(&state, 1, &req).await;
+        let methods = resp.result.unwrap()["methods"].as_array().unwrap().clone();
+        let method_strs: Vec<&str> = methods.iter().filter_map(|v| v.as_str()).collect();
+        for expected in ["server/transcribe-voice", "server/voice-start", "server/voice-stop"] {
+            assert!(
+                method_strs.contains(&expected),
+                "rpc/listMethods missing {}",
+                expected
+            );
+        }
     }
 
     // ── Test-only in-memory EventRepository ────────────────────────────

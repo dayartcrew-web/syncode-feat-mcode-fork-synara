@@ -330,6 +330,19 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "git.resolvePullRequest": "git/resolve-pull-request",
   "git.handoffThread": "git/handoff-thread",
   "git.preparePullRequestThread": "git/prepare-pull-request-thread",
+
+  // ─── T6c-15: Voice STT (graceful not-configured stubs) ───────────────
+  // Three STT (speech-to-text) RPCs the vendored MCode UI's voice panel
+  // calls. The syncode-ws backend serves them as GRACEFUL STUBS: it
+  // acknowledges each call and returns a typed "STT not configured" result
+  // (no whisper/ffmpeg CLI, no STT API). Map every MCode dot-name to the
+  // served slash dispatch key so the calls reach the backend (instead of
+  // being client-stubbed with MethodNotFound) and the UI can surface a
+  // clear "voice unavailable" status. Entries appended at the END to ease
+  // parallel-merge conflict resolution.
+  "server.transcribeVoice": "server/transcribe-voice",
+  "server.voiceStart": "server/voice-start",
+  "server.voiceStop": "server/voice-stop",
 };
 
 /**

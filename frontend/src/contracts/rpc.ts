@@ -561,7 +561,7 @@ interface ProviderCompactThreadResult {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 91 entries (latest: T6c-10 server write-side stubs +5) ──
+// ─── SERVED_RPC — 99 entries (latest: T6c-15 voice STT not-configured stubs +3) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -1106,6 +1106,32 @@ export const SERVED_RPC = {
     request: null as unknown as GitPreparePullRequestThreadInput,
     result: null as unknown as GitPreparePullRequestThreadResult,
   },
+
+  // ─── Voice STT (T6c-15: graceful not-configured stubs) ───────────────
+  // Three RPCs the vendored MCode UI's voice panel calls for speech-to-text.
+  // The syncode-ws backend has NO STT backend (no whisper/ffmpeg CLI, no STT
+  // API), so each handler is a GRACEFUL STUB: it acknowledges the call and
+  // returns a typed "STT not configured" result (no crash). The transport
+  // remaps the MCode dot-strings onto these slash keys (see MCODE_TO_SERVED
+  // in `wsTransport.ts`). Result shapes are opaque (`Record<string, unknown>`)
+  // since the MCode voice-input contracts are not in tier3; the backend's
+  // not-configured payloads are documented in
+  // `crates/syncode-ws/src/rpc.rs::handle_server_transcribe_voice` et al.:
+  //   - `server/transcribe-voice` → `{ text: "", error: "STT not configured — install whisper + ffmpeg (or configure a STT provider) to enable voice transcription" }`
+  //   - `server/voice-start`      → `{ ok: false, listening: false, reason: "STT not configured" }`
+  //   - `server/voice-stop`       → `{ ok: true, listening: false }`
+  "server/transcribe-voice": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "server/voice-start": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "server/voice-stop": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -1210,9 +1236,8 @@ export const UNSERVED_RPC = [
   "server.listLocalServerProcesses",
   "server.listWorktrees",
   "server.generateAutomationIntent",
-  "server.transcribeVoice",
-  "server.voiceStart",
-  "server.voiceStop",
+  // NOTE: `server.transcribeVoice` / `server.voiceStart` / `server.voiceStop`
+  // were SERVED in T6c-15 (graceful STT not-configured stubs).
 
   // ─── Provider discovery (no backend surface) — ~9 ───────────────────
   "provider.listSkills",
