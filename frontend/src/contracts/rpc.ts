@@ -131,6 +131,16 @@ import type {
   ProviderSkillsCatalogResult,
   ProviderSkillDescriptor,
 } from "./tier3/provider";
+// Profile stats Tier-3 result/input types (T6c-8 stats RPC exposure). The
+// backend `crates/syncode-ws/src/rpc.rs` `handle_stats_*` handlers return
+// minimal valid MCode shapes (aggregates zeroed, arrays empty, optionals null
+// — syncode has no stats aggregation subsystem) — see
+// `frontend/src/contracts/tier3/stats.ts` for the canonical shapes.
+import type {
+  ProfileStats,
+  ProfileTokenStats,
+  StatsGetProfileStatsInput,
+} from "./tier3/stats";
 
 // Minimal git input shapes for the served slash dispatch keys. The MCode UI
 // sends params under these camelCase keys (`cwd`, `branch`, `paths`,
@@ -338,7 +348,7 @@ interface ProviderCompactThreadResult {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 63 entries (T6c-4 server.* +9, T6c-5 terminal.* +9, T6c-6 automation.* +11, T6c-7 provider.* +11) ──
+// ─── SERVED_RPC — 65 entries (T6c-4 server.* +9, T6c-5 terminal.* +9, T6c-6 automation.* +11, T6c-7 provider.* +11, T6c-8 stats.* +2) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -687,6 +697,25 @@ export const SERVED_RPC = {
   "provider/compact-thread": {
     request: null as unknown as ProviderCompactThreadInput,
     result: null as unknown as ProviderCompactThreadResult,
+  },
+
+  // ─── Profile stats (T6c-8 stats RPC exposure) ────────────────────────
+  // The cloned MCode UI's Profile page calls these `stats.*` dot-strings
+  // (`wsNativeApi.ts` → `callTransport("stats.getProfileStats", …)`) to render
+  // the activity heatmap, provider-usage breakdown, skill-usage list, token
+  // totals, and quota panel. The transport remaps the MCode dot-strings onto
+  // these slash keys (see `MCODE_TO_SERVED` in `wsTransport.ts`). The backend
+  // `crates/syncode-ws/src/rpc.rs` `handle_stats_*` handlers return minimal
+  // valid MCode shapes (aggregates zeroed, arrays empty, optionals null) since
+  // syncode has no stats aggregation subsystem. Entries appended at the END to
+  // ease parallel-merge conflict resolution.
+  "stats/get-profile-stats": {
+    request: null as unknown as StatsGetProfileStatsInput,
+    result: null as unknown as ProfileStats,
+  },
+  "stats/get-profile-token-stats": {
+    request: null as unknown as StatsGetProfileStatsInput,
+    result: null as unknown as ProfileTokenStats,
   },
 } as const;
 

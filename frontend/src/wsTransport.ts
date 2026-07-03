@@ -247,6 +247,21 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "provider.listOptions": "provider/list-options",
   "provider.readSkill": "provider/read-skill",
   "provider.compactThread": "provider/compact-thread",
+
+  // Profile stats RPCs (T6c-8): the cloned MCode UI's Profile page calls these
+  // `stats.*` dot-strings (`wsNativeApi.ts` →
+  // `callTransport("stats.getProfileStats", …)`) to render the activity
+  // heatmap, provider-usage breakdown, skill-usage list, token totals, and
+  // quota panel. The syncode-ws backend now serves minimal valid MCode shapes
+  // (aggregates zeroed, arrays empty, optionals null — syncode has no stats
+  // aggregation subsystem) — map every MCode dot-name the UI uses to the
+  // served slash dispatch key so the calls reach the backend instead of being
+  // client-stubbed with MethodNotFound (which would crash the Profile page).
+  // The backend dispatch also accepts the dot-name directly (arms cover both
+  // forms) so this remap is belt-and-braces robustness. Entries appended at
+  // the END to ease parallel-merge conflict resolution.
+  "stats.getProfileStats": "stats/get-profile-stats",
+  "stats.getProfileTokenStats": "stats/get-profile-token-stats",
 };
 
 /**
