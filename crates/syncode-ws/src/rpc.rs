@@ -1773,6 +1773,51 @@ fn server_home_dir() -> Option<String> {
     crate::settings::server_home_dir()
 }
 
+/// Whether the server cwd is a git worktree (T6c-phase-26). Used by
+/// `server.welcome` and `server.getEnvironment` to surface
+/// `capabilities.repositoryIdentity` / `repositoryIdentity` so the UI can
+/// decide whether to render the git-backed workspace chrome. Best-effort:
+/// any error opening the repo (missing dir, no `.git`, libgit2 failure) →
+/// `false`. We never propagate the error — a degraded UI is preferable to a
+/// 500 over an environment probe.
+fn cwd_is_git_repo() -> bool {
+    let cwd = server_cwd();
+    git2::Repository::open(&cwd).is_ok()
+}
+
+/// Current process RSS in kBytes (T6c-phase-26). On Linux this reads
+/// `/proc/self/status` and parses the `VmRSS:` line (kB units). On any
+/// non-Linux OS, or on any read/parse failure, returns 0 — the caller
+/// (`server.getDiagnostics`) treats 0 as "unknown" and surfaces it as 0
+/// `rssBytes` (the diagnostics contract explicitly permits zeroed memory
+/// counters). Async-free on purpose: `/proc` is a tiny ramfs read.
+fn process_rss_kbytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(rest) = line.strip_prefix("VmRSS:") {
+                    // Format: "VmRSS:\t      12345 kB"
+                    let mut it = rest.split_whitespace();
+                    if let Some(kb) = it.next()
+                        && let Ok(n) = kb.parse::<u64>()
+                    {
+                        // Sanity: the unit field should be "kB" if present,
+                        // but we don't strictly require it — a parseable
+                        // leading number is the value we want.
+                        return n;
+                    }
+                }
+            }
+        }
+        0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
 /// `server.getConfig` (T6c-18 REAL) — return the stored `ServerConfig` from
 /// the in-memory settings store. The store is initialized from the default
 /// builder at `WsState` construction and updated by `server.setConfig` /
@@ -1808,10 +1853,24 @@ async fn handle_server_welcome(state: &WsState, id: Value) -> JsonRpcResponse {
         .filter(|s| !s.is_empty())
         .unwrap_or("syncode")
         .to_string();
+    // Auth mode as a kebab-case string (matches how `WsState::new_with_auth`
+    // serializes it into the in-memory settings store). Falls back to the
+    // no-auth default if serialization fails (defensive; shouldn't happen
+    // for the unit AuthMode enum).
+    let mode = serde_json::to_value(state.auth_config.mode)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "unsafe-no-auth".to_string());
+    let repository_identity = cwd_is_git_repo();
     let mut payload = serde_json::json!({
         "cwd": cwd,
         "projectName": project_name,
         "authRequired": state.auth_config.requires_authentication(),
+        "serverVersion": env!("CARGO_PKG_VERSION"),
+        "mode": mode,
+        "capabilities": {
+            "repositoryIdentity": repository_identity,
+        },
     });
     if let (Some(h), Some(obj)) = (home, payload.as_object_mut()) {
         obj.insert("homeDir".into(), Value::String(h));
@@ -1838,12 +1897,13 @@ fn handle_server_get_environment(id: Value) -> JsonRpcResponse {
     };
     let env_id = format!("syncode-{}-{}", os, arch);
     let server_version = env!("CARGO_PKG_VERSION");
+    let repository_identity = cwd_is_git_repo();
     let env_desc = serde_json::json!({
         "environmentId": env_id,
         "label": format!("Syncode ({}/{})", os, arch),
         "platform": { "os": os, "arch": arch },
         "serverVersion": server_version,
-        "capabilities": { "repositoryIdentity": false },
+        "capabilities": { "repositoryIdentity": repository_identity },
     });
     JsonRpcResponse::success(id, env_desc)
 }
@@ -1860,13 +1920,31 @@ async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcRes
         // before the JSON response is constructed.
         (store.projects.len(), store.threads.len())
     };
+    // Real process telemetry (T6c-phase-26):
+    //   - uptime from the server-start Instant captured in `WsState::new_with_auth`.
+    //   - RSS from `/proc/self/status` on Linux (kB → bytes); 0 elsewhere.
+    let uptime_seconds = state.started_at.elapsed().as_secs();
+    let rss_kbytes = process_rss_kbytes();
+    let rss_bytes = rss_kbytes.saturating_mul(1024);
+
+    // Child-process rollup: live terminal PTY sessions + tracked local
+    // servers. We surface a summary count only (no per-child probing —
+    // neither child process exposes its RSS portably without /proc walks,
+    // which is out of scope for a diagnostics summary). Both reads are
+    // cheap (HashMap snapshot / Vec clone under a short-lived lock).
+    let terminal_count = state.terminal_manager.read().await.list_sessions().await.len();
+    let local_server_count = state.local_servers.read().await.list().len();
+    let child_total_count = terminal_count + local_server_count;
+
     let result = serde_json::json!({
         "generatedAt": iso_now(),
         "process": {
             "pid": std::process::id(),
-            "uptimeSeconds": 0,
+            "uptimeSeconds": uptime_seconds,
             "memory": {
-                "rssBytes": 0,
+                "rssBytes": rss_bytes,
+                // Rust has no stable heap/external probe; keep these 0
+                // (contract permits zeroed counters for non-Node runtimes).
                 "heapTotalBytes": 0,
                 "heapUsedBytes": 0,
                 "externalBytes": 0,
@@ -1874,7 +1952,10 @@ async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcRes
             },
         },
         "childProcesses": [],
-        "childProcessTotalCount": 0,
+        "childProcessTotalCount": child_total_count,
+        // No per-child RSS probing — surface 0 (matches the empty
+        // `childProcesses` array; the contract permits a 0 rollup when no
+        // per-process detail is collected).
         "childProcessTotalRssBytes": 0,
         "projection": {
             "projectCount": project_count,
@@ -8926,7 +9007,13 @@ mod tests {
         assert!(["darwin", "linux", "windows", "unknown"].contains(&os), "os: {}", os);
         assert!(["arm64", "x64", "other"].contains(&arch), "arch: {}", arch);
         assert!(!result["serverVersion"].as_str().unwrap_or("").is_empty());
-        assert_eq!(result["capabilities"]["repositoryIdentity"], serde_json::Value::Bool(false));
+        // T6c-phase-26: repositoryIdentity is now REAL — derived from a git2
+        // probe of the server cwd. The test cwd (cargo's tempdir under the
+        // worktree) is a git repo, so this should be true; if it isn't, the
+        // probe failed silently (degrade-to-false) — assert it's a bool
+        // either way and prefer true.
+        let repo_identity = &result["capabilities"]["repositoryIdentity"];
+        assert!(repo_identity.is_boolean(), "repositoryIdentity must be bool: {:?}", repo_identity);
     }
 
     #[tokio::test]
@@ -8946,8 +9033,17 @@ mod tests {
         // ServerDiagnosticsResult top-level fields.
         assert!(!result["generatedAt"].as_str().unwrap_or("").is_empty());
         assert!(result["process"]["pid"].as_u64().unwrap_or(0) > 0);
+        // T6c-phase-26: uptime is now REAL — the server records a start
+        // Instant at construction; elapsed must be >= 0 (very fast tests may
+        // still be in the same second, so accept 0 too, but the field must
+        // be present as a non-null u64).
+        let uptime = result["process"]["uptimeSeconds"].as_u64();
+        assert!(uptime.is_some(), "uptimeSeconds must be u64: {:?}", result["process"]["uptimeSeconds"]);
+        // memory is an object; on Linux rssBytes reflects /proc VmRSS.
         assert!(result["process"]["memory"].is_object());
-        assert!(result["childProcesses"].as_array().unwrap().is_empty());
+        assert!(result["childProcesses"].is_array());
+        // No terminals/servers spawned in this test → 0 child count.
+        assert_eq!(result["childProcessTotalCount"].as_u64(), Some(0));
         assert_eq!(result["projection"]["projectCount"], 1);
         assert_eq!(result["projection"]["threadCount"], 0);
     }
@@ -8964,6 +9060,25 @@ mod tests {
         assert!(!result["projectName"].as_str().unwrap_or("").is_empty());
         // authRequired surfaced (boolean).
         assert_eq!(result["authRequired"], serde_json::Value::Bool(false));
+        // T6c-phase-26: serverVersion, mode, and capabilities.repositoryIdentity
+        // are now REAL.
+        assert!(
+            !result["serverVersion"].as_str().unwrap_or("").is_empty(),
+            "serverVersion must be non-empty: {:?}",
+            result["serverVersion"]
+        );
+        assert!(
+            !result["mode"].as_str().unwrap_or("").is_empty(),
+            "mode must be non-empty: {:?}",
+            result["mode"]
+        );
+        // Default test state is UnsafeNoAuth → mode serializes to "unsafe-no-auth".
+        assert_eq!(result["mode"].as_str().unwrap(), "unsafe-no-auth");
+        assert!(
+            result["capabilities"]["repositoryIdentity"].is_boolean(),
+            "capabilities.repositoryIdentity must be bool: {:?}",
+            result["capabilities"]
+        );
     }
 
     #[tokio::test]

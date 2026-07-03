@@ -156,6 +156,11 @@ pub struct WsState {
     /// child + pid, `stop` kills + removes the entry. Mirrors the
     /// `terminal_manager` wiring (Arc<RwLock<…>> shared across connections).
     pub local_servers: Arc<RwLock<crate::local_server::LocalServerManager>>,
+    /// Server start instant (T6c-phase-26). Captured in `new_with_auth` and
+    /// consulted by `server.getDiagnostics` to report a real
+    /// `process.uptimeSeconds` (elapsed since start). Monotonic — not wall
+    /// clock, so immune to NTP skew.
+    pub started_at: std::time::Instant,
 }
 
 impl WsState {
@@ -233,6 +238,7 @@ impl WsState {
             local_servers: Arc::new(RwLock::new(
                 crate::local_server::LocalServerManager::new(),
             )),
+            started_at: std::time::Instant::now(),
         }
     }
 
