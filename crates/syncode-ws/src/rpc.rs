@@ -174,6 +174,8 @@ async fn dispatch_method(
                     "git/worktree-list",
                     "git/worktree-create",
                     "git/worktree-remove",
+                    "git/summarize-diff",
+                    "server/generate-thread-recap",
                 ]
             }),
         ),
@@ -394,6 +396,14 @@ async fn dispatch_method(
             handle_server_upsert_keybinding(id, &request.params)
         }
 
+        // `server.generateThreadRecap` (T6c-13) — LLM-backed thread recap.
+        // See the LLM-backed-ops block above for the one-shot flow.
+        "server.generateThreadRecap"
+        | "server/generate-thread-recap"
+        | "server/generateThreadRecap" => {
+            handle_server_generate_thread_recap(state, id, &request.params).await
+        }
+
         // ─── Terminal PTY Methods (syncode-terminal-backed, T6c-5) ──────────
         //
         // The cloned MCode UI's Terminal panel + project-script runner call these
@@ -542,8 +552,11 @@ async fn dispatch_method(
         // `ALL_PROVIDERS` static (a `&[&str]` constant, no registry/state
         // needed) — the UI's model picker + agent-mention autocomplete show the
         // real provider set instead of an empty list. `compactThread` is a real
-        // op the composer calls to compact conversation context; we return a
-        // `{ ok: true }` stub (no LLM compaction wired here — deferred).
+        // op the composer calls to compact conversation context; it is now
+        // (T6c-13) provider-backed — the handler reads the thread's messages
+        // and runs them through a provider adapter one-shot (see the
+        // LLM-backed-ops block below). Empty history yields a no-op
+        // `{ ok: true, compactedSummary: "" }`.
         //
         // Shape references (Tier-3 `frontend/src/contracts/tier3/provider.ts`,
         // mirrored from MCode `providerDiscovery.ts`):
@@ -582,7 +595,9 @@ async fn dispatch_method(
         }
         "provider.listOptions" | "provider/list-options" => handle_provider_list_options(id),
         "provider.readSkill" | "provider/read-skill" => handle_provider_read_skill(id),
-        "provider.compactThread" | "provider/compact-thread" => handle_provider_compact_thread(id),
+        "provider.compactThread" | "provider/compact-thread" => {
+            handle_provider_compact_thread(state, id, &request.params).await
+        }
 
         // ─── Profile stats RPCs (T6c-8) ─────────────────────────
         //
@@ -645,11 +660,12 @@ async fn dispatch_method(
         //
         // Deferred / unserved (still in `UNSERVED_RPC`): `git.runStackedAction`
         // (LLM-backed multi-phase commit/push/PR — would need provider wiring),
-        // `git.summarizeDiff` (LLM-backed), `git.githubRepository`,
+        // `git.githubRepository`,
         // `git.resolvePullRequest`, `git.preparePullRequestThread`,
         // `git.handoffThread` (GitHub API — needs OAuth + REST client),
         // `git.createDetachedWorktree`, `git.subscribeActionProgress`
-        // (push channel — T6c-future).
+        // (push channel — T6c-future). NOTE: `git.summarizeDiff` was SERVED in
+        // T6c-13 (LLM-backed one-shot — see the LLM-backed-ops block below).
         //
         // Dispatch accepts BOTH the MCode dot-name AND a slash form for
         // robustness. Entry order matches the MCODE_TO_SERVED append block to
@@ -696,6 +712,28 @@ async fn dispatch_method(
         | "git/worktree-remove"
         | "git/remove-worktree"
         | "git/worktreeRemove" => handle_git_worktree_remove(id, &request.params),
+
+        // ─── LLM-backed ops (T6c-13: provider-CLI one-shot) ────────────
+        //
+        // Three RPCs need a single prompt → response round trip through a
+        // provider CLI (no streaming, no long-lived session):
+        //   - `provider.compactThread` — compact a thread's history (was a
+        //     `{ ok: true }` stub; now invokes the provider).
+        //   - `git.summarizeDiff` — LLM summary of a git diff (was UNSERVED).
+        //   - `server.generateThreadRecap` — LLM recap of a thread (was
+        //     UNSERVED).
+        //
+        // Each handler builds a prompt from the request payload (thread
+        // messages read from `read_store`; diff text from the params or
+        // fetched via syncode-git), resolves a provider adapter from
+        // `WsState::provider_registry`, and runs the one-shot helper in
+        // `crates/syncode-ws/src/llm.rs`. If no adapter is registered for the
+        // requested provider (or the CLI binary is missing) the handler
+        // returns a clear JSON-RPC error — never a panic. Dispatch accepts
+        // BOTH the MCode dot-name AND a slash form for robustness.
+        "git.summarizeDiff" | "git/summarize-diff" | "git/summarizeDiff" => {
+            handle_git_summarize_diff(state, id, &request.params).await
+        }
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -4541,13 +4579,309 @@ fn handle_provider_read_skill(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null }))
 }
 
-/// `provider.compactThread` — STUB. The composer calls this to compact the
-/// conversation context before an LLM round-trip (a real op). Syncode has no
-/// LLM-side compaction wired into the WS layer — return `{ ok: true }` so the
-/// composer treats the compaction as a no-op success. Real compaction would
-/// route through the provider adapter's session — deferred.
-fn handle_provider_compact_thread(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
+/// `provider.compactThread` — LLM-backed (T6c-13). The composer calls this to
+/// compact a thread's conversation context before an LLM round-trip. We read
+/// the thread's messages from `read_store`, build a compaction prompt, invoke a
+/// provider adapter one-shot, and return the compacted summary in the MCode
+/// `ProviderCompactThreadResult` shape (`{ ok, compactedSummary? }`).
+///
+/// The result extends the phase-7 stub shape (`{ ok: true }`) with an optional
+/// `compactedSummary` field — clients that only read `ok` keep working, while
+/// the composer can surface the summary. On failure (no provider registered,
+/// CLI missing, LLM error) `ok` is `false` and `error` carries a clear message
+/// — the composer falls back to the un-compacted history.
+async fn handle_provider_compact_thread(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let thread_id = match params.get("threadId").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => {
+            return param_error(
+                id,
+                "provider.compactThread requires a non-empty 'threadId'",
+            )
+        }
+    };
+
+    // Gather the thread's messages from the read model.
+    let history = thread_history_text(state, &thread_id).await;
+    if history.trim().is_empty() {
+        // Nothing to compact — succeed with an empty summary (the composer
+        // treats this as a no-op, same as the old stub).
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "ok": true, "compactedSummary": "" }),
+        );
+    }
+
+    let system = "You are a conversation compactor. Produce a concise summary of the conversation that preserves every decision, code reference, file path, and open question. Output only the summary.";
+    let prompt = format!(
+        "Compact the following conversation history into a faithful summary. \
+         Preserve all technical details, decisions, and action items.\n\n\
+         --- CONVERSATION ---\n{history}\n--- END ---"
+    );
+    let provider = resolve_provider_param(params);
+    let model = resolve_model_param(params);
+    match invoke(state, &provider, model.as_deref(), system, &prompt).await {
+        Ok(summary) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "ok": true, "compactedSummary": summary }),
+        ),
+        Err(e) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "ok": false, "error": e }),
+        ),
+    }
+}
+
+// ─── LLM-backed ops helpers (T6c-13) ───────────────────────────────────
+//
+// Shared plumbing for the three provider-CLI one-shot RPCs
+// (`provider.compactThread`, `git.summarizeDiff`, `server.generateThreadRecap`).
+// Each handler builds a prompt, resolves a provider adapter from
+// `WsState::provider_registry`, and runs it through
+// `crate::llm::invoke_llm_oneshot`.
+
+/// Build a JSON-RPC error response for an invalid-params failure (sugar over
+/// the inline `JsonRpcResponse::error(...)` used elsewhere).
+fn param_error(id: Value, message: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse::error(Some(id), crate::error_codes::INVALID_PARAMS, message)
+}
+
+/// Resolve the provider id from the RPC params. Accepts an optional `provider`
+/// (or `providerId`) string; falls back to the default provider (`claude`).
+fn resolve_provider_param(params: &Value) -> String {
+    params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| params.get("providerId").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| crate::llm::DEFAULT_PROVIDER.to_string())
+}
+
+/// Resolve an optional model override from the RPC params (`model`/`modelId`).
+fn resolve_model_param(params: &Value) -> Option<String> {
+    params
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| params.get("modelId").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Run a one-shot LLM invocation against the provider registered under
+/// `provider_id` in `WsState::provider_registry`. Returns the reply text or a
+/// human-readable error string (the caller surfaces it in the result shape).
+///
+/// `model` is an optional model override (resolved from the RPC params); `None`
+/// lets the adapter pick its default.
+///
+/// Errors:
+///   - `provider '{id}' is not registered` — the registry has no adapter for
+///     the id (production deployments must register one; tests register a mock).
+///   - The underlying `invoke_llm_oneshot` error (spawn/start/send failures,
+///     missing CLI binary, empty response).
+async fn invoke(
+    state: &WsState,
+    provider_id: &str,
+    model: Option<&str>,
+    system: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    // Try the requested provider; if not registered, fall back to the default
+    // then to the codex fallback so a stock install still works.
+    let registry = state.provider_registry.read().await;
+    let resolved = if registry.is_registered(provider_id) {
+        provider_id.to_string()
+    } else if registry.is_registered(crate::llm::DEFAULT_PROVIDER) {
+        tracing::info!(
+            requested = %provider_id,
+            fallback = %crate::llm::DEFAULT_PROVIDER,
+            "provider not registered; falling back"
+        );
+        crate::llm::DEFAULT_PROVIDER.to_string()
+    } else if registry.is_registered(crate::llm::FALLBACK_PROVIDER) {
+        crate::llm::FALLBACK_PROVIDER.to_string()
+    } else {
+        return Err(format!(
+            "no provider registered (requested '{provider_id}'); \
+             register one via the provider registry to enable LLM-backed ops"
+        ));
+    };
+    let adapter = registry
+        .get(&resolved)
+        .cloned()
+        .ok_or_else(|| format!("provider '{resolved}' lookup failed"))?;
+    drop(registry);
+
+    crate::llm::invoke_llm_oneshot(&adapter, &resolved, model, Some(system), prompt).await
+}
+
+/// Read a thread's messages from the read model and render them as a flat
+/// `role: content` transcript (oldest first). Used by `compactThread` and
+/// `generateThreadRecap` to build the LLM prompt body.
+///
+/// Messages are filtered to this thread (by joining through turns, since
+/// `MessageView` carries `turn_id` not `thread_id`). Tool-only messages
+/// (`role == "tool"`) are omitted — they're noise for compaction/recap.
+async fn thread_history_text(state: &WsState, thread_id: &str) -> String {
+    let store = state.read_store.read().await;
+    // Turns belonging to this thread, ordered by sequence.
+    let mut turns: Vec<&syncode_orchestration::TurnView> = store
+        .turns
+        .values()
+        .filter(|t| t.thread_id == thread_id)
+        .collect();
+    turns.sort_by_key(|t| t.sequence);
+
+    let mut out = String::new();
+    for turn in turns {
+        // The user input is on the turn itself.
+        out.push_str(&format!("user: {}\n", turn.user_input));
+        if let Some(output) = turn.assistant_output.as_deref() {
+            out.push_str(&format!("assistant: {output}\n"));
+        }
+        // Also surface role-tagged messages for richer fidelity when present.
+        let mut msgs: Vec<&syncode_orchestration::MessageView> = store
+            .messages
+            .values()
+            .filter(|m| m.turn_id == turn.id && m.role != "tool")
+            .collect();
+        msgs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        for m in msgs {
+            out.push_str(&format!("{}: {}\n", m.role, m.content));
+        }
+    }
+    out
+}
+
+/// `git.summarizeDiff` — LLM-backed (T6c-13). Returns a natural-language
+/// summary of a git diff in the MCode `GitSummarizeDiffResult` shape
+/// (`{ summary }`; the Tier-3 `GitSummarizeDiffResult extends
+/// OpaqueTransportResult` so a single `summary` field is shape-compatible).
+///
+/// The diff text comes from one of:
+///   1. `params.diff` / `params.patch` — caller-supplied diff text (the
+///      GitPanel may already have it in hand).
+///   2. `params.cwd` + optional `scope`/`oldRef`/`newRef` — fetch the working
+///      tree diff via syncode-git (reuses `handle_git_diff`'s logic).
+async fn handle_git_summarize_diff(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    // 1. Caller-supplied diff text wins.
+    let diff = params
+        .get("diff")
+        .or_else(|| params.get("patch"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let diff = if !diff.trim().is_empty() {
+        diff
+    } else {
+        // 2. Fetch via syncode-git. `cwd` is required for this path.
+        match open_git_service(id.clone(), params) {
+            Ok(svc) => {
+                let old_ref = params.get("oldRef").and_then(|v| v.as_str());
+                let new_ref = params.get("newRef").and_then(|v| v.as_str());
+                match svc.diff(old_ref, new_ref) {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            return JsonRpcResponse::success(
+                                id,
+                                serde_json::json!({ "summary": "No changes in diff." }),
+                            );
+                        }
+                        // Render a minimal textual patch (same shape as
+                        // `handle_git_diff`).
+                        let mut patch = String::new();
+                        for entry in &entries {
+                            let path =
+                                entry.old_path.as_deref().unwrap_or(&entry.new_path);
+                            patch.push_str(&format!(
+                                "diff --git a/{path} b/{new}\nstatus: {status:?}\n",
+                                new = entry.new_path,
+                                status = entry.status,
+                            ));
+                        }
+                        patch
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            Some(id),
+                            crate::error_codes::INTERNAL_ERROR,
+                            format!("git summarizeDiff: failed to read diff: {e}"),
+                        );
+                    }
+                }
+            }
+            Err(resp) => return *resp,
+        }
+    };
+
+    let system = "You are a code reviewer. Summarize the following git diff in 2-4 sentences for a developer. Focus on the intent of the change, the files touched, and any notable risks. Output only the summary.";
+    let prompt = format!(
+        "Summarize this diff:\n\n```diff\n{diff}\n```"
+    );
+    let provider = resolve_provider_param(params);
+    let model = resolve_model_param(params);
+    match invoke(state, &provider, model.as_deref(), system, &prompt).await {
+        Ok(summary) => JsonRpcResponse::success(id, serde_json::json!({ "summary": summary })),
+        Err(e) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "summary": "", "error": e }),
+        ),
+    }
+}
+
+/// `server.generateThreadRecap` — LLM-backed (T6c-13). Produces a high-level
+/// recap of a thread (what was done, what's pending) for the UI's recap card.
+/// Reads the thread's history from `read_store`, builds a recap prompt,
+/// invokes the provider, and returns the MCode `ServerGenerateThreadRecapResult`
+/// shape (`{ recap }`).
+async fn handle_server_generate_thread_recap(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let thread_id = match params.get("threadId").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => {
+            return param_error(
+                id,
+                "server.generateThreadRecap requires a non-empty 'threadId'",
+            )
+        }
+    };
+
+    let history = thread_history_text(state, &thread_id).await;
+    if history.trim().is_empty() {
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "recap": "No activity in this thread yet." }),
+        );
+    }
+
+    let system = "You are an engineering assistant. Produce a concise recap of the conversation: what was accomplished, key decisions made, and any open or pending work. Use bullet points. Output only the recap.";
+    let prompt = format!(
+        "Generate a recap of the following thread:\n\n--- THREAD ---\n{history}\n--- END ---"
+    );
+    let provider = resolve_provider_param(params);
+    let model = resolve_model_param(params);
+    match invoke(state, &provider, model.as_deref(), system, &prompt).await {
+        Ok(recap) => JsonRpcResponse::success(id, serde_json::json!({ "recap": recap })),
+        Err(e) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "recap": "", "error": e }),
+        ),
+    }
 }
 
 // ─── Profile stats handlers (T6c-8) ──────────────────────────────────
@@ -6838,8 +7172,16 @@ mod tests {
         ];
         for (dot, slash) in cases {
             for method in [*dot, *slash] {
+                // compactThread requires a non-empty threadId (T6c-13 made it
+                // provider-backed); pass one so the no-op-empty-history path
+                // resolves successfully. Other methods take no params.
+                let params = if method.ends_with("compactThread") || method.contains("compact-thread") {
+                    serde_json::json!({ "threadId": "thr_resolve_test" })
+                } else {
+                    serde_json::json!({})
+                };
                 let req = serde_json::json!({
-                    "jsonrpc": "2.0", "id": 1, "method": method
+                    "jsonrpc": "2.0", "id": 1, "method": method, "params": params
                 });
                 let resp = provider_rpc(&state, &req).await;
                 assert!(
@@ -7050,10 +7392,12 @@ mod tests {
         assert_eq!(result["provider"], "codex", "default provider should be codex");
     }
 
-    /// compactThread is a stub — returns { ok: true } so the composer treats
-    /// compaction as a no-op success.
+    /// compactThread with no thread history returns `{ ok: true }` (the
+    /// composer treats compaction as a no-op success when there's nothing to
+    /// compact). See `provider_compact_thread_invokes_provider` for the
+    /// provider-backed path.
     #[tokio::test]
-    async fn provider_compact_thread_returns_ok_stub() {
+    async fn provider_compact_thread_empty_history_is_noop() {
         let state = WsState::new_in_memory(16);
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.compactThread",
@@ -7061,7 +7405,234 @@ mod tests {
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
         assert_eq!(result["ok"], true);
+        assert_eq!(result["compactedSummary"], "");
     }
+
+    // ─── LLM-backed ops wiring tests (T6c-13) ───────────────────────────
+    //
+    // These tests prove the prompt → invoke → result wiring without a real
+    // provider CLI: a `MockLlmAdapter` is registered under the default
+    // provider id ("claude") and returns a canned reply. The compactThread /
+    // summarizeDiff / generateThreadRecap handlers must route the prompt
+    // through the adapter and surface the canned text in their result shape.
+
+    /// Seed a project + thread + one turn (user input + assistant output) and
+    /// return the thread id. Used by the compactThread / generateThreadRecap
+    /// wiring tests so they have non-empty history to feed the prompt.
+    async fn seed_thread_with_history(state: &WsState) -> String {
+        use syncode_orchestration::{Command, DomainEvent};
+
+        let project = state
+            .orchestrator
+            .handle_command(Command::CreateProject {
+                name: "LLM Test".into(),
+                root_path: "/tmp".into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = match &project.events[0].event {
+            DomainEvent::ProjectCreated { id, .. } => *id,
+            _ => unreachable!(),
+        };
+        let thread = state
+            .orchestrator
+            .handle_command(Command::CreateThread {
+                project_id,
+                provider_id: "claude".into(),
+                model: "m".into(),
+            })
+            .await
+            .expect("create thread");
+        let thread_id = match &thread.events[0].event {
+            DomainEvent::ThreadCreated { id, .. } => *id,
+            _ => unreachable!(),
+        };
+        let turn = state
+            .orchestrator
+            .handle_command(Command::StartTurn {
+                thread_id,
+                sequence: 1,
+                user_input: "How do I fix the bug?".into(),
+            })
+            .await
+            .expect("start turn");
+        let turn_id = match &turn.events[0].event {
+            DomainEvent::TurnStarted { id, .. } => *id,
+            _ => unreachable!(),
+        };
+        state
+            .orchestrator
+            .handle_command(Command::CompleteTurn {
+                id: turn_id,
+                assistant_output: "Use Option<T> instead of unwrap.".into(),
+                duration_ms: 1000,
+            })
+            .await
+            .expect("complete turn");
+        thread_id.to_string()
+    }
+
+    /// Register a `MockLlmAdapter` under the default provider id ("claude") so
+    /// `invoke()` resolves it. We register under an explicit id via
+    /// `register_shared` (rather than `register`, which keys by the mock's own
+    /// `provider_id()` of "mock-llm") so the handler's default-provider
+    /// resolution finds it.
+    async fn register_mock_provider(state: &WsState, canned: &str) {
+        use crate::llm::SharedAdapter;
+        let mock: SharedAdapter =
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::llm::MockLlmAdapter::new(canned),
+            ));
+        let mut registry = state.provider_registry.write().await;
+        registry.register_shared("claude".to_string(), mock);
+    }
+
+    /// compactThread with real history invokes the registered provider and
+    /// surfaces its canned reply in `compactedSummary`. Proves the prompt
+    /// (built from read-store messages) flows through to the adapter.
+    #[tokio::test]
+    async fn provider_compact_thread_invokes_provider() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "SUMMARY: bug fix discussion").await;
+        let thread_id = seed_thread_with_history(&state).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.compactThread",
+            "params": { "threadId": thread_id }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["ok"], true, "ok flag must be true on success");
+        assert_eq!(
+            result["compactedSummary"], "SUMMARY: bug fix discussion",
+            "canned reply must flow into compactedSummary"
+        );
+    }
+
+    /// compactThread with history but NO provider registered returns
+    /// `{ ok: false, error }` — a clear error, not a panic. The composer falls
+    /// back to the un-compacted history.
+    #[tokio::test]
+    async fn provider_compact_thread_no_provider_returns_error_result() {
+        let state = WsState::new_in_memory(16);
+        // No provider registered.
+        let thread_id = seed_thread_with_history(&state).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.compactThread",
+            "params": { "threadId": thread_id }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["ok"], false, "ok must be false without a provider");
+        let err = result["error"].as_str().expect("error message present");
+        assert!(
+            err.contains("no provider registered"),
+            "error should explain the missing provider; got: {err}"
+        );
+    }
+
+    /// summarizeDiff with a caller-supplied diff invokes the provider and
+    /// surfaces the canned reply in `summary`. Proves the diff-text path
+    /// (params.diff) flows through to the adapter.
+    #[tokio::test]
+    async fn git_summarize_diff_invokes_provider_with_supplied_diff() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "Refactors the auth module.").await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.summarizeDiff",
+            "params": {
+                "diff": "diff --git a/auth.rs b/auth.rs\n- old line\n+ new line"
+            }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(
+            result["summary"], "Refactors the auth module.",
+            "canned reply must flow into summary"
+        );
+    }
+
+    /// summarizeDiff resolves under BOTH the dot-name and the slash form (the
+    /// wsNativeApi sends dot, the tauriNativeApi sends slash).
+    #[tokio::test]
+    async fn git_summarize_diff_resolves_both_forms() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "ok").await;
+        for method in ["git.summarizeDiff", "git/summarize-diff"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "diff": "x" }
+            });
+            let resp = provider_rpc(&state, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            assert!(resp.result.is_some(), "{method} returned null result");
+        }
+    }
+
+    /// generateThreadRecap with real history invokes the provider and surfaces
+    /// the canned reply in `recap`.
+    #[tokio::test]
+    async fn server_generate_thread_recap_invokes_provider() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "RECAP: discussed Option<T>.").await;
+        let thread_id = seed_thread_with_history(&state).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.generateThreadRecap",
+            "params": { "threadId": thread_id }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(
+            result["recap"], "RECAP: discussed Option<T>.",
+            "canned reply must flow into recap"
+        );
+    }
+
+    /// generateThreadRecap resolves under BOTH the dot-name and slash form.
+    #[tokio::test]
+    async fn server_generate_thread_recap_resolves_both_forms() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "ok").await;
+        let thread_id = seed_thread_with_history(&state).await;
+        for method in [
+            "server.generateThreadRecap",
+            "server/generate-thread-recap",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "threadId": &thread_id }
+            });
+            let resp = provider_rpc(&state, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+        }
+    }
+
+    /// rpc/listMethods must advertise the two newly-served LLM RPCs (the
+    /// compactThread entry was already listed in phase-7).
+    #[tokio::test]
+    async fn llm_rpcs_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let methods = provider_rpc(&state, &req).await.result.unwrap()["methods"]
+            .as_array()
+            .expect("methods is an array")
+            .clone();
+        let listed: std::collections::HashSet<String> = methods
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        for expected in [
+            "provider/compact-thread",
+            "git/summarize-diff",
+            "server/generate-thread-recap",
+        ] {
+            assert!(
+                listed.contains(expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
+    }
+
 
     // ─── Profile stats RPC tests (T6c-8) ──────────────────────────────
 

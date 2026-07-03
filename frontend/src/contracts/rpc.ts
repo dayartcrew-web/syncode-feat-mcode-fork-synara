@@ -116,6 +116,10 @@ import type {
   AutomationRunActionResult,
   AutomationRunNowInput,
   AutomationRunNowResult,
+  GitSummarizeDiffInput,
+  GitSummarizeDiffResult,
+  ServerGenerateThreadRecapInput,
+  ServerGenerateThreadRecapResult,
 } from "./shell";
 import type { WsWelcomePayload } from "./tier3/ws";
 // Provider discovery Tier-3 result types (T6c-7 provider RPC exposure). The
@@ -527,11 +531,24 @@ interface ProviderReadSkillResult {
   skill: ProviderSkillDescriptor | null;
 }
 interface ProviderCompactThreadInput {
-  /** Thread id to compact (backend ignores — returns `{ ok: true }` stub). */
+  /** Thread id to compact. The backend reads its messages from the read model
+   * and runs them through a provider adapter one-shot (T6c-13). */
   threadId?: string;
+  /** Optional provider override (default "claude", falls back to "codex"). */
+  provider?: string;
+  /** Optional model override. */
+  model?: string;
 }
 interface ProviderCompactThreadResult {
+  /** `true` on success (compacted summary produced, or no-op for empty
+   * history); `false` if the provider couldn't be invoked (CLI missing,
+   * not registered, LLM error). */
   ok: boolean;
+  /** The compacted summary text (empty string for the no-op-empty-history
+   * path). Present when `ok` is true. */
+  compactedSummary?: string;
+  /** Human-readable error message. Present when `ok` is false. */
+  error?: string;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1023,6 +1040,27 @@ export const SERVED_RPC = {
     request: null as unknown as ServerUpsertKeybindingInput,
     result: null as unknown as ServerUpsertKeybindingResult,
   },
+
+  // ─── LLM-backed ops (T6c-13: provider-CLI one-shot) ──────────────────
+  // The cloned MCode UI's composer (`provider.compactThread`), GitPanel
+  // (`git.summarizeDiff`), and thread-recap card (`server.generateThreadRecap`)
+  // call these. The backend `crates/syncode-ws/src/rpc.rs` handlers build a
+  // prompt (thread messages from the read model; diff text from params or
+  // syncode-git), invoke a provider adapter one-shot, and surface the reply
+  // text. The transport remaps the MCode dot-strings onto these slash keys
+  // (see MCODE_TO_SERVED in `wsTransport.ts`). `provider.compactThread` was
+  // listed in the T6c-7 block; `git/summarize-diff` and
+  // `server/generate-thread-recap` are newly served. If no provider is
+  // registered (or the CLI binary is missing), the result carries an `error`
+  // field / empty text rather than throwing — the UI renders a fallback.
+  "git/summarize-diff": {
+    request: null as unknown as GitSummarizeDiffInput,
+    result: null as unknown as GitSummarizeDiffResult,
+  },
+  "server/generate-thread-recap": {
+    request: null as unknown as ServerGenerateThreadRecapInput,
+    result: null as unknown as ServerGenerateThreadRecapResult,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -1084,13 +1122,13 @@ export const UNSERVED_RPC = [
   // services syncode does not have:
   //   - GitHub API (resolvePullRequest/githubRepository/preparePullRequestThread/
   //     handoffThread) — needs OAuth + REST client
-  //   - LLM (runStackedAction/summarizeDiff) — needs provider wiring
+  //   - LLM (runStackedAction) — needs provider wiring (multi-phase commit/push/PR)
   //   - detached worktree (createDetachedWorktree) — niche variant of
   //     worktreeCreate; deferred
   //   - push channel (subscribeActionProgress) — T6c-future push delivery
+  //   (NOTE: `git.summarizeDiff` was served in T6c-13 — LLM-backed one-shot.)
   "git.resolvePullRequest",
   "git.runStackedAction",
-  "git.summarizeDiff",
   "git.githubRepository",
   "git.handoffThread",
   "git.preparePullRequestThread",
@@ -1123,7 +1161,7 @@ export const UNSERVED_RPC = [
   "server.listProviderUsage",
   "server.getUsage",
   "server.getRecap",
-  "server.generateThreadRecap",
+  // NOTE: `server.generateThreadRecap` was SERVED in T6c-13 (LLM-backed recap).
   "server.startLocalServer",
   "server.stopLocalServer",
   "server.listLocalServers",

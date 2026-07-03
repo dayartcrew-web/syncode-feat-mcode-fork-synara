@@ -307,6 +307,20 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "server.refreshProviders": "server/refresh-providers",
   "server.updateProvider": "server/update-provider",
   "server.upsertKeybinding": "server/upsert-keybinding",
+
+  // LLM-backed RPCs (T6c-13): the cloned MCode UI's composer (compactThread),
+  // GitPanel (summarizeDiff), and thread-recap card (generateThreadRecap) call
+  // these dot-strings. The syncode-ws backend now serves them by invoking a
+  // provider adapter one-shot (prompt → response). Map every MCode dot-name to
+  // the served slash dispatch key so the calls reach the backend instead of
+  // being client-stubbed with MethodNotFound. The backend dispatch also
+  // accepts the dot-name directly (arms cover both forms) so this remap is
+  // belt-and-braces robustness. `provider.compactThread` was already mapped in
+  // the T6c-7 block above; `git.summarizeDiff` and `server.generateThreadRecap`
+  // are newly served. Entries appended at the END to ease parallel-merge
+  // conflict resolution.
+  "git.summarizeDiff": "git/summarize-diff",
+  "server.generateThreadRecap": "server/generate-thread-recap",
 };
 
 /**
