@@ -567,10 +567,12 @@ async fn dispatch_method(
         "automation.archiveRun" | "automation/archive-run" => {
             handle_automation_archive_run(state, id, &request.params).await
         }
-        "automation.subscribe"
-        | "automation/subscribe"
-        | "automation.unsubscribe"
-        | "automation/unsubscribe" => handle_automation_subscribe_stub(id, &request.method),
+        "automation.subscribe" | "automation/subscribe" => {
+            handle_automation_subscribe(state, conn_id, id).await
+        }
+        "automation.unsubscribe" | "automation/unsubscribe" => {
+            handle_automation_unsubscribe(state, conn_id, id).await
+        }
 
         // ─── Provider discovery RPCs (T6c-7) ─────────────────────
         //
@@ -5509,10 +5511,14 @@ async fn handle_automation_run_now(state: &WsState, id: Value, params: &Value) -
                 .await
                 .unwrap_or_else(|| syncode_automation::AutomationRun::new(auto_id.clone()));
             let project_id = project_id_for_def(&def);
-            JsonRpcResponse::success(
-                id,
-                serde_json::json!({ "run": run_to_mcode_run(&run, &project_id) }),
-            )
+            let run_payload = run_to_mcode_run(&run, &project_id);
+            // Push the run snapshot to subscribed connections as a `run-upserted`
+            // lifecycle event on the `automation` channel. `trigger_with_delay`
+            // awaits `execute_run` synchronously — so by the time it returns,
+            // the run is in its terminal state (succeeded/failed) and this
+            // broadcast captures the lifecycle transition (T6c-21).
+            push_automation_run_upserted(state, &run_payload);
+            JsonRpcResponse::success(id, serde_json::json!({ "run": run_payload }))
         }
         Err(e) => automation_error(
             id,
@@ -5567,10 +5573,13 @@ async fn handle_automation_cancel_run(
         .await
         .map(|d| project_id_for_def(&d))
         .unwrap_or_default();
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({ "run": run_to_mcode_run(&run, &project_id) }),
-    )
+    let run_payload = run_to_mcode_run(&run, &project_id);
+    // Push the cancelled run snapshot to subscribers on the `automation`
+    // channel as a `run-upserted` lifecycle event (T6c-21). The cancel
+    // transition is a real lifecycle change (status flips to cancelled),
+    // so we broadcast it just like a completed/failed run.
+    push_automation_run_upserted(state, &run_payload);
+    JsonRpcResponse::success(id, serde_json::json!({ "run": run_payload }))
 }
 
 /// `automation.markRunRead` — mark a run as read. Persists the change through
@@ -5675,18 +5684,72 @@ async fn handle_automation_archive_run(
     )
 }
 
-/// `automation.subscribe` / `automation.unsubscribe` — STUB. Real push delivery
-/// (`automation.event`) would require a per-automation event tap feeding the
-/// push bus — deferred. Returns `{ subscribed: true }` so the UI tolerates the
-/// absence of push (it polls `automation.list`).
-fn handle_automation_subscribe_stub(id: Value, method: &str) -> JsonRpcResponse {
+/// Broadcast a `run-upserted` lifecycle event on the `automation` push channel
+/// (T6c-21). Subscribers receive the run snapshot — MCode's
+/// `AutomationStreamEvent` union exposes `run-upserted` (not separate
+/// started/completed/failed/cancelled variants), so the lifecycle transition
+/// is encoded in the run's `status` field.
+///
+/// Best-effort: no live subscribers is normal (broadcast::send returns
+/// `SendError` only when there are zero receivers) — the call site is still
+/// authoritative for the RPC response.
+fn push_automation_run_upserted(state: &WsState, run_payload: &serde_json::Value) {
+    let event = serde_json::json!({
+        "type": "run-upserted",
+        "run": run_payload,
+    });
+    let _ = state
+        .push_tx
+        .send((crate::channels::CHANNEL_AUTOMATION.to_string(), event));
+}
+
+/// `automation.subscribe` — register the calling connection on the `automation`
+/// push channel (T6c-21). Subsequent run-lifecycle events (runNow →
+/// `run-upserted`, cancelRun → `run-upserted`) are delivered by the push
+/// delivery loop (`run_push_delivery` in `server.rs`).
+///
+/// Unlike `server.subscribeConfig`, no initial snapshot is emitted here — the
+/// UI's automation view calls `automation.list` first to bootstrap its state,
+/// then subscribes for live deltas. (Mirror of MCode's snapshot-via-RPC,
+/// stream-via-push pattern.)
+async fn handle_automation_subscribe(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_AUTOMATION);
     JsonRpcResponse::success(
         id,
         serde_json::json!({
             "subscribed": true,
-            "method": method,
-            "channel": "automation",
-            "note": "stub: no automation.event push delivery (T6c-future)",
+            "channel": crate::channels::CHANNEL_AUTOMATION,
+            "added": added,
+        }),
+    )
+}
+
+/// `automation.unsubscribe` — deregister the calling connection from the
+/// `automation` push channel (T6c-21).
+async fn handle_automation_unsubscribe(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let removed = state
+        .subscriptions
+        .write()
+        .await
+        .unsubscribe(conn_id, crate::channels::CHANNEL_AUTOMATION);
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": false,
+            "channel": crate::channels::CHANNEL_AUTOMATION,
+            "removed": removed,
         }),
     )
 }
@@ -9301,16 +9364,191 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automation_subscribe_returns_stub() {
+    async fn automation_subscribe_registers_on_automation_channel() {
+        // T6c-21: subscribe is REAL — registers the connection on the
+        // `automation` push channel (no longer a stub). Both dot-name and
+        // slash form must resolve and surface `subscribed: true` with the
+        // correct channel name.
         let state = WsState::new_in_memory(16);
+        state.subscriptions.write().await.register(1);
         for method in ["automation.subscribe", "automation/subscribe"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method
             });
             let resp = auto_rpc(&state, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
-            assert_eq!(resp.result.unwrap()["subscribed"], true);
+            let result = resp.result.unwrap();
+            assert_eq!(result["subscribed"], true);
+            assert_eq!(result["channel"], "automation");
         }
+        // The connection is now registered on the automation channel.
+        assert!(state
+            .subscriptions
+            .read()
+            .await
+            .subscribers_for(crate::channels::CHANNEL_AUTOMATION)
+            .contains(&1));
+    }
+
+    #[tokio::test]
+    async fn automation_unsubscribe_deregisters_from_automation_channel() {
+        // T6c-21: unsubscribe is REAL — removes the connection from the
+        // `automation` push channel.
+        let state = WsState::new_in_memory(16);
+        {
+            let mut regs = state.subscriptions.write().await;
+            regs.register(1);
+            regs.subscribe(1, crate::channels::CHANNEL_AUTOMATION);
+        }
+        for method in ["automation.unsubscribe", "automation/unsubscribe"] {
+            // First call removes; second is idempotent (subscribed: false).
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = auto_rpc(&state, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["subscribed"], false);
+            assert_eq!(result["channel"], "automation");
+        }
+        assert!(!state
+            .subscriptions
+            .read()
+            .await
+            .subscribers_for(crate::channels::CHANNEL_AUTOMATION)
+            .contains(&1));
+    }
+
+    /// T6c-21 keystone proof: subscribe to the `automation` channel → run an
+    /// automation (`echo hello`) → assert a `push/automation` frame carrying a
+    /// `run-upserted` event is received on the push bus. The delivery loop
+    /// (`run_push_delivery`) is not exercised here directly — we tap
+    /// `push_tx` (the broadcast bus) because that is the seam the delivery
+    /// loop subscribes to.
+    #[tokio::test]
+    async fn automation_run_now_pushes_lifecycle_event_on_subscribed_channel() {
+        let state = WsState::new_in_memory(16);
+        // Tap the push bus BEFORE triggering, so the broadcast receiver is
+        // live when the run-now handler publishes.
+        let mut rx = state.push_tx.subscribe();
+
+        // Create an automation with a real command (the in-memory scheduler
+        // uses ProcessRunExecutor, which runs `prompt` as a shell command).
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": {
+                "name": "Echo hello",
+                "prompt": "echo hello",
+                "schedule": { "type": "manual" },
+                "projectId": "proj-keystone"
+            }
+        });
+        let resp = auto_rpc(&state, &create).await;
+        assert!(resp.error.is_none(), "create: {:?}", resp.error);
+        let auto_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Trigger the run — `trigger_with_delay(Immediate)` awaits the full
+        // subprocess execution synchronously, so by the time runNow returns,
+        // the `run-upserted` lifecycle event has already been broadcast.
+        let run_now = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "automation.runNow",
+            "params": { "id": auto_id }
+        });
+        let resp = auto_rpc(&state, &run_now).await;
+        assert!(resp.error.is_none(), "runNow: {:?}", resp.error);
+        let run_id = resp.result.unwrap()["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Drain pending pushes and find the automation channel event.
+        // (The broadcast bus may carry other events — e.g. orchestration
+        // domain events; filter for the automation channel.)
+        let mut saw_run_upserted = false;
+        for _ in 0..32 {
+            match rx.try_recv() {
+                Ok((channel, payload)) if channel == "automation" => {
+                    assert_eq!(
+                        payload["type"], "run-upserted",
+                        "automation push event must be a run-upserted (got {payload})"
+                    );
+                    assert_eq!(
+                        payload["run"]["id"], run_id,
+                        "pushed run id must match the runNow result"
+                    );
+                    assert_eq!(
+                        payload["run"]["automationId"], auto_id,
+                        "pushed automationId must match the def"
+                    );
+                    saw_run_upserted = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_run_upserted,
+            "automation.runNow must push a run-upserted event on the `automation` channel"
+        );
+    }
+
+    /// Cancellation also broadcasts a `run-upserted` lifecycle event (the
+    /// run's status flips to `cancelled`).
+    #[tokio::test]
+    async fn automation_cancel_run_pushes_lifecycle_event() {
+        let state = WsState::new_in_memory(16);
+        let mut rx = state.push_tx.subscribe();
+
+        // Seed: create + runNow (echo ok) so a real run exists.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": {
+                "name": "Echo ok",
+                "prompt": "echo ok",
+                "schedule": { "type": "manual" }
+            }
+        });
+        let resp = auto_rpc(&state, &create).await;
+        let auto_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let run_now = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "automation.runNow",
+            "params": { "id": auto_id }
+        });
+        let run_now_resp = auto_rpc(&state, &run_now).await;
+        // Drain the runNow push so the cancel push is unambiguous.
+        let _ = rx.try_recv();
+        let run_id = run_now_resp.result.unwrap()["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Cancel the run.
+        let cancel = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "automation.cancelRun",
+            "params": { "runId": run_id }
+        });
+        let resp = auto_rpc(&state, &cancel).await;
+        assert!(resp.error.is_none(), "cancelRun: {:?}", resp.error);
+
+        // The cancel handler must have pushed a run-upserted on automation.
+        let mut saw_cancel_push = false;
+        for _ in 0..32 {
+            match rx.try_recv() {
+                Ok((channel, payload)) if channel == "automation" => {
+                    assert_eq!(payload["type"], "run-upserted");
+                    assert_eq!(payload["run"]["id"], run_id);
+                    saw_cancel_push = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_cancel_push,
+            "automation.cancelRun must push a run-upserted event on the `automation` channel"
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════════

@@ -119,7 +119,9 @@ pub struct WsState {
     /// Automation scheduler (T6c-6). Backs the `automation.*` RPC handlers
     /// (list/create/get/update/delete/runNow/cancelRun) — manages automation
     /// definition + run-record lifecycle (mirrors the terminal_manager wiring).
-    /// Subscribe/push delivery is stubbed (`automation.event` deferred).
+    /// Subscribe/unsubscribe register/deregister the calling connection on the
+    /// `automation` push channel, and runNow/cancelRun broadcast
+    /// `run-upserted` lifecycle events on `push_tx` (T6c-21).
     pub automation_scheduler: Arc<syncode_automation::Scheduler>,
     /// Provider adapter registry (T6c-13). Backs the LLM-backed RPCs
     /// (`provider.compactThread`, `git.summarizeDiff`,
