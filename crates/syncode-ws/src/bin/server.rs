@@ -21,6 +21,11 @@
 //! - `SYNCODE_WS_PORT` — bind port (default `3000`).
 //! - `SYNCODE_DB` — SQLite DB path (default `syncode.db` in cwd; empty string
 //!   → in-memory).
+//! - `SYNCODE_DEFAULT_PROVIDER` — provider id to arm the chat pipeline
+//!   (default `claude`). When the named provider's CLI is installed, turns
+//!   actually dispatch to the provider and AI responses stream back; when it
+//!   is absent the orchestrator falls back to inert mode (turns are recorded
+//!   but no AI response is generated, and the server still boots).
 //! - `RUST_LOG` — tracing filter (default `syncode_ws=info,info`).
 //!
 //! # WebSocket path
@@ -41,6 +46,10 @@ const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 3000;
 const DEFAULT_DB_PATH: &str = "syncode.db";
 const PUSH_CAPACITY: usize = 1024;
+/// Default provider id used when `SYNCODE_DEFAULT_PROVIDER` is unset. The
+/// provider's CLI must be installed on PATH for the chat to actually generate
+/// AI responses; otherwise the orchestrator falls back to inert mode.
+const DEFAULT_PROVIDER: &str = "claude";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -92,7 +101,7 @@ async fn build_state() -> WsState {
     match syncode_persistence::init_database(&PathBuf::from(&db_path)).await {
         Ok(pool) => {
             let repo: Arc<dyn EventRepository> = Arc::new(SqliteEventRepository::new(pool));
-            let orchestrator = Orchestrator::new(repo);
+            let orchestrator = build_orchestrator(repo);
             tracing::info!(db_path = %db_path, "SQLite-backed event store initialized");
             WsState::new(PUSH_CAPACITY, orchestrator)
         }
@@ -103,6 +112,47 @@ async fn build_state() -> WsState {
                 "SQLite init failed — falling back to in-memory event store"
             );
             WsState::new_in_memory(PUSH_CAPACITY)
+        }
+    }
+}
+
+/// Build the orchestrator with a [`ProviderCommandReactor`] + a provider
+/// adapter, so turns actually invoke a provider and AI responses stream back.
+///
+/// The provider id comes from `SYNCODE_DEFAULT_PROVIDER` (default `claude`).
+/// When the named provider's CLI is unavailable (the adapter factory returns
+/// `None`), this falls back to [`Orchestrator::new`] — turns are still
+/// recorded but no AI response is generated, and the server still boots
+/// (graceful degradation, logged at `WARN`).
+///
+/// `WsState::new` wraps the orchestrator's push bus as a
+/// [`syncode_ws::push::WsDomainEventPublisher`] via
+/// [`Orchestrator::with_event_publisher`], so provider-stream-sourced domain
+/// events (tokens, tool calls, completion) are pushed to subscribed clients.
+fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
+    let default_provider = std::env::var("SYNCODE_DEFAULT_PROVIDER")
+        .unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
+
+    let reactor = Arc::new(syncode_orchestration::ProviderCommandReactor::new(
+        syncode_provider::SessionManager::new(),
+    ));
+
+    match syncode_provider::registry::create_by_id(&default_provider) {
+        Some(adapter) => {
+            tracing::info!(
+                provider = %default_provider,
+                "chat pipeline armed: turns will dispatch to the provider"
+            );
+            Orchestrator::with_reactor_and_adapter(repo, reactor, adapter)
+        }
+        None => {
+            tracing::warn!(
+                provider = %default_provider,
+                "provider adapter not available — chat will be inert \
+                 (turns recorded but no AI response). Install the provider CLI \
+                 or set SYNCODE_DEFAULT_PROVIDER to an available provider id."
+            );
+            Orchestrator::new(repo)
         }
     }
 }
