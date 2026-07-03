@@ -42,9 +42,11 @@
 ### Server (config / Settings)
 | RPC | Status | Backed by |
 |---|---|---|
-| `server.getConfig` / `getSettings` / `welcome` / `getEnvironment` / `getDiagnostics` | 🟡 STUB-defaults | no subsystem — defaults + real `authMode` (from WsAuthConfig) + live projection counts (diagnostics) |
-| `server.setConfig` / `updateSettings` / `refreshProviders` / `updateProvider` / `upsertKeybinding` | 🟡 STUB | no persistence — accept write, return ack |
-| `server.subscribeConfig` / `subscribeSettings` / `subscribeProviderStatuses` / `subscribeLifecycle` | 🟡 STUB | `{subscribed:true}` — no push delivery |
+| `server.getConfig` / `getSettings` | ✅ REAL | `ServerSettingsState` (in-memory store; reads return persisted state) |
+| `server.setConfig` / `updateSettings` / `patchSettings` / `updateProvider` / `upsertKeybinding` / `refreshProviders` | ✅ REAL | merge into store (deep-merge) + push on change (`configUpdated`/`settingsUpdated`/`providerStatusesUpdated`) |
+| `server.subscribeConfig` / `subscribeSettings` / `subscribeProviderStatuses` | ✅ REAL | register + initial snapshot + live push delivery |
+| `server.welcome` / `getEnvironment` / `getDiagnostics` | 🟡 STUB-defaults | no subsystem — defaults + real `authMode` + live projection counts (diagnostics) |
+| `server.subscribeLifecycle` | 🟡 STUB | no maintenance-task push subsystem |
 | `server.transcribeVoice` / `voiceStart` / `voiceStop` | 🟡 STUB | graceful "STT not configured" (no whisper/ffmpeg) — served, no MethodNotFound |
 | `server.generateAutomationIntent` | ✅ REAL | LLM via provider CLI (invoke_llm_oneshot — prompt→AutomationDef JSON) |
 | `server.patchSettings` / `listProviderUsage` / `getProviderUsageSnapshot` / `startLocalServer` / `stopLocalServer` | 🟡 STUB | no persistence/usage/localServer subsystem — graceful defaults |
