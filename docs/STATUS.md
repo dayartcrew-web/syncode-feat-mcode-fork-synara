@@ -66,7 +66,7 @@
 |---|---|---|
 | `automation.list` / `create` / `get` / `update` / `delete` / `runNow` / `cancelRun` | ✅ REAL | `syncode-automation::Scheduler` + **`ProcessRunExecutor`** (automations **actually execute** via `sh -c`) |
 | `automation.markRunRead` / `archiveRun` | ✅ REAL | `Scheduler::mark_run_read` / `archive_run` (persisted via repo upsert; `AutomationRun` carries `unread` + `archived_at`) |
-| `automation.subscribe` / `unsubscribe` / `automation.event` (push) | 🟡 STUB | `{subscribed:true}` — no run-event push |
+| `automation.subscribe` / `unsubscribe` / `automation.event` (push) | ✅ REAL | register on CHANNEL_AUTOMATION; `runNow`/`cancelRun` push `run-upserted` lifecycle events via `push_tx` (trigger synchronous — awaits full execution) |
 | `automation.get` (single) | ✅ REAL | Scheduler.get |
 
 ### Provider (discovery + LLM)
