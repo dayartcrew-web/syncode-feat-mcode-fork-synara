@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod channels;
+pub mod llm;
 pub mod push;
 pub mod rpc;
 pub mod server;
@@ -118,6 +119,13 @@ pub struct WsState {
     /// definition + run-record lifecycle (mirrors the terminal_manager wiring).
     /// Subscribe/push delivery is stubbed (`automation.event` deferred).
     pub automation_scheduler: Arc<syncode_automation::Scheduler>,
+    /// Provider adapter registry (T6c-13). Backs the LLM-backed RPCs
+    /// (`provider.compactThread`, `git.summarizeDiff`,
+    /// `server.generateThreadRecap`) — each one-shot op resolves a provider
+    /// adapter by id from this registry, spawns it, and runs a single prompt.
+    /// Starts empty in `new_in_memory` (tests register a `MockLlmAdapter`);
+    /// production deployments populate it from config (claude/codex/gemini/…).
+    pub provider_registry: Arc<RwLock<syncode_provider::registry::ProviderRegistry>>,
 }
 
 impl WsState {
@@ -172,6 +180,9 @@ impl WsState {
             automation_scheduler: Arc::new(syncode_automation::Scheduler::new_with_deps(
                 Arc::new(syncode_automation::InMemoryAutomationRepository::new()),
                 Arc::new(syncode_automation::ProcessRunExecutor::new()),
+            )),
+            provider_registry: Arc::new(RwLock::new(
+                syncode_provider::registry::ProviderRegistry::new(),
             )),
         }
     }
