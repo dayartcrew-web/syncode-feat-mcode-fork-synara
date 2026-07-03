@@ -12,6 +12,7 @@ syncode-contracts = { path = "../syncode-contracts" }
 syncode-orchestration = { path = "../syncode-orchestration" }
 syncode-persistence = { path = "../syncode-persistence" }
 syncode-auth = { path = "../syncode-auth" }
+syncode-git = { path = "../syncode-git" }
 async-trait = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -27,3 +28,4 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 futures-util = "0.3"
+tempfile = "3"

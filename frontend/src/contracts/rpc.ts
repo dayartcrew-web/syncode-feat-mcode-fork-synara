@@ -66,6 +66,51 @@ import type { PushSubscribeParams } from "../types/PushSubscribeParams";
 import type { PushSubscribeResult } from "../types/PushSubscribeResult";
 import type { PushUnsubscribeParams } from "../types/PushUnsubscribeParams";
 import type { PushUnsubscribeResult } from "../types/PushUnsubscribeResult";
+// Git Tier-3 result/input types (T6c-3 git RPC exposure). The backend maps
+// syncode-git's types into these MCode shapes — see `crates/syncode-ws/src/rpc.rs`
+// `handle_git_*` handlers.
+import type {
+  GitBranch,
+  GitReadWorkingTreeDiffInput,
+  GitStatusResult,
+} from "./tier3/git";
+
+// Minimal git input shapes for the served slash dispatch keys. The MCode UI
+// sends params under these camelCase keys (`cwd`, `branch`, `paths`,
+// `message`); the backend reads them verbatim (see `handle_git_*`).
+interface GitCwdInput {
+  cwd: string;
+}
+interface GitCreateBranchInput {
+  cwd: string;
+  branch: string;
+  publish?: boolean;
+}
+interface GitCheckoutInput {
+  cwd: string;
+  branch: string;
+}
+interface GitStageFilesInput {
+  cwd: string;
+  paths: readonly string[];
+}
+interface GitCommitInput {
+  cwd: string;
+  message: string;
+}
+interface GitStageFilesResult {
+  ok: boolean;
+}
+// readWorkingTreeDiff returns `{ patch: string }` (MCode GitReadWorkingTreeDiffResult).
+interface GitReadWorkingTreeDiffResult {
+  patch: string;
+}
+// listBranches returns the MCode GitListBranchesResult.
+interface GitListBranchesResult {
+  branches: readonly GitBranch[];
+  isRepo: boolean;
+  hasOriginRemote: boolean;
+}
 
 // ════════════════════════════════════════════════════════════════════════
 // ─── SERVED_RPC — 23 entries (21 in dispatch + ping + rpc/listMethods) ──
@@ -147,6 +192,42 @@ export const SERVED_RPC = {
     result: null as unknown as OrchestrationReadModel,
   },
 
+  // ─── Git (syncode-git-backed, T6c-3) ────────────────────────────────
+  // The cloned MCode GitPanel calls `git.*` RPCs. The transport remaps the
+  // MCode dot-strings (`git.status`, `git.readWorkingTreeDiff`,
+  // `git.listBranches`, …) onto these slash keys (see `MCODE_TO_SERVED` in
+  // `wsTransport.ts`). The backend `crates/syncode-ws/src/rpc.rs`
+  // `handle_git_*` handlers reuse `syncode-git::Git2Service` and map the
+  // results into the MCode shapes (Tier-3 `git.ts`).
+  //
+  // Known gaps (documented in `handle_git_*`):
+  //   - per-file insertions/deletions are 0 (syncode-git lacks line stats)
+  //   - `git.unstage` with non-empty paths is not implemented (no syncode-git
+  //     unstage op) → INTERNAL_ERROR. Empty-paths is a no-op OK.
+  //   - `git.readWorkingTreeDiff` returns a synthesized minimal patch (real
+  //     unified-diff hunks require git2::Patch plumbing — deferred).
+  "git/status": { request: null as unknown as GitCwdInput, result: null as unknown as GitStatusResult },
+  "git/diff": {
+    request: null as unknown as GitReadWorkingTreeDiffInput,
+    result: null as unknown as GitReadWorkingTreeDiffResult,
+  },
+  "git/branches": { request: null as unknown as GitCwdInput, result: null as unknown as GitListBranchesResult },
+  "git/create-branch": {
+    request: null as unknown as GitCreateBranchInput,
+    result: null as unknown as null,
+  },
+  "git/checkout": { request: null as unknown as GitCheckoutInput, result: null as unknown as null },
+  "git/delete-branch": { request: null as unknown as GitCheckoutInput, result: null as unknown as null },
+  "git/add": {
+    request: null as unknown as GitStageFilesInput,
+    result: null as unknown as GitStageFilesResult,
+  },
+  "git/unstage": {
+    request: null as unknown as GitStageFilesInput,
+    result: null as unknown as GitStageFilesResult,
+  },
+  "git/commit": { request: null as unknown as GitCommitInput, result: null as unknown as null },
+
   // ─── Auth ────────────────────────────────────────────────────────────
   "auth/bootstrap": {
     request: null as unknown as AuthBootstrapParams,
@@ -215,29 +296,34 @@ export type ServedRpcResult<M extends ServedRpcMethod> =
  * The full typed request/response shapes for these are Tier 3 (deferred).
  */
 export const UNSERVED_RPC = [
-  // ─── Git (crate exists, no RPC exposure) — ~22 ───────────────────────
-  "git.status",
-  "git.diff",
-  "git.branchList",
-  "git.branchCreate",
-  "git.branchCheckout",
-  "git.branchDelete",
+  // ─── Git (crate exists; CORE ops SERVED in T6c-3, advanced deferred) ──
+  // The core GitPanel ops (status/diff/listBranches/createBranch/checkout/
+  // branchDelete/stage/unstage/commit) are SERVED — see SERVED_RPC. The
+  // advanced ops below remain unserved:
   "git.worktreeList",
   "git.worktreeCreate",
   "git.worktreeRemove",
-  "git.stage",
-  "git.unstage",
   "git.stashList",
   "git.stashCreate",
   "git.stashApply",
   "git.stashDrop",
-  "git.commit",
   "git.pull",
   "git.push",
   "git.fetch",
   "git.resolvePullRequest",
   "git.runStackedAction",
-  "git.readWorkingTreeDiff",
+  "git.summarizeDiff",
+  "git.githubRepository",
+  "git.handoffThread",
+  "git.preparePullRequestThread",
+  "git.stashAndCheckout",
+  "git.stashInfo",
+  "git.removeIndexLock",
+  "git.init",
+  "git.createWorktree",
+  "git.createDetachedWorktree",
+  "git.removeWorktree",
+  "git.subscribeActionProgress",
 
   // ─── Terminal (crate exists, no RPC exposure) — ~8 ───────────────────
   "terminal.open",
