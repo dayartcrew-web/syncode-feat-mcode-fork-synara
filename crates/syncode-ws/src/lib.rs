@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod channels;
+pub mod local_server;
 pub mod llm;
 pub mod push;
 pub mod rpc;
@@ -147,6 +148,14 @@ pub struct WsState {
     /// response carries token-usage metadata. In-memory only (rebuilt from
     /// empty on each server start — mirrors the settings store's gap).
     pub usage: Arc<RwLock<crate::usage::UsageStore>>,
+    /// Local-server process manager (T6c-phase-24). Backs the
+    /// `server.startLocalServer` / `server.stopLocalServer` RPCs — spawns,
+    /// tracks, and kills long-running server processes (e.g. `ollama serve`,
+    /// LM Studio, any configurable command) via `tokio::process::Command`.
+    /// Processes are keyed by an assigned server id; `start` records the
+    /// child + pid, `stop` kills + removes the entry. Mirrors the
+    /// `terminal_manager` wiring (Arc<RwLock<…>> shared across connections).
+    pub local_servers: Arc<RwLock<crate::local_server::LocalServerManager>>,
 }
 
 impl WsState {
@@ -221,6 +230,9 @@ impl WsState {
             )),
             settings,
             usage: Arc::new(RwLock::new(crate::usage::UsageStore::new())),
+            local_servers: Arc::new(RwLock::new(
+                crate::local_server::LocalServerManager::new(),
+            )),
         }
     }
 

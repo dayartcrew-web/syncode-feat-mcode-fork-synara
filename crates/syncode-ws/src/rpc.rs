@@ -923,13 +923,14 @@ async fn dispatch_method(
         "server.getProviderUsageSnapshot" | "server/get-provider-usage-snapshot" => {
             handle_server_get_provider_usage_snapshot(state, id, &request.params).await
         }
-        // stub: no local-server process-mgmt subsystem — graceful not-supported.
+        // T6c-phase-24 REAL: spawn a long-running server process via the
+        // LocalServerManager. Reads `command`/`args`/`env`/`name`/`id`/`ports`.
         "server.startLocalServer" | "server/start-local-server" => {
-            handle_server_start_local_server(id)
+            handle_server_start_local_server(state, id, &request.params).await
         }
-        // stub: no local-server process-mgmt subsystem — no-op ack.
+        // T6c-phase-24 REAL: kill a tracked server process by `id`.
         "server.stopLocalServer" | "server/stop-local-server" => {
-            handle_server_stop_local_server(id, &request.params)
+            handle_server_stop_local_server(state, id, &request.params).await
         }
 
         // ─── Push Subscription Methods ───────────────────────────
@@ -2645,30 +2646,154 @@ fn usage_snapshot_json(agg: &crate::usage::ProviderUsageAggregate, source: &str)
     })
 }
 
-/// `server.startLocalServer` — return a graceful not-supported result.
-/// Syncode has no local-server process-mgmt subsystem (no dev-server spawn /
-/// port-bind / lifecycle tracking), so we acknowledge the call and return
-/// `{ ok: false, reason: "Local server management not supported in this mode" }`
-/// — the UI surfaces a clear "not available" state instead of MethodNotFound.
-fn handle_server_start_local_server(id: Value) -> JsonRpcResponse {
-    // stub: no local-server process-mgmt subsystem.
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "ok": false,
-            "reason": "Local server management not supported in this mode"
-        }),
-    )
+/// `server.startLocalServer` — spawn a long-running server process.
+///
+/// Reads params:
+///   - `command` (required): executable to spawn (argv[0]).
+///   - `args` (optional, default []): argv[1..] as an array of strings.
+///   - `env` (optional, default {}): environment overrides as an object.
+///   - `name` (optional): display name surfaced to the UI.
+///   - `id` (optional): explicit server id; auto-generated as `local-<n>` if absent.
+///   - `ports` (optional, default []): ports the caller declares the server
+///     will bind (echoed back into `addresses`, not probed).
+///
+/// Returns the MCode `ServerLocalServerProcess` shape on success:
+///   `{ id, pid, command, displayName, args, ports, addresses, isStoppable, startedAt }`
+/// On spawn failure returns an INVALID_PARAMS error (-32602) carrying the
+/// spawn error message.
+async fn handle_server_start_local_server(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let obj = match params.as_object() {
+        Some(o) => o,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "params must be an object",
+            );
+        }
+    };
+
+    let command = match obj.get("command").and_then(|v| v.as_str()) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "params.command (non-empty string) is required",
+            );
+        }
+    };
+
+    let args: Vec<String> = obj
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let env: std::collections::HashMap<String, String> = obj
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let ports: Vec<u32> = obj
+        .get("ports")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u32))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let display_name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&command)
+        .to_string();
+
+    // Auto-assign an id from the current map size + a uuid suffix for
+    // collision-safety if the caller omits one.
+    let server_id = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            format!(
+                "local-{}",
+                uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0")
+            )
+        });
+
+    let mut mgr = state.local_servers.write().await;
+    match mgr
+        .start(server_id, display_name, command, args, env, ports)
+        .await
+    {
+        Ok(view) => {
+            let result = serde_json::to_value(&view).unwrap_or_else(|_| {
+                serde_json::json!({ "id": view.id, "pid": view.pid })
+            });
+            JsonRpcResponse::success(id, result)
+        }
+        Err(msg) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            msg,
+        ),
+    }
 }
 
-/// `server.stopLocalServer` — no-op ack. Syncode has no local-server
-/// process-mgmt subsystem, so there is nothing to stop. Reads `params` to
-/// acknowledge the MCode `ServerStopLocalServerInput` (`{ pid, port }`) and
-/// returns `{ ok: true }`.
-fn handle_server_stop_local_server(id: Value, params: &Value) -> JsonRpcResponse {
-    let _ = params; // ack `{ pid, port }` — no behavior.
-    // stub: no local-server process-mgmt subsystem — no-op ack.
-    JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
+/// `server.stopLocalServer` — kill a tracked server process by `id`.
+///
+/// Reads params:
+///   - `id` (preferred): the server id returned by `startLocalServer`.
+///   - `name` (fallback): treated as an id if `id` is absent (legacy/convenience).
+///
+/// Returns `{ ok: true }` on success. If the id isn't tracked returns an
+/// INVALID_PARAMS error (-32602).
+async fn handle_server_stop_local_server(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let server_id = params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("name").and_then(|v| v.as_str()))
+        .map(String::from);
+    let server_id = match server_id {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "params.id (non-empty string) is required",
+            );
+        }
+    };
+
+    let mut mgr = state.local_servers.write().await;
+    match mgr.stop(&server_id).await {
+        Ok(()) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Err(msg) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            msg,
+        ),
+    }
 }
 
 // ─── Git Handlers (syncode-git-backed) ────────────────────────────
@@ -10629,33 +10754,94 @@ mod tests {
         assert_eq!(total["value"], "240");
     }
 
-    /// startLocalServer returns graceful not-supported; stopLocalServer
-    /// returns `{ ok: true }`.
+    /// startLocalServer spawns a real process and returns its pid; stopLocalServer
+    /// kills + removes it. Both forms (dot + slash) verified.
     #[tokio::test]
-    async fn server_local_server_lifecycle_stubs_are_graceful() {
+    async fn server_local_server_lifecycle_is_real() {
         let state = WsState::new_in_memory(16);
 
-        // start: `{ ok: false, reason: ... }` under BOTH forms.
+        // start `sleep 30` as a local server under BOTH method-name forms.
+        let mut started_ids = Vec::new();
         for method in ["server.startLocalServer", "server/start-local-server"] {
-            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": {
+                    "id": format!("sleep-{method}"),
+                    "name": "sleeper",
+                    "command": "sleep",
+                    "args": ["30"],
+                    "ports": [8080],
+                }
+            });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            assert_eq!(result["ok"], false, "{}: ok must be false", method);
-            let reason = result["reason"].as_str().expect("reason present");
-            assert!(!reason.is_empty(), "{}: reason must be non-empty", method);
+            let pid = result["pid"].as_u64().expect("pid present") as i32;
+            assert!(pid > 0, "{}: pid must be positive", method);
+            assert_eq!(result["command"], "sleep");
+            assert_eq!(result["args"], "30");
+            assert_eq!(result["ports"][0], 8080);
+            assert_eq!(result["isStoppable"], true);
+            let srv_id = result["id"].as_str().expect("id present").to_string();
+            // Process must actually exist.
+            let alive = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .expect("kill -0 runs");
+            assert!(alive.success(), "{}: spawned pid must be alive", method);
+            started_ids.push(srv_id);
         }
 
-        // stop: `{ ok: true }` under BOTH forms.
-        for method in ["server.stopLocalServer", "server/stop-local-server"] {
+        // stop each under BOTH method-name forms.
+        for (i, method) in [
+            "server.stopLocalServer",
+            "server/stop-local-server",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let srv_id = &started_ids[i];
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
-                "params": { "pid": 1234, "port": 8080 }
+                "params": { "id": srv_id }
             });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             assert_eq!(resp.result.unwrap()["ok"], true, "{}: ok must be true", method);
         }
+
+        // No longer tracked.
+        let mgr = state.local_servers.read().await;
+        assert!(mgr.list().is_empty(), "all servers must be removed after stop");
+    }
+
+    /// startLocalServer validates: missing command -> INVALID_PARAMS.
+    #[tokio::test]
+    async fn server_start_local_server_validates_command() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.startLocalServer",
+            "params": { "name": "x" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.result.is_none(), "missing command must error");
+        let err = resp.error.expect("error present");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    /// stopLocalServer validates: unknown id -> INVALID_PARAMS.
+    #[tokio::test]
+    async fn server_stop_local_server_unknown_id_errors() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.stopLocalServer",
+            "params": { "id": "never-started" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.result.is_none(), "unknown id must error");
+        let err = resp.error.expect("error present");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
     }
 
     /// rpc/listMethods must advertise all 6 newly-served niche RPCs.
