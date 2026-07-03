@@ -222,6 +222,31 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "automation.archiveRun": "automation/archive-run",
   "automation.subscribe": "automation/subscribe",
   "automation.unsubscribe": "automation/subscribe",
+
+  // Provider discovery RPCs (T6c-7): the cloned MCode UI's composer/agent-
+  // mention/SkillsPanel/plugin layer calls these `provider.*` dot-strings
+  // (`wsNativeApi.ts` → `callTransport("provider.listModels", …)`,
+  // `provider.getComposerCapabilities`, …). The syncode-ws backend now serves
+  // minimal valid MCode shapes (empty arrays/null descriptors, except
+  // `listModels`/`listAgents` which are cheaply populated from the
+  // syncode-provider `ALL_PROVIDERS` static) — map every MCode dot-name the UI
+  // uses to the served slash dispatch key so the calls reach the backend
+  // instead of being client-stubbed with MethodNotFound (which would leave the
+  // model picker/agent-mention autocomplete/SkillsPanel empty). The backend
+  // dispatch also accepts the dot-name directly (arms cover both forms) so this
+  // remap is belt-and-braces robustness. Entries appended at the END to ease
+  // parallel-merge conflict resolution.
+  "provider.listModels": "provider/list-models",
+  "provider.listSkills": "provider/list-skills",
+  "provider.listSkillsCatalog": "provider/list-skills-catalog",
+  "provider.listPlugins": "provider/list-plugins",
+  "provider.readPlugin": "provider/read-plugin",
+  "provider.listCommands": "provider/list-commands",
+  "provider.listAgents": "provider/list-agents",
+  "provider.getComposerCapabilities": "provider/get-composer-capabilities",
+  "provider.listOptions": "provider/list-options",
+  "provider.readSkill": "provider/read-skill",
+  "provider.compactThread": "provider/compact-thread",
 };
 
 /**
