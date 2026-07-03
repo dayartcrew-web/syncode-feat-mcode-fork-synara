@@ -84,6 +84,8 @@ import type {
 // `frontend/src/contracts/tier3/server.ts` for the canonical shapes.
 import type {
   ServerConfig,
+  ServerConfigIssue,
+  ServerProviderStatus,
   ServerSettings,
 } from "./tier3/server";
 // Terminal Tier-3 result type (T6c-5 terminal PTY RPC exposure). The backend
@@ -356,6 +358,61 @@ interface ServerSubscribeStubResult {
   note?: string;
 }
 
+// ─── Server write-side stub shapes (T6c-10) ────────────────────────────
+//
+// The cloned MCode UI persists user edits via these `server.*` write RPCs.
+// Syncode has no native settings/keybindings persistence layer, so each
+// backend handler is a STUB: it validates the params shape and echoes the
+// default read-side payload. The ack result types mirror MCode's contracts:
+//
+//   - `server.setConfig`        → echoes `ServerConfig` (default).
+//   - `server.updateSettings`   → echoes `ServerSettings` (default; the
+//                                 patch is NOT applied).
+//   - `server.refreshProviders` → `{ providers: [] }` (empty status payload).
+//   - `server.updateProvider`   → `{ providers: [] }` (validates `provider`).
+//   - `server.upsertKeybinding` → `{ keybindings: [], issues: [] }` (validates
+//                                 params is an object).
+//
+// `ServerConfig`/`ServerSettings` are reused from Tier-3 `server.ts`. The
+// provider-status and keybindings ack shapes get local interfaces below.
+
+// MCode `ServerProviderStatusesUpdatedPayload` (the ack shape for both
+// `refreshProviders` and `updateProvider`). The stub returns an empty
+// `providers` array (no provider-availability probe in syncode).
+interface ServerProvidersStatusResult {
+  providers: readonly ServerProviderStatus[];
+}
+
+// MCode `ServerProviderUpdateInput`: `{ provider: ProviderKind }`. The backend
+// validates `provider` is a non-empty string before returning the ack.
+interface ServerProviderUpdateInput {
+  provider: string;
+}
+
+// MCode `ServerUpsertKeybindingResult`: `{ keybindings, issues }`. The stub
+// echoes empty arrays (no keybindings resolver in syncode). `keybindings` is
+// `readonly unknown[]` because the MCode `ResolvedKeybindingsConfig` shape is
+// an array of resolved rules the UI tolerates empty; `issues` mirrors the
+// `ServerConfigIssue` shape from Tier-3 `server.ts`.
+interface ServerUpsertKeybindingResult {
+  keybindings: readonly unknown[];
+  issues: readonly ServerConfigIssue[];
+}
+
+// MCode `ServerUpsertKeybindingInput` = `KeybindingRule` (a struct). The
+// backend validates params is a JSON object; the exact field set is not
+// enforced server-side (the stub accepts any object and returns the empty
+// default). Typed loosely as `Record<string, unknown>` to match.
+type ServerUpsertKeybindingInput = Record<string, unknown>;
+
+// `server.setConfig` accepts a full `ServerConfig` overwrite. The stub ignores
+// the payload and echoes the default.
+type ServerSetConfigInput = Partial<ServerConfig>;
+
+// `server.updateSettings` accepts a `ServerSettingsPatch`. The stub ignores
+// the patch and echoes the default `ServerSettings`.
+type ServerUpdateSettingsInput = Record<string, unknown>;
+
 // ─── Terminal PTY input/result shapes (T6c-5) ──────────────────────────
 //
 // `TerminalSessionSnapshot` is imported from Tier-3 `terminal.ts` (the
@@ -472,7 +529,7 @@ interface ProviderCompactThreadResult {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 65 entries (T6c-4 server.* +9, T6c-5 terminal.* +9, T6c-6 automation.* +11, T6c-7 provider.* +11, T6c-8 stats.* +2) ──
+// ─── SERVED_RPC — 91 entries (latest: T6c-10 server write-side stubs +5) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -915,6 +972,50 @@ export const SERVED_RPC = {
     request: null as unknown as GitWorktreeRemoveInput,
     result: null as unknown as GitWorktreeRemoveResult,
   },
+
+  // ─── Server write-side stubs (T6c-10) ─────────────────────────────────
+  // The cloned MCode UI persists user edits via these `server.*` write RPCs
+  // (Settings panel "Apply"/"Reset", provider re-probe buttons, keybinding
+  // editor). The transport remaps the MCode dot-strings (`server.setConfig`,
+  // `server.updateSettings`, `server.refreshProviders`, `server.updateProvider`,
+  // `server.upsertKeybinding`) onto these slash keys (see `MCODE_TO_SERVED` in
+  // `wsTransport.ts`). The backend handlers in
+  // `crates/syncode-ws/src/rpc.rs` `handle_server_*` are STUBS: they validate
+  // the params shape (where required) and echo the default read-side payload
+  // — no persistence (syncode has no settings/keybindings subsystem). The
+  // UI's optimistic update is overwritten by the echoed default on the next
+  // read, converging to "no changes persisted".
+  //
+  // Known gaps (documented in `handle_server_*`):
+  //   - `server/set-config` echoes the default `ServerConfig` (write ignored).
+  //   - `server/update-settings` echoes the default `ServerSettings` (patch
+  //     NOT applied).
+  //   - `server/refresh-providers` returns `{ providers: [] }` (no probe).
+  //   - `server/update-provider` validates `provider` non-empty, then returns
+  //     `{ providers: [] }` (no probe).
+  //   - `server/upsert-keybinding` validates params is an object, then returns
+  //     `{ keybindings: [], issues: [] }` (no resolver).
+  // Entries appended at the END to ease parallel-merge conflict resolution.
+  "server/set-config": {
+    request: null as unknown as ServerSetConfigInput,
+    result: null as unknown as ServerConfig,
+  },
+  "server/update-settings": {
+    request: null as unknown as ServerUpdateSettingsInput,
+    result: null as unknown as ServerSettings,
+  },
+  "server/refresh-providers": {
+    request: null as unknown as null,
+    result: null as unknown as ServerProvidersStatusResult,
+  },
+  "server/update-provider": {
+    request: null as unknown as ServerProviderUpdateInput,
+    result: null as unknown as ServerProvidersStatusResult,
+  },
+  "server/upsert-keybinding": {
+    request: null as unknown as ServerUpsertKeybindingInput,
+    result: null as unknown as ServerUpsertKeybindingResult,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -998,16 +1099,16 @@ export const UNSERVED_RPC = [
   // layer — this section is intentionally empty (kept as a marker for the
   // domain).
 
-  // ─── Server meta — read-side SERVED in T6c-4, write-side deferred ────
+  // ─── Server meta — read-side SERVED in T6c-4, write-side SERVED in T6c-10 ──
   // The core read RPCs (`server.getConfig`, `server.getSettings`,
   // `server.getEnvironment`, `server.getDiagnostics`, `server.welcome`) and
   // the four `server.subscribe*` stubs are SERVED — see SERVED_RPC. The
-  // write-side / advanced server RPCs below remain unserved (MethodNotFound):
-  "server.setConfig",
+  // write-side RPCs (`server.setConfig`, `server.updateSettings`,
+  // `server.refreshProviders`, `server.updateProvider`,
+  // `server.upsertKeybinding`) are ALSO SERVED as of T6c-10 (stubs that echo
+  // the default read-side payload — no persistence). The advanced server
+  // RPCs below remain unserved (MethodNotFound):
   "server.patchSettings",
-  "server.updateSettings",
-  "server.refreshProviders",
-  "server.updateProvider",
   "server.listProviders",
   "server.getProviderStatuses",
   "server.getProviderAuthStatus",
@@ -1025,7 +1126,6 @@ export const UNSERVED_RPC = [
   "server.transcribeVoice",
   "server.voiceStart",
   "server.voiceStop",
-  "server.upsertKeybinding",
 
   // ─── Provider discovery (no backend surface) — ~9 ───────────────────
   "provider.listSkills",
