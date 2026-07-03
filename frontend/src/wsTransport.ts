@@ -355,6 +355,25 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "git.runStackedAction": "git/run-stacked-action",
   "git.createDetachedWorktree": "git/create-detached-worktree",
   "git.subscribeActionProgress": "git/subscribe-action-progress",
+
+  // ─── T6c-17: server niche ops (LAST batch — completes all RPCs) ──────
+  // The final 6 unserved server RPCs the vendored MCode UI calls. The
+  // syncode-ws backend serves `server.generateAutomationIntent` for REAL
+  // (LLM-backed one-shot — prompts a provider CLI and parses the JSON reply
+  // into the MCode `ServerGenerateAutomationIntentResult` shape); the other
+  // 5 are GRACEFUL STUBS (no settings persistence / usage-tracking /
+  // local-server process-mgmt subsystem in syncode — each returns a
+  // documented empty/ack payload). Map every MCode dot-name to the served
+  // slash dispatch key so the calls reach the backend (instead of being
+  // client-stubbed with MethodNotFound). After this batch: ZERO unserved
+  // RPCs at the transport layer. Entries appended at the END to ease
+  // parallel-merge conflict resolution.
+  "server.generateAutomationIntent": "server/generate-automation-intent",
+  "server.patchSettings": "server/patch-settings",
+  "server.listProviderUsage": "server/list-provider-usage",
+  "server.getProviderUsageSnapshot": "server/get-provider-usage-snapshot",
+  "server.startLocalServer": "server/start-local-server",
+  "server.stopLocalServer": "server/stop-local-server",
 };
 
 /**
