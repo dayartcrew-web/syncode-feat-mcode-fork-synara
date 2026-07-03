@@ -8,7 +8,7 @@
 
 ## TL;DR
 - **Frontend**: MCode `apps/web` cloned + rewired — **type-clean (tsc 0)**, suite **2128/0 pass**, vite build green.
-- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **104 served RPCs** dispatching MCode dot-names + slash forms.
+- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **107 served RPCs** dispatching MCode dot-names + slash forms.
 - **Every UI panel's RPCs reach the backend.** Read-side is REAL where Syncode has the subsystem; STUB-defaults where it doesn't. Terminal streams live output; automations actually execute; LLM ops work via provider CLI (no API key).
 
 ## Legend
@@ -36,7 +36,8 @@
 | `git.githubRepository` / `resolvePullRequest` | ✅ REAL | gh CLI (no token — uses gh auth; `gh repo view` / `gh pr view`) |
 | `git.handoffThread` | 🟡 PARTIAL | gh pr create real; worktree-handoff fields stub |
 | `git.preparePullRequestThread` | 🟡 STUB | composable via resolvePullRequest + worktreeCreate |
-| `git.runStackedAction` / `createDetachedWorktree` / `subscribeActionProgress` | ⛔ UNSERVED | (stacked actions / push-channel) |
+| `git.runStackedAction` / `createDetachedWorktree` | ✅ REAL | syncode-git StackedPipeline (action mapping) + `git worktree add --detach` |
+| `git.subscribeActionProgress` | 🟡 STUB | stacked actions synchronous — no progress push |
 
 ### Server (config / Settings)
 | RPC | Status | Backed by |
