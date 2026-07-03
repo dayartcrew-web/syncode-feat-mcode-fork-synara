@@ -104,6 +104,15 @@ pub struct WsState {
     /// are keyed by the caller-provided `terminalId` (MCode convention) so the
     /// UI's session references stay stable across calls.
     pub terminal_manager: SharedSessionManager,
+    /// Per-session output-reader task handles (T6c-11). Each live terminal
+    /// session has a dedicated tokio task that polls the PTY for new output
+    /// (via `spawn_blocking`) and broadcasts `terminal/event` push frames onto
+    /// `push_tx`. The handle is retained so `terminal.close`/`destroy` can
+    /// abort the reader — otherwise the blocking `read` would outlive the
+    /// session and leak a thread. Keyed by session id (the same key the
+    /// `terminal_manager` uses).
+    pub terminal_readers:
+        Arc<tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// Automation scheduler (T6c-6). Backs the `automation.*` RPC handlers
     /// (list/create/get/update/delete/runNow/cancelRun) — manages automation
     /// definition + run-record lifecycle (mirrors the terminal_manager wiring).
@@ -159,6 +168,7 @@ impl WsState {
             terminal_manager: Arc::new(RwLock::new(
                 syncode_terminal::SessionManager::new(),
             )),
+            terminal_readers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             automation_scheduler: Arc::new(syncode_automation::Scheduler::new()),
         }
     }

@@ -466,10 +466,10 @@ async fn dispatch_method(
         "terminal.subscribeEvents"
         | "terminal/subscribe"
         | "terminal/subscribe-events"
-        | "terminal.subscribe"
-        | "terminal/unsubscribe"
+        | "terminal.subscribe" => handle_terminal_subscribe(state, conn_id, id).await,
+        "terminal/unsubscribe"
         | "terminal/unsubscribe-events"
-        | "terminal.unsubscribeEvents" => handle_terminal_subscribe_stub(id, &request.method),
+        | "terminal.unsubscribeEvents" => handle_terminal_unsubscribe(state, conn_id, id).await,
 
         // ─── Automation Methods (syncode-automation-backed) ───────
         // The cloned MCode Automations panel calls `automation.*` RPCs
@@ -3167,6 +3167,14 @@ async fn handle_terminal_open(state: &WsState, id: Value, params: &Value) -> Jso
             );
         }
     };
+
+    // Spawn the per-session output-reader task (T6c-11). It polls the PTY for
+    // new output (via `spawn_blocking` — the PTY reader is blocking std I/O)
+    // and broadcasts each chunk onto `push_tx` as a `terminal/event` push
+    // frame. Connections subscribed to the `terminal` channel receive it. The
+    // task ends on EOF (child exited) or when aborted by `terminal.close`.
+    spawn_terminal_reader(state.clone(), session_key.clone(), params.clone()).await;
+
     JsonRpcResponse::success(id, session_info_to_snapshot(&info, params))
 }
 
@@ -3304,6 +3312,9 @@ async fn handle_terminal_close(state: &WsState, id: Value, params: &Value) -> Js
             format!("terminal.close: session not found: {session_key}"),
         );
     }
+    // Abort the per-session output-reader task so its blocking PTY read does
+    // not outlive the session (otherwise the reader thread leaks until EOF).
+    abort_terminal_reader(state, &session_key).await;
     JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
 }
 
@@ -3438,25 +3449,242 @@ async fn handle_terminal_restart(state: &WsState, id: Value, params: &Value) -> 
     handle_terminal_open(state, id, params).await
 }
 
-/// `terminal.subscribeEvents` / `terminal.unsubscribeEvents` — STUB.
+/// `terminal.subscribeEvents` — record a real push subscription for the
+/// `terminal` channel on the originating connection (T6c-11).
 ///
-/// Returns `{ subscribed: true, note: ... }` without recording a real push
-/// subscription or spawning an output-pump task. The syncode-terminal
-/// `SessionManager` is pull-based (no callback on new output), so real push
-/// delivery requires a per-session reader task that polls
-/// `PtyHandle::read_output` and broadcasts on `push_tx` — deferred to
-/// T6c-future. The UI tolerates the absence of push (it can poll
-/// `terminal.list` or a future `terminal.read`).
-fn handle_terminal_subscribe_stub(id: Value, method: &str) -> JsonRpcResponse {
+/// Before T6c-11 this was a stub: the syncode-terminal `SessionManager` was
+/// pull-based (no callback on new output), so no push frames were ever
+/// emitted and the subscription was a no-op. With the per-session output
+/// reader task now broadcasting `terminal/event` frames onto `push_tx`, a
+/// connection that subscribes here receives every output/exit event from
+/// every live session (the `terminal` channel is global, not per-session —
+/// the `terminalId` inside each frame lets the UI filter per pane).
+///
+/// The push delivery loop (`run_push_delivery` in `server.rs`) consults the
+/// subscription registry on every broadcast and forwards only channels the
+/// connection has opted into, so this call is the gate that opens the
+/// terminal stream to the caller.
+async fn handle_terminal_subscribe(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_TERMINAL);
     JsonRpcResponse::success(
         id,
         serde_json::json!({
             "subscribed": true,
-            "method": method,
-            "channel": "terminal",
-            "note": "stub: pull-based SessionManager — no push delivery (T6c-future)",
+            "channel": crate::channels::CHANNEL_TERMINAL,
+            "added": added,
         }),
     )
+}
+
+/// `terminal.unsubscribeEvents` — drop the `terminal` channel subscription
+/// for the originating connection (T6c-11). After this call the connection
+/// receives no further `push/terminal` frames until it re-subscribes.
+async fn handle_terminal_unsubscribe(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let removed = state
+        .subscriptions
+        .write()
+        .await
+        .unsubscribe(conn_id, crate::channels::CHANNEL_TERMINAL);
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "unsubscribed": true,
+            "channel": crate::channels::CHANNEL_TERMINAL,
+            "removed": removed,
+        }),
+    )
+}
+
+/// Per-session output-reader task (T6c-11) — the bridge that turns the
+/// pull-based `SessionManager` into a live-push terminal stream.
+///
+/// `spawn_terminal_reader` launches a tokio task that owns the read loop for
+/// one session. Each iteration:
+///
+/// 1. **Read** — `tokio::task::spawn_blocking` runs the PTY read on a blocking
+///    thread (the `portable_pty` reader's `read` is blocking std I/O — it has
+///    no readiness notification, so calling it directly on a reactor thread
+///    would stall the async runtime). The blocking closure locks the
+///    `PtyHandle`'s reader (`std::sync::Mutex`, held only across the read),
+///    fills a 4 KiB buffer, and returns the byte count.
+/// 2. **Decode + push** — back on the async task, the bytes are
+///    lossily-decoded to UTF-8 (`String::from_utf8_lossy` — terminal output is
+///    a byte stream that may split a multi-byte char across reads) and
+///    broadcast onto `push_tx` as `(CHANNEL_TERMINAL, <TerminalEvent payload>)`.
+///    The payload is the MCode `TerminalEvent` `{ type:"output", threadId,
+///    terminalId, createdAt, data, byteLength }` shape (see
+///    `frontend/src/contracts/tier3/terminal.ts`), so the UI's existing
+///    decoder applies unchanged.
+/// 3. **EOF / exit** — a zero-length read (or a reader error) means the child
+///    has exited; the task broadcasts a final `{ type:"exited", exitCode,
+///    exitSignal }` frame (best-effort exit code: `null`, since
+///    `portable_pty`'s `child` is dropped at spawn and we can't reap it
+///    here — documented gap), marks the PTY stopped, removes itself from the
+///    reader registry, and ends.
+///
+/// **Locking model.** The `Arc<RwLock<TerminalSession>>` is cloned once at
+/// spawn; each iteration takes a `session.read().await` guard only long enough
+/// to grab a `&PtyHandle` reference for the blocking closure (the closure
+/// locks the reader's own `std::sync::Mutex` internally). The session guard
+/// is dropped before `push_tx.send` so the push never blocks another task
+/// waiting on the session lock. The `push_tx` clone is captured directly, so
+/// the reader does not touch `WsState` after spawn (no Arc to the whole
+/// state) — only the reader-registry Mutex is touched at exit, to unregister.
+///
+/// **Abortion.** The `JoinHandle` is stored in `state.terminal_readers` keyed
+/// by session id. `handle_terminal_close` calls `abort_terminal_reader`,
+/// which aborts the task — the blocking read is interrupted when its task is
+/// dropped (the `spawn_blocking` closure's future is cancelled on the next
+/// yield; in practice the session's PTY master is also dropped by
+/// `destroy_session`, which causes the blocking read to error/EOF promptly).
+async fn spawn_terminal_reader(state: WsState, session_id: String, params: Value) {
+    use tokio::task::JoinHandle;
+
+    // Resolve the session Arc once. If it vanished between create and here
+    // (extremely unlikely — same task), bail without spawning.
+    let session_arc = {
+        let read_guard = state.terminal_manager.read().await;
+        read_guard.get_session(&session_id).await
+    };
+    let session_arc = match session_arc {
+        Some(a) => a,
+        None => return,
+    };
+
+    let push_tx = state.push_tx.clone();
+    let thread_id = params
+        .get("threadId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&session_id)
+        .to_string();
+    let terminal_id = session_id.clone();
+    let readers_registry = state.terminal_readers.clone();
+
+    let handle: JoinHandle<()> = tokio::spawn(async move {
+        loop {
+            // Each iteration hands the session Arc to a blocking thread that
+            // performs the PTY read. The blocking closure takes the session's
+            // RwLock read guard (tokio guards are Send) and calls the sync
+            // `read_output_blocking` WITHOUT awaiting — the documented
+            // escape-hatch for tokio RwLocks on a blocking thread.
+            let session_for_read = session_arc.clone();
+            let read_result = tokio::task::spawn_blocking(move || {
+                let session = session_for_read.blocking_read();
+                let pty = session.pty();
+                let mut local_buf = vec![0u8; 4096];
+                match pty.read_output_blocking(&mut local_buf) {
+                    Ok(0) => Ok(Vec::new()), // EOF
+                    Ok(n) => {
+                        local_buf.truncate(n);
+                        Ok(local_buf)
+                    }
+                    Err(e) => Err(e),
+                }
+            })
+            .await;
+
+            let bytes = match read_result {
+                Ok(Ok(b)) if b.is_empty() => {
+                    // EOF — child exited.
+                    let _ = push_tx.send((
+                        crate::channels::CHANNEL_TERMINAL.to_string(),
+                        serde_json::json!({
+                            "type": "exited",
+                            "threadId": thread_id,
+                            "terminalId": terminal_id,
+                            "createdAt": chrono::Utc::now().to_rfc3339(),
+                            "exitCode": serde_json::Value::Null,
+                            "exitSignal": serde_json::Value::Null,
+                        }),
+                    ));
+                    break;
+                }
+                Ok(Ok(b)) => b,
+                Ok(Err(_e)) => {
+                    // Reader error — treat like EOF (session is unusable).
+                    tracing::warn!(
+                        session_id = %terminal_id,
+                        "terminal reader error; ending reader task"
+                    );
+                    let _ = push_tx.send((
+                        crate::channels::CHANNEL_TERMINAL.to_string(),
+                        serde_json::json!({
+                            "type": "error",
+                            "threadId": thread_id,
+                            "terminalId": terminal_id,
+                            "createdAt": chrono::Utc::now().to_rfc3339(),
+                            "message": "terminal reader closed",
+                        }),
+                    ));
+                    break;
+                }
+                Err(join_err) => {
+                    // spawn_blocking task panicked or was cancelled — the
+                    // reader task itself is being aborted (terminal.close).
+                    // Exit quietly.
+                    tracing::debug!(
+                        session_id = %terminal_id,
+                        error = %join_err,
+                        "terminal reader blocking task cancelled; ending reader"
+                    );
+                    break;
+                }
+            };
+
+            let byte_len = bytes.len();
+            let data = String::from_utf8_lossy(&bytes).into_owned();
+            let created_at = chrono::Utc::now().to_rfc3339();
+            // Broadcast the output frame. `send` errors when there are no
+            // receivers — not a failure (the session is still alive; output
+            // is best-effort pushed).
+            let _ = push_tx.send((
+                crate::channels::CHANNEL_TERMINAL.to_string(),
+                serde_json::json!({
+                    "type": "output",
+                    "threadId": thread_id,
+                    "terminalId": terminal_id,
+                    "createdAt": created_at,
+                    "data": data,
+                    "byteLength": byte_len,
+                }),
+            ));
+        }
+
+        // Self-unregister from the reader registry (best-effort; close() may
+        // already have removed + aborted us, in which case this is a no-op).
+        readers_registry.lock().await.remove(&terminal_id);
+        // Mark the PTY stopped so list_sessions reports it as not-alive.
+        let session = session_arc.read().await;
+        session.pty().mark_stopped();
+    });
+
+    // Record the handle so close() can abort it. If a previous reader for the
+    // same id lingered (restart path), abort it first to avoid double-readers.
+    let mut registry = state.terminal_readers.lock().await;
+    if let Some(prev) = registry.insert(session_id, handle) {
+        prev.abort();
+    }
+}
+
+/// Abort a session's output-reader task on close/destroy (T6c-11).
+async fn abort_terminal_reader(state: &WsState, session_id: &str) {
+    let handle = state.terminal_readers.lock().await.remove(session_id);
+    if let Some(h) = handle {
+        h.abort();
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -6201,10 +6429,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_subscribests_is_stub_success() {
-        // subscribeEvents is stubbed (pull-based SessionManager) but must
-        // return success so the UI's subscribe call doesn't error.
+    async fn terminal_subscribe_returns_success() {
+        // subscribeEvents now records a real `terminal` channel subscription
+        // (T6c-11) and must return success so the UI's subscribe call works.
         let state = WsState::new_in_memory(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "terminal.subscribeEvents",
             "params": { "terminalId": "whatever" }
@@ -6978,5 +7208,213 @@ mod tests {
         assert_eq!(result["unavailableProviders"].as_array().unwrap().len(), 0);
         assert_eq!(result["heatmap"].as_array().unwrap().len(), 0);
         assert_eq!(result["heatmapMetric"], "tokens");
+    }
+
+    // ─── T6c-11: terminal live-push tests ──────────────────────────────
+
+    /// Helper: subscribe to the push bus and collect terminal frames until a
+    /// predicate matches or the deadline passes.
+    async fn collect_terminal_frames(
+        push_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
+        deadline_ms: u64,
+    ) -> Vec<serde_json::Value> {
+        let mut rx = push_tx.subscribe();
+        let mut frames = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
+        while std::time::Instant::now() < deadline {
+            let remaining =
+                deadline.saturating_duration_since(std::time::Instant::now());
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok((channel, data))) if channel == crate::channels::CHANNEL_TERMINAL => {
+                    frames.push(data);
+                }
+                _ => break,
+            }
+        }
+        frames
+    }
+
+    /// Keystone: spawning a terminal session whose PTY runs `echo hello`
+    /// produces a `terminal/event` output frame containing "hello" on the
+    /// push bus. This proves the reader task reads PTY output and broadcasts
+    /// it end-to-end.
+    #[tokio::test]
+    async fn terminal_open_pushes_output_to_broadcast() {
+        // Skip on platforms without /bin/sh.
+        if std::path::Path::new("/bin/sh").exists() {
+            // present
+        } else {
+            eprintln!("[skip] /bin/sh not available; cannot run PTY test");
+            return;
+        }
+
+        let state = WsState::new_in_memory(16);
+
+        // Subscribe to the push bus BEFORE opening the session, so the
+        // broadcast receiver exists when the reader task sends.
+        let push_tx = state.push_tx.clone();
+        let collect_handle = tokio::spawn(collect_terminal_frames(push_tx.clone(), 2000));
+
+        // Yield once so the collector task is polling.
+        tokio::task::yield_now().await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.open",
+            "params": {
+                "terminalId": "term-echo-test",
+                "command": "/bin/sh",
+                "args": ["-c", "echo hello"],
+                "threadId": "thread-1",
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "open failed: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["terminalId"], "term-echo-test");
+
+        let frames = collect_handle.await.expect("collector task panicked");
+
+        // Assert at least one output frame carried "hello".
+        let saw_hello = frames.iter().any(|f| {
+            f.get("type").and_then(|v| v.as_str()) == Some("output")
+                && f.get("data")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s.contains("hello"))
+        });
+        assert!(
+            saw_hello,
+            "expected an output frame containing 'hello'; got {} frames: {:?}",
+            frames.len(),
+            frames
+        );
+
+        // Also assert the frame carries the identity fields the UI needs.
+        let output_frame = frames
+            .iter()
+            .find(|f| f.get("type").and_then(|v| v.as_str()) == Some("output"))
+            .unwrap();
+        assert_eq!(output_frame["terminalId"], "term-echo-test");
+        assert_eq!(output_frame["threadId"], "thread-1");
+        assert!(output_frame["createdAt"].is_string());
+        assert!(output_frame["byteLength"].is_number());
+
+        // Cleanup: close the session (aborts the reader).
+        let close_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "terminal.close",
+            "params": { "terminalId": "term-echo-test" }
+        });
+        let _ = rpc(&state, 1, &close_req).await;
+    }
+
+    /// `terminal.subscribeEvents` records a real `terminal` channel
+    /// subscription on the originating connection (T6c-11). Before T6c-11
+    /// this was a no-op stub; now the connection actually receives
+    /// `push/terminal` frames.
+    #[tokio::test]
+    async fn terminal_subscribe_records_real_subscription() {
+        let state = WsState::new_in_memory(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        // No subscription yet.
+        let subscribed = state
+            .subscriptions
+            .read()
+            .await
+            .get_subscription(1)
+            .is_some_and(|s| s.is_subscribed(crate::channels::CHANNEL_TERMINAL));
+        assert!(!subscribed, "should not be subscribed before call");
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.subscribeEvents"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["subscribed"], true);
+        assert_eq!(result["channel"], "terminal");
+
+        // Now subscribed.
+        let subscribed = state
+            .subscriptions
+            .read()
+            .await
+            .get_subscription(1)
+            .is_some_and(|s| s.is_subscribed(crate::channels::CHANNEL_TERMINAL));
+        assert!(subscribed, "subscribeEvents must record a real subscription");
+    }
+
+    /// `terminal.unsubscribeEvents` drops the subscription (T6c-11).
+    #[tokio::test]
+    async fn terminal_unsubscribe_drops_subscription() {
+        let state = WsState::new_in_memory(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+        state
+            .subscriptions
+            .write()
+            .await
+            .subscribe(1, crate::channels::CHANNEL_TERMINAL);
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.unsubscribeEvents"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["unsubscribed"], true);
+
+        let subscribed = state
+            .subscriptions
+            .read()
+            .await
+            .get_subscription(1)
+            .is_some_and(|s| s.is_subscribed(crate::channels::CHANNEL_TERMINAL));
+        assert!(!subscribed, "unsubscribeEvents must clear the subscription");
+    }
+
+    /// `terminal.close` aborts the reader task and removes its handle from
+    /// the registry (T6c-11). After close, the reader registry is empty.
+    #[tokio::test]
+    async fn terminal_close_aborts_reader_task() {
+        if !std::path::Path::new("/bin/sh").exists() {
+            eprintln!("[skip] /bin/sh not available");
+            return;
+        }
+        let state = WsState::new_in_memory(16);
+
+        // Spawn a long-lived shell so the reader keeps running.
+        let open_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.open",
+            "params": {
+                "terminalId": "term-close-test",
+                "command": "/bin/sh",
+                "args": ["-c", "sleep 30"],
+            }
+        });
+        let resp = rpc(&state, 1, &open_req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        // Reader registered.
+        let registered = state.terminal_readers.lock().await.contains_key("term-close-test");
+        assert!(registered, "reader handle should be registered after open");
+
+        // Close.
+        let close_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "terminal.close",
+            "params": { "terminalId": "term-close-test" }
+        });
+        let resp = rpc(&state, 1, &close_req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        // Reader removed.
+        let still_registered = state
+            .terminal_readers
+            .lock()
+            .await
+            .contains_key("term-close-test");
+        assert!(
+            !still_registered,
+            "close must remove the reader handle from the registry"
+        );
     }
 }
