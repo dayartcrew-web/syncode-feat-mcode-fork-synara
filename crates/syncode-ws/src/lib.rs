@@ -11,6 +11,7 @@ pub mod rpc;
 pub mod server;
 pub mod settings;
 pub mod transport;
+pub mod usage;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -136,6 +137,14 @@ pub struct WsState {
     /// no on-disk settings file; the store is rebuilt from defaults on each
     /// server start (the documented gap: edits don't survive a restart).
     pub settings: Arc<RwLock<crate::settings::ServerSettingsState>>,
+    /// Provider token-usage log (T6c-19). Append-only record of every
+    /// successful provider round trip (input/output/total tokens + provider
+    /// id + model + timestamp). The `server.listProviderUsage` and
+    /// `server.getProviderUsageSnapshot` RPCs aggregate over this log. The
+    /// `invoke()` one-shot helper records into it whenever a provider
+    /// response carries token-usage metadata. In-memory only (rebuilt from
+    /// empty on each server start — mirrors the settings store's gap).
+    pub usage: Arc<RwLock<crate::usage::UsageStore>>,
 }
 
 impl WsState {
@@ -209,6 +218,7 @@ impl WsState {
                 syncode_provider::registry::ProviderRegistry::new(),
             )),
             settings,
+            usage: Arc::new(RwLock::new(crate::usage::UsageStore::new())),
         }
     }
 
