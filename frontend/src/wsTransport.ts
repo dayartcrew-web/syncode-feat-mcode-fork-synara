@@ -262,6 +262,34 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   // the END to ease parallel-merge conflict resolution.
   "stats.getProfileStats": "stats/get-profile-stats",
   "stats.getProfileTokenStats": "stats/get-profile-token-stats",
+
+  // Git Advanced RPCs (T6c-9): the cloned MCode GitPanel's stash/worktree/
+  // network/init menus call these `git.*` dot-strings beyond the core phase-3
+  // surface. The syncode-ws backend now serves them (stash/fetch/init/
+  // removeIndexLock via git2; pull/push via syncode-git Git2Service; worktree
+  // list/create/remove via git2; stashAndCheckout is a stub `{ ok:false }`).
+  // Map every MCode dot-name the UI uses to the served slash dispatch key so
+  // the calls reach the backend instead of being client-stubbed with
+  // MethodNotFound. The backend dispatch also accepts the dot-name directly
+  // (arms cover both forms) so this remap is belt-and-braces robustness.
+  // Entries appended at the END to ease parallel-merge conflict resolution.
+  "git.stashList": "git/stash-list",
+  "git.stashCreate": "git/stash-create",
+  "git.stashApply": "git/stash-apply",
+  "git.stashDrop": "git/stash-drop",
+  "git.stashInfo": "git/stash-info",
+  "git.stashAndCheckout": "git/stash-and-checkout",
+  "git.fetch": "git/fetch",
+  "git.pull": "git/pull",
+  "git.push": "git/push",
+  "git.init": "git/init",
+  "git.removeIndexLock": "git/remove-index-lock",
+  "git.worktreeList": "git/worktree-list",
+  "git.listWorktrees": "git/worktree-list",
+  "git.worktreeCreate": "git/worktree-create",
+  "git.createWorktree": "git/worktree-create",
+  "git.worktreeRemove": "git/worktree-remove",
+  "git.removeWorktree": "git/worktree-remove",
 };
 
 /**
