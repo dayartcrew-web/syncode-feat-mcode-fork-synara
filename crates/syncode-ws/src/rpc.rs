@@ -627,8 +627,12 @@ async fn dispatch_method(
         "provider.listSkillsCatalog" | "provider/list-skills-catalog" => {
             handle_provider_list_skills_catalog(id, &request.params)
         }
-        "provider.listPlugins" | "provider/list-plugins" => handle_provider_list_plugins(id),
-        "provider.readPlugin" | "provider/read-plugin" => handle_provider_read_plugin(id),
+        "provider.listPlugins" | "provider/list-plugins" => {
+            handle_provider_list_plugins(id, &request.params)
+        }
+        "provider.readPlugin" | "provider/read-plugin" => {
+            handle_provider_read_plugin(id, &request.params)
+        }
         "provider.listCommands" | "provider/list-commands" => {
             handle_provider_list_commands(id, &request.params)
         }
@@ -636,7 +640,9 @@ async fn dispatch_method(
         "provider.getComposerCapabilities" | "provider/get-composer-capabilities" => {
             handle_provider_get_composer_capabilities(id, &request.params)
         }
-        "provider.listOptions" | "provider/list-options" => handle_provider_list_options(id),
+        "provider.listOptions" | "provider/list-options" => {
+            handle_provider_list_options(id, &request.params)
+        }
         "provider.readSkill" | "provider/read-skill" => {
             handle_provider_read_skill(id, &request.params)
         }
@@ -6004,26 +6010,70 @@ fn handle_provider_list_skills_catalog(id: Value, params: &Value) -> JsonRpcResp
     )
 }
 
-/// `provider.listPlugins` — return `ProviderListPluginsResult` with empty
-/// marketplaces/errors and a null `remoteSyncError`. Syncode has no plugin
-/// marketplace loader.
-fn handle_provider_list_plugins(id: Value) -> JsonRpcResponse {
+/// `provider.listPlugins` — filesystem scan of the project `.plugins/`
+/// directory (precedence: explicit `cwd` + `.plugins`, then
+/// `SYNCODE_PLUGINS_DIR` env, then relative `.plugins` fallback) for `*.json`
+/// plugin descriptor files. Each file is parsed as a `ProviderPluginDescriptor`
+/// (id, name, source, installed, enabled, installPolicy, authPolicy). Returns
+/// the full `ProviderListPluginsResult` shape: marketplaces/errors empty,
+/// remoteSyncError null, and the discovered plugins under a synthetic
+/// "local" marketplace. Missing dir → graceful empty marketplaces list.
+fn handle_provider_list_plugins(id: Value, params: &Value) -> JsonRpcResponse {
+    let dir = resolve_plugins_dir(params);
+    let marketplaces: Vec<Value> = match dir {
+        Some(d) => {
+            let plugins = scan_plugins_dir(&d);
+            if plugins.is_empty() {
+                Vec::new()
+            } else {
+                let abs = d.canonicalize_unchecked().to_string_lossy().into_owned();
+                vec![serde_json::json!({
+                    "name": "local",
+                    "path": abs,
+                    "interface": { "displayName": "Local Plugins" },
+                    "plugins": plugins,
+                })]
+            }
+        }
+        None => Vec::new(),
+    };
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "marketplaces": [],
+            "marketplaces": marketplaces,
             "marketplaceLoadErrors": [],
             "remoteSyncError": Value::Null,
             "featuredPluginIds": [],
+            "source": "filesystem",
         }),
     )
 }
 
-/// `provider.readPlugin` — return `{ plugin: null }`. The UI's readPlugin
-/// consumer (`PluginDetailSheet`) renders an empty/not-found state when the
-/// plugin is null; the MCode schema marks plugin as `Schema.Null`able.
-fn handle_provider_read_plugin(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null }))
+/// `provider.readPlugin` — read a plugin descriptor at the requested `path`.
+/// The path must point to an existing readable `*.json` file inside a `.plugins`
+/// directory (basic traversal guard). Returns `{ plugin: {...} }` with the full
+/// descriptor shape or `{ plugin: null }` when missing/unreadable/out-of-bounds.
+fn handle_provider_read_plugin(id: Value, params: &Value) -> JsonRpcResponse {
+    let raw_path = match params.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null })),
+    };
+    let path = Path::new(raw_path);
+    let canonical = match path.canonicalize_unchecked().canonicalize() {
+        Ok(c) => c,
+        Err(_) => return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null })),
+    };
+    // Basic traversal guard: require the canonical path to contain a `.plugins`
+    // component, and reject non-`.json` extensions.
+    let in_plugins = canonical
+        .components()
+        .any(|c| c.as_os_str() == ".plugins");
+    let is_json = canonical.extension().and_then(|e| e.to_str()) == Some("json");
+    if !in_plugins || !is_json {
+        return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null }));
+    }
+    let plugin = read_plugin_descriptor(&canonical);
+    JsonRpcResponse::success(id, serde_json::json!({ "plugin": plugin }))
 }
 
 /// `provider.listCommands` — return `ProviderListCommandsResult` with a static
@@ -6224,11 +6274,219 @@ impl CanonicalizeUnchecked for Path {
     }
 }
 
-/// `provider.listOptions` — return `{ options: [] }`. Syncode has no
-/// per-provider option descriptor subsystem (the MCode `ProviderOptionDescriptor`
-/// surface drives provider-specific settings UIs we don't render).
-fn handle_provider_list_options(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "options": [] }))
+/// `provider.listOptions` — return per-provider model configuration options
+/// (`ProviderOptionDescriptor[]`). Mirrors the MCode `model.ts` option sets:
+/// reasoning-effort (codex/claude/grok), thinking-level (gemini/pi). Other
+/// providers return an empty array (no configurable options). The `provider`
+/// param is read from the request (defaults to `claude` when absent). Returns
+/// `{ options: [...] }`.
+fn handle_provider_list_options(id: Value, params: &Value) -> JsonRpcResponse {
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude");
+    let kind = to_mcode_provider_kind(provider).unwrap_or(provider);
+    let options = provider_option_descriptors(kind);
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "options": options,
+            "source": "static",
+        }),
+    )
+}
+
+/// Build the static `ProviderOptionDescriptor[]` for a given MCode provider
+/// kind. Returns a single `SelectProviderOptionDescriptor` for providers with a
+/// configurable reasoning effort / thinking level; empty for others. Values
+/// sourced from the MCode `model.ts` capability constants.
+fn provider_option_descriptors(kind: &str) -> Vec<Value> {
+    let (opt_id, label, choices): (&str, &str, Vec<(&str, &str, bool)>) = match kind {
+        // codex: low/medium(high-default)/high/xhigh — gpt-5.5 model.
+        "codex" => (
+            "reasoningEffort",
+            "Reasoning Effort",
+            vec![
+                ("low", "Low", false),
+                ("medium", "Medium", true),
+                ("high", "High", false),
+                ("xhigh", "Extra High", false),
+            ],
+        ),
+        // claudeAgent: low/medium/high-default/xhigh/max/ultrathink/ultracode.
+        "claudeAgent" => (
+            "reasoningEffort",
+            "Reasoning Effort",
+            vec![
+                ("low", "Low", false),
+                ("medium", "Medium", false),
+                ("high", "High", true),
+                ("xhigh", "Extra High", false),
+                ("max", "Max", false),
+                ("ultrathink", "Ultrathink", false),
+                ("ultracode", "Ultracode", false),
+            ],
+        ),
+        // grok: none/low-default/medium/high.
+        "grok" => (
+            "reasoningEffort",
+            "Reasoning Effort",
+            vec![
+                ("none", "None", false),
+                ("low", "Low", true),
+                ("medium", "Medium", false),
+                ("high", "High", false),
+            ],
+        ),
+        // gemini: thinking level — Dynamic/-1 or 512 tokens (gemini-2.5) and
+        // HIGH-default/LOW (gemini-3). Surface the union as thinkingLevel.
+        "gemini" => (
+            "thinkingLevel",
+            "Thinking Level",
+            vec![
+                ("HIGH", "High", true),
+                ("LOW", "Low", false),
+                ("-1", "Dynamic", false),
+                ("512", "512 Tokens", false),
+            ],
+        ),
+        // pi: thinking level — same surface as gemini (pi uses a similar
+        // thinking-budget toggle). Default to medium.
+        "pi" => (
+            "thinkingLevel",
+            "Thinking Level",
+            vec![
+                ("low", "Low", false),
+                ("medium", "Medium", true),
+                ("high", "High", false),
+            ],
+        ),
+        _ => return Vec::new(),
+    };
+    let options: Vec<Value> = choices
+        .into_iter()
+        .map(|(value, lbl, is_default)| {
+            let mut choice = serde_json::json!({
+                "id": value,
+                "label": lbl,
+            });
+            if is_default {
+                choice["isDefault"] = Value::Bool(true);
+            }
+            choice
+        })
+        .collect();
+    vec![serde_json::json!({
+        "id": opt_id,
+        "label": label,
+        "type": "select",
+        "options": options,
+    })]
+}
+
+/// Resolve the plugins directory for a `listPlugins`/`readPlugin` request.
+/// Precedence: explicit `cwd` param joined with `.plugins`, then the
+/// `SYNCODE_PLUGINS_DIR` env var, finally a relative `.plugins` fallback.
+/// Returns `None` if the resolved directory does not exist (graceful empty
+/// result).
+fn resolve_plugins_dir(params: &Value) -> Option<PathBuf> {
+    let dir = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|cwd| Path::new(cwd).join(".plugins"))
+        .or_else(|| std::env::var_os("SYNCODE_PLUGINS_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(".plugins"));
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+/// Scan the resolved plugins directory for `*.json` files and build a
+/// `ProviderPluginDescriptor` per file. Each file is parsed as JSON; required
+/// fields are `id` and `name` (others default: source = local file path,
+/// installed/enabled = true, installPolicy = AVAILABLE, authPolicy = ON_USE).
+/// Invalid JSON or missing required fields → file is skipped. Returns sorted
+/// by id. Empty on any I/O error.
+fn scan_plugins_dir(dir: &Path) -> Vec<Value> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut plugins: Vec<(String, Value)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(descriptor) = read_plugin_descriptor(&path) {
+            let id = descriptor
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !id.is_empty() {
+                plugins.push((id, descriptor));
+            }
+        }
+    }
+    plugins.sort_by(|a, b| a.0.cmp(&b.0));
+    plugins.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Read and parse a plugin descriptor file at `path` into a
+/// `ProviderPluginDescriptor` JSON value. The file must be valid JSON with at
+/// least an `id` (string) and `name` (string) field; optional fields
+/// (`description`, `enabled`, `version`, `interface`, `installPolicy`,
+/// `authPolicy`) are merged in when present. Returns `None` on I/O error,
+/// invalid JSON, or missing required fields.
+fn read_plugin_descriptor(path: &Path) -> Option<Value> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let parsed: Value = serde_json::from_str(&content).ok()?;
+    let obj = parsed.as_object()?;
+    let id = obj.get("id").and_then(|v| v.as_str())?;
+    let name = obj.get("name").and_then(|v| v.as_str())?;
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+    let abs_path = path.canonicalize_unchecked().to_string_lossy().into_owned();
+    let enabled = obj
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let install_policy = obj
+        .get("installPolicy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("AVAILABLE");
+    let auth_policy = obj
+        .get("authPolicy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ON_USE");
+    let mut descriptor = serde_json::json!({
+        "id": id,
+        "name": name,
+        "source": { "type": "local", "path": abs_path },
+        "installed": true,
+        "enabled": enabled,
+        "installPolicy": install_policy,
+        "authPolicy": auth_policy,
+    });
+    if let Some(desc) = obj.get("description").and_then(|v| v.as_str()) {
+        descriptor["description"] = Value::String(desc.to_string());
+    }
+    if let Some(version) = obj.get("version").and_then(|v| v.as_str()) {
+        descriptor["version"] = Value::String(version.to_string());
+    }
+    if let Some(iface) = obj.get("interface") {
+        descriptor["interface"] = iface.clone();
+    }
+    Some(descriptor)
 }
 
 /// `provider.readSkill` — read a skill file at the requested `path` and return
@@ -10083,12 +10341,24 @@ mod tests {
             "listCommands should return static non-empty command list"
         );
 
-        // listOptions → { options: [] }  (still a stub — no option subsystem)
+        // listOptions → returns reasoningEffort select descriptor for codex.
         let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions"
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "codex" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["options"].as_array().unwrap().len(), 0);
+        let options = result["options"].as_array().unwrap();
+        assert_eq!(options.len(), 1, "codex should expose one option descriptor");
+        assert_eq!(options[0]["id"], "reasoningEffort");
+        assert_eq!(options[0]["type"], "select");
+        let choices = options[0]["options"].as_array().unwrap();
+        assert!(choices.len() >= 3, "codex reasoningEffort has multiple levels");
+        // "medium" is the default for the gpt-5.5 codex model.
+        let medium = choices
+            .iter()
+            .find(|c| c["id"] == "medium")
+            .expect("codex reasoningEffort includes a medium option");
+        assert_eq!(medium["isDefault"], true);
 
         // readPlugin → { plugin: null }
         let req = serde_json::json!({
@@ -10122,6 +10392,231 @@ mod tests {
         assert!(result["marketplaceLoadErrors"].is_array());
         assert!(result["remoteSyncError"].is_null());
         assert!(result["featuredPluginIds"].is_array());
+    }
+
+    /// listOptions must return a per-provider static option descriptor map
+    /// mirroring the MCode `model.ts` capability constants: codex/claude/grok
+    /// get a `reasoningEffort` select, gemini/pi get a `thinkingLevel` select,
+    /// and unmapped providers (e.g. kilo) get an empty array. Default provider
+    /// (no param) resolves to claudeAgent.
+    #[tokio::test]
+    async fn provider_list_options_per_provider_map() {
+        let state = WsState::new_in_memory(16);
+
+        // codex → reasoningEffort select with medium as default (gpt-5.5).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "codex" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let options = result["options"].as_array().unwrap();
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0]["id"], "reasoningEffort");
+        assert_eq!(options[0]["type"], "select");
+        let codex_choices = options[0]["options"].as_array().unwrap();
+        assert_eq!(codex_choices.len(), 4);
+        let values: Vec<&str> = codex_choices
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(values, vec!["low", "medium", "high", "xhigh"]);
+
+        // claudeAgent → reasoningEffort with ultrathink-style levels.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "claudeAgent" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let options = result["options"].as_array().unwrap();
+        assert_eq!(options[0]["id"], "reasoningEffort");
+        let claude_values: Vec<&str> = options[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(claude_values.contains(&"ultrathink"));
+        assert!(claude_values.contains(&"ultracode"));
+
+        // gemini → thinkingLevel.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "gemini" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let options = result["options"].as_array().unwrap();
+        assert_eq!(options[0]["id"], "thinkingLevel");
+        assert_eq!(options[0]["type"], "select");
+
+        // grok → reasoningEffort including "none".
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "grok" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let grok_values: Vec<&str> = result["options"][0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(grok_values.contains(&"none"));
+        // grok default is "low".
+        let low = result["options"][0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "low")
+            .unwrap();
+        assert_eq!(low["isDefault"], true);
+
+        // pi → thinkingLevel.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "pi" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["options"][0]["id"], "thinkingLevel");
+
+        // kilo → empty (no configurable options).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "kilo" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["options"].as_array().unwrap().len(), 0);
+
+        // default provider (no param) → claudeAgent reasoningEffort.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["options"][0]["id"], "reasoningEffort");
+    }
+
+    /// listPlugins must scan a project `.plugins/` dir for `*.json` plugin
+    /// descriptors, returning them under a synthetic "local" marketplace.
+    /// Missing dir → empty marketplaces. Each descriptor carries the full
+    /// ProviderPluginDescriptor shape (id, name, source, installed, enabled,
+    /// installPolicy, authPolicy).
+    #[tokio::test]
+    async fn provider_list_plugins_scans_filesystem() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plugins_dir = tmp.path().join(".plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        // Two valid plugin descriptors + one invalid (missing required field).
+        std::fs::write(
+            plugins_dir.join("alpha.json"),
+            serde_json::json!({
+                "id": "alpha",
+                "name": "Alpha Plugin",
+                "description": "First test plugin",
+                "version": "1.0.0",
+                "enabled": true,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            plugins_dir.join("beta.json"),
+            serde_json::json!({
+                "id": "beta",
+                "name": "Beta Plugin",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // invalid: missing `name`.
+        std::fs::write(
+            plugins_dir.join("broken.json"),
+            serde_json::json!({ "id": "broken" }).to_string(),
+        )
+        .unwrap();
+        // non-json: ignored.
+        std::fs::write(plugins_dir.join("readme.md"), "# plugins").unwrap();
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listPlugins",
+            "params": { "cwd": tmp.path() }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let marketplaces = result["marketplaces"].as_array().unwrap();
+        assert_eq!(marketplaces.len(), 1, "one local marketplace");
+        assert_eq!(marketplaces[0]["name"], "local");
+        let plugins = marketplaces[0]["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 2, "two valid descriptors, broken skipped");
+        // sorted by id → alpha first.
+        assert_eq!(plugins[0]["id"], "alpha");
+        assert_eq!(plugins[0]["name"], "Alpha Plugin");
+        assert_eq!(plugins[0]["description"], "First test plugin");
+        assert_eq!(plugins[0]["version"], "1.0.0");
+        assert_eq!(plugins[0]["installed"], true);
+        assert_eq!(plugins[0]["enabled"], true);
+        assert_eq!(plugins[0]["installPolicy"], "AVAILABLE");
+        assert_eq!(plugins[0]["authPolicy"], "ON_USE");
+        assert_eq!(plugins[0]["source"]["type"], "local");
+        assert_eq!(plugins[1]["id"], "beta");
+
+        // Missing `.plugins` dir → empty marketplaces (graceful).
+        let empty_tmp = tempfile::tempdir().unwrap();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listPlugins",
+            "params": { "cwd": empty_tmp.path() }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["marketplaces"].as_array().unwrap().len(), 0);
+        assert!(result["remoteSyncError"].is_null());
+    }
+
+    /// readPlugin must return `{ plugin: {...} }` for an existing valid plugin
+    /// descriptor inside a `.plugins/` dir, and `{ plugin: null }` for missing
+    /// paths or traversal attempts outside `.plugins`.
+    #[tokio::test]
+    async fn provider_read_plugin_filesystem() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plugins_dir = tmp.path().join(".plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let plugin_path = plugins_dir.join("alpha.json");
+        std::fs::write(
+            &plugin_path,
+            serde_json::json!({
+                "id": "alpha", "name": "Alpha Plugin", "enabled": false,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let state = WsState::new_in_memory(16);
+        // Valid read → full descriptor with enabled=false carried through.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.readPlugin",
+            "params": { "path": plugin_path }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let plugin = &result["plugin"];
+        assert_eq!(plugin["id"], "alpha");
+        assert_eq!(plugin["name"], "Alpha Plugin");
+        assert_eq!(plugin["enabled"], false);
+        assert_eq!(plugin["source"]["type"], "local");
+
+        // Missing path → null.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.readPlugin",
+            "params": { "path": plugins_dir.join("nonexistent.json") }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert!(result["plugin"].is_null());
+
+        // Path outside .plugins → null (traversal guard).
+        let outside = tmp.path().join("outside.json");
+        std::fs::write(&outside, r#"{"id":"x","name":"y"}"#).unwrap();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.readPlugin",
+            "params": { "path": outside }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert!(result["plugin"].is_null(), "plugin outside .plugins must be null");
     }
 
     /// getComposerCapabilities must echo the requested `provider` and return
