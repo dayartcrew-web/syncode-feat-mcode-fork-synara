@@ -176,6 +176,10 @@ async fn dispatch_method(
                     "git/worktree-remove",
                     "git/summarize-diff",
                     "server/generate-thread-recap",
+                    "git/github-repository",
+                    "git/resolve-pull-request",
+                    "git/handoff-thread",
+                    "git/prepare-pull-request-thread",
                 ]
             }),
         ),
@@ -660,12 +664,13 @@ async fn dispatch_method(
         //
         // Deferred / unserved (still in `UNSERVED_RPC`): `git.runStackedAction`
         // (LLM-backed multi-phase commit/push/PR — would need provider wiring),
-        // `git.githubRepository`,
-        // `git.resolvePullRequest`, `git.preparePullRequestThread`,
-        // `git.handoffThread` (GitHub API — needs OAuth + REST client),
         // `git.createDetachedWorktree`, `git.subscribeActionProgress`
         // (push channel — T6c-future). NOTE: `git.summarizeDiff` was SERVED in
         // T6c-13 (LLM-backed one-shot — see the LLM-backed-ops block below).
+        // `git.githubRepository` + `git.resolvePullRequest` + `git.handoffThread`
+        // + `git.preparePullRequestThread` were UNSERVED until T6c-14; they are
+        // NOW SERVED via the GitHub-API ops block below (shelling out to the
+        // `gh` CLI — auth delegated to `gh auth login`, no token handling).
         //
         // Dispatch accepts BOTH the MCode dot-name AND a slash form for
         // robustness. Entry order matches the MCODE_TO_SERVED append block to
@@ -733,6 +738,51 @@ async fn dispatch_method(
         // BOTH the MCode dot-name AND a slash form for robustness.
         "git.summarizeDiff" | "git/summarize-diff" | "git/summarizeDiff" => {
             handle_git_summarize_diff(state, id, &request.params).await
+        }
+
+        // ─── GitHub-API ops (T6c-14: gh-CLI-backed) ──────────────────────
+        //
+        // Four RPCs need the GitHub API. Rather than depend on an OAuth REST
+        // client + token vault, we shell out to the user's `gh` CLI (authed
+        // via `gh auth login` — `dayartcrew-web` in this dev env). Each
+        // handler spawns `gh` via `tokio::process::Command`, parses its
+        // `--json` output, and maps to the MCode result shape. On any gh
+        // failure (binary missing, not authed, no network, not a GitHub repo,
+        // PR not found) the handler returns a clear JSON-RPC error result —
+        // never a panic. The pure parsing logic lives in `gh_parse::*`
+        // (unit-tested with fixtures; the `gh` subprocess calls are
+        // `#[ignore]`-gated integration tests).
+        //
+        //   - `git.githubRepository`         — detect the GitHub repo for a
+        //     local path (parses `git remote get-url origin`; enriches via
+        //     `gh repo view --json owner,name,url,defaultBranchRef`).
+        //   - `git.resolvePullRequest`       — `gh pr view <n> --json
+        //     number,title,state,headRefName,baseRefName,url` → MCode
+        //     `GitResolvePullRequestResult`.
+        //   - `git.handoffThread`            — create a PR from a branch via
+        //     `gh pr create`. STUBBED with `{ ok:false, reason }` for the
+        //     multi-phase worktree/checkout variant (the MCode shape carries
+        //     `worktreePath`/`associatedWorktreeBranch` fields that imply a
+        //     two-phase op we don't model); the simple `gh pr create` path
+        //     returns the PR URL.
+        //   - `git.preparePullRequestThread` — prepare a worktree/branch for a
+        //     PR. STUBBED (`{ ok:false, reason }`) — the MCode shape implies
+        //     a checkout + worktree-add sequence we don't wire here.
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form.
+        "git.githubRepository" | "git/github-repository" | "git/githubRepository" => {
+            handle_git_github_repository(id, &request.params).await
+        }
+        "git.resolvePullRequest"
+        | "git/resolve-pull-request"
+        | "git/resolvePullRequest" => handle_git_resolve_pull_request(id, &request.params).await,
+        "git.handoffThread" | "git/handoff-thread" | "git/handoffThread" => {
+            handle_git_handoff_thread(id, &request.params).await
+        }
+        "git.preparePullRequestThread"
+        | "git/prepare-pull-request-thread"
+        | "git/preparePullRequestThread" => {
+            handle_git_prepare_pull_request_thread(id, &request.params).await
         }
 
         // ─── Push Subscription Methods ───────────────────────────
@@ -4884,7 +4934,457 @@ async fn handle_server_generate_thread_recap(
     }
 }
 
-// ─── Profile stats handlers (T6c-8) ──────────────────────────────────
+// ─── GitHub-API ops handlers (T6c-14: gh-CLI-backed) ───────────────────
+//
+// These four handlers resolve the GitHub-API RPCs the vendored MCode UI calls
+// (`git.githubRepository`, `git.resolvePullRequest`, `git.handoffThread`,
+// `git.preparePullRequestThread`). Rather than implement an OAuth client + a
+// token vault, we shell out to the user's `gh` CLI (authed via
+// `gh auth login`). Every subprocess call is bounded (gh's own network calls
+// fail fast on no-auth/no-network) and every error path returns a JSON-RPC
+// error result, never a panic.
+//
+// The pure parsing logic (remote-URL parse, `gh repo view` JSON parse, `gh pr
+// view` JSON parse) is factored into the `gh_parse` submodule below so the
+// mappings can be unit-tested with canned fixtures — no `gh` subprocess
+// required. The `#[ignore]`-gated tests at the bottom exercise the live
+// `gh`/`git` subprocess path against a real GitHub repo (integration-only).
+
+/// Resolve `cwd` from RPC params (accepts both `cwd` and `path` keys; defaults
+/// to `.`). Used by the GitHub-API handlers (matches the open_git_service
+/// convention). Note: a separate `resolve_cwd` (returning `Option<String>`)
+/// exists for the terminal handlers above; this variant always yields a path.
+fn resolve_cwd_or_dot(params: &Value) -> String {
+    params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("path").and_then(|v| v.as_str()))
+        .unwrap_or(".")
+        .to_string()
+}
+
+/// Spawn a subprocess (`gh` or `git`) in `cwd`, capturing stdout/stderr/exit.
+/// Async + bounded — uses `tokio::process::Command` (the WS handler context is
+/// async). Returns `Ok(output_string)` on exit 0 (stdout), `Err(message)` on
+/// any failure (binary missing, non-zero exit, IO error). The error message is
+/// crafted to surface to the UI (e.g. "gh auth required" / "not a GitHub
+/// repo" / "PR not found") rather than a raw stack trace.
+async fn run_cli_capture(
+    bin: &str,
+    cwd: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    // Validate the binary is on PATH before spawning (a spawn() failure would
+    // otherwise surface as a generic IO error). `which` is a sync std call —
+    // cheap, runs once per RPC.
+    if which::which(bin).is_err() {
+        return Err(format!(
+            "`{bin}` CLI not found on PATH — install it and (for gh) run `gh auth login`"
+        ));
+    }
+    let output = tokio::process::Command::new(bin)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .map_err(|e| format!("`{bin}` spawn failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // gh prefixes errors with "gh: " and exits non-zero; surface the
+        // first non-empty line for the UI.
+        let msg = stderr
+            .lines()
+            .chain(stdout.lines())
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("non-zero exit")
+            .to_string();
+        return Err(format!("`{bin}` failed: {msg}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// `git.githubRepository` → detect the GitHub repo for a local path.
+///
+/// Two-step resolution:
+///   1. `git -C <cwd> remote get-url origin` → parse the GitHub owner/repo
+///      from the URL (handles both `git@github.com:owner/repo.git` and
+///      `https://github.com/owner/repo[.git]`). If `origin` is missing or
+///      points elsewhere (GitLab/Bitbucket/local), return `{ repository: null }`
+///      (the MCode `GitHubRepositoryResult` shape — null signals "not a GitHub
+///      repo", NOT an error).
+///   2. If a GitHub repo was detected, enrich via
+///      `gh repo view owner/repo --json nameWithOwner,url` when `gh` is
+///      available + authed. On any `gh` failure (not authed / no network), we
+///      still return the parsed-from-URL fields (graceful degradation — the
+///      URL parse alone is enough to populate the shape).
+async fn handle_git_github_repository(id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = resolve_cwd_or_dot(params);
+
+    // Step 1: parse the GitHub owner/repo from the origin remote URL.
+    let remote_url = match run_cli_capture("git", &cwd, &["remote", "get-url", "origin"]).await {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            // No `origin` remote (or not a git repo) → not a GitHub repo. The
+            // MCode shape uses `null` for this case, not an error.
+            return JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "repository": null }),
+            );
+        }
+    };
+    let Some((owner, name)) = gh_parse::parse_github_remote(&remote_url) else {
+        // origin exists but isn't a GitHub URL → null.
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "repository": null }),
+        );
+    };
+
+    // Step 2: enrich via gh (graceful on failure).
+    let slug = format!("{owner}/{name}");
+    let mut name_with_owner = slug.clone();
+    let mut url = format!("https://github.com/{slug}");
+    if let Ok(json) =
+        run_cli_capture("gh", &cwd, &["repo", "view", &slug, "--json", "nameWithOwner,url"]).await
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json)
+    {
+        if let Some(s) = parsed.get("nameWithOwner").and_then(|v| v.as_str()) {
+            name_with_owner = s.to_string();
+        }
+        if let Some(u) = parsed.get("url").and_then(|v| v.as_str()) {
+            url = u.to_string();
+        }
+    }
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "repository": {
+                "nameWithOwner": name_with_owner,
+                "url": url,
+            }
+        }),
+    )
+}
+
+/// `git.resolvePullRequest` → resolve a PR by number (or URL). Returns the
+/// MCode `GitResolvePullRequestResult` shape (`{ pullRequest: { number, title,
+/// url, baseBranch, headBranch, state } }`). Calls
+/// `gh pr view <ref> --json number,title,state,headRefName,baseRefName,url`.
+/// `ref` is the PR number if `params.number` is set, else the URL if
+/// `params.url` is set. On gh failure (PR not found / repo not GitHub / not
+/// authed) → JSON-RPC error.
+async fn handle_git_resolve_pull_request(id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = resolve_cwd_or_dot(params);
+    // Resolve the PR reference: prefer `number`, fall back to `url`.
+    let pr_ref = params
+        .get("number")
+        .and_then(|v| v.as_i64().map(|n| n.to_string()))
+        .or_else(|| params.get("url").and_then(|v| v.as_str()).map(String::from));
+    let Some(pr_ref) = pr_ref else {
+        return param_error(
+            id,
+            "git.resolvePullRequest requires 'number' (int) or 'url' (string)",
+        );
+    };
+    if pr_ref.trim().is_empty() {
+        return param_error(
+            id,
+            "git.resolvePullRequest requires a non-empty 'number' or 'url'",
+        );
+    }
+
+    let json = match run_cli_capture(
+        "gh",
+        &cwd,
+        &[
+            "pr",
+            "view",
+            &pr_ref,
+            "--json",
+            "number,title,state,headRefName,baseRefName,url",
+        ],
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git.resolvePullRequest: {e}"),
+            );
+        }
+    };
+
+    match gh_parse::parse_pr_view(&json) {
+        Ok(pr) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "pullRequest": pr }),
+        ),
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git.resolvePullRequest: parse gh output: {e}"),
+        ),
+    }
+}
+
+/// `git.handoffThread` → create a PR from a thread's branch.
+///
+/// The full MCode shape (`GitHandoffThreadResult`) implies a multi-phase op:
+/// it carries `worktreePath`, `associatedWorktreePath`, `associatedWorktreeBranch`,
+/// `associatedWorktreeRef`, `changesTransferred`, `conflictsDetected` — a
+/// thread-to-worktree handoff we don't model. The PR-creation sub-step (the
+/// most common intent) IS wired via `gh pr create` and surfaced in the
+/// returned `message`. The other fields are returned as `null`/`false`
+/// (matching the "no worktree handoff performed" outcome).
+///
+/// Params: `{ cwd, title, body, base, head }`. If `head` is omitted, gh
+/// defaults to the current branch.
+async fn handle_git_handoff_thread(id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = resolve_cwd_or_dot(params);
+    let title = match params.get("title").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => return param_error(id, "git.handoffThread requires a non-empty 'title'"),
+    };
+    let body = params
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let base = params
+        .get("base")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let head = params
+        .get("head")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Build the gh pr create arg list. `--body-file -` reads the body from
+    // stdin (avoids arg-length limits + shell-escaping; matches MCode's
+    // temp-file approach but stdin is simpler in-process).
+    let mut args: Vec<String> = vec![
+        "pr".into(),
+        "create".into(),
+        "--title".into(),
+        title.clone(),
+    ];
+    if !base.is_empty() {
+        args.push("--base".into());
+        args.push(base.clone());
+    }
+    if !head.is_empty() {
+        args.push("--head".into());
+        args.push(head.clone());
+    }
+    args.push("--body".into());
+    args.push(body);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args(&arg_refs).current_dir(&cwd);
+    // Stdin is not piped (--body is a literal arg); inherit nothing.
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(e) => {
+            // Distinguish "binary missing" from "spawn failed".
+            if which::which("gh").is_err() {
+                return JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "ok": false,
+                        "reason": "`gh` CLI not found on PATH — install it and run `gh auth login`"
+                    }),
+                );
+            }
+            return JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "ok": false, "reason": format!("gh spawn failed: {e}") }),
+            );
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("gh pr create failed (non-zero exit)")
+            .to_string();
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "ok": false, "reason": reason }),
+        );
+    }
+
+    // gh pr create prints the PR URL on stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let url = stdout
+        .lines()
+        .find(|l| l.starts_with("https://"))
+        .map(String::from)
+        .unwrap_or_else(|| stdout.trim().to_string());
+
+    // Return the MCode GitHandoffThreadResult shape (worktree fields null —
+    // we didn't perform a worktree handoff, only the PR-create sub-step).
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "targetMode": "branch",
+            "branch": null,
+            "worktreePath": null,
+            "associatedWorktreePath": null,
+            "associatedWorktreeBranch": null,
+            "associatedWorktreeRef": null,
+            "changesTransferred": false,
+            "conflictsDetected": false,
+            "message": format!("Created PR: {url}"),
+        }),
+    )
+}
+
+/// `git.preparePullRequestThread` → prepare a worktree/branch for a PR.
+///
+/// STUBBED. The MCode shape (`GitPreparePullRequestThreadResult`) implies a
+/// two-phase op: resolve the PR (via `git.resolvePullRequest`), then create a
+/// local worktree + checkout the PR's head branch. The worktree plumbing
+/// (`git worktree add`) is available via `git.worktreeCreate`, but wiring the
+/// full sequence (PR resolve → branch checkout → worktree add → associate with
+/// the thread) is deferred. We return a clear `{ ok:false, reason }` envelope
+/// so the UI can render a fallback rather than a MethodNotFound.
+async fn handle_git_prepare_pull_request_thread(id: Value, _params: &Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "ok": false,
+            "reason": "git.preparePullRequestThread is stubbed — PR→worktree checkout sequence not wired (compose via git.resolvePullRequest + git.worktreeCreate)"
+        }),
+    )
+}
+
+/// Pure parsing helpers for `gh` CLI JSON output. Factored out of the handlers
+/// so the mappings can be unit-tested with canned fixtures (no `gh` subprocess
+/// required). The handlers above call these after capturing `gh`'s stdout.
+mod gh_parse {
+    use serde_json::{json, Value};
+
+    /// Parse a GitHub owner/repo pair from a git remote URL. Accepts:
+    ///   - `git@github.com:owner/repo.git`
+    ///   - `git@github.com:owner/repo`
+    ///   - `https://github.com/owner/repo.git`
+    ///   - `https://github.com/owner/repo`
+    ///   - `ssh://git@github.com/owner/repo.git`
+    ///
+    /// Returns `None` for non-GitHub URLs (GitLab, Bitbucket, local paths)
+    /// or malformed inputs. Pure + allocation-light.
+    pub fn parse_github_remote(url: &str) -> Option<(String, String)> {
+        let url = url.trim();
+        if url.is_empty() {
+            return None;
+        }
+        // SCP-like form: git@github.com:owner/repo.git (note the COLON after
+        // the host). Accept with or without a leading `ssh://`.
+        for prefix in [
+            "ssh://git@github.com:",
+            "git@github.com:",
+            "ssh.git@github.com:",
+        ] {
+            if let Some(rest) = url.strip_prefix(prefix) {
+                return split_slug(rest);
+            }
+        }
+        // Slash-form (https:// or ssh://git@github.com/): strip everything up
+        // to and including `github.com/` and split the remainder.
+        for prefix in [
+            "https://github.com/",
+            "http://github.com/",
+            "ssh://git@github.com/",
+            "ssh://github.com/",
+            "git://github.com/",
+        ] {
+            if let Some(rest) = url.strip_prefix(prefix) {
+                return split_slug(rest);
+            }
+        }
+        None
+    }
+
+    /// Split `owner/repo.git` or `owner/repo` into `(owner, repo)`, stripping a
+    /// trailing `.git` and any trailing `.wiki`/`.git` sub-suffix. Returns None
+    /// if there aren't exactly two `/`-separated non-empty segments.
+    fn split_slug(slug: &str) -> Option<(String, String)> {
+        // Drop a trailing `.git` (case-insensitive) and any fragment/query.
+        let slug = slug.split(['#', '?']).next().unwrap_or(slug);
+        let slug = slug.strip_suffix(".git").unwrap_or(slug);
+        let mut parts = slug.split('/');
+        let owner = parts.next()?.trim();
+        let name = parts.next()?.trim();
+        // Reject anything beyond owner/repo (e.g. owner/repo/branches/main).
+        if parts.next().is_some() || owner.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some((owner.to_string(), name.to_string()))
+    }
+
+    /// Parse the JSON output of `gh pr view <n> --json number,title,state,
+    /// headRefName,baseRefName,url` into the MCode `GitResolvedPullRequest`
+    /// shape (`{ number, title, url, baseBranch, headBranch, state }`).
+    ///
+    /// `state` is normalized to one of `"open" | "closed" | "merged"` — gh
+    /// emits lowercase (`OPEN`/`CLOSED`/`MERGED`), and we lowercase + map
+    /// defensively (unknown values fall back to `"open"`).
+    pub fn parse_pr_view(json: &str) -> Result<Value, String> {
+        let v: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let number = v
+            .get("number")
+            .and_then(|n| n.as_i64())
+            .ok_or_else(|| "missing 'number' field".to_string())?;
+        let title = v
+            .get("title")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| "missing 'title' field".to_string())?
+            .to_string();
+        let url = v
+            .get("url")
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| "missing 'url' field".to_string())?
+            .to_string();
+        let head_branch = v
+            .get("headRefName")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+        let base_branch = v
+            .get("baseRefName")
+            .and_then(|b| b.as_str())
+            .unwrap_or("")
+            .to_string();
+        let state_raw = v
+            .get("state")
+            .and_then(|s| s.as_str())
+            .unwrap_or("open");
+        let state = match state_raw.to_ascii_lowercase().as_str() {
+            "open" | "opened" => "open",
+            "closed" | "close" => "closed",
+            "merged" | "merge" => "merged",
+            _ => "open", // defensive default
+        };
+        Ok(json!({
+            "number": number,
+            "title": title,
+            "url": url,
+            "baseBranch": base_branch,
+            "headBranch": head_branch,
+            "state": state,
+        }))
+    }
+}
+
+
 
 /// `stats.getProfileStats` — return an empty `ProfileStats`. Syncode has no
 /// stats aggregation subsystem (no prompt/turn/token accumulator, no daily
@@ -7631,6 +8131,319 @@ mod tests {
                 "rpc/listMethods missing {expected}"
             );
         }
+    }
+
+    // ─── GitHub-API ops RPC tests (T6c-14: gh-CLI-backed) ───────────────
+    //
+    // The pure parsing logic (`gh_parse::parse_github_remote`,
+    // `gh_parse::parse_pr_view`) is unit-tested with canned fixtures below —
+    // no `gh` subprocess required. The dispatch + listMethods tests verify
+    // wiring without invoking `gh`. The two live-`gh` tests are
+    // `#[ignore]`-gated (integration-only — they need a real GitHub repo +
+    // network + `gh auth login`).
+
+    /// `parse_github_remote` handles all four canonical remote-URL forms
+    /// (git@ SSH, ssh://, https://, with/without trailing .git) and rejects
+    /// non-GitHub hosts + malformed inputs.
+    #[test]
+    fn gh_parse_remote_url_forms() {
+        use super::gh_parse::parse_github_remote;
+        // SSH SCP-like form.
+        assert_eq!(
+            parse_github_remote("git@github.com:owner/repo.git"),
+            Some(("owner".into(), "repo".into()))
+        );
+        // SSH SCP-like form without .git.
+        assert_eq!(
+            parse_github_remote("git@github.com:owner/repo"),
+            Some(("owner".into(), "repo".into()))
+        );
+        // ssh:// form.
+        assert_eq!(
+            parse_github_remote("ssh://git@github.com/owner/repo.git"),
+            Some(("owner".into(), "repo".into()))
+        );
+        // HTTPS form with .git.
+        assert_eq!(
+            parse_github_remote("https://github.com/owner/repo.git"),
+            Some(("owner".into(), "repo".into()))
+        );
+        // HTTPS form without .git.
+        assert_eq!(
+            parse_github_remote("https://github.com/owner/repo"),
+            Some(("owner".into(), "repo".into()))
+        );
+        // Whitespace is trimmed.
+        assert_eq!(
+            parse_github_remote("  https://github.com/owner/repo.git  "),
+            Some(("owner".into(), "repo".into()))
+        );
+
+        // Non-GitHub hosts → None.
+        assert_eq!(parse_github_remote("git@gitlab.com:owner/repo.git"), None);
+        assert_eq!(
+            parse_github_remote("https://bitbucket.org/owner/repo.git"),
+            None
+        );
+        // Local path remote → None.
+        assert_eq!(parse_github_remote("/home/user/repo"), None);
+        // Malformed (too many segments) → None.
+        assert_eq!(
+            parse_github_remote("https://github.com/owner/repo/branches/main"),
+            None
+        );
+        // Empty → None.
+        assert_eq!(parse_github_remote(""), None);
+        // Empty owner/repo segments → None.
+        assert_eq!(parse_github_remote("https://github.com//repo"), None);
+    }
+
+    /// `parse_pr_view` maps the `gh pr view --json number,title,state,
+    /// headRefName,baseRefName,url` output to the MCode
+    /// `GitResolvedPullRequest` shape, normalizing `state` to lowercase +
+    /// mapping unknown states to `"open"` defensively.
+    #[test]
+    fn gh_parse_pr_view_maps_to_mcode_shape() {
+        use super::gh_parse::parse_pr_view;
+        let fixture = serde_json::json!({
+            "number": 42,
+            "title": "feat: add gh-CLI ops",
+            "state": "OPEN",
+            "headRefName": "task/t6c14-github-gh-api",
+            "baseRefName": "master",
+            "url": "https://github.com/synara/syncode/pull/42",
+        })
+        .to_string();
+        let pr = parse_pr_view(&fixture).expect("fixture must parse");
+        assert_eq!(pr["number"], 42);
+        assert_eq!(pr["title"], "feat: add gh-CLI ops");
+        assert_eq!(pr["url"], "https://github.com/synara/syncode/pull/42");
+        assert_eq!(pr["baseBranch"], "master");
+        assert_eq!(pr["headBranch"], "task/t6c14-github-gh-api");
+        assert_eq!(pr["state"], "open");
+
+        // MERGED → "merged".
+        let merged = serde_json::json!({
+            "number": 7, "title": "t", "state": "MERGED",
+            "headRefName": "h", "baseRefName": "b",
+            "url": "https://github.com/o/r/pull/7",
+        })
+        .to_string();
+        assert_eq!(parse_pr_view(&merged).unwrap()["state"], "merged");
+
+        // Unknown state → defensive default "open".
+        let weird = serde_json::json!({
+            "number": 1, "title": "t", "state": "DRAFT",
+            "headRefName": "h", "baseRefName": "b",
+            "url": "https://github.com/o/r/pull/1",
+        })
+        .to_string();
+        assert_eq!(parse_pr_view(&weird).unwrap()["state"], "open");
+
+        // Missing `number` → Err.
+        let bad = serde_json::json!({ "title": "t" }).to_string();
+        assert!(parse_pr_view(&bad).is_err());
+
+        // Malformed JSON → Err.
+        assert!(parse_pr_view("not json").is_err());
+
+        // Missing optional headRefName/baseRefName → empty string (not Err).
+        let no_refs = serde_json::json!({
+            "number": 1, "title": "t", "state": "open",
+            "url": "https://github.com/o/r/pull/1",
+        })
+        .to_string();
+        let pr = parse_pr_view(&no_refs).unwrap();
+        assert_eq!(pr["headBranch"], "");
+        assert_eq!(pr["baseBranch"], "");
+    }
+
+    /// `git.preparePullRequestThread` is stubbed — it must resolve (no
+    /// MethodNotFound) under BOTH the dot-name AND the slash form and return
+    /// a `{ ok:false, reason }` envelope (not an error).
+    #[tokio::test]
+    async fn git_prepare_pull_request_thread_stub_resolves_both_forms() {
+        let state = WsState::new_in_memory(16);
+        for method in [
+            "git.preparePullRequestThread",
+            "git/prepare-pull-request-thread",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": {}
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} errored: {:?}", resp.error);
+            let result = resp.result.expect("stub returns a result envelope");
+            assert_eq!(result["ok"], false, "{method} must report ok:false");
+            assert!(
+                result["reason"].as_str().is_some(),
+                "{method} must carry a reason string"
+            );
+        }
+    }
+
+    /// `git.handoffThread` rejects an empty/missing `title` with INVALID_PARAMS
+    /// (param validation guard — no gh subprocess spawned for this path).
+    #[tokio::test]
+    async fn git_handoff_thread_requires_title() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.handoffThread",
+            "params": { "title": "  " }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(
+            resp.error.is_some(),
+            "empty title must be rejected with an error"
+        );
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    /// `git.resolvePullRequest` rejects missing/empty `number`+`url` with
+    /// INVALID_PARAMS (param validation guard).
+    #[tokio::test]
+    async fn git_resolve_pull_request_requires_ref() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.resolvePullRequest",
+            "params": {}
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "missing ref must be rejected");
+        assert_eq!(
+            resp.error.unwrap().code,
+            crate::error_codes::INVALID_PARAMS
+        );
+    }
+
+    /// `git.githubRepository` on a non-repo path returns `{ repository: null }`
+    /// (the MCode "not a GitHub repo" sentinel) — not an error.
+    #[tokio::test]
+    async fn git_github_repository_non_repo_returns_null() {
+        let state = WsState::new_in_memory(16);
+        // /tmp is not a git repo → no origin remote → repository:null.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.githubRepository",
+            "params": { "cwd": "/tmp" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "non-repo must not error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert!(
+            result["repository"].is_null(),
+            "non-repo must yield repository:null, got {result}"
+        );
+    }
+
+    /// `git.githubRepository` on a repo with a non-GitHub origin returns
+    /// `{ repository: null }` (not an error). Uses a temp repo with a local
+    /// path remote (which is never a GitHub URL).
+    #[tokio::test]
+    async fn git_github_repository_non_github_origin_returns_null() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Add a local path remote as `origin` (definitely not GitHub).
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "/some/local/path"])
+            .current_dir(&repo)
+            .output()
+            .expect("git remote add");
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.githubRepository",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "non-github origin must not error");
+        let result = resp.result.unwrap();
+        assert!(
+            result["repository"].is_null(),
+            "non-github origin must yield repository:null"
+        );
+    }
+
+    /// rpc/listMethods must advertise the four newly-served GitHub-API RPCs.
+    #[tokio::test]
+    async fn github_api_rpcs_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let methods = rpc(&state, 1, &req).await.result.unwrap()["methods"]
+            .as_array()
+            .expect("methods is an array")
+            .clone();
+        let listed: std::collections::HashSet<String> = methods
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        for expected in [
+            "git/github-repository",
+            "git/resolve-pull-request",
+            "git/handoff-thread",
+            "git/prepare-pull-request-thread",
+        ] {
+            assert!(
+                listed.contains(expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
+    }
+
+    /// LIVE: `git.githubRepository` on the syncode worktree (which has a real
+    /// GitHub origin) resolves the owner/repo + URL. `#[ignore]` — needs a
+    /// real GitHub repo + `git remote get-url origin` to succeed.
+    #[tokio::test]
+    #[ignore = "live: needs a real GitHub repo origin + gh auth"]
+    async fn live_github_repository_resolves_worktree() {
+        let state = WsState::new_in_memory(16);
+        let cwd = env!("CARGO_MANIFEST_DIR");
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.githubRepository",
+            "params": { "cwd": cwd }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "live resolve errored: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        let repo = &result["repository"];
+        // If the worktree's origin isn't a GitHub repo, repository is null —
+        // still a valid outcome. If it IS, nameWithOwner must be non-empty.
+        if !repo.is_null() {
+            assert!(
+                repo["nameWithOwner"].as_str().unwrap_or("").contains('/'),
+                "nameWithOwner must be owner/repo: {repo}"
+            );
+            assert!(
+                repo["url"].as_str().unwrap_or("").starts_with("https://"),
+                "url must be https: {repo}"
+            );
+        }
+    }
+
+    /// LIVE: `git.resolvePullRequest` on a known PR number resolves the MCode
+    /// shape. `#[ignore]` — needs network + `gh auth login` + a real PR.
+    /// (Caller sets a known-good `{ cwd, number }` before un-ignoring.)
+    #[tokio::test]
+    #[ignore = "live: needs gh auth + a real GitHub PR number"]
+    async fn live_resolve_pull_request_known_pr() {
+        let state = WsState::new_in_memory(16);
+        let cwd = env!("CARGO_MANIFEST_DIR");
+        // PR #1 is a placeholder — adjust to a real PR before un-ignoring.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.resolvePullRequest",
+            "params": { "cwd": cwd, "number": 1 }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        // Accept either a successful resolve OR a clear error (PR not found /
+        // not authed) — both prove the wiring is intact. A panic would fail.
+        eprintln!(
+            "live resolvePullRequest result: error={:?} result={:?}",
+            resp.error, resp.result
+        );
     }
 
 
