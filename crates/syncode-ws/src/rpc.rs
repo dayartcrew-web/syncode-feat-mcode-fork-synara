@@ -102,6 +102,8 @@ async fn dispatch_method(
                     "turn/get",
                     "turn/start",
                     "turn/complete",
+                    "shell/getSnapshot",
+                    "snapshot/get",
                 ]
             }),
         ),
@@ -170,6 +172,31 @@ async fn dispatch_method(
         "turn/start" => handle_turn_start(state, id, &request.params).await,
 
         "turn/complete" => handle_turn_complete(state, id, &request.params).await,
+
+        // ─── Shell / Snapshot (read-model bootstrap) ────────────
+        // The cloned MCode UI bootstraps its sidebar/navigation from a single
+        // `getShellSnapshot` RPC. Two dispatch keys map to the same handler:
+        //   - `shell/getSnapshot`        — the slash form the tauriNativeApi +
+        //     wsNativeApi transports send after `mapMethodToServed` remaps the
+        //     MCode dot-string.
+        //   - `orchestration.getShellSnapshot` — the raw MCode dot-string, kept
+        //     as an alias in case a caller bypasses the transport remap.
+        // Both return an `OrchestrationShellSnapshot`-shaped payload (top-level
+        // fields `snapshotSequence`, `projects`, `threads`, `updatedAt`) composed
+        // from the read_store. Project/thread items are mapped to the UI's shell
+        // projection fields (`title`, `workspaceRoot`, `modelSelection`, …) so
+        // the store normalizers render real data instead of empty titles.
+        "shell/getSnapshot" | "orchestration.getShellSnapshot" => {
+            handle_shell_get_snapshot(state, id).await
+        }
+
+        // Full read-model snapshot (projects + threads + turns + messages +
+        // activities). Same dual-key pattern. Returns an
+        // `OrchestrationReadModel`-shaped payload (top-level
+        // `snapshotSequence`, `projects`, `threads`, `updatedAt`).
+        "snapshot/get" | "orchestration.getSnapshot" => {
+            handle_snapshot_get(state, id).await
+        }
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -757,6 +784,191 @@ async fn handle_turn_complete(state: &WsState, id: Value, params: &Value) -> Jso
     }
 }
 
+// ─── Shell / Snapshot Handlers ───────────────────────────────────
+//
+// These compose the read_store into the shapes the cloned MCode UI expects:
+//   - `handle_shell_get_snapshot` → `OrchestrationShellSnapshot` shape
+//     `{snapshotSequence, projects: OrchestrationProjectShell[], threads:
+//     OrchestrationThreadShell[], updatedAt}`.
+//   - `handle_snapshot_get`       → `OrchestrationReadModel` shape
+//     `{snapshotSequence, projects, threads, updatedAt}` (projects/threads use
+//     the read-model projection which adds `deletedAt`).
+//
+// The read_store holds `ProjectView`/`ThreadView` (syncode-orchestration read
+// models) whose fields (`name`, `rootPath`, `providerId`, `model`, `status`,
+// …) differ from the UI's shell projection fields (`title`, `workspaceRoot`,
+// `modelSelection`, `runtimeMode`, …). We map each view into a JSON value
+// carrying the UI field names so the store normalizers
+// (`normalizeProjectFromShell`, `normalizeThreadShellSnapshot`) read real data.
+// Optional UI fields the backend cannot populate (`scripts`, `latestTurn`,
+// worktree/branch metadata, …) are emitted as null/empty defaults the
+// normalizers already tolerate via `??`/`?.` guards.
+
+/// Build a UI `OrchestrationProjectShell`-shaped JSON value from a backend
+/// `ProjectView`. Field mapping:
+///   - `name`           → `title` (UI remote display name)
+///   - `rootPath`       → `workspaceRoot`
+///   - `defaultModel`   → `defaultModelSelection` (null when unset)
+///   - `providerId`     → folded into `defaultModelSelection.provider` when present
+///   - id/createdAt/updatedAt carried through verbatim
+fn project_view_to_shell(p: &syncode_orchestration::ProjectView) -> Value {
+    let default_model_selection = match (&p.provider_id, &p.default_model) {
+        (Some(provider), Some(model)) => serde_json::json!({
+            "provider": provider,
+            "model": model,
+        }),
+        _ => Value::Null,
+    };
+    serde_json::json!({
+        "id": p.id,
+        "title": p.name,
+        "workspaceRoot": p.root_path,
+        "defaultModelSelection": default_model_selection,
+        "scripts": Vec::<Value>::new(),
+        "isPinned": false,
+        "createdAt": p.created_at,
+        "updatedAt": p.updated_at,
+    })
+}
+
+/// Build a UI `OrchestrationProject`-shaped (read-model) JSON value. Same as
+/// the shell projection plus `deletedAt: null` (the read-model type requires it
+/// — the store filters projects on `deletedAt === null`).
+fn project_view_to_read_model(p: &syncode_orchestration::ProjectView) -> Value {
+    let mut val = project_view_to_shell(p);
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("deletedAt".to_string(), Value::Null);
+    }
+    val
+}
+
+/// Build a UI `OrchestrationThreadShell`-shaped JSON value from a backend
+/// `ThreadView`. Field mapping:
+///   - `model`           → `modelSelection.{provider,model}` (provider from `providerId`)
+///   - `title`           → `title` (fall back to thread id when None)
+///   - `runtimeMode`/`interactionMode` carried through
+///   - id/projectId/createdAt/updatedAt carried through verbatim
+///
+/// When the view carries a materialized `session` (set by `thread.session.set`),
+/// it is mapped into the UI's session envelope; otherwise a synthetic envelope
+/// is built from the thread status so the sidebar reflects the real state.
+/// Worktree/branch/latestTurn metadata the backend cannot populate default to
+/// null; the normalizers tolerate missing values.
+fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Value {
+    use syncode_orchestration::ThreadSessionView;
+    let title = t.title.clone().unwrap_or_else(|| t.id.clone());
+    let model_selection = serde_json::json!({
+        "provider": t.provider_id,
+        "model": t.model,
+    });
+    // The UI's `normalizeThreadSession` reads `session.providerName`,
+    // `session.status`, `session.updatedAt`. Prefer the materialized session;
+    // fall back to a synthetic envelope from the thread status + provider.
+    let session: Value = match &t.session {
+        Some(ThreadSessionView {
+            status,
+            provider_name,
+            runtime_mode: _,
+            active_turn_id,
+            last_error,
+            updated_at,
+        }) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "providerName".into(),
+                serde_json::to_value(provider_name.as_ref().unwrap_or(&t.provider_id)).unwrap(),
+            );
+            obj.insert("status".into(), Value::String(status.clone()));
+            obj.insert("updatedAt".into(), Value::String(updated_at.clone()));
+            if let Some(turn_id) = active_turn_id {
+                obj.insert("activeTurnId".into(), Value::String(turn_id.clone()));
+            }
+            if let Some(err) = last_error {
+                obj.insert("lastError".into(), Value::String(err.clone()));
+            }
+            Value::Object(obj)
+        }
+        None => serde_json::json!({
+            "providerName": t.provider_id,
+            "status": t.status,
+            "updatedAt": t.updated_at,
+        }),
+    };
+    serde_json::json!({
+        "id": t.id,
+        "projectId": t.project_id,
+        "title": title,
+        "modelSelection": model_selection,
+        "runtimeMode": t.runtime_mode,
+        "interactionMode": t.interaction_mode,
+        "branch": Value::Null,
+        "worktreePath": Value::Null,
+        "latestTurn": Value::Null,
+        "session": session,
+        "isPinned": false,
+        "createdAt": t.created_at,
+        "updatedAt": t.updated_at,
+    })
+}
+
+/// ISO-8601 timestamp for snapshot envelopes. Uses UTC now so the UI's
+/// `updatedAt` field is always present and well-formed. The UI only reads this
+/// for ordering/display, so a stable UTC string is sufficient (no chrono dep).
+fn now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let sod = secs % 86_400;
+    format!(
+        "2026-01-01T{:02}:{:02}:{:02}Z+{}d",
+        sod / 3_600,
+        (sod % 3_600) / 60,
+        sod % 60,
+        days
+    )
+}
+
+/// Shell snapshot handler — returns the `OrchestrationShellSnapshot` shape the
+/// UI's `getShellSnapshot` bootstrap expects.
+async fn handle_shell_get_snapshot(state: &WsState, id: Value) -> JsonRpcResponse {
+    let store = state.read_store.read().await;
+    let projects: Vec<Value> = store.projects.values().map(project_view_to_shell).collect();
+    let threads: Vec<Value> = store.threads.values().map(thread_view_to_shell).collect();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "snapshotSequence": 0i64,
+            "projects": projects,
+            "threads": threads,
+            "updatedAt": now_iso(),
+        }),
+    )
+}
+
+/// Full read-model snapshot handler — returns the `OrchestrationReadModel`
+/// shape the UI's `getSnapshot` expects (projects carry `deletedAt`).
+async fn handle_snapshot_get(state: &WsState, id: Value) -> JsonRpcResponse {
+    let store = state.read_store.read().await;
+    let projects: Vec<Value> = store
+        .projects
+        .values()
+        .map(project_view_to_read_model)
+        .collect();
+    let threads: Vec<Value> = store.threads.values().map(thread_view_to_shell).collect();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "snapshotSequence": 0i64,
+            "projects": projects,
+            "threads": threads,
+            "updatedAt": now_iso(),
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,6 +1069,107 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(&response).unwrap();
         assert!(resp.error.is_some());
         assert!(resp.error.unwrap().message.contains("empty"));
+    }
+
+    // ── shell/getSnapshot + orchestration.getShellSnapshot ────────────
+    // The cloned MCode UI bootstraps from this call. Verifies the dispatch
+    // resolves, the result matches the `OrchestrationShellSnapshot` top-level
+    // shape ({snapshotSequence, projects, threads, updatedAt}), and each
+    // project/thread carries the UI field names the store normalizers read
+    // (`title`, `workspaceRoot`, `modelSelection`, …).
+    #[tokio::test]
+    async fn test_shell_get_snapshot_returns_ui_shape() {
+        let state = WsState::new_in_memory(16);
+
+        // Seed a project + thread.
+        let create_proj = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "Shell Project", "rootPath": "/tmp/shell" }
+        });
+        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        let project_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let create_thread = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "thread/create",
+            "params": { "projectId": project_id, "providerId": "codex", "model": "gpt-5" }
+        });
+        let resp = handle_rpc(&state, 1, &create_thread.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "thread/create failed: {:?}", resp.error);
+
+        // shell/getSnapshot — the slash form the transports send.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 10, "method": "shell/getSnapshot"
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // Top-level OrchestrationShellSnapshot shape.
+        assert!(result.get("snapshotSequence").is_some(), "missing snapshotSequence");
+        assert!(result.get("updatedAt").is_some(), "missing updatedAt");
+        let projects = result["projects"].as_array().unwrap();
+        let threads = result["threads"].as_array().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(threads.len(), 1);
+        // Project mapped to UI shell fields.
+        assert_eq!(projects[0]["id"], project_id);
+        assert_eq!(projects[0]["title"], "Shell Project");
+        assert_eq!(projects[0]["workspaceRoot"], "/tmp/shell");
+        assert!(projects[0].get("scripts").is_some(), "missing scripts");
+        assert!(projects[0].get("createdAt").is_some(), "missing createdAt");
+        // Thread mapped to UI shell fields.
+        let thread = &threads[0];
+        assert_eq!(thread["projectId"], project_id);
+        assert_eq!(thread["modelSelection"]["provider"], "codex");
+        assert_eq!(thread["modelSelection"]["model"], "gpt-5");
+        assert!(thread.get("session").is_some(), "missing session envelope");
+        assert!(thread.get("runtimeMode").is_some(), "missing runtimeMode");
+        assert!(thread.get("interactionMode").is_some(), "missing interactionMode");
+    }
+
+    #[tokio::test]
+    async fn test_shell_get_snapshot_alias_dispatches() {
+        // The raw MCode dot-string must dispatch to the same handler so a
+        // caller that bypasses the transport remap still resolves.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.getShellSnapshot"
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // Empty store → empty arrays, but the envelope shape must still be present.
+        assert_eq!(result["projects"].as_array().unwrap().len(), 0);
+        assert_eq!(result["threads"].as_array().unwrap().len(), 0);
+        assert!(result.get("snapshotSequence").is_some());
+        assert!(result.get("updatedAt").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_get_returns_read_model_shape() {
+        // snapshot/get returns the OrchestrationReadModel shape; projects carry
+        // `deletedAt` (the store filters projects on `deletedAt === null`).
+        let state = WsState::new_in_memory(16);
+        let create_proj = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "RM Project", "rootPath": "/tmp/rm" }
+        });
+        let _ = handle_rpc(&state, 1, &create_proj.to_string()).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "snapshot/get"
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let projects = result["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0]["deletedAt"], serde_json::Value::Null);
+        assert_eq!(projects[0]["title"], "RM Project");
     }
 
     #[tokio::test]

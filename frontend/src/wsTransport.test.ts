@@ -13,6 +13,11 @@ type WsListener = (event?: { data?: unknown }) => void;
 
 const sockets: MockWebSocket[] = [];
 
+/** Yield to the microtask queue a few times so async send paths flush. */
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 class MockWebSocket {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -22,6 +27,13 @@ class MockWebSocket {
   readyState = MockWebSocket.CONNECTING;
   readonly sent: unknown[] = [];
   private readonly listeners = new Map<WsEventType, Set<WsListener>>();
+  // Direct-property handlers — the real WebSocket API WsTransport uses
+  // (`socket.onopen`, `socket.onmessage`, …). Kept in addition to the
+  // addEventListener surface so existing tests are unaffected.
+  onopen: WsListener | null = null;
+  onmessage: WsListener | null = null;
+  onclose: WsListener | null = null;
+  onerror: WsListener | null = null;
 
   constructor(readonly url: string) {
     sockets.push(this);
@@ -46,12 +58,17 @@ class MockWebSocket {
     this.emit("close");
   }
 
-  private emit(type: WsEventType, event?: { data?: unknown }) {
+  /** Test-only: deliver a frame to listeners registered for `type`. */
+  emit(type: WsEventType, event?: { data?: unknown }) {
     const listeners = this.listeners.get(type);
-    if (!listeners) return;
-    for (const listener of listeners) {
-      listener(event);
+    if (listeners) {
+      for (const listener of listeners) {
+        listener(event);
+      }
     }
+    // Also fire the direct-property handler (WsTransport uses these).
+    const handler = this[`on${type}` as "onopen" | "onmessage" | "onclose" | "onerror"];
+    handler?.(event);
   }
 }
 
@@ -176,5 +193,93 @@ describe("WsTransport", () => {
     transport.dispose();
 
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  // ── T6c-2: orchestration bootstrap remap ───────────────────────────
+  // The cloned MCode UI calls `orchestration.getShellSnapshot` /
+  // `orchestration.getSnapshot` (dot-strings). The transport must remap these
+  // onto the served slash methods (`shell/getSnapshot`, `snapshot/get`) and
+  // SEND them to the backend, rather than client-stubbing them with
+  // MethodNotFound. Without the remap the shell would show "Loading projects…"
+  // forever (the bootstrap call never reached the backend).
+  it("remaps orchestration.getShellSnapshot to the served shell/getSnapshot method", async () => {
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = sockets[0]!;
+    // Open the socket so sendJsonRpc proceeds past ensureOpen().
+    socket.readyState = MockWebSocket.OPEN;
+    socket.emit("open");
+
+    // Issue the bootstrap call the UI makes (wsNativeApi.ts).
+    const pending = transport.request("orchestration.getShellSnapshot");
+
+    // Wait for the request to flush to the wire (ensureOpen awaits a microtask).
+    await flushMicrotasks();
+
+    // The wire frame must carry the served slash method, not the dot-string.
+    expect(socket.sent).toHaveLength(1);
+    const sentFrame = JSON.parse(socket.sent[0] as string);
+    expect(sentFrame.method).toBe("shell/getSnapshot");
+
+    // Resolve so the pending promise doesn't leak across tests.
+    const responseFrame = {
+      jsonrpc: "2.0",
+      id: sentFrame.id,
+      result: { snapshotSequence: 0, projects: [], threads: [], updatedAt: "2026-01-01T00:00:00Z" },
+    };
+    socket.emit("message", { data: JSON.stringify(responseFrame) });
+    await expect(pending).resolves.toEqual({
+      snapshotSequence: 0,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    });
+
+    transport.dispose();
+  });
+
+  it("remaps orchestration.getSnapshot to the served snapshot/get method", async () => {
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = sockets[0]!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.emit("open");
+
+    const pending = transport.request("orchestration.getSnapshot");
+
+    await flushMicrotasks();
+
+    expect(socket.sent).toHaveLength(1);
+    const sentFrame = JSON.parse(socket.sent[0] as string);
+    expect(sentFrame.method).toBe("snapshot/get");
+
+    const responseFrame = {
+      jsonrpc: "2.0",
+      id: sentFrame.id,
+      result: { snapshotSequence: 0, projects: [], threads: [], updatedAt: "2026-01-01T00:00:00Z" },
+    };
+    socket.emit("message", { data: JSON.stringify(responseFrame) });
+    await expect(pending).resolves.toEqual({
+      snapshotSequence: 0,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    });
+
+    transport.dispose();
+  });
+
+  it("rejects genuinely unserved orchestration methods client-side", async () => {
+    // Sanity: the remap is specific. An orchestration method the backend does
+    // NOT serve must still reject with MethodNotFound without reaching the wire.
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = sockets[0]!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.emit("open");
+
+    await expect(transport.request("orchestration.repairReadModel")).rejects.toThrow(
+      /Method not found/,
+    );
+    expect(socket.sent).toHaveLength(0);
+
+    transport.dispose();
   });
 });
