@@ -8,7 +8,7 @@
 
 ## TL;DR
 - **Frontend**: MCode `apps/web` cloned + rewired — **type-clean (tsc 0)**, suite **2128/0 pass**, vite build green.
-- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **97 served RPCs** dispatching MCode dot-names + slash forms.
+- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **101 served RPCs** dispatching MCode dot-names + slash forms.
 - **Every UI panel's RPCs reach the backend.** Read-side is REAL where Syncode has the subsystem; STUB-defaults where it doesn't. Terminal streams live output; automations actually execute; LLM ops work via provider CLI (no API key).
 
 ## Legend
@@ -33,7 +33,10 @@
 | `git.stashList` / `stashCreate` / `stashApply` / `stashDrop` / `stashInfo` / `fetch` / `init` / `removeIndexLock` / `worktreeList` / `worktreeCreate` / `worktreeRemove` / `pull` / `push` | ✅ REAL | git2 (stash/fetch/init/worktree) + syncode-git CLI (pull/push) |
 | `git.stashAndCheckout` | 🟡 STUB | (compose stashCreate + checkout) |
 | `git.summarizeDiff` | ✅ REAL | provider CLI one-shot (LLM) |
-| `git.runStackedAction` / `githubRepository` / `resolvePullRequest` / `preparePullRequestThread` / `handoffThread` / `createDetachedWorktree` / `subscribeActionProgress` | ⛔ UNSERVED | (stacked actions / GitHub API / push-channel) |
+| `git.githubRepository` / `resolvePullRequest` | ✅ REAL | gh CLI (no token — uses gh auth; `gh repo view` / `gh pr view`) |
+| `git.handoffThread` | 🟡 PARTIAL | gh pr create real; worktree-handoff fields stub |
+| `git.preparePullRequestThread` | 🟡 STUB | composable via resolvePullRequest + worktreeCreate |
+| `git.runStackedAction` / `createDetachedWorktree` / `subscribeActionProgress` | ⛔ UNSERVED | (stacked actions / push-channel) |
 
 ### Server (config / Settings)
 | RPC | Status | Backed by |
