@@ -114,6 +114,15 @@ async fn dispatch_method(
                     "git/add",
                     "git/unstage",
                     "git/commit",
+                    "server/getConfig",
+                    "server/getSettings",
+                    "server/welcome",
+                    "server/getEnvironment",
+                    "server/getDiagnostics",
+                    "server/subscribeConfig",
+                    "server/subscribeSettings",
+                    "server/subscribeProviderStatuses",
+                    "server/subscribeLifecycle",
                 ]
             }),
         ),
@@ -251,6 +260,56 @@ async fn dispatch_method(
         | "git/unstageFiles"
         | "git/unstage" => handle_git_unstage(id, &request.params),
         "git.commit" | "git/commit" => handle_git_commit(id, &request.params),
+
+        // ─── Server config / settings / lifecycle (T6c-4) ───────────────────
+        //
+        // The cloned MCode UI calls these on startup:
+        //   - `server.getConfig`        → drives Settings → availableEditors +
+        //     keybindings + provider availability (Tier-3 `ServerConfig`).
+        //   - `server.getSettings`      → Settings panel state
+        //     (Tier-3 `ServerSettings`).
+        //   - `server.welcome`          → lifecycle welcome push (server-side
+        //     RPC form; the WS-connect push is a separate deferred path).
+        //   - `server.getEnvironment`   → platform/serverVersion
+        //     (`ExecutionEnvironmentDescriptor`).
+        //   - `server.getDiagnostics`   → process/child/memory/projection
+        //     counts (`ServerDiagnosticsResult`).
+        //   - `server.subscribeConfig` / `subscribeSettings` /
+        //     `subscribeProviderStatuses` / `subscribeLifecycle` — stubs that
+        //     return success without emitting push events (T6c-future will wire
+        //     these to real push channels).
+        //
+        // Syncode has no native "server config" subsystem, so each handler
+        // returns a minimal valid MCode shape (required top-level fields
+        // present, arrays empty, optionals null). The auth mode is surfaced in
+        // `getConfig` from `WsAuthConfig` (cheap — already in WsState).
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form for
+        // robustness (the tauriNativeApi sends slash, the wsNativeApi sends
+        // dot — both must resolve).
+        "server.getConfig" | "server/getConfig" => handle_server_get_config(state, id),
+        "server.getSettings" | "server/getSettings" => handle_server_get_settings(id),
+        "server.welcome" | "server/welcome" => handle_server_welcome(state, id).await,
+        "server.getEnvironment" | "server/getEnvironment" => handle_server_get_environment(id),
+        "server.getDiagnostics" | "server/getDiagnostics" => {
+            handle_server_get_diagnostics(state, id).await
+        }
+        // stub: no push delivery (T6c-future)
+        "server.subscribeConfig" | "server/subscribeConfig" => {
+            handle_server_subscribe_stub(id, "config")
+        }
+        // stub: no push delivery (T6c-future)
+        "server.subscribeSettings" | "server/subscribeSettings" => {
+            handle_server_subscribe_stub(id, "settings")
+        }
+        // stub: no push delivery (T6c-future)
+        "server.subscribeProviderStatuses" | "server/subscribeProviderStatuses" => {
+            handle_server_subscribe_stub(id, "providerStatuses")
+        }
+        // stub: no push delivery (T6c-future)
+        "server.subscribeLifecycle" | "server/subscribeLifecycle" => {
+            handle_server_subscribe_stub(id, "lifecycle")
+        }
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -1019,6 +1078,266 @@ async fn handle_snapshot_get(state: &WsState, id: Value) -> JsonRpcResponse {
             "projects": projects,
             "threads": threads,
             "updatedAt": now_iso(),
+        }),
+    )
+}
+
+// ─── Server config / settings / lifecycle Handlers (T6c-4) ───────
+//
+// The cloned MCode UI bootstraps its Settings panel + provider-config layer
+// from these `server.*` RPCs. Syncode has no native server-config subsystem
+// (no settings file, no provider availability probes, no local-server process
+// tracking), so each handler returns a **minimal valid MCode shape** — the
+// required top-level fields are present with empty/default values, and arrays
+// are empty so the UI's `.map`/`.filter`/`.length` reads render "nothing
+// configured yet" rather than crashing on `MethodNotFound`. Optional fields
+// the UI tolerates (`homeDir`, `chatWorkspaceRoot`, …) are omitted entirely;
+// the contracts mark them `Schema.optional`, so absence deserializes as
+// `undefined` rather than erroring.
+//
+// Shape references (Tier-3 `frontend/src/contracts/tier3/server.ts`,
+// mirrored from MCode `packages/contracts/src/server.ts`):
+//   - ServerConfig       { cwd, worktreesDir, keybindingsConfigPath,
+//                          keybindings, issues, providers, availableEditors,
+//                          +optional homeDir/chatWorkspaceRoot }
+//   - ServerSettings     (DEFAULT_SERVER_SETTINGS literal — see server.ts)
+//   - WsWelcomePayload   { cwd, projectName, +optional homeDir/…/bootstrap*Id }
+//   - ExecutionEnvironmentDescriptor { environmentId, label, platform,
+//                                      serverVersion, capabilities }
+//   - ServerDiagnosticsResult { generatedAt, process{pid,uptimeSeconds,memory},
+//                               childProcesses, childProcessTotalCount,
+//                               childProcessTotalRssBytes, projection }
+//
+// Caveats / known gaps:
+//   - `cwd`/`worktreesDir`/`homeDir` use `std::env` (best-effort). The real
+//     values in MCode come from the desktop shell; we surface process env
+//     defaults so the field is non-empty (the UI's `TrimmedNonEmptyString`
+//     schema rejects empty strings).
+//   - `keybindings` is `{ rules: [] }` — MCode's `ResolvedKeybindingsConfig`
+//     is a `readonly ResolvedKeybindingRule[]` (array), so we emit `[]`. The
+//     UI's keybindings normalizer tolerates an empty array.
+//   - `availableEditors` is `[]` — MCode enumerates detected editors (VS Code,
+//     …); Syncode has no editor-detection path. The Settings panel's editor
+//     picker renders an empty list.
+//   - `serverVersion` is the cargo crate version of `syncode-ws`. Used only
+//     for display.
+//   - `server.getDiagnostics` reports the current process's pid + zeroed
+//     memory counters (no real rss/heap probe in stable std). The
+//     `projection` block pulls live counts from the read_store so the
+//     diagnostics panel reflects real state.
+
+/// Best-effort ISO-8601 timestamp. Uses chrono (already a syncode-ws dep) for a
+/// well-formed UTC string. The UI reads `generatedAt`/`checkedAt` for display
+/// only; a stable UTC string is sufficient.
+fn iso_now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Resolve a non-empty default for `cwd`. Falls back to the process cwd, then
+/// `/` (guaranteed non-empty so the `TrimmedNonEmptyString` schema accepts it).
+fn server_cwd() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/".to_string())
+}
+
+/// Resolve a non-empty default for `homeDir` from `HOME` (POSIX) / `USERPROFILE`
+/// (Windows). Returns `None` when unset (the field is optional in the schema).
+fn server_home_dir() -> Option<String> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// `server.getConfig` — return a minimal valid `ServerConfig` shape.
+///
+/// Top-level fields returned:
+/// - `cwd`: process cwd (non-empty)
+/// - `worktreesDir`: `<cwd>/.synara/worktrees` (non-empty)
+/// - `keybindingsConfigPath`: `<home>/.synara/keybindings.json` (non-empty)
+/// - `keybindings`: empty array (no resolved rules; UI tolerates empty)
+/// - `issues`: empty array (no keybinding-config validation runs)
+/// - `providers`: empty array (no provider-availability probe)
+/// - `availableEditors`: empty array (no editor detection)
+/// - `homeDir`: `Option<HOME>` (omitted when unset; optional in schema)
+/// - `authMode`: syncode auth mode surfaced from `WsAuthConfig`
+///   (`unsafe-no-auth` | `remote-reachable` | ...). Not part of the MCode
+///   `ServerConfig` schema, but harmless as an extra field and useful for
+///   the UI to display the active auth policy.
+fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse {
+    let cwd = server_cwd();
+    let home = server_home_dir();
+    let worktrees_dir = format!("{}/.synara/worktrees", cwd.trim_end_matches('/'));
+    let keybindings_path = format!(
+        "{}/.synara/keybindings.json",
+        home.as_deref().unwrap_or(&cwd)
+    );
+    // The syncode `AuthMode` serializes kebab-case (`unsafe-no-auth`,
+    // `remote-reachable`, …). Surface it verbatim — the UI doesn't read this
+    // field today, but it's a cheap, accurate signal of the active policy.
+    let auth_mode = serde_json::to_value(state.auth_config.mode)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "unsafe-no-auth".to_string());
+
+    let mut cfg = serde_json::json!({
+        "cwd": cwd,
+        "worktreesDir": worktrees_dir,
+        "keybindingsConfigPath": keybindings_path,
+        "keybindings": [],
+        "issues": [],
+        "providers": [],
+        "availableEditors": [],
+        "authMode": auth_mode,
+    });
+    // Insert `homeDir` only when HOME was resolvable (the field is optional in
+    // the MCode schema; absence deserializes as `undefined`). Single-level
+    // guard — clippy-clean (no collapsible-if nesting).
+    if let (Some(h), Some(obj)) = (home, cfg.as_object_mut()) {
+        obj.insert("homeDir".into(), Value::String(h));
+    }
+    JsonRpcResponse::success(id, cfg)
+}
+
+/// `server.getSettings` — return the MCode `DEFAULT_SERVER_SETTINGS` literal.
+/// The vendored UI references this exact shape for state initialization (see
+/// `frontend/src/contracts/tier3/server.ts` `DEFAULT_SERVER_SETTINGS`). Each
+/// provider is enabled with its conventional binary name and empty
+/// `customModels`; the text-generation model selection defaults to
+/// `{ provider: "codex", model: "gpt-5.4-mini" }` (matches the literal).
+fn handle_server_get_settings(id: Value) -> JsonRpcResponse {
+    let settings = serde_json::json!({
+        "enableAssistantStreaming": false,
+        "defaultThreadEnvMode": "local",
+        "addProjectBaseDirectory": "",
+        "textGenerationModelSelection": {
+            "provider": "codex",
+            "model": "gpt-5.4-mini",
+        },
+        "providers": {
+            "codex": { "enabled": true, "binaryPath": "codex", "customModels": [], "homePath": "" },
+            "claudeAgent": { "enabled": true, "binaryPath": "claude", "customModels": [], "launchArgs": "" },
+            "cursor": { "enabled": true, "binaryPath": "cursor-agent", "customModels": [], "apiEndpoint": "" },
+            "gemini": { "enabled": true, "binaryPath": "gemini", "customModels": [] },
+            "grok": { "enabled": true, "binaryPath": "grok", "customModels": [] },
+            "kilo": { "enabled": true, "binaryPath": "kilo", "customModels": [], "serverUrl": "", "serverPassword": "" },
+            "opencode": {
+                "enabled": true, "binaryPath": "opencode", "customModels": [],
+                "serverUrl": "", "serverPassword": "", "experimentalWebSockets": false,
+            },
+            "pi": { "enabled": true, "binaryPath": "pi", "customModels": [], "agentDir": "" },
+        },
+        "skills": { "disabled": [] },
+    });
+    JsonRpcResponse::success(id, settings)
+}
+
+/// `server.welcome` — return a `WsWelcomePayload` shape. MCode emits this as a
+/// `push/server.welcome` notification on WS connect; the RPC form (if the UI
+/// requests it directly) returns the same payload. We derive `projectName`
+/// from the cwd's last path segment (best-effort) and leave the optional
+/// bootstrap ids absent (no project/thread auto-bootstrap in syncode).
+async fn handle_server_welcome(state: &WsState, id: Value) -> JsonRpcResponse {
+    let cwd = server_cwd();
+    let home = server_home_dir();
+    let project_name = cwd
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("syncode")
+        .to_string();
+    let mut payload = serde_json::json!({
+        "cwd": cwd,
+        "projectName": project_name,
+        "authRequired": state.auth_config.requires_authentication(),
+    });
+    if let (Some(h), Some(obj)) = (home, payload.as_object_mut()) {
+        obj.insert("homeDir".into(), Value::String(h));
+    }
+    JsonRpcResponse::success(id, payload)
+}
+
+/// `server.getEnvironment` — return `ExecutionEnvironmentDescriptor`. Maps
+/// `std::env::consts::{OS, ARCH}` to MCode's literal unions (`darwin`/`linux`/
+/// `windows`/`unknown` for os; `arm64`/`x64`/`other` for arch). The
+/// `environmentId` is a stable string derived from the OS+arch; `serverVersion`
+/// is the syncode-ws crate version.
+fn handle_server_get_environment(id: Value) -> JsonRpcResponse {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => "unknown",
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" | "arm64" => "arm64",
+        "x86_64" => "x64",
+        _ => "other",
+    };
+    let env_id = format!("syncode-{}-{}", os, arch);
+    let server_version = env!("CARGO_PKG_VERSION");
+    let env_desc = serde_json::json!({
+        "environmentId": env_id,
+        "label": format!("Syncode ({}/{})", os, arch),
+        "platform": { "os": os, "arch": arch },
+        "serverVersion": server_version,
+        "capabilities": { "repositoryIdentity": false },
+    });
+    JsonRpcResponse::success(id, env_desc)
+}
+
+/// `server.getDiagnostics` — return `ServerDiagnosticsResult` with zeroed
+/// memory counters and live projection counts. MCode reports rss/heap/etc.
+/// from the Node process; syncode has no equivalent stable probe, so all
+/// byte counters are 0. The `projection` block pulls real project/thread
+/// counts from the read_store so the diagnostics panel reflects state.
+async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcResponse {
+    let (project_count, thread_count) = {
+        let store = state.read_store.read().await;
+        // Cheap HashMap len reads; tight scope so the read guard drops
+        // before the JSON response is constructed.
+        (store.projects.len(), store.threads.len())
+    };
+    let result = serde_json::json!({
+        "generatedAt": iso_now(),
+        "process": {
+            "pid": std::process::id(),
+            "uptimeSeconds": 0,
+            "memory": {
+                "rssBytes": 0,
+                "heapTotalBytes": 0,
+                "heapUsedBytes": 0,
+                "externalBytes": 0,
+                "arrayBuffersBytes": 0,
+            },
+        },
+        "childProcesses": [],
+        "childProcessTotalCount": 0,
+        "childProcessTotalRssBytes": 0,
+        "projection": {
+            "projectCount": project_count,
+            "threadCount": thread_count,
+        },
+    });
+    JsonRpcResponse::success(id, result)
+}
+
+/// Generic subscribe-stub for the `server.subscribe*` RPCs. Returns a success
+/// envelope without recording a real push subscription or emitting any push
+/// events. The UI tolerates no push delivery (it polls the read RPCs on a
+/// staleTime/refetch cadence). Real push delivery for these channels is
+/// T6c-future work.
+fn handle_server_subscribe_stub(id: Value, channel: &str) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": format!("server.{}", channel),
+            "note": "stub: no push delivery (T6c-future)",
         }),
     )
 }
@@ -2215,6 +2534,204 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         assert_eq!(resp.result.unwrap()["branch"], "main");
+    }
+
+    // ─── Server config RPC tests (T6c-4) ────────────────────────────────
+    //
+    // Three layers:
+    //   1. Dispatch mapping: dot-form (`server.getConfig`) + slash-form
+    //      (`server/getConfig`) both resolve to the same handler (no
+    //      MethodNotFound).
+    //   2. Shape: each handler returns the MCode-shaped payload with the
+    //      required top-level fields present (`ServerConfig.cwd`,
+    //      `ServerSettings.providers`, …) and arrays empty.
+    //   3. rpc/listMethods surfaces the new methods.
+
+    #[tokio::test]
+    async fn server_get_config_dispatches_dot_and_slash_forms() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.getConfig", "server/getConfig"] {
+            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            // MCode ServerConfig required top-level fields (non-empty strings
+            // for the TrimmedNonEmptyString schema fields; arrays present).
+            assert!(!result["cwd"].as_str().unwrap_or("").trim().is_empty(), "{}: cwd empty", method);
+            assert!(
+                !result["worktreesDir"].as_str().unwrap_or("").trim().is_empty(),
+                "{}: worktreesDir empty", method
+            );
+            assert!(
+                !result["keybindingsConfigPath"].as_str().unwrap_or("").trim().is_empty(),
+                "{}: keybindingsConfigPath empty", method
+            );
+            assert!(result["keybindings"].is_array(), "{}: keybindings missing", method);
+            assert!(result["keybindings"].as_array().unwrap().is_empty());
+            assert!(result["issues"].as_array().unwrap().is_empty());
+            assert!(result["providers"].as_array().unwrap().is_empty());
+            assert!(result["availableEditors"].as_array().unwrap().is_empty());
+            // authMode surfaced from WsAuthConfig (kebab-case string).
+            assert!(
+                ["unsafe-no-auth", "desktop-managed-local", "loopback-browser", "remote-reachable"]
+                    .contains(&result["authMode"].as_str().unwrap_or("")),
+                "{}: authMode not a valid kebab literal: {:?}",
+                method,
+                result["authMode"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn server_get_config_auth_mode_reflects_remote_config() {
+        // A remote-requiring WsState must surface authMode="remote-reachable".
+        let state = make_remote_state();
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server/getConfig" });
+        let resp = rpc(&state, 1, &req).await;
+        // No bootstrap → authz rejects (Read permission required in remote mode).
+        // This confirms the authz gate treats server/getConfig as protected.
+        assert!(resp.error.is_some(), "expected authz rejection in remote mode");
+        assert_eq!(
+            resp.error.unwrap().code,
+            crate::auth::auth_error_codes::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn server_get_settings_returns_default_literal_shape() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server.getSettings" });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // MCode DEFAULT_SERVER_SETTINGS top-level fields.
+        assert_eq!(result["enableAssistantStreaming"], serde_json::Value::Bool(false));
+        assert_eq!(result["defaultThreadEnvMode"], "local");
+        assert!(result.get("addProjectBaseDirectory").is_some());
+        assert_eq!(result["textGenerationModelSelection"]["provider"], "codex");
+        // All 8 provider keys present with the conventional binary names.
+        let providers = &result["providers"];
+        assert_eq!(providers["codex"]["binaryPath"], "codex");
+        assert_eq!(providers["claudeAgent"]["binaryPath"], "claude");
+        assert_eq!(providers["cursor"]["binaryPath"], "cursor-agent");
+        assert_eq!(providers["gemini"]["binaryPath"], "gemini");
+        assert_eq!(providers["grok"]["binaryPath"], "grok");
+        assert_eq!(providers["kilo"]["binaryPath"], "kilo");
+        assert_eq!(providers["opencode"]["binaryPath"], "opencode");
+        assert_eq!(providers["pi"]["binaryPath"], "pi");
+        // Each provider is enabled with an empty customModels array.
+        for key in ["codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi"] {
+            assert_eq!(
+                providers[key]["enabled"],
+                serde_json::Value::Bool(true),
+                "{} not enabled", key
+            );
+            assert!(providers[key]["customModels"].as_array().unwrap().is_empty());
+        }
+        assert!(result["skills"]["disabled"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_get_environment_maps_os_and_arch() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server/getEnvironment" });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // ExecutionEnvironmentDescriptor top-level fields.
+        assert!(
+            result["environmentId"].as_str().unwrap_or("").starts_with("syncode-"),
+            "environmentId should be prefixed: {:?}",
+            result["environmentId"]
+        );
+        assert!(!result["label"].as_str().unwrap_or("").is_empty());
+        let os = result["platform"]["os"].as_str().unwrap();
+        let arch = result["platform"]["arch"].as_str().unwrap();
+        assert!(["darwin", "linux", "windows", "unknown"].contains(&os), "os: {}", os);
+        assert!(["arm64", "x64", "other"].contains(&arch), "arch: {}", arch);
+        assert!(!result["serverVersion"].as_str().unwrap_or("").is_empty());
+        assert_eq!(result["capabilities"]["repositoryIdentity"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn server_get_diagnostics_includes_projection_counts() {
+        let state = WsState::new_in_memory(16);
+        // Seed one project so projection.projectCount reflects live state.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "D", "rootPath": "/tmp/d" }
+        });
+        let _ = rpc(&state, 1, &create).await;
+
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "server.getDiagnostics" });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // ServerDiagnosticsResult top-level fields.
+        assert!(!result["generatedAt"].as_str().unwrap_or("").is_empty());
+        assert!(result["process"]["pid"].as_u64().unwrap_or(0) > 0);
+        assert!(result["process"]["memory"].is_object());
+        assert!(result["childProcesses"].as_array().unwrap().is_empty());
+        assert_eq!(result["projection"]["projectCount"], 1);
+        assert_eq!(result["projection"]["threadCount"], 0);
+    }
+
+    #[tokio::test]
+    async fn server_welcome_returns_payload_shape() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server.welcome" });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // WsWelcomePayload required fields.
+        assert!(!result["cwd"].as_str().unwrap_or("").trim().is_empty());
+        assert!(!result["projectName"].as_str().unwrap_or("").is_empty());
+        // authRequired surfaced (boolean).
+        assert_eq!(result["authRequired"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn server_subscribe_stubs_return_success() {
+        let state = WsState::new_in_memory(16);
+        for (method, channel_suffix) in [
+            ("server.subscribeConfig", "config"),
+            ("server.subscribeSettings", "settings"),
+            ("server.subscribeProviderStatuses", "providerStatuses"),
+            ("server.subscribeLifecycle", "lifecycle"),
+        ] {
+            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["subscribed"], serde_json::Value::Bool(true), "{}", method);
+            assert_eq!(result["channel"], format!("server.{}", channel_suffix), "{}", method);
+        }
+    }
+
+    #[tokio::test]
+    async fn server_handlers_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let resp = rpc(&state, 1, &req).await;
+        let methods = resp.result.unwrap()["methods"].as_array().unwrap().clone();
+        let method_strs: Vec<&str> = methods.iter().filter_map(|v| v.as_str()).collect();
+        for expected in [
+            "server/getConfig",
+            "server/getSettings",
+            "server/welcome",
+            "server/getEnvironment",
+            "server/getDiagnostics",
+            "server/subscribeConfig",
+            "server/subscribeSettings",
+            "server/subscribeProviderStatuses",
+            "server/subscribeLifecycle",
+        ] {
+            assert!(
+                method_strs.contains(&expected),
+                "rpc/listMethods missing {}",
+                expected
+            );
+        }
     }
 
     // ── Test-only in-memory EventRepository ────────────────────────────

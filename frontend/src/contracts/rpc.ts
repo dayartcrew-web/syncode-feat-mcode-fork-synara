@@ -74,6 +74,15 @@ import type {
   GitReadWorkingTreeDiffInput,
   GitStatusResult,
 } from "./tier3/git";
+// Server Tier-3 result/input types (T6c-4 server config RPC exposure). The
+// backend `crates/syncode-ws/src/rpc.rs` `handle_server_*` handlers return
+// minimal valid MCode shapes (arrays empty, optionals null) — see
+// `frontend/src/contracts/tier3/server.ts` for the canonical shapes.
+import type {
+  ServerConfig,
+  ServerSettings,
+} from "./tier3/server";
+import type { WsWelcomePayload } from "./tier3/ws";
 
 // Minimal git input shapes for the served slash dispatch keys. The MCode UI
 // sends params under these camelCase keys (`cwd`, `branch`, `paths`,
@@ -112,8 +121,61 @@ interface GitListBranchesResult {
   hasOriginRemote: boolean;
 }
 
+// ─── Server config/env/diagnostics/subscribe shapes (T6c-4) ────────────
+//
+// `ServerConfig` and `ServerSettings` are imported from Tier-3 `server.ts`
+// (canonical MCode shapes). The diagnostics/environment/subscribe shapes are
+// NOT vendored in Tier-3 (MCode derives them from Effect schemas in
+// `packages/contracts/src/{server,environment}.ts`); we declare local
+// interfaces mirroring the MCode top-level field set so the served registry
+// is type-safe. The backend returns these exact shapes (see
+// `handle_server_*` in `crates/syncode-ws/src/rpc.rs`).
+
+// ServerGetEnvironmentResult = ExecutionEnvironmentDescriptor (MCode
+// `environment.ts`). The backend surfaces `std::env::consts::{OS,ARCH}` +
+// the syncode-ws crate version.
+interface ServerGetEnvironmentResult {
+  environmentId: string;
+  label: string;
+  platform: { os: string; arch: string };
+  serverVersion: string;
+  capabilities: { repositoryIdentity: boolean };
+}
+
+// ServerDiagnosticsResult (MCode `server.ts` ~L232). The backend zeroes the
+// memory counters (no stable rss/heap probe) and pulls live project/thread
+// counts into `projection`.
+interface ServerDiagnosticsMemory {
+  rssBytes: number;
+  heapTotalBytes: number;
+  heapUsedBytes: number;
+  externalBytes: number;
+  arrayBuffersBytes: number;
+}
+interface ServerDiagnosticsResult {
+  generatedAt: string;
+  process: {
+    pid: number;
+    uptimeSeconds: number;
+    memory: ServerDiagnosticsMemory;
+  };
+  childProcesses: readonly unknown[];
+  childProcessTotalCount: number;
+  childProcessTotalRssBytes: number;
+  projection: { projectCount: number; threadCount: number };
+}
+
+// Server subscribe* stubs (T6c-4). The backend returns a success envelope
+// without recording a real push subscription or emitting push events —
+// real push delivery is T6c-future.
+interface ServerSubscribeStubResult {
+  subscribed: boolean;
+  channel: string;
+  note?: string;
+}
+
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 23 entries (21 in dispatch + ping + rpc/listMethods) ──
+// ─── SERVED_RPC — 32 entries (T6c-4 adds 9 server.* read/subscribe RPCs) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -228,6 +290,55 @@ export const SERVED_RPC = {
   },
   "git/commit": { request: null as unknown as GitCommitInput, result: null as unknown as null },
 
+  // ─── Server config / settings / lifecycle (T6c-4) ───────────────────
+  // The cloned MCode UI calls these `server.*` RPCs on startup (Settings
+  // panel + provider-config initialization). The transport remaps the MCode
+  // dot-strings (`server.getConfig`, `server.getSettings`, …) onto these
+  // slash keys (see `MCODE_TO_SERVED` in `wsTransport.ts`). The backend
+  // `crates/syncode-ws/src/rpc.rs` `handle_server_*` handlers return minimal
+  // valid MCode shapes (required fields present, arrays empty, optionals
+  // null). `ServerConfig`/`ServerSettings` use the canonical Tier-3 types;
+  // diagnostics/environment/subscribe use local interfaces mirroring MCode.
+  //
+  // Known gaps (documented in `handle_server_*`):
+  //   - `server.getConfig` returns empty `providers`/`availableEditors`/
+  //     `keybindings`/`issues` (no provider probe / editor detection).
+  //   - `server.getDiagnostics` zeroes memory counters (no stable probe).
+  //   - `server.subscribe*` are stubs (no push delivery — T6c-future).
+  "server/getConfig": { request: null as unknown as null, result: null as unknown as ServerConfig },
+  "server/getSettings": {
+    request: null as unknown as null,
+    result: null as unknown as ServerSettings,
+  },
+  "server/welcome": {
+    request: null as unknown as null,
+    result: null as unknown as WsWelcomePayload,
+  },
+  "server/getEnvironment": {
+    request: null as unknown as null,
+    result: null as unknown as ServerGetEnvironmentResult,
+  },
+  "server/getDiagnostics": {
+    request: null as unknown as null,
+    result: null as unknown as ServerDiagnosticsResult,
+  },
+  "server/subscribeConfig": {
+    request: null as unknown as null,
+    result: null as unknown as ServerSubscribeStubResult,
+  },
+  "server/subscribeSettings": {
+    request: null as unknown as null,
+    result: null as unknown as ServerSubscribeStubResult,
+  },
+  "server/subscribeProviderStatuses": {
+    request: null as unknown as null,
+    result: null as unknown as ServerSubscribeStubResult,
+  },
+  "server/subscribeLifecycle": {
+    request: null as unknown as null,
+    result: null as unknown as ServerSubscribeStubResult,
+  },
+
   // ─── Auth ────────────────────────────────────────────────────────────
   "auth/bootstrap": {
     request: null as unknown as AuthBootstrapParams,
@@ -335,28 +446,34 @@ export const UNSERVED_RPC = [
   "terminal.subscribe",
   "terminal.unsubscribe",
 
-  // ─── Server meta (no backend surface) — ~21 ─────────────────────────
-  "server.getConfig",
+  // ─── Server meta — read-side SERVED in T6c-4, write-side deferred ────
+  // The core read RPCs (`server.getConfig`, `server.getSettings`,
+  // `server.getEnvironment`, `server.getDiagnostics`, `server.welcome`) and
+  // the four `server.subscribe*` stubs are SERVED — see SERVED_RPC. The
+  // write-side / advanced server RPCs below remain unserved (MethodNotFound):
   "server.setConfig",
-  "server.getSettings",
   "server.patchSettings",
+  "server.updateSettings",
+  "server.refreshProviders",
+  "server.updateProvider",
   "server.listProviders",
   "server.getProviderStatuses",
   "server.getProviderAuthStatus",
   "server.getProviderUsageSnapshot",
   "server.listProviderUsage",
-  "server.getDiagnostics",
   "server.getUsage",
   "server.getRecap",
+  "server.generateThreadRecap",
   "server.startLocalServer",
   "server.stopLocalServer",
+  "server.listLocalServers",
   "server.listLocalServerProcesses",
+  "server.listWorktrees",
   "server.generateAutomationIntent",
+  "server.transcribeVoice",
   "server.voiceStart",
   "server.voiceStop",
-  "server.subscribeConfig",
-  "server.subscribeProviderStatuses",
-  "server.subscribeSettings",
+  "server.upsertKeybinding",
 
   // ─── Provider discovery (no backend surface) — ~9 ───────────────────
   "provider.listSkills",

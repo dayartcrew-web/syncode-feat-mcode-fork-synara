@@ -155,6 +155,27 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "git.unstage": "git/unstage",
   "git.unstageFiles": "git/unstage",
   "git.commit": "git/commit",
+
+  // Server config/settings/lifecycle RPCs (T6c-4): the cloned MCode UI calls
+  // these `server.*` dot-strings on startup (`wsNativeApi.ts` →
+  // `WS_METHODS.serverGetConfig` = "server.getConfig", …). The syncode-ws
+  // backend now serves minimal valid MCode shapes for the read side (config,
+  // settings, welcome, environment, diagnostics) + subscribe* stubs. Map every
+  // MCode dot-name the UI uses to the served slash dispatch key so the calls
+  // reach the backend instead of being client-stubbed with MethodNotFound
+  // (which would leave the Settings/provider-config layer uninitialized).
+  // The `tauriNativeApi.ts` already sends slash forms (`server/getConfig`),
+  // so the dot→slash remap here only affects the `wsNativeApi` path; both
+  // resolve because the backend dispatch accepts both forms.
+  "server.getConfig": "server/getConfig",
+  "server.getSettings": "server/getSettings",
+  "server.welcome": "server/welcome",
+  "server.getEnvironment": "server/getEnvironment",
+  "server.getDiagnostics": "server/getDiagnostics",
+  "server.subscribeConfig": "server/subscribeConfig",
+  "server.subscribeSettings": "server/subscribeSettings",
+  "server.subscribeProviderStatuses": "server/subscribeProviderStatuses",
+  "server.subscribeLifecycle": "server/subscribeLifecycle",
 };
 
 /**
