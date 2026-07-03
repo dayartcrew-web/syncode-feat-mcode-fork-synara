@@ -1,6 +1,6 @@
 # SHELL-GAPS — Electron → Tauri shell swap (B4 / "T6")
 
-> Status: 2026-07-02. Companion to `CONTRACTS-BRIDGE-DESIGN.md` §6.5 + B4.
+> Status: 2026-07-03 (updated). Companion to `CONTRACTS-BRIDGE-DESIGN.md` §6.5 + B4. The **WS-backend path** now serves terminal **live output push** (subscribeEvents real) + git/automation/server/provider/stats RPCs via the standalone server; the remaining gaps below are the **Tauri-desktop-command** ones (worktree/stash/restart/contextMenu/etc.) + browser webview (Electron-only). For the authoritative current REAL-vs-STUB status see [`STATUS.md`](./STATUS.md). Body below is the original T6 gap enumeration.
 
 This document enumerates the NativeApi / DesktopBridge surface, how each
 method maps onto Tauri (existing syncode-tauri command, direct `@tauri-apps/api`

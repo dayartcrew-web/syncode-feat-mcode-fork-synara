@@ -1,6 +1,6 @@
 # Syncode — Architecture
 
-> **Source of truth for the current implementation** (2026-06-27). Supersedes the planning-stage `COMPARISON-*.md` docs. Generated alongside `.masday/intel/`.
+> **Architecture reference** (2026-06-27). The **clone+rewire arc (PR #6–#32)** since added: a standalone WS server (`syncode-ws/src/bin/server.rs`, SQLite) serving **97 RPCs** across all MCode domains, terminal live-output push, `ProcessRunExecutor` (executing automations), and LLM ops via provider CLI. For the authoritative current REAL-vs-STUB status see [`STATUS.md`](./STATUS.md). Supersedes the planning-stage `COMPARISON-*.md` docs. Generated alongside `.masday/intel/` (intel is pre-clone + stale in places — trust `STATUS.md` + live `cargo test` for current counts).
 
 ## 1. What is Syncode?
 

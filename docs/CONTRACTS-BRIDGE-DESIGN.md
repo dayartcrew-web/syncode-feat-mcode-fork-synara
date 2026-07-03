@@ -1,6 +1,6 @@
 # Contracts Bridge Design — ts-rs ↔ `@t3tools/contracts`
 
-> **Status (2026-07-02): DESIGN.** Keystone artifact for the *clone + re-wire* frontend strategy (see [`COMPARISON-FRONTEND-MCODE-vs-SYNCODE.md`](./COMPARISON-FRONTEND-MCODE-vs-SYNCODE.md) §14.3). This document specifies how Syncode's Rust domain is exposed to a cloned MCode `apps/web` frontend as a drop-in replacement for MCode's Effect-Schema contracts package.
+> **Status (2026-07-03): IMPLEMENTED (PR #6–#32).** This design was executed end-to-end — the contracts bridge is complete, the cloned UI is type-clean (tsc 0), and a standalone backend serves all RPC domains. For the authoritative current REAL-vs-STUB status see [`STATUS.md`](./STATUS.md). This document is retained as the design spec; the body (tiers, decisions, phased plan) reflects the original design.
 >
 > Grounded in live measurement of both sides: MCode `@t3tools/contracts` (`/home/vibe-dev/mcode/packages/contracts/`) and Syncode ts-rs output (`crates/syncode-contracts/` → `frontend/src/types/`).
 

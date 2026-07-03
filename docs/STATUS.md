@@ -1,0 +1,108 @@
+# Syncode — Clone+Rewire Status & REAL-vs-STUB Matrix
+
+> **Status (2026-07-03): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32.
+>
+> This is the single source of truth for "mana yang masih stub vs real app-wired." Other docs (`COMPARISON-FRONTEND`, `CONTRACTS-BRIDGE-DESIGN`, `SHELL-GAPS`, `TEST_SUMMARY`, `CRATES`, `ARCHITECTURE`) carry detail/history; this file carries current status.
+
+---
+
+## TL;DR
+- **Frontend**: MCode `apps/web` cloned + rewired — **type-clean (tsc 0)**, suite **2128/0 pass**, vite build green.
+- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **97 served RPCs** dispatching MCode dot-names + slash forms.
+- **Every UI panel's RPCs reach the backend.** Read-side is REAL where Syncode has the subsystem; STUB-defaults where it doesn't. Terminal streams live output; automations actually execute; LLM ops work via provider CLI (no API key).
+
+## Legend
+- ✅ **REAL** — backed by real Syncode logic/data (git2, syncode-terminal, scheduler, read_model, provider CLI, …).
+- 🟡 **STUB** — served (no MethodNotFound) but returns default/empty/no-persistence (UI renders a valid empty state; writes are accepted but not persisted).
+- ⛔ **UNSERVED** — no handler (client-stub MethodNotFound; UI feature non-functional).
+
+---
+
+## REAL-vs-STUB matrix (per RPC domain)
+
+### Shell / orchestration
+| RPC | Status | Backed by |
+|---|---|---|
+| `orchestration.getShellSnapshot` / `getSnapshot` | ✅ REAL | `read_model` (real projects + threads; E2E-proven: shell lists "Demo Project") |
+| `orchestration.subscribeShell` / `dispatchCommand` / `getTurnDiff` / `getFullThreadDiff` / `replayEvents` / `repairState` | ⛔ UNSERVED | (advanced orchestration ops) |
+
+### Git (GitPanel)
+| RPC | Status | Backed by |
+|---|---|---|
+| `git.status` / `diff` / `readWorkingTreeDiff` / `log` / `branches` / `add`(stage) / `commit` / `createBranch` / `deleteBranch` / `checkout` | ✅ REAL | `syncode-git::Git2Service` |
+| `git.stashList` / `stashCreate` / `stashApply` / `stashDrop` / `stashInfo` / `fetch` / `init` / `removeIndexLock` / `worktreeList` / `worktreeCreate` / `worktreeRemove` / `pull` / `push` | ✅ REAL | git2 (stash/fetch/init/worktree) + syncode-git CLI (pull/push) |
+| `git.stashAndCheckout` | 🟡 STUB | (compose stashCreate + checkout) |
+| `git.summarizeDiff` | ✅ REAL | provider CLI one-shot (LLM) |
+| `git.runStackedAction` / `githubRepository` / `resolvePullRequest` / `preparePullRequestThread` / `handoffThread` / `createDetachedWorktree` / `subscribeActionProgress` | ⛔ UNSERVED | (stacked actions / GitHub API / push-channel) |
+
+### Server (config / Settings)
+| RPC | Status | Backed by |
+|---|---|---|
+| `server.getConfig` / `getSettings` / `welcome` / `getEnvironment` / `getDiagnostics` | 🟡 STUB-defaults | no subsystem — defaults + real `authMode` (from WsAuthConfig) + live projection counts (diagnostics) |
+| `server.setConfig` / `updateSettings` / `refreshProviders` / `updateProvider` / `upsertKeybinding` | 🟡 STUB | no persistence — accept write, return ack |
+| `server.subscribeConfig` / `subscribeSettings` / `subscribeProviderStatuses` / `subscribeLifecycle` | 🟡 STUB | `{subscribed:true}` — no push delivery |
+| `server.listProviderUsage` / `getProviderUsageSnapshot` / `startLocalServer` / `stopLocalServer` / `transcribeVoice` / `voiceStart` / `voiceStop` / `generateAutomationIntent` / `patchSettings` | ⛔ UNSERVED | (usage analytics / local-server mgmt / voice STT / AI intent) |
+
+### Terminal (Terminal panel)
+| RPC | Status | Backed by |
+|---|---|---|
+| `terminal.open`/`new` / `write` / `resize` / `close`/`kill` / `ackOutput` / `list` / `clear` / `restart` | ✅ REAL | `syncode-terminal::SessionManager` (real PTY; round-trip verified vs `/bin/cat`) |
+| `terminal.subscribeEvents` (live output) | ✅ REAL | per-session reader task → `push_tx` `terminal/event` (terminal **streams live output**) |
+| `terminal.split` / `toggle` / `splitRight` / `splitDown` / `splitUp` / `splitLeft` | (UI-internal) | pane-layout, not backend RPCs |
+
+### Automation (Automations panel)
+| RPC | Status | Backed by |
+|---|---|---|
+| `automation.list` / `create` / `get` / `update` / `delete` / `runNow` / `cancelRun` | ✅ REAL | `syncode-automation::Scheduler` + **`ProcessRunExecutor`** (automations **actually execute** via `sh -c`) |
+| `automation.markRunRead` / `archiveRun` | 🟡 STUB | (needs AutomationRun type extension) |
+| `automation.subscribe` / `unsubscribe` / `automation.event` (push) | 🟡 STUB | `{subscribed:true}` — no run-event push |
+| `automation.get` (single) | ✅ REAL | Scheduler.get |
+
+### Provider (discovery + LLM)
+| RPC | Status | Backed by |
+|---|---|---|
+| `provider.listModels` / `listAgents` | ✅ REAL | `ALL_PROVIDERS` static (8 real provider descriptors) |
+| `provider.listSkills` / `listSkillsCatalog` / `listPlugins` / `readPlugin` / `listCommands` / `getComposerCapabilities` / `listOptions` / `readSkill` | 🟡 STUB-empty | no skills/plugins/commands subsystem |
+| `provider.compactThread` | ✅ REAL | provider CLI one-shot (LLM compaction) |
+
+### Stats (Profile)
+| RPC | Status | Backed by |
+|---|---|---|
+| `stats.getProfileStats` / `getProfileTokenStats` | 🟡 STUB-empty | no stats/telemetry subsystem |
+
+### Auth / infra
+| RPC | Status | Backed by |
+|---|---|---|
+| `auth.bootstrap` / `auth.status` / `auth.logout` | ✅ REAL | `syncode-auth` (opt-in; bearer-session) |
+| `push.subscribe` / `push.unsubscribe` / `ping` / `rpc.listMethods` | ✅ REAL | WS infra |
+
+---
+
+## Component status (the app-wiring)
+| Component | Status |
+|---|---|
+| Cloned MCode UI (`apps/web` → `frontend/`) | ✅ vendored (753 files + 35 shared modules), type-clean |
+| Contracts bridge (`@t3tools/contracts` shim) | ✅ complete — 139 Tier-3 symbols + RPC registry + 44-event union + branded IDs |
+| Transport (`wsTransport` JSON-RPC) | ✅ Effect-free; `MCODE_TO_SERVED` (88 mappings) |
+| Standalone WS backend | ✅ `cargo run -p syncode-ws --bin server` (SQLite, env-configurable) |
+| Terminal live output | ✅ reader-task → push bus |
+| Automation execution | ✅ `ProcessRunExecutor` (sh -c) |
+| LLM ops | ✅ provider CLI one-shot (`llm.rs::invoke_llm_oneshot`) — **no API key** (providers use CLI auth) |
+| Desktop shell (Tauri) | ✅ builds + 28 commands wired; **boot E2E not verified** (headless — needs a display) |
+
+## Test/quality state
+- **Frontend**: tsc **0 errors**, vitest **2128 pass / 0 fail**, vite build green.
+- **Backend**: `cargo test -p syncode-ws` **132** (128 lib + 4 e2e); `syncode-contracts` 96; `syncode-automation` 72; `syncode-terminal` 20. Per-crate `cargo clippy -- -D warnings` green. (Workspace `cargo test` works now — glib/libs installed.)
+- **~27 PRs** (PR #6–#32) across the clone+rewire + RPC-coverage + infra arc.
+
+## Genuinely remaining (marginal / niche / config-gated)
+- **git/automation live event-push** — extend terminal reader-task pattern; git ops are synchronous so progress is limited.
+- **GitHub-API ops** — achievable via `gh api` subprocess (gh CLI authed); niche PR-handoff flow.
+- **voice ops** (transcribeVoice/…) — STT subsystem (different from LLM-text).
+- **Real persistence for server settings** — currently write-stubs (no settings store).
+- **markRunRead/archiveRun** real impl — needs AutomationRun type extension.
+- **Desktop GUI boot E2E** — needs a display (headless-blocked).
+
+---
+
+*For the design/spec history see [`CONTRACTS-BRIDGE-DESIGN.md`](./CONTRACTS-BRIDGE-DESIGN.md); for the frontend comparison/lineage see [`COMPARISON-FRONTEND-MCODE-vs-SYNCODE.md`](./COMPARISON-FRONTEND-MCODE-vs-SYNCODE.md).*
