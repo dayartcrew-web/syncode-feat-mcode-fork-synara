@@ -107,6 +107,26 @@ impl SessionManager {
         rows: u16,
     ) -> Result<String, PtyError> {
         let session_id = format!("term-{}", uuid::Uuid::new_v4().hyphenated());
+        self.create_session_with_id(session_id, command, args, working_dir, cols, rows)
+            .await
+    }
+
+    /// Create a new terminal session under a caller-provided session id.
+    ///
+    /// This is the WS-RPC entry point (T6c-5): the cloned MCode UI keys
+    /// terminal sessions by `terminalId` (a stable string it generates), so
+    /// the WS handler calls this with that id to keep the UI's session
+    /// references stable across `open`/`write`/`resize`/`close`. If a session
+    /// with the given id already exists it is overwritten (re-open semantics).
+    pub async fn create_session_with_id(
+        &self,
+        session_id: String,
+        command: &str,
+        args: &[&str],
+        working_dir: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, PtyError> {
         let session =
             TerminalSession::new(session_id.clone(), command, args, working_dir, cols, rows)?;
         self.sessions

@@ -176,6 +176,28 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "server.subscribeSettings": "server/subscribeSettings",
   "server.subscribeProviderStatuses": "server/subscribeProviderStatuses",
   "server.subscribeLifecycle": "server/subscribeLifecycle",
+
+  // Terminal PTY RPCs (T6c-5): the cloned MCode UI's Terminal panel +
+  // project-script runner call these `terminal.*` dot-strings
+  // (`wsNativeApi.ts` → `WS_METHODS.terminalOpen` = "terminal.open", …). The
+  // syncode-ws backend now serves them via `syncode-terminal::SessionManager`
+  // handlers — map every MCode dot-name the UI uses to the served slash
+  // dispatch key so the calls reach the backend instead of being
+  // client-stubbed with MethodNotFound (which would leave the Terminal panel
+  // inert). The backend dispatch also accepts the dot-name directly (arms
+  // cover both forms) so this remap is belt-and-braces robustness.
+  "terminal.open": "terminal/create",
+  "terminal.new": "terminal/create",
+  "terminal.write": "terminal/write",
+  "terminal.resize": "terminal/resize",
+  "terminal.close": "terminal/close",
+  "terminal.kill": "terminal/close",
+  "terminal.ackOutput": "terminal/ack",
+  "terminal.list": "terminal/list",
+  "terminal.clear": "terminal/clear",
+  "terminal.restart": "terminal/restart",
+  "terminal.subscribeEvents": "terminal/subscribe-events",
+  "terminal.subscribe": "terminal/subscribe-events",
 };
 
 /**

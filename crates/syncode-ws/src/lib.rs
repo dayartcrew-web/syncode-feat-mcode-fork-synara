@@ -73,6 +73,12 @@ impl JsonRpcResponse {
 /// Connection ID type
 pub type ConnectionId = u64;
 
+/// Shared terminal session manager — wraps `syncode_terminal::SessionManager`
+/// behind a `RwLock` (mirrors the Tauri `SharedSessionManager` pattern in
+/// `crates/syncode-tauri/src/terminal_commands.rs`). The `terminal.*` RPC
+/// handlers (T6c-5) read/write sessions through this handle.
+pub type SharedSessionManager = Arc<RwLock<syncode_terminal::SessionManager>>;
+
 /// Shared state for the WebSocket server
 #[derive(Clone)]
 pub struct WsState {
@@ -93,6 +99,11 @@ pub struct WsState {
     /// Per-connection authenticated principals. Populated by `auth/bootstrap`,
     /// consulted by the authz gate on every protected method call.
     pub conn_auth: crate::auth::SharedConnectionAuth,
+    /// Terminal PTY session manager (T6c-5). Owns the lifecycle of all
+    /// terminal sessions created via `terminal.open`/`terminal.new`. Sessions
+    /// are keyed by the caller-provided `terminalId` (MCode convention) so the
+    /// UI's session references stay stable across calls.
+    pub terminal_manager: SharedSessionManager,
 }
 
 impl WsState {
@@ -140,6 +151,9 @@ impl WsState {
             subscriptions: Arc::new(RwLock::new(crate::push::SubscriptionRegistry::new())),
             auth_config,
             conn_auth: crate::auth::SharedConnectionAuth::new(),
+            terminal_manager: Arc::new(RwLock::new(
+                syncode_terminal::SessionManager::new(),
+            )),
         }
     }
 
