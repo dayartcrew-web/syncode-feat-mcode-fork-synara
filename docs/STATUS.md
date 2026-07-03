@@ -73,7 +73,8 @@
 | RPC | Status | Backed by |
 |---|---|---|
 | `provider.listModels` / `listAgents` | ✅ REAL | `ALL_PROVIDERS` static (8 real provider descriptors) |
-| `provider.listSkills` / `listSkillsCatalog` / `listPlugins` / `readPlugin` / `listCommands` / `getComposerCapabilities` / `listOptions` / `readSkill` | 🟡 STUB-empty | no skills/plugins/commands subsystem |
+| `provider.getComposerCapabilities` / `listSkills` / `listSkillsCatalog` / `listCommands` / `readSkill` | ✅ REAL | per-provider capability flags + filesystem `.skills/*.md` scan + static native commands + skill file read (traversal-guarded) |
+| `provider.listPlugins` / `readPlugin` / `listOptions` | 🟡 STUB-empty | no plugin marketplace/options subsystem |
 | `provider.compactThread` | ✅ REAL | provider CLI one-shot (LLM compaction) |
 
 ### Stats (Profile)
