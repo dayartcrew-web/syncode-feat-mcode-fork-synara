@@ -130,6 +130,31 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   // client-stubbed with MethodNotFound — the shell would never load real data.
   "orchestration.getShellSnapshot": "shell/getSnapshot",
   "orchestration.getSnapshot": "snapshot/get",
+
+  // Git RPCs (T6c-3): the cloned MCode GitPanel calls `git.*` dot-strings
+  // (`git.status`, `git.readWorkingTreeDiff`, `git.listBranches`, …). The
+  // syncode-ws backend now serves these via `syncode-git` handlers — map
+  // every MCode dot-name the UI uses to the served slash dispatch key. The
+  // backend also accepts the dot-name directly (dispatch arms cover both
+  // forms) so this remap is belt-and-braces robustness, not strictly
+  // required — but keeping it lets the SERVED_RPC type registry govern the
+  // call shape (typed params/result).
+  "git.status": "git/status",
+  "git.diff": "git/diff",
+  "git.readWorkingTreeDiff": "git/diff",
+  "git.branchList": "git/branches",
+  "git.listBranches": "git/branches",
+  "git.branchCreate": "git/create-branch",
+  "git.createBranch": "git/create-branch",
+  "git.branchCheckout": "git/checkout",
+  "git.checkout": "git/checkout",
+  "git.branchDelete": "git/delete-branch",
+  "git.deleteBranch": "git/delete-branch",
+  "git.stage": "git/add",
+  "git.stageFiles": "git/add",
+  "git.unstage": "git/unstage",
+  "git.unstageFiles": "git/unstage",
+  "git.commit": "git/commit",
 };
 
 /**

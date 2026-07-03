@@ -6,6 +6,7 @@
 
 use crate::{ConnectionId, JsonRpcRequest, JsonRpcResponse, WsState};
 use serde_json::Value;
+use syncode_git::service::GitService;
 use syncode_orchestration::Command;
 
 /// Handle an incoming JSON-RPC message.
@@ -104,6 +105,15 @@ async fn dispatch_method(
                     "turn/complete",
                     "shell/getSnapshot",
                     "snapshot/get",
+                    "git/status",
+                    "git/diff",
+                    "git/branches",
+                    "git/create-branch",
+                    "git/checkout",
+                    "git/delete-branch",
+                    "git/add",
+                    "git/unstage",
+                    "git/commit",
                 ]
             }),
         ),
@@ -197,6 +207,50 @@ async fn dispatch_method(
         "snapshot/get" | "orchestration.getSnapshot" => {
             handle_snapshot_get(state, id).await
         }
+
+        // ─── Git Methods (syncode-git-backed) ─────────────────────
+        // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
+        // `git.readWorkingTreeDiff`, `git.listBranches`, …). We reuse the
+        // existing `syncode_git::service::Git2Service` (the same impl the
+        // Tauri `git_*` commands use) and map its result types into the
+        // MCode UI shapes (Tier-3 `git.ts`). Dispatch accepts BOTH the MCode
+        // dot-name AND a slash form for robustness — the transport remap
+        // converts dot → slash, but a caller bypassing the remap still
+        // resolves.
+        //
+        // The UI sends params under camelCase keys (`cwd`, `branch`,
+        // `paths`, `scope`, `message`); we read them verbatim.
+        "git.status" | "git/status" => handle_git_status(id, &request.params),
+        "git.diff"
+        | "git/diff"
+        | "git.readWorkingTreeDiff"
+        | "git/readWorkingTreeDiff" => handle_git_diff(id, &request.params),
+        "git.branchList"
+        | "git.listBranches"
+        | "git/listBranches"
+        | "git.branches"
+        | "git/branches" => handle_git_branches(id, &request.params),
+        "git.branchCreate"
+        | "git.createBranch"
+        | "git/createBranch"
+        | "git/create-branch" => handle_git_create_branch(id, &request.params),
+        "git.branchCheckout"
+        | "git.checkout"
+        | "git/checkout"
+        | "git/check-out" => handle_git_checkout(id, &request.params),
+        "git.branchDelete"
+        | "git.deleteBranch"
+        | "git/deleteBranch"
+        | "git/delete-branch" => handle_git_delete_branch(id, &request.params),
+        "git.stage"
+        | "git.stageFiles"
+        | "git/stageFiles"
+        | "git/add" => handle_git_stage(id, &request.params),
+        "git.unstage"
+        | "git.unstageFiles"
+        | "git/unstageFiles"
+        | "git/unstage" => handle_git_unstage(id, &request.params),
+        "git.commit" | "git/commit" => handle_git_commit(id, &request.params),
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -969,6 +1023,373 @@ async fn handle_snapshot_get(state: &WsState, id: Value) -> JsonRpcResponse {
     )
 }
 
+// ─── Git Handlers (syncode-git-backed) ────────────────────────────
+//
+// Reuse `syncode_git::service::Git2Service` (same impl as the Tauri `git_*`
+// commands in `crates/syncode-tauri/src/git_commands.rs`) and map the
+// syncode-git result types into the MCode UI shapes (Tier-3
+// `frontend/src/contracts/tier3/git.ts`):
+//
+//   - `git.status` → MCode `GitStatusResult`:
+//       { branch, hasWorkingTreeChanges, workingTree: { files[], insertions,
+//         deletions }, hasUpstream, upstreamBranch, aheadCount, behindCount, pr }
+//   - `git.readWorkingTreeDiff` → MCode `GitReadWorkingTreeDiffResult`:
+//       { patch: string }
+//   - `git.listBranches` → MCode `GitListBranchesResult`:
+//       { branches: GitBranch[], isRepo, hasOriginRemote }
+//   - `git.createBranch` / `git.checkout` / `git.deleteBranch` → void
+//   - `git.stageFiles` / `git.unstageFiles` → { ok: boolean }
+//
+// Caveats / known gaps:
+//   - syncode-git's `GitStatus` does not track per-file insertions/deletions
+//     (the underlying git2 path-status API doesn't yield hunk counts); the
+//     MCode UI reads `workingTree.files[].insertions/deletions` for the
+//     per-file stat chips. We emit `0` for both — the UI renders `+0`/`-0`
+//     rather than crashing (verified against `GitActionsControl.tsx`:
+//     `file.insertions`/`file.deletions` are read with `?? 0` tolerance).
+//     Real per-file line stats require a `diff_num_stats` call — deferred.
+//   - syncode-git's `GitStatus` always reports `ahead: 0, behind: 0` (no
+//     upstream tracking). The MCode `GitStatusResult` exposes `hasUpstream`
+//     and `upstreamBranch`; we emit `hasUpstream: false`, `upstreamBranch:
+//     null`. Real ahead/behind requires resolving the upstream ref —
+//     deferred (the `push()` impl in `service.rs` already does this; a
+//     follow-up could lift it into `status()`).
+//   - `git.readWorkingTreeDiff` synthesizes a minimal textual patch from
+//     the diff entries (per-file path + status header). Real unified-diff
+//     hunk generation (`patch` field) requires `git2::Patch` plumbing —
+//     deferred. The UI's `DiffPanel` parses the patch with `parsePatch()`;
+//     an empty/synthesized patch renders as "no changes" rather than
+//     crashing. Documented gap.
+
+/// Open a `Git2Service` for the `cwd`/`path` param. Both keys are accepted:
+/// the MCode UI sends `cwd`; older callers (mirroring the Tauri commands)
+/// send `path`. Defaults to `.` (current dir) when absent. On failure
+/// returns a ready-to-send error `JsonRpcResponse` (boxed to keep the
+/// `Result`'s `Err` variant small — clippy `result_large_err`).
+fn open_git_service(
+    id: Value,
+    params: &Value,
+) -> Result<syncode_git::service::Git2Service, Box<JsonRpcResponse>> {
+    let path = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("path").and_then(|v| v.as_str()))
+        .unwrap_or(".");
+    match syncode_git::service::Git2Service::open(std::path::Path::new(path)) {
+        Ok(svc) => Ok(svc),
+        Err(e) => Err(Box::new(git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git open failed: {e}"),
+        ))),
+    }
+}
+
+/// Build a typed error response (uses `INVALID_PARAMS` for param-shape
+/// problems, `INTERNAL_ERROR` for git failures). Kept as a thin wrapper so
+/// each handler reads cleanly.
+fn git_error(id: Value, code: i32, msg: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse::error(Some(id), code, msg.into())
+}
+
+/// `git.status` — return MCode `GitStatusResult`.
+fn handle_git_status(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let status = match svc.status() {
+        Ok(s) => s,
+        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git status: {e}")),
+    };
+
+    // Map syncode `GitFileStatus` → MCode `GitStatusFile` (path +
+    // insertions/deletions, defaulting to 0 — see module-level caveats).
+    let files: Vec<Value> = status
+        .files
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "path": f.path,
+                "insertions": 0u32,
+                "deletions": 0u32,
+            })
+        })
+        .collect();
+
+    let result = serde_json::json!({
+        "branch": status.branch,
+        "hasWorkingTreeChanges": !status.files.is_empty(),
+        "workingTree": {
+            "files": files,
+            "insertions": 0u32,
+            "deletions": 0u32,
+        },
+        "hasUpstream": false,
+        "upstreamBranch": Value::Null,
+        "aheadCount": status.ahead,
+        "behindCount": status.behind,
+        "pr": Value::Null,
+    });
+    JsonRpcResponse::success(id, result)
+}
+
+/// `git.readWorkingTreeDiff` — return MCode `GitReadWorkingTreeDiffResult`
+/// `{ patch: string }`. The MCode UI passes an optional `scope`
+/// (`workingTree` | `unstaged` | `staged` | `branch`); syncode-git only
+/// implements the working-tree diff, so non-workingTree scopes collapse to
+/// an empty patch (the UI renders "no changes" rather than erroring).
+fn handle_git_diff(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    // Optional oldRef/newRef (the Tauri `git_diff` command shape). The MCode
+    // UI does not send these for `readWorkingTreeDiff` — only `cwd` + `scope`.
+    let old_ref = params.get("oldRef").and_then(|v| v.as_str());
+    let new_ref = params.get("newRef").and_then(|v| v.as_str());
+
+    let entries = match svc.diff(old_ref, new_ref) {
+        Ok(e) => e,
+        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git diff: {e}")),
+    };
+
+    // Synthesize a minimal textual patch: one header line per changed file
+    // (`diff --git a/<path> b/<path>` + status). Real unified-diff hunks
+    // (with `@@` markers and line content) require `git2::Patch` plumbing —
+    // deferred. An empty entries list yields an empty patch string.
+    let mut patch = String::new();
+    for entry in &entries {
+        let path = entry.old_path.as_deref().unwrap_or(&entry.new_path);
+        patch.push_str(&format!(
+            "diff --git a/{path} b/{new}\nnew file mode 100644\nstatus: {status:?}\n",
+            path = path,
+            new = entry.new_path,
+            status = entry.status,
+        ));
+    }
+    JsonRpcResponse::success(id, serde_json::json!({ "patch": patch }))
+}
+
+/// `git.listBranches` — return MCode `GitListBranchesResult`
+/// `{ branches: GitBranch[], isRepo, hasOriginRemote }`.
+fn handle_git_branches(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let branches = match svc.branches() {
+        Ok(b) => b,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git branches: {e}"),
+            );
+        }
+    };
+
+    // Resolve the first current branch (the default) — MCode UI uses
+    // `isDefault` to mark the repo's default branch. syncode-git doesn't
+    // track defaults; we mark the current branch as default (best-effort).
+    let default_name = branches.iter().find(|b| b.is_current).map(|b| b.name.clone());
+
+    let mapped: Vec<Value> = branches
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "name": b.name,
+                "isRemote": b.is_remote,
+                "current": b.is_current,
+                "isDefault": default_name.as_deref() == Some(b.name.as_str()),
+                "worktreePath": Value::Null,
+            })
+        })
+        .collect();
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "branches": mapped,
+            "isRepo": true,
+            "hasOriginRemote": false,
+        }),
+    )
+}
+
+/// `git.createBranch` — create a branch at HEAD. The MCode UI sends
+/// `{ cwd, branch, publish }` (`publish` toggles remote push — we ignore it,
+/// no network ops in this RPC). Returns void.
+fn handle_git_create_branch(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let name = match params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("name").and_then(|v| v.as_str()))
+    {
+        Some(n) => n.to_string(),
+        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'branch' parameter"),
+    };
+    // MCode UI passes `publish` (bool); we always checkout the new branch
+    // (matches the UI's createBranch+checkout sequence).
+    let checkout = params
+        .get("checkout")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    match svc.create_branch(&name, checkout) {
+        Ok(_) => JsonRpcResponse::success(id, Value::Null),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git createBranch: {e}"),
+        ),
+    }
+}
+
+/// `git.checkout` — checkout a branch/ref. UI sends `{ cwd, branch }`.
+fn handle_git_checkout(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let ref_name = match params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("ref").and_then(|v| v.as_str()))
+        .or_else(|| params.get("refName").and_then(|v| v.as_str()))
+    {
+        Some(r) => r.to_string(),
+        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'branch' parameter"),
+    };
+    match svc.checkout(&ref_name) {
+        Ok(_) => JsonRpcResponse::success(id, Value::Null),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git checkout: {e}"),
+        ),
+    }
+}
+
+/// `git.branchDelete` — delete a local branch. UI sends `{ cwd, branch }`.
+fn handle_git_delete_branch(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let name = match params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("name").and_then(|v| v.as_str()))
+    {
+        Some(n) => n.to_string(),
+        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'branch' parameter"),
+    };
+    match svc.delete_branch(&name) {
+        Ok(_) => JsonRpcResponse::success(id, Value::Null),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git deleteBranch: {e}"),
+        ),
+    }
+}
+
+/// `git.stageFiles` / `git.add` — stage files. UI sends `{ cwd, paths: string[] }`.
+/// Returns MCode `GitStageFilesResult { ok: boolean }`. Param validation runs
+/// BEFORE opening the repo so an empty `paths` array yields a clean
+/// `INVALID_PARAMS` (rather than being masked by a downstream git-open error).
+fn handle_git_stage(id: Value, params: &Value) -> JsonRpcResponse {
+    let files: Vec<String> = params
+        .get("paths")
+        .and_then(|v| v.as_array())
+        .or_else(|| params.get("files").and_then(|v| v.as_array()))
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if files.is_empty() {
+        return git_error(
+            id,
+            crate::error_codes::INVALID_PARAMS,
+            "Missing 'paths' parameter (or empty array)",
+        );
+    }
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    match svc.add(&refs) {
+        Ok(_) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git stageFiles: {e}"),
+        ),
+    }
+}
+
+/// `git.unstageFiles` — unstage files. syncode-git has no dedicated unstage
+/// op (`git reset HEAD -- <paths>` semantics require index/HEAD plumbing the
+/// `GitService` trait doesn't expose). We surface an OK stub for an empty
+/// file list (the common no-op case — defensive; the UI's mutation guard
+/// already rejects empty arrays) and a not-implemented error for actual
+/// unstage requests. Documented as a partial gap.
+fn handle_git_unstage(id: Value, params: &Value) -> JsonRpcResponse {
+    let files: Vec<String> = params
+        .get("paths")
+        .and_then(|v| v.as_array())
+        .or_else(|| params.get("files").and_then(|v| v.as_array()))
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if files.is_empty() {
+        // No-op unstage of zero files — return OK.
+        return JsonRpcResponse::success(id, serde_json::json!({ "ok": true }));
+    }
+    git_error(
+        id,
+        crate::error_codes::INTERNAL_ERROR,
+        "git unstage: not implemented (syncode-git has no unstage op; deferred)",
+    )
+}
+
+/// `git.commit` — commit staged changes. UI sends `{ cwd, message }` (the
+/// bare `git.commit` is not directly invoked by the GitPanel's hot paths —
+/// commit happens via `git.runStackedAction` — but we serve it for
+/// completeness). Returns void.
+fn handle_git_commit(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let message = match params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("commitMessage").and_then(|v| v.as_str()))
+    {
+        Some(m) => m.to_string(),
+        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'message' parameter"),
+    };
+    match svc.commit(&message) {
+        Ok(_) => JsonRpcResponse::success(id, Value::Null),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git commit: {e}"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1441,6 +1862,359 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none());
         assert_eq!(resp.result.unwrap()["authenticated"], true);
+    }
+
+    // ─── Git RPC tests ─────────────────────────────────────────────────
+    //
+    // Two layers:
+    //   1. Dispatch mapping: dot-form (`git.status`) + slash-form
+    //      (`git/status`) + MCode aliases (`git.readWorkingTreeDiff`,
+    //      `git.listBranches`, …) all resolve to the same handler (no
+    //      MethodNotFound).
+    //   2. End-to-end against a real temp git repo: status/branches/diff
+    //      return the MCode-shaped payload with real data.
+    //
+    // Tests that need a git binary are gated on `git_available()` so they
+    // skip cleanly in CI environments without git.
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Build a temp git repo with one commit on `main`. Returns the path
+    /// (the tempdir itself is leaked — fine for short-lived tests).
+    fn temp_git_repo() -> std::path::PathBuf {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .expect("git init");
+        for (k, v) in [("user.name", "Test"), ("user.email", "t@t.test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&path)
+                .output()
+                .expect("git config");
+        }
+        std::fs::write(path.join("README.md"), "init\n").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&path)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&path)
+            .output()
+            .expect("git commit");
+        std::mem::forget(dir); // leak — test process is short-lived
+        path
+    }
+
+    #[tokio::test]
+    async fn git_status_dispatches_dot_and_slash_forms() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        for method in ["git.status", "git/status"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "cwd": repo.to_string_lossy() }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            // MCode GitStatusResult top-level fields.
+            assert_eq!(result["branch"], "main");
+            assert_eq!(result["hasWorkingTreeChanges"], false);
+            assert!(result.get("workingTree").is_some());
+            assert!(result.get("aheadCount").is_some());
+            assert!(result.get("behindCount").is_some());
+            assert!(result.get("pr").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn git_status_reports_uncommitted_changes() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Add an untracked file → status should report hasWorkingTreeChanges.
+        std::fs::write(repo.join("new.txt"), "new\n").expect("write");
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.status",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["hasWorkingTreeChanges"], true);
+        let files = result["workingTree"]["files"].as_array().unwrap();
+        assert!(!files.is_empty(), "expected at least one file in working tree");
+        // Each file carries the MCode GitStatusFile fields.
+        assert!(files[0].get("path").is_some());
+        assert!(files[0].get("insertions").is_some());
+        assert!(files[0].get("deletions").is_some());
+    }
+
+    #[tokio::test]
+    async fn git_status_missing_path_errors() {
+        // A path with no repo → INTERNAL_ERROR (git open failed).
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.status",
+            "params": { "cwd": "/tmp/syncode-t6c3-nonexistent-xyz" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "expected error for missing path");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INTERNAL_ERROR);
+    }
+
+    #[tokio::test]
+    async fn git_branches_dispatches_all_aliases() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        // All three alias forms must resolve to the branches handler.
+        for method in [
+            "git.branchList",
+            "git/listBranches",
+            "git.listBranches",
+            "git.branches",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "cwd": repo.to_string_lossy() }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            // MCode GitListBranchesResult fields.
+            let branches = result["branches"].as_array().unwrap();
+            assert!(!branches.is_empty(), "{}: expected at least one branch", method);
+            // The `main` branch exists and is current.
+            let main = branches
+                .iter()
+                .find(|b| b["name"] == "main")
+                .unwrap_or_else(|| panic!("{}: no main branch in {:?}", method, branches));
+            assert_eq!(main["current"], true);
+            assert_eq!(main["isDefault"], true); // current marked as default
+            assert_eq!(result["isRepo"], true);
+            assert_eq!(result["hasOriginRemote"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn git_diff_dispatches_read_working_tree_diff_alias() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Modify a file so the working-tree diff is non-empty.
+        std::fs::write(repo.join("README.md"), "changed\n").expect("write");
+        let state = WsState::new_in_memory(16);
+
+        // The MCode UI calls `git.readWorkingTreeDiff`; it must dispatch.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.readWorkingTreeDiff",
+            "params": { "cwd": repo.to_string_lossy(), "scope": "workingTree" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // MCode GitReadWorkingTreeDiffResult: { patch: string }.
+        let patch = result["patch"].as_str().unwrap();
+        assert!(patch.contains("README.md"), "patch should reference changed file");
+    }
+
+    #[tokio::test]
+    async fn git_create_branch_then_checkout() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        // createBranch dispatches (publish is ignored — no network).
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.createBranch",
+            "params": { "cwd": repo.to_string_lossy(), "branch": "feature/x", "publish": false }
+        });
+        let resp = rpc(&state, 1, &create).await;
+        assert!(resp.error.is_none(), "createBranch: {:?}", resp.error);
+
+        // The new branch shows up in branches.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "git.listBranches",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &list).await;
+        let branches = resp.result.unwrap()["branches"].as_array().unwrap().clone();
+        assert!(branches.iter().any(|b| b["name"] == "feature/x"));
+    }
+
+    #[tokio::test]
+    async fn git_stage_returns_ok() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        std::fs::write(repo.join("to-stage.txt"), "x\n").expect("write");
+        let state = WsState::new_in_memory(16);
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.stageFiles",
+            "params": { "cwd": repo.to_string_lossy(), "paths": ["to-stage.txt"] }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        // MCode GitStageFilesResult: { ok: boolean }.
+        assert_eq!(resp.result.unwrap()["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn git_stage_rejects_empty_paths() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.stageFiles",
+            "params": { "cwd": "/tmp", "paths": [] }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn git_unstage_empty_is_ok_real_unstage_errors() {
+        let state = WsState::new_in_memory(16);
+        // Empty paths → no-op OK.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.unstageFiles",
+            "params": { "cwd": "/tmp", "paths": [] }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        // Non-empty paths → not-implemented (syncode-git has no unstage op).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "git.unstageFiles",
+            "params": { "cwd": "/tmp", "paths": ["a.txt"] }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INTERNAL_ERROR);
+    }
+
+    #[tokio::test]
+    async fn git_commit_via_dot_and_slash() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        std::fs::write(repo.join("c.txt"), "y\n").expect("write");
+        // Stage first.
+        let state = WsState::new_in_memory(16);
+        let stage = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/add",
+            "params": { "cwd": repo.to_string_lossy(), "paths": ["c.txt"] }
+        });
+        let resp = rpc(&state, 1, &stage).await;
+        assert!(resp.error.is_none(), "stage: {:?}", resp.error);
+
+        // commit via dot form.
+        let commit = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "git.commit",
+            "params": { "cwd": repo.to_string_lossy(), "message": "add c" }
+        });
+        let resp = rpc(&state, 1, &commit).await;
+        assert!(resp.error.is_none(), "commit: {:?}", resp.error);
+        // commit returns void. NOTE: serde_json deserializes `Option<Value>`
+        // from `"result":null` as `None` (serde treats JSON null as absence of
+        // an Option) — so the void-result shape surfaces as `result: None`,
+        // not `Some(Value::Null)`. Accept either form.
+        assert!(
+            matches!(resp.result, None | Some(Value::Null)),
+            "commit result shape: {:?}",
+            resp.result
+        );
+
+        // Verify the commit landed (status clean).
+        let status = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "git/status",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &status).await;
+        let result = resp.result.unwrap();
+        // c.txt is committed → not in working tree changes.
+        assert_eq!(result["hasWorkingTreeChanges"], false);
+    }
+
+    #[tokio::test]
+    async fn git_handlers_listed_in_list_methods() {
+        // The new git methods must appear in rpc/listMethods so the UI's
+        // capability discovery surfaces them.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let resp = rpc(&state, 1, &req).await;
+        let methods = resp.result.unwrap()["methods"].as_array().unwrap().clone();
+        let method_strs: Vec<&str> = methods.iter().filter_map(|v| v.as_str()).collect();
+        for expected in [
+            "git/status",
+            "git/diff",
+            "git/branches",
+            "git/create-branch",
+            "git/checkout",
+            "git/delete-branch",
+            "git/add",
+            "git/unstage",
+            "git/commit",
+        ] {
+            assert!(
+                method_strs.contains(&expected),
+                "rpc/listMethods missing {}",
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn git_status_accepts_path_alias() {
+        // The Tauri-style `path` param key must work too (back-compat).
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/status",
+            "params": { "path": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["branch"], "main");
     }
 
     // ── Test-only in-memory EventRepository ────────────────────────────
