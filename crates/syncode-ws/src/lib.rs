@@ -104,6 +104,11 @@ pub struct WsState {
     /// are keyed by the caller-provided `terminalId` (MCode convention) so the
     /// UI's session references stay stable across calls.
     pub terminal_manager: SharedSessionManager,
+    /// Automation scheduler (T6c-6). Backs the `automation.*` RPC handlers
+    /// (list/create/get/update/delete/runNow/cancelRun) — manages automation
+    /// definition + run-record lifecycle (mirrors the terminal_manager wiring).
+    /// Subscribe/push delivery is stubbed (`automation.event` deferred).
+    pub automation_scheduler: Arc<syncode_automation::Scheduler>,
 }
 
 impl WsState {
@@ -154,6 +159,7 @@ impl WsState {
             terminal_manager: Arc::new(RwLock::new(
                 syncode_terminal::SessionManager::new(),
             )),
+            automation_scheduler: Arc::new(syncode_automation::Scheduler::new()),
         }
     }
 

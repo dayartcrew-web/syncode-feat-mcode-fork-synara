@@ -132,6 +132,16 @@ async fn dispatch_method(
                     "terminal/clear",
                     "terminal/restart",
                     "terminal/subscribe-events",
+                    "automation/list",
+                    "automation/create",
+                    "automation/get",
+                    "automation/update",
+                    "automation/delete",
+                    "automation/run-now",
+                    "automation/cancel-run",
+                    "automation/mark-run-read",
+                    "automation/archive-run",
+                    "automation/subscribe",
                 ]
             }),
         ),
@@ -396,6 +406,61 @@ async fn dispatch_method(
         | "terminal/unsubscribe"
         | "terminal/unsubscribe-events"
         | "terminal.unsubscribeEvents" => handle_terminal_subscribe_stub(id, &request.method),
+
+        // ─── Automation Methods (syncode-automation-backed) ───────
+        // The cloned MCode Automations panel calls `automation.*` RPCs
+        // (`automation.list`, `automation.create`, `automation.runNow`, …). We
+        // reuse the existing `syncode_automation::Scheduler` (the same engine
+        // the Tauri commands would use) and map its `AutomationDef` /
+        // `AutomationRun` types into the MCode UI shapes (Tier-3
+        // `automation.ts`: `AutomationDefinition` / `AutomationRun`).
+        //
+        // The syncode `AutomationDef` is command/script-based; the MCode
+        // `AutomationDefinition` is prompt/LLM-based with modelSelection. To
+        // keep the panel functional without a schema migration, the create/
+        // update handlers stash the full client-supplied input (minus the
+        // scheduler-controlled fields) as a JSON overlay in the def's
+        // `description` field. The read handlers (list/get) merge this overlay
+        // back over the serialized def so the returned payload carries the
+        // MCode-required fields (`prompt`, `projectId`, `modelSelection`, …)
+        // the UI reads. The scheduler remains authoritative for id/name/
+        // enabled/schedule/nextRunAt/createdAt/updatedAt.
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND the slash form for
+        // robustness (the transport remap converts dot → slash, but a caller
+        // bypassing the remap still resolves).
+        "automation.list" | "automation/list" => {
+            handle_automation_list(state, id).await
+        }
+        "automation.create" | "automation/create" => {
+            handle_automation_create(state, id, &request.params).await
+        }
+        "automation.get" | "automation/get" => {
+            handle_automation_get(state, id, &request.params).await
+        }
+        "automation.update" | "automation/update" => {
+            handle_automation_update(state, id, &request.params).await
+        }
+        "automation.delete" | "automation/delete" => {
+            handle_automation_delete(state, id, &request.params).await
+        }
+        "automation.runNow"
+        | "automation/run-now"
+        | "automation.run"
+        | "automation/run" => handle_automation_run_now(state, id, &request.params).await,
+        "automation.cancelRun" | "automation/cancel-run" => {
+            handle_automation_cancel_run(state, id, &request.params).await
+        }
+        "automation.markRunRead" | "automation/mark-run-read" => {
+            handle_automation_mark_run_read(state, id, &request.params).await
+        }
+        "automation.archiveRun" | "automation/archive-run" => {
+            handle_automation_archive_run(state, id, &request.params).await
+        }
+        "automation.subscribe"
+        | "automation/subscribe"
+        | "automation.unsubscribe"
+        | "automation/unsubscribe" => handle_automation_subscribe_stub(id, &request.method),
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -2288,6 +2353,676 @@ fn handle_terminal_subscribe_stub(id: Value, method: &str) -> JsonRpcResponse {
     )
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// ─── Automation Handlers (T6c-6) ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+//
+// The Automations panel calls `automation.*` RPCs. We reuse
+// `syncode_automation::Scheduler` for def + run-record lifecycle. The
+// syncode `AutomationDef` is command/script-based; the MCode UI expects the
+// prompt/LLM-based `AutomationDefinition` shape. To bridge without a schema
+// migration, we stash the full client-supplied create/update input as a JSON
+// overlay in the def's `description` field (`AUTOMATION_OVERLAY_KEY`), then
+// merge it back on read so the UI receives the MCode-required fields
+// (`prompt`, `projectId`, `modelSelection`, …) it reads off the definition.
+
+/// Marker key used to detect and recover the JSON overlay stashed in a def's
+/// `description` field. The value is a stringified JSON object carrying the
+/// MCode create/update input fields the syncode `AutomationDef` doesn't model.
+const AUTOMATION_OVERLAY_KEY: &str = "__mcode_overlay__:";
+
+/// JSON keys whose values the Scheduler (not the client) owns. These are
+/// skipped when capturing the overlay from create/update input.
+fn is_scheduler_controlled(key: &str) -> bool {
+    matches!(
+        key,
+        "id"
+            | "name"
+            | "enabled"
+            | "schedule"
+            | "nextRunAt"
+            | "createdAt"
+            | "updatedAt"
+            | "archivedAt"
+            | "iterationCount"
+            | "completionPolicyVersion"
+            | "completionPolicyUpdatedAt"
+    )
+}
+
+/// Build a syncode `ScheduleType` from a MCode `AutomationSchedule` payload.
+/// MCode discriminated union `{ type: "manual" | "once" | "interval" | "cron"
+/// | "daily" | "weekdays" | "weekly" }`. daily/weekdays/weekly are collapsed
+/// to Manual (syncode's ScheduleType doesn't model them — kept as Manual so
+/// they never auto-fire; the panel still lists them).
+fn parse_schedule(input: &Value) -> syncode_automation::ScheduleType {
+    let kind = input.get("type").and_then(|v| v.as_str()).unwrap_or("manual");
+    match kind {
+        "once" => {
+            let run_at = input
+                .get("runAt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            syncode_automation::ScheduleType::OneShot(run_at)
+        }
+        "interval" => {
+            let secs = input
+                .get("everySeconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60);
+            syncode_automation::ScheduleType::Interval(secs)
+        }
+        "cron" => {
+            let expr = input
+                .get("expression")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0 * * * *")
+                .to_string();
+            syncode_automation::ScheduleType::Cron(expr)
+        }
+        // manual, daily, weekdays, weekly — collapse to Manual (no auto-fire).
+        _ => syncode_automation::ScheduleType::Manual,
+    }
+}
+
+/// Capture the MCode create/update input fields the syncode `AutomationDef`
+/// doesn't model, as a JSON object. Stored as a stringified blob in the def's
+/// `description` (prefixed with `AUTOMATION_OVERLAY_KEY`).
+fn capture_overlay(input: &Value) -> Value {
+    let mut overlay = serde_json::Map::new();
+    if let Some(obj) = input.as_object() {
+        for (k, v) in obj {
+            if !is_scheduler_controlled(k.as_str()) {
+                overlay.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(overlay)
+}
+
+/// Recover the overlay JSON object previously stashed in `description`, if any.
+fn recover_overlay(description: &str) -> Value {
+    if let Some(rest) = description.strip_prefix(AUTOMATION_OVERLAY_KEY)
+        && let Ok(Value::Object(map)) = serde_json::from_str::<Value>(rest)
+    {
+        return Value::Object(map);
+    }
+    Value::Object(serde_json::Map::new())
+}
+
+/// Merge a recovered overlay onto a serialized syncode `AutomationDef`,
+/// producing the MCode `AutomationDefinition` shape. Scheduler-controlled
+/// fields (`id`, `name`, `enabled`, `schedule`, `nextRunAt`, `createdAt`,
+/// `updatedAt`) win; overlay fills in everything else (`prompt`, `projectId`,
+/// `modelSelection`, `runtimeMode`, …). Missing MCode-required fields get
+/// sensible defaults so the UI's field accesses never collapse to undefined.
+fn def_to_mcode_definition(def: &syncode_automation::AutomationDef) -> Value {
+    let mut out = serde_json::to_value(def).unwrap_or_else(|_| Value::Object(Default::default()));
+    let map = out.as_object_mut().expect("serialized def is an object");
+
+    // Rewrite the schedule from syncode's internally-tagged form
+    // (`{"manual": null}` / `{"interval": 300}` / `{"one_shot": "..."}` /
+    // `{"cron": "..."}`) into the MCode discriminated-union shape
+    // (`{"type": "manual"}` / `{"type": "interval", "everySeconds": 300}` / …).
+    // The overlay (captured from the create/update input) already carries the
+    // original MCode schedule — prefer it if present, else derive from syncode.
+    let schedule_value = if map.get("schedule").is_some() {
+        schedule_to_mcode(&def.schedule)
+    } else {
+        Value::Null
+    };
+
+    // Merge the overlay (non-controlled fields).
+    let overlay = recover_overlay(&def.description);
+    if let Value::Object(overlay_map) = overlay {
+        for (k, v) in overlay_map {
+            // Overlay never overwrites scheduler-controlled fields.
+            map.entry(k).or_insert(v);
+        }
+    }
+
+    // The overlay's schedule (if present) is the original MCode input —
+    // authoritative. Otherwise use the syncode-derived MCode shape.
+    if map.get("schedule").and_then(|s| s.get("type")).is_none() {
+        map.insert("schedule".into(), schedule_value);
+    }
+
+    // Fill defaults for MCode-required fields if still absent (the UI reads
+    // these off AutomationDefinition under exactOptionalPropertyTypes — they
+    // must be present and well-typed).
+    let now = chrono::Utc::now().to_rfc3339();
+    map.entry("projectId").or_insert(Value::Null);
+    map.entry("sourceThreadId").or_insert(Value::Null);
+    map.entry("prompt")
+        .or_insert(Value::String(String::new()));
+    map.entry("modelSelection")
+        .or_insert(serde_json::json!({ "providerId": "claude", "modelId": "claude-sonnet-4-20250514" }));
+    map.entry("runtimeMode")
+        .or_insert(Value::String("approval-required".into()));
+    map.entry("interactionMode")
+        .or_insert(Value::String("default".into()));
+    map.entry("worktreeMode").or_insert(Value::String("auto".into()));
+    map.entry("mode")
+        .or_insert(Value::String("standalone".into()));
+    map.entry("targetThreadId").or_insert(Value::Null);
+    map.entry("maxIterations").or_insert(Value::Null);
+    map.entry("stopOnError").or_insert(Value::Bool(true));
+    map.entry("minimumIntervalSeconds").or_insert(serde_json::json!(60));
+    map.entry("maxRuntimeSeconds").or_insert(Value::Null);
+    map.entry("retryPolicy")
+        .or_insert(serde_json::json!({ "type": "none" }));
+    map.entry("misfirePolicy")
+        .or_insert(Value::String("coalesce".into()));
+    map.entry("acknowledgedRisks").or_insert(serde_json::json!([]));
+    map.entry("iterationCount").or_insert(serde_json::json!(0));
+    // nextRunAt / archivedAt — ensure present (Null if unset).
+    map.entry("nextRunAt").or_insert(Value::Null);
+    map.entry("archivedAt").or_insert(Value::Null);
+    // createdAt/updatedAt are always present from the syncode def; if somehow
+    // missing, fill now.
+    map.entry("createdAt").or_insert(Value::String(now.clone()));
+    map.entry("updatedAt").or_insert(Value::String(now));
+    out
+}
+
+/// Map a syncode `AutomationRun` into the MCode `AutomationRun` shape. The
+/// syncode run carries id/automationId/status/startedAt/endedAt/error; the
+/// MCode shape adds projectId/threadId/trigger/scheduledFor/result/etc.
+/// Missing fields are defaulted so UI field accesses stay well-typed.
+fn run_to_mcode_run(
+    run: &syncode_automation::AutomationRun,
+    project_id: &str,
+) -> Value {
+    let mut out = serde_json::to_value(run).unwrap_or_else(|_| Value::Object(Default::default()));
+    let map = out.as_object_mut().expect("serialized run is an object");
+    let now = chrono::Utc::now().to_rfc3339();
+    map.entry("projectId")
+        .or_insert(Value::String(project_id.to_string()));
+    map.entry("threadId").or_insert(Value::Null);
+    map.entry("turnId").or_insert(Value::Null);
+    map.entry("trigger")
+        .or_insert(serde_json::json!({ "type": "manual" }));
+    // MCode uses `scheduledFor`; the syncode run doesn't track it — default to now.
+    map.entry("scheduledFor").or_insert(Value::String(now.clone()));
+    map.entry("claimedBy").or_insert(Value::Null);
+    map.entry("claimedAt").or_insert(Value::Null);
+    map.entry("leaseExpiresAt").or_insert(Value::Null);
+    map.entry("finishedAt")
+        .or_insert(run.ended_at.clone().map(Value::String).unwrap_or(Value::Null));
+    map.entry("threadCreateCommandId").or_insert(Value::Null);
+    map.entry("turnStartCommandId").or_insert(Value::Null);
+    map.entry("messageId").or_insert(Value::Null);
+    map.entry("result").or_insert(Value::Null);
+    map.entry("permissionSnapshot")
+        .or_insert(serde_json::json!({
+            "provider": "claude",
+            "modelSelection": { "providerId": "claude", "modelId": "claude-sonnet-4-20250514" },
+            "runtimeMode": "approval-required",
+            "interactionMode": "default",
+            "worktreeMode": "auto",
+            "allowedCapabilities": ["send-turn"],
+            "createdAt": now.clone(),
+        }));
+    map.entry("createdAt")
+        .or_insert(run.started_at.clone().map(Value::String).unwrap_or(Value::String(now.clone())));
+    map.entry("updatedAt")
+        .or_insert(run.ended_at.clone().map(Value::String).unwrap_or(Value::String(now)));
+    out
+}
+
+/// Convert a syncode `ScheduleType` back to the MCode discriminated-union
+/// shape (`{"type": "manual"}`, `{"type": "interval", "everySeconds": N}`, …).
+/// Used on read to surface a schedule the UI understands (syncode's serde
+/// tagged form `{"manual": null}` / `{"interval": N}` is not MCode-shaped).
+fn schedule_to_mcode(schedule: &syncode_automation::ScheduleType) -> Value {
+    use syncode_automation::ScheduleType;
+    match schedule {
+        ScheduleType::Manual => serde_json::json!({ "type": "manual" }),
+        ScheduleType::Interval(secs) => {
+            serde_json::json!({ "type": "interval", "everySeconds": secs })
+        }
+        ScheduleType::OneShot(run_at) => {
+            serde_json::json!({ "type": "once", "runAt": run_at })
+        }
+        ScheduleType::Cron(expr) => {
+            serde_json::json!({ "type": "cron", "expression": expr, "timezone": "UTC" })
+        }
+    }
+}
+
+/// Resolve the projectId to associate with runs for a given automation def
+/// (falls back to "" — the UI tolerates a missing/empty projectId).
+fn project_id_for_def(def: &syncode_automation::AutomationDef) -> String {
+    def.project_id.clone().unwrap_or_default()
+}
+
+fn automation_error(id: Value, code: i32, msg: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse::error(Some(id), code, msg.into())
+}
+
+/// `automation.list` — return all automation definitions + their runs in the
+/// MCode `AutomationListResult` shape (`{ definitions, runs }`).
+async fn handle_automation_list(state: &WsState, id: Value) -> JsonRpcResponse {
+    let scheduler = state.automation_scheduler.clone();
+    let defs = scheduler.list().await;
+    let definitions: Vec<Value> = defs.iter().map(def_to_mcode_definition).collect();
+
+    let mut runs: Vec<Value> = Vec::new();
+    for def in &defs {
+        let project_id = project_id_for_def(def);
+        let def_id = def.id.as_str();
+        for r in scheduler.list_runs(&def_id).await {
+            runs.push(run_to_mcode_run(&r, &project_id));
+        }
+    }
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "definitions": definitions, "runs": runs }),
+    )
+}
+
+/// `automation.create` — register a new automation def from the MCode
+/// `AutomationCreateInput` and return the created `AutomationDefinition`.
+///
+/// Params (MCode camelCase): `name`, `prompt`, `schedule`, `projectId`,
+/// `modelSelection`, `enabled`, … The scheduler controls `id`/`name`/`enabled`
+/// /`schedule`/`createdAt`/`updatedAt`; everything else is stashed as the
+/// overlay so the read path can return the full MCode shape.
+async fn handle_automation_create(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let name = match params.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.trim().is_empty() => n.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.create: 'name' is required",
+            );
+        }
+    };
+    let schedule = if let Some(s) = params.get("schedule") {
+        parse_schedule(s)
+    } else {
+        syncode_automation::ScheduleType::Manual
+    };
+    // Syncode AutomationDef is command-based; derive a no-op command from the
+    // prompt (the real run dispatch happens through the RunExecutor, which is
+    // NoopExecutor by default — the command field is unused at runtime).
+    let prompt = params
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let command = if prompt.is_empty() {
+        "true".to_string()
+    } else {
+        format!("echo {}", prompt.chars().take(80).collect::<String>())
+    };
+
+    let overlay = capture_overlay(params);
+    let overlay_str = format!(
+        "{AUTOMATION_OVERLAY_KEY}{}",
+        serde_json::to_string(&overlay).unwrap_or_else(|_| "{}".into())
+    );
+
+    let mut def = syncode_automation::AutomationDef::new(name, command, schedule);
+    def.description = overlay_str;
+    if let Some(enabled) = params.get("enabled").and_then(|v| v.as_bool()) {
+        def.enabled = enabled;
+    }
+    if let Some(pid) = params.get("projectId").and_then(|v| v.as_str()) {
+        def.project_id = Some(pid.to_string());
+    }
+
+    let scheduler = state.automation_scheduler.clone();
+    if let Err(e) = scheduler.register(def.clone()).await {
+        return automation_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("automation.create: register failed: {e}"),
+        );
+    }
+    let created_id = def.id.as_str();
+    let created = scheduler.get(&created_id).await.unwrap_or(def);
+    JsonRpcResponse::success(id, def_to_mcode_definition(&created))
+}
+
+/// `automation.get` — fetch a single automation def by id.
+async fn handle_automation_get(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let auto_id = match params
+        .get("id")
+        .or_else(|| params.get("automationId"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.get: 'id' (or 'automationId') is required",
+            );
+        }
+    };
+    let scheduler = state.automation_scheduler.clone();
+    match scheduler.get(&auto_id).await {
+        Some(def) => JsonRpcResponse::success(id, def_to_mcode_definition(&def)),
+        None => automation_error(
+            id,
+            crate::error_codes::INVALID_PARAMS,
+            format!("automation.get: not found: {auto_id}"),
+        ),
+    }
+}
+
+/// `automation.update` — patch an existing automation def. Reads `id` + any
+/// subset of create fields. Re-captures the overlay from the update input,
+/// preserving previously-stashed fields not present in this update.
+async fn handle_automation_update(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let auto_id = match params.get("id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.update: 'id' is required",
+            );
+        }
+    };
+    let scheduler = state.automation_scheduler.clone();
+    let mut existing = match scheduler.get(&auto_id).await {
+        Some(d) => d,
+        None => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("automation.update: not found: {auto_id}"),
+            );
+        }
+    };
+
+    // Start the overlay from the previously-stashed fields, then apply this
+    // update's overlay on top (so a partial update doesn't drop prior fields).
+    let mut merged_overlay = match recover_overlay(&existing.description) {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    let new_overlay = capture_overlay(params);
+    if let Value::Object(new_map) = new_overlay {
+        for (k, v) in new_map {
+            merged_overlay.insert(k, v);
+        }
+    }
+    existing.description = format!(
+        "{AUTOMATION_OVERLAY_KEY}{}",
+        serde_json::to_string(&Value::Object(merged_overlay)).unwrap_or_else(|_| "{}".into())
+    );
+
+    if let Some(name) = params.get("name").and_then(|v| v.as_str())
+        && !name.trim().is_empty()
+    {
+        existing.name = name.to_string();
+    }
+    if let Some(schedule) = params.get("schedule") {
+        existing.schedule = parse_schedule(schedule);
+    }
+    if let Some(enabled) = params.get("enabled").and_then(|v| v.as_bool()) {
+        existing.enabled = enabled;
+    }
+    if let Some(pid) = params.get("projectId").and_then(|v| v.as_str()) {
+        existing.project_id = Some(pid.to_string());
+    }
+    existing.updated_at = chrono::Utc::now().to_rfc3339();
+
+    if let Err(e) = scheduler.update(existing.clone()).await {
+        return automation_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("automation.update: {e}"),
+        );
+    }
+    let updated_id = existing.id.as_str();
+    let updated = scheduler.get(&updated_id).await.unwrap_or(existing);
+    JsonRpcResponse::success(id, def_to_mcode_definition(&updated))
+}
+
+/// `automation.delete` — unregister an automation def. Returns `{ ok: true }`.
+async fn handle_automation_delete(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let auto_id = match params
+        .get("id")
+        .or_else(|| params.get("automationId"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.delete: 'id' (or 'automationId') is required",
+            );
+        }
+    };
+    let scheduler = state.automation_scheduler.clone();
+    let removed = scheduler.unregister(&auto_id).await;
+    JsonRpcResponse::success(id, serde_json::json!({ "ok": removed }))
+}
+
+/// `automation.runNow` / `automation.run` — trigger a run immediately and
+/// return the MCode `AutomationRunNowResult` shape (`{ run: AutomationRun }`).
+///
+/// The default Scheduler uses `NoopExecutor`, so the run fails (status Failed)
+/// but a run record is persisted and returned — the panel can render it. Real
+/// dispatch requires wiring a `RunExecutor` (deferred).
+///
+/// Uses `Delay::Immediate` (not `Delay::Real`) to skip the retry backoff: with
+/// the default `NoopExecutor` retrying is pointless, and real backoff sleeps
+/// (default `retry_delay_secs=30` × `max_retries=3` = ~90s) would hang the RPC.
+/// When a real `RunExecutor` is wired (deferred), revisit the delay strategy.
+async fn handle_automation_run_now(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let auto_id = match params
+        .get("id")
+        .or_else(|| params.get("automationId"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.runNow: 'id' (or 'automationId') is required",
+            );
+        }
+    };
+    let scheduler = state.automation_scheduler.clone();
+    // Verify the def exists first (better error than trigger's NotFound).
+    let def = match scheduler.get(&auto_id).await {
+        Some(d) => d,
+        None => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("automation.runNow: not found: {auto_id}"),
+            );
+        }
+    };
+
+    match scheduler
+        .trigger_with_delay(&auto_id, syncode_automation::executor::Delay::Immediate)
+        .await
+    {
+        Ok(run_id) => {
+            let run = scheduler
+                .get_run(&run_id)
+                .await
+                .unwrap_or_else(|| syncode_automation::AutomationRun::new(auto_id.clone()));
+            let project_id = project_id_for_def(&def);
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "run": run_to_mcode_run(&run, &project_id) }),
+            )
+        }
+        Err(e) => automation_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("automation.runNow: trigger failed: {e}"),
+        ),
+    }
+}
+
+/// `automation.cancelRun` — cancel a run by id. Returns the updated run in the
+/// MCode `AutomationCancelRunResult` shape (`{ run: AutomationRun }`).
+async fn handle_automation_cancel_run(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let run_id = match params
+        .get("runId")
+        .or_else(|| params.get("id"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.cancelRun: 'runId' (or 'id') is required",
+            );
+        }
+    };
+    let scheduler = state.automation_scheduler.clone();
+    if let Err(e) = scheduler.cancel_run(&run_id).await {
+        return automation_error(
+            id,
+            crate::error_codes::INVALID_PARAMS,
+            format!("automation.cancelRun: {e}"),
+        );
+    }
+    let run = match scheduler.get_run(&run_id).await {
+        Some(r) => r,
+        None => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("automation.cancelRun: run vanished: {run_id}"),
+            );
+        }
+    };
+    // Recover the project id from the run's automation def.
+    let project_id = scheduler
+        .get(&run.automation_id)
+        .await
+        .map(|d| project_id_for_def(&d))
+        .unwrap_or_default();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "run": run_to_mcode_run(&run, &project_id) }),
+    )
+}
+
+/// `automation.markRunRead` — mark a run as read. The syncode run type + repo
+/// port don't model a `read`/`unread` flag, so this is a STUB that returns the
+/// current run unchanged. Returns `{ run: AutomationRun }`.
+async fn handle_automation_mark_run_read(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let run_id = match params
+        .get("runId")
+        .or_else(|| params.get("id"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.markRunRead: 'runId' (or 'id') is required",
+            );
+        }
+    };
+    let scheduler = state.automation_scheduler.clone();
+    let run = match scheduler.get_run(&run_id).await {
+        Some(r) => r,
+        None => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("automation.markRunRead: not found: {run_id}"),
+            );
+        }
+    };
+    let project_id = scheduler
+        .get(&run.automation_id)
+        .await
+        .map(|d| project_id_for_def(&d))
+        .unwrap_or_default();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "run": run_to_mcode_run(&run, &project_id) }),
+    )
+}
+
+/// `automation.archiveRun` — archive a run. The syncode run type + repo port
+/// don't model `archivedAt`, so this is a STUB that returns the current run
+/// unchanged. Returns `{ run: AutomationRun }`.
+async fn handle_automation_archive_run(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let run_id = match params
+        .get("runId")
+        .or_else(|| params.get("id"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "automation.archiveRun: 'runId' (or 'id') is required",
+            );
+        }
+    };
+    let scheduler = state.automation_scheduler.clone();
+    let run = match scheduler.get_run(&run_id).await {
+        Some(r) => r,
+        None => {
+            return automation_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("automation.archiveRun: not found: {run_id}"),
+            );
+        }
+    };
+    let project_id = scheduler
+        .get(&run.automation_id)
+        .await
+        .map(|d| project_id_for_def(&d))
+        .unwrap_or_default();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "run": run_to_mcode_run(&run, &project_id) }),
+    )
+}
+
+/// `automation.subscribe` / `automation.unsubscribe` — STUB. Real push delivery
+/// (`automation.event`) would require a per-automation event tap feeding the
+/// push bus — deferred. Returns `{ subscribed: true }` so the UI tolerates the
+/// absence of push (it polls `automation.list`).
+fn handle_automation_subscribe_stub(id: Value, method: &str) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "method": method,
+            "channel": "automation",
+            "note": "stub: no automation.event push delivery (T6c-future)",
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3650,6 +4385,308 @@ mod tests {
                 method_strs.iter().any(|m| m == expected),
                 "rpc/listMethods missing {expected}"
             );
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ─── Automation RPC tests (T6c-6) ────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Test helper that mirrors `term_rpc` but is named for automation scope.
+    async fn auto_rpc(state: &WsState, req: &serde_json::Value) -> JsonRpcResponse {
+        let raw = handle_rpc(state, 1, &req.to_string()).await;
+        serde_json::from_str(&raw.unwrap_or_default()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn automation_list_methods_includes_automation_rpcs() {
+        // The new automation methods must appear in rpc/listMethods so the UI's
+        // capability discovery sees them.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods"
+        });
+        let resp = auto_rpc(&state, &req).await;
+        let methods = resp.result.unwrap()["methods"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let method_strs: Vec<String> = methods
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for expected in [
+            "automation/list",
+            "automation/create",
+            "automation/get",
+            "automation/update",
+            "automation/delete",
+            "automation/run-now",
+            "automation/cancel-run",
+            "automation/mark-run-read",
+            "automation/archive-run",
+            "automation/subscribe",
+        ] {
+            assert!(
+                method_strs.iter().any(|m| m == expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_create_returns_mcode_shape() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": {
+                "name": "Triage crashes",
+                "prompt": "Look for new crashes and open a PR",
+                "schedule": { "type": "manual" },
+                "projectId": "proj-1",
+                "modelSelection": { "providerId": "claude", "modelId": "claude-sonnet-4-20250514" },
+                "enabled": true,
+                "runtimeMode": "approval-required"
+            }
+        });
+        let resp = auto_rpc(&state, &req).await;
+        assert!(resp.error.is_none(), "create failed: {:?}", resp.error);
+        let def = resp.result.unwrap();
+        // MCode-required top-level fields present + well-typed.
+        assert!(def["id"].is_string(), "id missing: {}", def);
+        assert_eq!(def["name"], "Triage crashes");
+        assert_eq!(def["enabled"], true);
+        assert_eq!(def["prompt"], "Look for new crashes and open a PR");
+        assert_eq!(def["projectId"], "proj-1");
+        assert_eq!(def["schedule"]["type"], "manual");
+        assert_eq!(def["modelSelection"]["providerId"], "claude");
+        assert_eq!(def["runtimeMode"], "approval-required");
+        // Defaulted MCode-required fields are populated.
+        assert_eq!(def["mode"], "standalone");
+        assert_eq!(def["interactionMode"], "default");
+        assert!(def["createdAt"].is_string());
+        assert!(def["updatedAt"].is_string());
+    }
+
+    #[tokio::test]
+    async fn automation_create_rejects_missing_name() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": { "prompt": "no name" }
+        });
+        let resp = auto_rpc(&state, &req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn automation_round_trip_create_list_get_run_cancel() {
+        // End-to-end happy path mirroring the phase-5 terminal round-trip.
+        let state = WsState::new_in_memory(16);
+
+        // 1. Create an automation.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": {
+                "name": "Daily build",
+                "prompt": "Run the build",
+                "schedule": { "type": "interval", "everySeconds": 300 },
+                "projectId": "proj-rt"
+            }
+        });
+        let resp = auto_rpc(&state, &create).await;
+        assert!(resp.error.is_none(), "create: {:?}", resp.error);
+        let def = resp.result.unwrap();
+        let auto_id = def["id"].as_str().unwrap().to_string();
+        assert_eq!(def["schedule"]["type"], "interval");
+        assert_eq!(def["schedule"]["everySeconds"], 300);
+
+        // 2. List → definitions array includes it, runs empty.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "automation.list"
+        });
+        let resp = auto_rpc(&state, &list).await;
+        assert!(resp.error.is_none(), "list: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        let definitions = result["definitions"].as_array().unwrap();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["id"], auto_id);
+        assert_eq!(definitions[0]["name"], "Daily build");
+        // Runs starts empty (no run triggered yet).
+        assert!(result["runs"].as_array().unwrap().is_empty());
+
+        // 3. Get by id returns the same def.
+        let get = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "automation.get",
+            "params": { "id": auto_id }
+        });
+        let resp = auto_rpc(&state, &get).await;
+        assert!(resp.error.is_none(), "get: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["id"], auto_id);
+
+        // 4. runNow → a run record is created (NoopExecutor → Failed, but the
+        //    record exists and is returned in the AutomationRunNowResult shape).
+        let run_now = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "automation.runNow",
+            "params": { "id": auto_id }
+        });
+        let resp = auto_rpc(&state, &run_now).await;
+        assert!(resp.error.is_none(), "runNow: {:?}", resp.error);
+        let run = resp.result.unwrap()["run"].clone();
+        assert!(run["id"].is_string());
+        assert_eq!(run["automationId"], auto_id);
+        assert_eq!(run["projectId"], "proj-rt");
+        let run_id = run["id"].as_str().unwrap().to_string();
+
+        // 5. List now shows the run too.
+        let resp = auto_rpc(&state, &list).await;
+        let runs = resp.result.unwrap()["runs"].as_array().unwrap().clone();
+        assert_eq!(runs.len(), 1, "expected 1 run after runNow");
+        assert_eq!(runs[0]["id"], run_id);
+
+        // 6. cancelRun → run status becomes cancelled.
+        let cancel = serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "automation.cancelRun",
+            "params": { "runId": run_id }
+        });
+        let resp = auto_rpc(&state, &cancel).await;
+        assert!(resp.error.is_none(), "cancelRun: {:?}", resp.error);
+        let cancelled = resp.result.unwrap()["run"].clone();
+        assert_eq!(cancelled["status"], "cancelled");
+
+        // 7. Delete → ok:true, then list shows zero defs.
+        let delete = serde_json::json!({
+            "jsonrpc": "2.0", "id": 6, "method": "automation.delete",
+            "params": { "id": auto_id }
+        });
+        let resp = auto_rpc(&state, &delete).await;
+        assert!(resp.error.is_none(), "delete: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+        let resp = auto_rpc(&state, &list).await;
+        assert_eq!(
+            resp.result.unwrap()["definitions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_update_preserves_overlay_fields() {
+        let state = WsState::new_in_memory(16);
+
+        // Create with a prompt + modelSelection.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": {
+                "name": "Auto-1",
+                "prompt": "original prompt",
+                "schedule": { "type": "manual" },
+                "modelSelection": { "providerId": "claude", "modelId": "m1" }
+            }
+        });
+        let resp = auto_rpc(&state, &create).await;
+        let auto_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Update only the name + enabled (partial). Prompt + modelSelection
+        // must survive (overlay preserved).
+        let update = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "automation.update",
+            "params": { "id": auto_id, "name": "Auto-renamed", "enabled": false }
+        });
+        let resp = auto_rpc(&state, &update).await;
+        assert!(resp.error.is_none(), "update: {:?}", resp.error);
+        let def = resp.result.unwrap();
+        assert_eq!(def["name"], "Auto-renamed");
+        assert_eq!(def["enabled"], false);
+        // Overlay preserved.
+        assert_eq!(def["prompt"], "original prompt");
+        assert_eq!(def["modelSelection"]["modelId"], "m1");
+    }
+
+    #[tokio::test]
+    async fn automation_get_not_found_returns_invalid_params() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.get",
+            "params": { "id": "nope" }
+        });
+        let resp = auto_rpc(&state, &req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn automation_dot_and_slash_dispatch_equivalent() {
+        // Both MCode dot-name and slash form must resolve to the same handler.
+        let state = WsState::new_in_memory(16);
+        for method in ["automation.list", "automation/list"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = auto_rpc(&state, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert!(result["definitions"].is_array(), "{}: bad shape", method);
+            assert!(result["runs"].is_array(), "{}: bad shape", method);
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_mark_run_read_and_archive_are_stubs() {
+        // Verdict: markRunRead/archiveRun are stubs (syncode run type/repo
+        // don't model read/archived). Both must return the run unchanged in
+        // the AutomationRunActionResult shape (`{ run: ... }`).
+        let state = WsState::new_in_memory(16);
+
+        // Create + runNow to seed a run.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": { "name": "Stub-test", "schedule": { "type": "manual" } }
+        });
+        let resp = auto_rpc(&state, &create).await;
+        let auto_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let run_now = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "automation.runNow",
+            "params": { "id": auto_id }
+        });
+        let resp = auto_rpc(&state, &run_now).await;
+        let run_id = resp.result.unwrap()["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // markRunRead.
+        let mark = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "automation.markRunRead",
+            "params": { "runId": run_id }
+        });
+        let resp = auto_rpc(&state, &mark).await;
+        assert!(resp.error.is_none(), "markRunRead: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["run"]["id"], run_id);
+
+        // archiveRun.
+        let archive = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "automation.archiveRun",
+            "params": { "runId": run_id }
+        });
+        let resp = auto_rpc(&state, &archive).await;
+        assert!(resp.error.is_none(), "archiveRun: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["run"]["id"], run_id);
+    }
+
+    #[tokio::test]
+    async fn automation_subscribe_returns_stub() {
+        let state = WsState::new_in_memory(16);
+        for method in ["automation.subscribe", "automation/subscribe"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = auto_rpc(&state, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            assert_eq!(resp.result.unwrap()["subscribed"], true);
         }
     }
 }

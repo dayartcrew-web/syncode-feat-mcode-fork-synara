@@ -89,6 +89,30 @@ import type {
 // `syncode-terminal::SessionManager` and map its `SessionInfo` into the MCode
 // `TerminalSessionSnapshot` shape — see `frontend/src/contracts/tier3/terminal.ts`.
 import type { TerminalSessionSnapshot } from "./tier3/terminal";
+// Automation Tier-3 result/input types (T6c-6 automation RPC exposure). The
+// backend `crates/syncode-ws/src/rpc.rs` `handle_automation_*` handlers reuse
+// `syncode-automation::Scheduler` and map its `AutomationDef`/`AutomationRun`
+// into the MCode `AutomationDefinition`/`AutomationRun` shapes — see
+// `frontend/src/contracts/tier3/automation.ts` for the canonical shapes + the
+// `AutomationListResult`/`AutomationRunNowResult`/`AutomationRunActionResult`
+// input/result types from `./shell.ts`.
+import type {
+  AutomationCreateInput,
+  AutomationDefinition,
+  AutomationListResult,
+  AutomationUpdateInput,
+} from "./tier3/automation";
+import type {
+  AutomationArchiveRunInput,
+  AutomationCancelRunInput,
+  AutomationCancelRunResult,
+  AutomationDeleteInput,
+  AutomationListInput,
+  AutomationMarkRunReadInput,
+  AutomationRunActionResult,
+  AutomationRunNowInput,
+  AutomationRunNowResult,
+} from "./shell";
 import type { WsWelcomePayload } from "./tier3/ws";
 
 // Minimal git input shapes for the served slash dispatch keys. The MCode UI
@@ -479,6 +503,56 @@ export const SERVED_RPC = {
     result: null as unknown as TerminalSubscribeStubResult,
   },
 
+  // ─── Automation (T6c-6 — syncode-automation-backed) ───────────────────
+  // The Automations panel calls `automation.*` RPCs. The backend reuses
+  // `syncode-automation::Scheduler` for def + run-record lifecycle, mapping
+  // `AutomationDef`/`AutomationRun` into the MCode shapes. Notes:
+  //   - `subscribe` is a STUB (no real `automation.event` push — deferred).
+  //   - `markRunRead`/`archiveRun` are STUBS (syncode run type/repo don't
+  //     model `unread`/`archivedAt` — return the run unchanged).
+  //   - `runNow` uses `Delay::Immediate` (no-op executor retries are pointless;
+  //     real executor wiring is deferred).
+  "automation/list": {
+    request: null as unknown as AutomationListInput,
+    result: null as unknown as AutomationListResult,
+  },
+  "automation/create": {
+    request: null as unknown as AutomationCreateInput,
+    result: null as unknown as AutomationDefinition,
+  },
+  "automation/get": {
+    request: null as unknown as AutomationListInput,
+    result: null as unknown as AutomationDefinition,
+  },
+  "automation/update": {
+    request: null as unknown as AutomationUpdateInput,
+    result: null as unknown as AutomationDefinition,
+  },
+  "automation/delete": {
+    request: null as unknown as AutomationDeleteInput,
+    result: null as unknown as { ok: boolean },
+  },
+  "automation/run-now": {
+    request: null as unknown as AutomationRunNowInput,
+    result: null as unknown as AutomationRunNowResult,
+  },
+  "automation/cancel-run": {
+    request: null as unknown as AutomationCancelRunInput,
+    result: null as unknown as AutomationCancelRunResult,
+  },
+  "automation/mark-run-read": {
+    request: null as unknown as AutomationMarkRunReadInput,
+    result: null as unknown as AutomationRunActionResult,
+  },
+  "automation/archive-run": {
+    request: null as unknown as AutomationArchiveRunInput,
+    result: null as unknown as AutomationRunActionResult,
+  },
+  "automation/subscribe": {
+    request: null as unknown as null,
+    result: null as unknown as TerminalSubscribeStubResult,
+  },
+
   // ─── Auth ────────────────────────────────────────────────────────────
   "auth/bootstrap": {
     request: null as unknown as AuthBootstrapParams,
@@ -625,16 +699,14 @@ export const UNSERVED_RPC = [
   "provider.listOptions",
   "provider.listSkillsCatalog",
 
-  // ─── Automation (crate exists, not RPC-exposed) — ~9 ────────────────
-  "automation.list",
-  "automation.get",
-  "automation.create",
-  "automation.update",
-  "automation.delete",
-  "automation.run",
-  "automation.cancelRun",
-  "automation.subscribe",
-  "automation.unsubscribe",
+  // ─── Automation ──────────────────────────────────────────────────────
+  // The core automation CRUD + run RPCs (`automation.list`, `automation.create`,
+  // `automation.get`, `automation.update`, `automation.delete`, `automation.run`,
+  // `automation.cancelRun`, `automation.subscribe`, `automation.unsubscribe`)
+  // are NOW SERVED as of T6c-6 (mapped via MCODE_TO_SERVED to `automation/list`,
+  // `automation/create`, …; subscribe/unsubscribe share a stub arm returning
+  // `{subscribed:true}`). `automation.runNow`/`markRunRead`/`archiveRun` are
+  // also served (markRunRead/archiveRun are no-op stubs).
 
   // ─── Project file ops (CRUD served, file ops not) — ~10 ─────────────
   "project.readFile",

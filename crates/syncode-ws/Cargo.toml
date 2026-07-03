@@ -14,6 +14,7 @@ syncode-persistence = { path = "../syncode-persistence" }
 syncode-auth = { path = "../syncode-auth" }
 syncode-git = { path = "../syncode-git" }
 syncode-terminal = { workspace = true }
+syncode-automation = { workspace = true }
 async-trait = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }
