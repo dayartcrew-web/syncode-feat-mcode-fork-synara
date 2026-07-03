@@ -8,7 +8,7 @@
 
 ## TL;DR
 - **Frontend**: MCode `apps/web` cloned + rewired — **type-clean (tsc 0)**, suite **2128/0 pass**, vite build green.
-- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **101 served RPCs** dispatching MCode dot-names + slash forms.
+- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **104 served RPCs** dispatching MCode dot-names + slash forms.
 - **Every UI panel's RPCs reach the backend.** Read-side is REAL where Syncode has the subsystem; STUB-defaults where it doesn't. Terminal streams live output; automations actually execute; LLM ops work via provider CLI (no API key).
 
 ## Legend
@@ -44,7 +44,8 @@
 | `server.getConfig` / `getSettings` / `welcome` / `getEnvironment` / `getDiagnostics` | 🟡 STUB-defaults | no subsystem — defaults + real `authMode` (from WsAuthConfig) + live projection counts (diagnostics) |
 | `server.setConfig` / `updateSettings` / `refreshProviders` / `updateProvider` / `upsertKeybinding` | 🟡 STUB | no persistence — accept write, return ack |
 | `server.subscribeConfig` / `subscribeSettings` / `subscribeProviderStatuses` / `subscribeLifecycle` | 🟡 STUB | `{subscribed:true}` — no push delivery |
-| `server.listProviderUsage` / `getProviderUsageSnapshot` / `startLocalServer` / `stopLocalServer` / `transcribeVoice` / `voiceStart` / `voiceStop` / `generateAutomationIntent` / `patchSettings` | ⛔ UNSERVED | (usage analytics / local-server mgmt / voice STT / AI intent) |
+| `server.transcribeVoice` / `voiceStart` / `voiceStop` | 🟡 STUB | graceful "STT not configured" (no whisper/ffmpeg) — served, no MethodNotFound |
+| `server.listProviderUsage` / `getProviderUsageSnapshot` / `startLocalServer` / `stopLocalServer` / `generateAutomationIntent` / `patchSettings` | ⛔ UNSERVED | (usage analytics / local-server mgmt / AI intent) |
 
 ### Terminal (Terminal panel)
 | RPC | Status | Backed by |
