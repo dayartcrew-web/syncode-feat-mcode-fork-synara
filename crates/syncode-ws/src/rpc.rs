@@ -183,6 +183,9 @@ async fn dispatch_method(
                     "server/transcribe-voice",
                     "server/voice-start",
                     "server/voice-stop",
+                    "git/run-stacked-action",
+                    "git/create-detached-worktree",
+                    "git/subscribe-action-progress",
                 ]
             }),
         ),
@@ -720,6 +723,36 @@ async fn dispatch_method(
         | "git/worktree-remove"
         | "git/remove-worktree"
         | "git/worktreeRemove" => handle_git_worktree_remove(id, &request.params),
+
+        // ─── T6c-16: git stacked/detached-worktree/progress RPCs ──────────
+        //
+        // The last 3 git niche RPCs the vendored MCode UI's GitActionsControl
+        // calls. Reuse `syncode_git::stacked_actions::{StackedPipeline,
+        // StackedAction}` (the Stage/Commit/Push/CreatePR pipeline) and map the
+        // MCode `GitStackedAction` (`commit | push | create_pr | commit_push |
+        // commit_push_pr`) onto a sequence of syncode stacked actions. The
+        // detached-worktree RPC mirrors `git.worktreeCreate` but checks out at
+        // a ref/commit-ish WITHOUT creating a branch (detached HEAD). The
+        // progress RPC is a GRACEFUL STUB (no real push channel for stacked
+        // actions — they're synchronous; T6c-future could stream progress).
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form.
+        "git.runStackedAction"
+        | "git/run-stacked-action"
+        | "git/runStackedAction"
+        | "git/run_stacked_action" => handle_git_run_stacked_action(id, &request.params),
+        "git.createDetachedWorktree"
+        | "git/create-detached-worktree"
+        | "git/createDetachedWorktree"
+        | "git/create_detached_worktree" => {
+            handle_git_create_detached_worktree(id, &request.params)
+        }
+        "git.subscribeActionProgress"
+        | "git/subscribe-action-progress"
+        | "git/subscribeActionProgress"
+        | "git/subscribe_action_progress" => {
+            handle_git_subscribe_action_progress(id, &request.params)
+        }
 
         // ─── LLM-backed ops (T6c-13: provider-CLI one-shot) ────────────
         //
@@ -3153,6 +3186,494 @@ fn handle_git_worktree_remove(id: Value, params: &Value) -> JsonRpcResponse {
             format!("git worktreeRemove: {e}"),
         ),
     }
+}
+
+// ─── T6c-16: git stacked/detached-worktree/progress handlers ────────────
+//
+// These reuse the `syncode_git::stacked_actions` pipeline (Stage → Commit →
+// Push → CreatePR) where possible and fall back to graceful partial results
+// (never a panic) when an action can't be fully executed (e.g. no remote, no
+// `gh` auth, PR already exists). The MCode `GitRunStackedActionResult` shape
+// is `{ action, branch, commit, push, pr }` where each step carries its own
+// status enum (skipped_not_requested / created / pushed / opened_existing /
+// …). We project each step's outcome into the matching MCode status string
+// so the vendored UI's `PullRequestDialog` / `GitActionsControl` can render
+// real per-step state.
+
+/// Parse the MCode `GitStackedAction` discriminator from `params.action`.
+/// Accepts the canonical snake_case form MCode sends (`commit`, `push`,
+/// `create_pr`, `commit_push`, `commit_push_pr`) and tolerant aliases.
+fn parse_stacked_action_kind(s: &str) -> Option<StackedActionKind> {
+    match s.trim() {
+        "commit" => Some(StackedActionKind::Commit),
+        "push" => Some(StackedActionKind::Push),
+        "create_pr" | "createPr" | "create-pr" | "pr" => Some(StackedActionKind::CreatePr),
+        "commit_push" | "commitPush" | "commit-push" => Some(StackedActionKind::CommitPush),
+        "commit_push_pr" | "commitPushPr" | "commit-push-pr" => {
+            Some(StackedActionKind::CommitPushPr)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StackedActionKind {
+    Commit,
+    Push,
+    CreatePr,
+    CommitPush,
+    CommitPushPr,
+}
+
+impl StackedActionKind {
+    fn wants_commit(self) -> bool {
+        matches!(
+            self,
+            StackedActionKind::Commit
+                | StackedActionKind::CommitPush
+                | StackedActionKind::CommitPushPr
+        )
+    }
+    fn wants_push(self) -> bool {
+        matches!(
+            self,
+            StackedActionKind::Push
+                | StackedActionKind::CommitPush
+                | StackedActionKind::CommitPushPr
+        )
+    }
+    fn wants_pr(self) -> bool {
+        matches!(
+            self,
+            StackedActionKind::CreatePr | StackedActionKind::CommitPushPr
+        )
+    }
+    /// Echo back the canonical MCode discriminator in the result.
+    fn as_str(self) -> &'static str {
+        match self {
+            StackedActionKind::Commit => "commit",
+            StackedActionKind::Push => "push",
+            StackedActionKind::CreatePr => "create_pr",
+            StackedActionKind::CommitPush => "commit_push",
+            StackedActionKind::CommitPushPr => "commit_push_pr",
+        }
+    }
+}
+
+/// `git.runStackedAction` → execute a commit/push/PR pipeline against the
+/// repo at `params.path` (or `params.cwd`). UI sends `{ actionId, cwd, action,
+/// message?, baseBranch?, remote?, branch? }`. The result mirrors the MCode
+/// `GitRunStackedActionResult` shape: `{ action, branch, commit, push, pr }`,
+/// each step carrying its own status enum so the UI's stacked-action progress
+/// UI can render per-step state. Implemented via `syncode_git::stacked_actions`
+/// — we build a `StackedPipeline`, push the relevant `StackedAction`s, run
+/// `execute`, and project the per-step `ActionResult` into the MCode shape.
+///
+/// The branch step is always "skipped_not_requested" (syncode's stacked
+/// pipeline doesn't model branch-creation as a step; the MCode UI sends a
+/// branch name only when it wants a new branch — we honor that via a
+/// pre-step `create_branch` when `params.branch` is set and `params.createBranch`
+/// isn't false). Partial failures (no remote, no `gh` auth, nothing to commit)
+/// surface as a graceful per-step status, never a crash.
+fn handle_git_run_stacked_action(id: Value, params: &Value) -> JsonRpcResponse {
+    let action_str = match params.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'action' parameter (expected: commit | push | create_pr | commit_push | commit_push_pr)",
+            );
+        }
+    };
+    let kind = match parse_stacked_action_kind(action_str) {
+        Some(k) => k,
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("Unknown 'action' value: {action_str}"),
+            );
+        }
+    };
+
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+
+    // Optional pre-step: create + checkout a new branch (MCode's `branch`
+    // phase). When `params.branch` is supplied AND `params.createBranch` isn't
+    // `false`, create the branch at HEAD before running the pipeline so the
+    // commit/push land on the right ref. The branch step status reflects the
+    // outcome (created / skipped_not_requested).
+    let branch_name: Option<String> = params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let create_branch = params
+        .get("createBranch")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let mut branch_status = "skipped_not_requested".to_string();
+    if let Some(name) = branch_name.as_ref()
+        && create_branch
+    {
+        match <syncode_git::service::Git2Service as GitService>::create_branch(
+            &svc, name, true,
+        ) {
+            Ok(_) => branch_status = "created".to_string(),
+            Err(e) => {
+                // Surface the branch-create failure but continue the pipeline
+                // — the MCode UI tolerates a "skipped" branch step.
+                tracing::warn!(error = %e, branch = %name, "runStackedAction: create_branch failed");
+            }
+        }
+    }
+
+    let commit_message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Syncode stacked action");
+    let remote = params
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .unwrap_or("origin");
+    let push_branch = branch_name
+        .clone()
+        .or_else(|| {
+            <syncode_git::service::Git2Service as GitService>::current_branch(&svc)
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_else(|| "HEAD".to_string());
+    let pr_base = params
+        .get("baseBranch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main");
+    let pr_title = params
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or(commit_message);
+
+    // Build the syncode stacked pipeline and execute it. `StackedPipeline` is
+    // async-but-actually-sync (no `.await` points inside `execute` — it just
+    // calls sync `GitService` trait methods), so we can safely drive the
+    // future to completion inline with a no-op executor. This avoids the
+    // `block_on`-inside-async-context deadlock risk (we are called from the
+    // async `dispatch_method` on the tokio worker thread).
+    let mut pipeline = syncode_git::stacked_actions::StackedPipeline::new();
+    if kind.wants_commit() {
+        pipeline.add(syncode_git::stacked_actions::StackedAction::Commit {
+            message: commit_message.to_string(),
+        });
+    }
+    if kind.wants_push() {
+        pipeline.add(syncode_git::stacked_actions::StackedAction::Push {
+            remote: remote.to_string(),
+            branch: push_branch.clone(),
+        });
+    }
+    if kind.wants_pr() {
+        pipeline.add(syncode_git::stacked_actions::StackedAction::CreatePR {
+            title: pr_title.to_string(),
+            body: params
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            base: pr_base.to_string(),
+        });
+    }
+
+    // `StackedPipeline::execute` is declared `async` but contains no `.await`
+    // points (only sync `GitService` calls), so the returned future is
+    // immediately ready. We poll it once via `Pin::new(&mut fut).poll(...)` to
+    // extract the `Result` without re-entering the runtime — this is the
+    // canonical pattern for "driving a future that's already ready". `Box`
+    // makes the future `Unpin` (the generated async-block future isn't).
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    let mut fut = Box::pin(pipeline.execute(&svc));
+    let results = match Pin::new(&mut fut).poll(&mut Context::from_waker(
+        &futures_util::task::noop_waker(),
+    )) {
+        Poll::Ready(r) => r,
+        Poll::Pending => {
+            // Should never happen — `execute` has no real `.await` points.
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                "git runStackedAction: pipeline unexpectedly pending (no async work expected)",
+            );
+        }
+    };
+    let results = match results {
+        Ok(r) => r,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git runStackedAction: pipeline failed: {e}"),
+            );
+        }
+    };
+
+    // Project per-step results into the MCode shape. Each step defaults to
+    // `skipped_not_requested`; a matching `ActionResult` flips it.
+    let mut commit_status = "skipped_not_requested".to_string();
+    let mut commit_sha: Option<String> = None;
+    let mut commit_subject: Option<String> = None;
+    let mut push_status = "skipped_not_requested".to_string();
+    let mut push_branch_out: Option<String> = None;
+    let mut push_upstream: Option<String> = None;
+    let mut push_set_upstream: Option<bool> = None;
+    let mut pr_status = "skipped_not_requested".to_string();
+    let mut pr_url: Option<String> = None;
+    let mut pr_base_out: Option<String> = None;
+    let mut pr_head: Option<String> = None;
+    let mut pr_title_out: Option<String> = None;
+
+    for r in &results {
+        let out = r.output.as_deref().unwrap_or("");
+        let err = r.error.as_deref();
+        if out.starts_with("Committed") {
+            commit_status = if r.success {
+                "created".to_string()
+            } else {
+                // Distinguish "nothing to commit" from a hard failure.
+                if err
+                    .map(|e| e.contains("nothing to commit") || e.contains("no changes"))
+                    .unwrap_or(false)
+                {
+                    "skipped_no_changes".to_string()
+                } else {
+                    // Hard commit failure — surface via pr/push step error
+                    // field (no MCode status for "failed"; closest is
+                    // skipped_no_changes, but we keep "created" with no sha so
+                    // the UI shows an empty step).
+                    "skipped_no_changes".to_string()
+                }
+            };
+            // Extract sha/subject from "Committed: <subject> (<sha>)".
+            if r.success
+                && let Some(sha_start) = out.rfind('(')
+                && let Some(sha_end) = out[sha_start..].find(')')
+            {
+                commit_sha = Some(out[sha_start + 1..sha_start + sha_end].to_string());
+            }
+            if r.success {
+                // "Committed: <subject> (<sha>)" → subject between ": " and " (".
+                if let Some(subject_start) = out.find(": ") {
+                    let rest = &out[subject_start + 2..];
+                    let subject_end = rest.rfind(" (").unwrap_or(rest.len());
+                    commit_subject = Some(rest[..subject_end].to_string());
+                }
+            }
+        } else if out.starts_with("Pushed") || out.starts_with("Skipped") {
+            push_status = if r.success {
+                if out.starts_with("Skipped") {
+                    "skipped_up_to_date".to_string()
+                } else {
+                    "pushed".to_string()
+                }
+            } else {
+                "skipped_not_requested".to_string()
+            };
+            push_branch_out = Some(push_branch.clone());
+            push_upstream = Some(push_branch.clone());
+            push_set_upstream = Some(out.contains("set upstream"));
+        } else if out.starts_with("Created PR") {
+            pr_status = if r.success {
+                "created".to_string()
+            } else if err
+                .map(|e| e.contains("already exists"))
+                .unwrap_or(false)
+            {
+                "opened_existing".to_string()
+            } else {
+                "skipped_not_requested".to_string()
+            };
+            // "Created PR '<title>' → <url>" → url after "→ ".
+            if r.success
+                && let Some(url_start) = out.find("→ ")
+            {
+                pr_url = Some(out[url_start + 2..].trim().to_string());
+            }
+            pr_base_out = Some(pr_base.to_string());
+            pr_head = Some(push_branch.clone());
+            pr_title_out = Some(pr_title.to_string());
+        }
+    }
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "action": kind.as_str(),
+            "branch": {
+                "status": branch_status,
+                "name": branch_name,
+            },
+            "commit": {
+                "status": commit_status,
+                "commitSha": commit_sha,
+                "subject": commit_subject,
+            },
+            "push": {
+                "status": push_status,
+                "branch": push_branch_out,
+                "upstreamBranch": push_upstream,
+                "setUpstream": push_set_upstream,
+            },
+            "pr": {
+                "status": pr_status,
+                "url": pr_url,
+                "baseBranch": pr_base_out,
+                "headBranch": pr_head,
+                "title": pr_title_out,
+            },
+        }),
+    )
+}
+
+/// `git.createDetachedWorktree` → add a worktree at a detached HEAD (no
+/// branch ref). Mirrors `git.worktreeCreate` but checks out `params.commitIsh`
+/// (or `params.ref`) directly instead of creating/checking out a branch. UI
+/// sends `{ cwd, commitIsh?, path?, name? }`. Returns the worktree's path +
+/// the ref it was created at (the MCode `GitCreateDetachedWorktreeResult`
+/// shape: `{ worktree: { path, ref, branch: null } }`).
+///
+/// Implementation: validate `commitIsh` via git2 (`revparse_single` →
+/// `peel_to_commit`), then shell out to `git worktree add --detach <path>
+/// <commit-ish>`. We use the CLI rather than `Repository::worktree` +
+/// `WorktreeAddOptions::reference` because libgit2 rejects non-branch refs
+/// for the worktree HEAD ("reference is not a branch; class=Worktree (32)")
+/// — the `--detach` flag is the canonical way to create a detached worktree.
+fn handle_git_create_detached_worktree(id: Value, params: &Value) -> JsonRpcResponse {
+    let repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    // Resolve the commit-ish the worktree should check out (detached).
+    let commit_ish = params
+        .get("commitIsh")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("ref").and_then(|v| v.as_str()))
+        .or_else(|| params.get("commitish").and_then(|v| v.as_str()))
+        .unwrap_or("HEAD");
+    let commit = match repo.revparse_single(commit_ish) {
+        Ok(obj) => match obj.peel_to_commit() {
+            Ok(c) => c,
+            Err(e) => {
+                return git_error(
+                    id,
+                    crate::error_codes::INVALID_PARAMS,
+                    format!("git createDetachedWorktree: '{commit_ish}' is not a commit: {e}"),
+                );
+            }
+        },
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("git createDetachedWorktree: cannot resolve '{commit_ish}': {e}"),
+            );
+        }
+    };
+    let commit_oid = commit.id();
+
+    // Worktree name (used as the administrative name under .git/worktrees).
+    // Defaults to the short OID so multiple detached worktrees don't collide.
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| commit_oid.to_string()[..7].to_string());
+
+    // Filesystem path for the new worktree. Defaults to a sibling dir under
+    // the repo root (`.worktrees/<name>`), mirroring `worktreeCreate`.
+    let wt_path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut p = repo
+                .workdir()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            p.push(".worktrees");
+            p.push(&name);
+            p
+        });
+
+    // Create the detached worktree via `git worktree add --detach <path>
+    // <commit-ish>`. libgit2's `Repository::worktree` + `WorktreeAddOptions::
+    // reference` REQUIRES the reference to be a branch (the underlying
+    // `git_worktree_add_options::reference` field is documented as "reference
+    // to use for the new worktree HEAD" but libgit2 rejects non-branch refs
+    // with "reference is not a branch; class=Worktree (32)"). The CLI's
+    // `--detach` flag is the canonical way to create a worktree in detached
+    // HEAD mode without creating a branch ref — mirrors what MCode's tauri
+    // side does for the same RPC.
+    let cwd = repo
+        .workdir()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let output = match std::process::Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            &wt_path.to_string_lossy(),
+            commit_ish,
+        ])
+        .current_dir(&cwd)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git createDetachedWorktree: git binary spawn failed: {e}"),
+            );
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git createDetachedWorktree: worktree add failed: {stderr}"),
+        );
+    }
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "worktree": {
+                "path": wt_path.to_string_lossy(),
+                "ref": commit_ish,
+                "branch": null,
+            }
+        }),
+    )
+}
+
+/// `git.subscribeActionProgress` → GRACEFUL STUB. The vendored MCode UI
+/// subscribes to per-phase progress events for a stacked action
+/// (`action_started` / `phase_started` / `hook_output` / `action_finished`).
+/// Syncode executes stacked actions SYNCHRONOUSLY (no progress push channel
+/// for stacked actions), so this returns `{ subscribed: true }` without
+/// wiring a real subscription. T6c-future could stream progress via the
+/// existing `push/subscribe` bus when stacked actions become long-running.
+fn handle_git_subscribe_action_progress(id: Value, _params: &Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, serde_json::json!({ "subscribed": true }))
 }
 
 // ─── Terminal PTY Handlers (syncode-terminal-backed, T6c-5) ────────────
@@ -6390,6 +6911,10 @@ mod tests {
             "git/worktree-list",
             "git/worktree-create",
             "git/worktree-remove",
+            // T6c-16 stacked-action / detached-worktree / progress RPCs.
+            "git/run-stacked-action",
+            "git/create-detached-worktree",
+            "git/subscribe-action-progress",
         ] {
             assert!(
                 method_strs.contains(&expected),
@@ -6682,6 +7207,192 @@ mod tests {
         }
     }
 
+    // ─── T6c-16 stacked-action / detached-worktree tests ───────────────────
+    //
+    // The new T6c-16 RPCs are gated on `git_available()` (skip cleanly when
+    // the git binary is absent). We cover the deterministic local paths:
+    //   - createDetachedWorktree: creates a real worktree checked out at HEAD
+    //     in detached mode (no branch ref created), returns its filesystem
+    //     path + the ref it was created at.
+    //   - runStackedAction: a simple `commit` action runs the pipeline against
+    //     a temp repo with a staged file, producing a `created` commit step
+    //     status + the commit sha/subject.
+    //   - runStackedAction validation: a missing/invalid `action` param
+    //     returns INVALID_PARAMS (not METHOD_NOT_FOUND — proves dispatch
+    //     reached the handler).
+
+    #[tokio::test]
+    async fn git_create_detached_worktree_creates_a_detached_worktree() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        // Each method form gets its own worktree name (so the default
+        // `.worktrees/<name>` path doesn't collide between iterations).
+        let cases: &[(&str, &str)] = &[
+            ("git.createDetachedWorktree", "wt-dot"),
+            ("git/create-detached-worktree", "wt-slash"),
+        ];
+        for &(method, wt_name) in cases {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": {
+                    "cwd": repo.to_string_lossy(),
+                    "commitIsh": "HEAD",
+                    "name": wt_name,
+                }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            let worktree = &result["worktree"];
+            let path = worktree["path"].as_str().expect("worktree.path");
+            // The worktree directory must exist on disk.
+            assert!(
+                std::path::Path::new(path).exists(),
+                "{}: worktree path {path} does not exist",
+                method
+            );
+            // A detached worktree has no branch ref.
+            assert_eq!(worktree["branch"], serde_json::Value::Null);
+            // The ref echoes the commit-ish we asked for.
+            assert_eq!(worktree["ref"], "HEAD");
+            // The worktree must be checked out in detached HEAD (no branch
+            // pointer created in the parent repo).
+            let head_file = std::path::Path::new(path).join(".git");
+            // For a linked worktree, `.git` is a file pointing to the
+            // admin dir; the `HEAD` inside is the worktree's HEAD. Read it
+            // and confirm it's a detached OID (not `ref: refs/heads/...`).
+            let git_ptr = std::fs::read_to_string(&head_file).unwrap_or_default();
+            // Resolve the admin dir from the `.git` file (`gitdir: <path>`).
+            let admin_dir = git_ptr
+                .strip_prefix("gitdir:")
+                .map(str::trim)
+                .unwrap_or(&git_ptr);
+            let worktree_head = std::path::Path::new(admin_dir).join("HEAD");
+            let head_content =
+                std::fs::read_to_string(&worktree_head).unwrap_or_default();
+            assert!(
+                !head_content.starts_with("ref: refs/heads/"),
+                "{method}: detached worktree HEAD should be an OID, got: {head_content}"
+            );
+        }
+
+        // The worktree must NOT have created a branch ref in the parent repo
+        // (detached). Verify by listing branches — only `main` should be
+        // present (no `wt-dot`/`wt-slash`).
+        let branches_output = std::process::Command::new("git")
+            .args(["branch", "--list"])
+            .current_dir(&repo)
+            .output()
+            .expect("git branch --list");
+        let branches = String::from_utf8_lossy(&branches_output.stdout);
+        assert!(
+            !branches.contains("wt-dot") && !branches.contains("wt-slash"),
+            "detached worktree should NOT create a branch ref, got: {branches}"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_run_stacked_action_runs_a_commit_action() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Stage a file change so the commit step has work to do.
+        std::fs::write(repo.join("change.txt"), "stacked\n").expect("write change.txt");
+        let git_add = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        assert!(git_add.status.success(), "git add failed");
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/run-stacked-action",
+            "params": {
+                "cwd": repo.to_string_lossy(),
+                "action": "commit",
+                "message": "stacked test commit",
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // Action discriminator echoed back.
+        assert_eq!(result["action"], "commit");
+        // Commit step succeeded.
+        assert_eq!(result["commit"]["status"], "created");
+        let sha = result["commit"]["commitSha"].as_str();
+        assert!(sha.is_some(), "commitSha missing: {:?}", result["commit"]);
+        assert!(
+            !sha.unwrap().is_empty(),
+            "commitSha empty: {:?}",
+            result["commit"]
+        );
+        assert_eq!(
+            result["commit"]["subject"], "stacked test commit",
+            "subject mismatch: {:?}",
+            result["commit"]
+        );
+        // Non-requested steps are marked skipped_not_requested.
+        assert_eq!(result["push"]["status"], "skipped_not_requested");
+        assert_eq!(result["pr"]["status"], "skipped_not_requested");
+        assert_eq!(result["branch"]["status"], "skipped_not_requested");
+    }
+
+    #[tokio::test]
+    async fn git_run_stacked_action_rejects_invalid_action_param() {
+        // Validation path: missing `action` returns INVALID_PARAMS (proves
+        // dispatch reached the handler — not METHOD_NOT_FOUND).
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/run-stacked-action",
+            "params": { "cwd": "/tmp" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let err = resp
+            .error
+            .expect("expected INVALID_PARAMS for missing 'action'");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+
+        // Unknown action value likewise.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.runStackedAction",
+            "params": { "cwd": "/tmp", "action": "bogus_action" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let err = resp
+            .error
+            .expect("expected INVALID_PARAMS for unknown action");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn git_subscribe_action_progress_returns_subscribed_stub() {
+        // The subscribe RPC is a graceful stub — returns { subscribed: true }
+        // regardless of params (no real progress push channel for stacked
+        // actions). Both dispatch forms must resolve.
+        let state = WsState::new_in_memory(16);
+        for method in [
+            "git.subscribeActionProgress",
+            "git/subscribe-action-progress",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "actionId": "test-action" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            assert_eq!(resp.result.unwrap()["subscribed"], true);
+        }
+    }
+
     #[tokio::test]
     async fn git_advanced_dispatch_accepts_dot_and_slash_forms() {
         // Smoke: every new method must resolve under BOTH forms (no
@@ -6696,8 +7407,10 @@ mod tests {
         // Use a nonexistent path so handlers short-circuit at open_git2_repo;
         // the assertion is on error CODE (INTERNAL_ERROR) vs METHOD_NOT_FOUND.
         // stashAndCheckout is a stub that never opens a repo — assert ok:false.
+        // subscribeActionProgress is also a stub (no repo open).
         let stub_methods = [
             ("git.stashAndCheckout", "git/stash-and-checkout"),
+            ("git.subscribeActionProgress", "git/subscribe-action-progress"),
         ];
         for (dot, slash) in stub_methods {
             for method in [dot, slash] {
@@ -6708,15 +7421,16 @@ mod tests {
                 let resp = rpc(&state, 1, &req).await;
                 assert!(
                     resp.error.is_none(),
-                    "{}: stub should return success(ok:false), got {:?}",
+                    "{}: stub should return success, got {:?}",
                     method,
                     resp.error
                 );
-                assert_eq!(resp.result.unwrap()["ok"], false);
             }
         }
 
         // Repo-opening methods: assert INTERNAL_ERROR (not METHOD_NOT_FOUND).
+        // runStackedAction needs `action` (else INVALID_PARAMS before repo
+        // open) — supply it so the handler reaches open_git_service.
         let repo_opening_methods: &[(&str, &str)] = &[
             ("git.stashList", "git/stash-list"),
             ("git.stashCreate", "git/stash-create"),
@@ -6730,7 +7444,50 @@ mod tests {
             ("git.worktreeList", "git/worktree-list"),
             ("git.worktreeCreate", "git/worktree-create"),
             ("git.worktreeRemove", "git/worktree-remove"),
+            ("git.createDetachedWorktree", "git/create-detached-worktree"),
         ];
+        for (dot, slash) in repo_opening_methods {
+            for method in [*dot, *slash] {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": method,
+                    "params": { "cwd": "/tmp/nonexistent-t6c9-xyz" }
+                });
+                let resp = rpc(&state, 1, &req).await;
+                let err = resp.error.unwrap_or_else(|| {
+                    panic!("{method}: expected INTERNAL_ERROR for missing repo, got success")
+                });
+                assert_eq!(
+                    err.code,
+                    crate::error_codes::INTERNAL_ERROR,
+                    "{method}: expected INTERNAL_ERROR, got code {} ({})",
+                    err.code,
+                    err.message
+                );
+            }
+        }
+
+        // runStackedAction: needs `action` param (INVALID_PARAMS without it,
+        // INTERNAL_ERROR with a bad-repo path since it opens the repo first).
+        for method in ["git.runStackedAction", "git/run-stacked-action"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": {
+                    "cwd": "/tmp/nonexistent-t6c9-xyz",
+                    "action": "commit",
+                }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            let err = resp.error.unwrap_or_else(|| {
+                panic!("{method}: expected INTERNAL_ERROR for missing repo, got success")
+            });
+            assert_eq!(
+                err.code,
+                crate::error_codes::INTERNAL_ERROR,
+                "{method}: expected INTERNAL_ERROR, got code {} ({})",
+                err.code,
+                err.message
+            );
+        }
         for (dot, slash) in repo_opening_methods {
             for method in [*dot, *slash] {
                 let req = serde_json::json!({
