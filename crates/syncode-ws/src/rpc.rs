@@ -6,6 +6,7 @@
 
 use crate::{ConnectionId, JsonRpcRequest, JsonRpcResponse, WsState};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use syncode_git::service::GitService;
 use syncode_orchestration::Command;
 
@@ -620,19 +621,25 @@ async fn dispatch_method(
         // — both must resolve). Entry order matches the MCODE_TO_SERVED append
         // block to ease parallel-merge conflict resolution.
         "provider.listModels" | "provider/list-models" => handle_provider_list_models(id),
-        "provider.listSkills" | "provider/list-skills" => handle_provider_list_skills(id),
+        "provider.listSkills" | "provider/list-skills" => {
+            handle_provider_list_skills(id, &request.params)
+        }
         "provider.listSkillsCatalog" | "provider/list-skills-catalog" => {
-            handle_provider_list_skills_catalog(id)
+            handle_provider_list_skills_catalog(id, &request.params)
         }
         "provider.listPlugins" | "provider/list-plugins" => handle_provider_list_plugins(id),
         "provider.readPlugin" | "provider/read-plugin" => handle_provider_read_plugin(id),
-        "provider.listCommands" | "provider/list-commands" => handle_provider_list_commands(id),
+        "provider.listCommands" | "provider/list-commands" => {
+            handle_provider_list_commands(id, &request.params)
+        }
         "provider.listAgents" | "provider/list-agents" => handle_provider_list_agents(id),
         "provider.getComposerCapabilities" | "provider/get-composer-capabilities" => {
             handle_provider_get_composer_capabilities(id, &request.params)
         }
         "provider.listOptions" | "provider/list-options" => handle_provider_list_options(id),
-        "provider.readSkill" | "provider/read-skill" => handle_provider_read_skill(id),
+        "provider.readSkill" | "provider/read-skill" => {
+            handle_provider_read_skill(id, &request.params)
+        }
         "provider.compactThread" | "provider/compact-thread" => {
             handle_provider_compact_thread(state, id, &request.params).await
         }
@@ -5830,17 +5837,46 @@ fn handle_provider_list_models(id: Value) -> JsonRpcResponse {
     )
 }
 
-/// `provider.listSkills` — return `ProviderListSkillsResult` with an empty
-/// `skills` array. Syncode has no skill-discovery subsystem.
-fn handle_provider_list_skills(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "skills": [] }))
+/// `provider.listSkills` — return `ProviderListSkillsResult` populated from a
+/// filesystem scan of the project `.skills/*.md` directory (or
+/// `SYNCODE_SKILLS_DIR`). Each markdown file becomes a `ProviderSkillDescriptor`
+/// (name = filename stem, description = YAML frontmatter `description:` field,
+/// path = absolute, enabled = true). Missing/unreadable directory returns an
+/// empty `skills` array — the composer renders a "no skills" empty state.
+fn handle_provider_list_skills(id: Value, params: &Value) -> JsonRpcResponse {
+    let skills = match resolve_skills_dir(params) {
+        Some(dir) => scan_skills_dir(&dir),
+        None => Vec::new(),
+    };
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "skills": skills,
+            "source": "filesystem",
+        }),
+    )
 }
 
-/// `provider.listSkillsCatalog` — return `ProviderSkillsCatalogResult` with an
-/// empty `skills` array. The catalog is a UI-side aggregated skill index;
-/// syncode has no skill loader.
-fn handle_provider_list_skills_catalog(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "skills": [] }))
+/// `provider.listSkillsCatalog` — same filesystem scan as `listSkills`. The
+/// catalog is a UI-side aggregated skill index; in syncode the catalog and the
+/// live skills list are the same filesystem-backed source. Includes the
+/// resolved `mcodeSkillsDir` (absolute path) when a skills dir exists.
+fn handle_provider_list_skills_catalog(id: Value, params: &Value) -> JsonRpcResponse {
+    let (skills, dir_field): (Vec<Value>, Value) = match resolve_skills_dir(params) {
+        Some(dir) => {
+            let abs = dir.canonicalize_unchecked();
+            let abs_str = abs.to_string_lossy().into_owned();
+            (scan_skills_dir(&dir), Value::String(abs_str))
+        }
+        None => (Vec::new(), Value::Null),
+    };
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "skills": skills,
+            "mcodeSkillsDir": dir_field,
+        }),
+    )
 }
 
 /// `provider.listPlugins` — return `ProviderListPluginsResult` with empty
@@ -5865,10 +5901,42 @@ fn handle_provider_read_plugin(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null }))
 }
 
-/// `provider.listCommands` — return `ProviderListCommandsResult` with an empty
-/// `commands` array. Syncode has no native slash-command discovery.
-fn handle_provider_list_commands(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "commands": [] }))
+/// `provider.listCommands` — return `ProviderListCommandsResult` with a static
+/// per-provider list of native slash commands. Each provider ships a known set
+/// of built-in CLI commands; we surface them so the composer's `/` autocomplete
+/// shows real entries instead of an empty list. Unknown/unrecognized providers
+/// get the minimal `/help` + `/clear` baseline.
+fn handle_provider_list_commands(id: Value, params: &Value) -> JsonRpcResponse {
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude");
+    let kind = to_mcode_provider_kind(provider).unwrap_or(provider);
+    let commands: Vec<Value> = match kind {
+        "claudeAgent" => vec![
+            serde_json::json!({ "name": "/help", "description": "Show available commands and usage." }),
+            serde_json::json!({ "name": "/clear", "description": "Clear the current conversation history." }),
+            serde_json::json!({ "name": "/compact", "description": "Summarize and compact the conversation context." }),
+            serde_json::json!({ "name": "/cost", "description": "Show token usage and cost for the session." }),
+            serde_json::json!({ "name": "/doctor", "description": "Diagnose the Claude installation and environment." }),
+        ],
+        "codex" => vec![
+            serde_json::json!({ "name": "/help", "description": "Show available commands and usage." }),
+            serde_json::json!({ "name": "/clear", "description": "Clear the current conversation history." }),
+        ],
+        _ => vec![
+            serde_json::json!({ "name": "/help", "description": "Show available commands and usage." }),
+            serde_json::json!({ "name": "/clear", "description": "Clear the current conversation history." }),
+        ],
+    };
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "commands": commands,
+            "source": "static",
+        }),
+    )
 }
 
 /// `provider.listAgents` — return `ProviderListAgentsResult` with one
@@ -5908,21 +5976,127 @@ fn handle_provider_get_composer_capabilities(id: Value, params: &Value) -> JsonR
         .get("provider")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("codex");
+        .unwrap_or("claude");
+    let kind = to_mcode_provider_kind(provider).unwrap_or(provider);
+    // Per-provider capability matrix. Tier-1 providers (claude/codex) get the
+    // richest flag set so the composer renders the full skill/command UI;
+    // smaller providers get progressively fewer flags. Plugin flags stay false
+    // everywhere — syncode has no plugin marketplace subsystem.
+    let (skill_mentions, skill_discovery, native_commands) = match kind {
+        "claudeAgent" => (true, true, true),
+        "codex" => (true, true, true),
+        "gemini" => (true, false, true),
+        "grok" => (false, false, true),
+        "cursor" => (false, false, true),
+        "kilo" | "opencode" | "pi" => (false, false, false),
+        _ => (false, false, false),
+    };
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "provider": provider,
-            "supportsSkillMentions": false,
-            "supportsSkillDiscovery": false,
-            "supportsNativeSlashCommandDiscovery": false,
+            "provider": kind,
+            "supportsSkillMentions": skill_mentions,
+            "supportsSkillDiscovery": skill_discovery,
+            "supportsNativeSlashCommandDiscovery": native_commands,
             "supportsPluginMentions": false,
             "supportsPluginDiscovery": false,
-            "supportsRuntimeModelList": false,
-            "supportsThreadCompaction": false,
-            "supportsThreadImport": false,
+            "supportsRuntimeModelList": true,
+            "supportsThreadCompaction": true,
+            "supportsThreadImport": true,
         }),
     )
+}
+
+/// Resolve the skills directory for a `listSkills`/`listSkillsCatalog`/`readSkill`
+/// request. Precedence: explicit `cwd` param joined with `.skills`, then the
+/// `SYNCODE_SKILLS_DIR` env var, finally a relative `.skills` fallback. Returns
+/// `None` if the resolved directory does not exist (graceful empty result).
+fn resolve_skills_dir(params: &Value) -> Option<PathBuf> {
+    let dir = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|cwd| Path::new(cwd).join(".skills"))
+        .or_else(|| std::env::var_os("SYNCODE_SKILLS_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(".skills"));
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+/// Parse a YAML-ish frontmatter block (`---\n...\n---`) from a markdown skill
+/// file and extract the `description:` value. Only the simple `key: value`
+/// scalar form is supported — sufficient for skill files authored as
+/// `name: foo\ndescription: bar`. Returns `None` if no frontmatter or no
+/// `description:` key is present.
+fn parse_skill_frontmatter_description(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    let after_fence = trimmed.strip_prefix("---")?;
+    let end = after_fence.find("\n---")?;
+    let frontmatter = &after_fence[..end];
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("description:") {
+            let val = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Scan the resolved skills directory for `*.md` files and build a
+/// `ProviderSkillDescriptor` per file. Name is the filename stem, description is
+/// parsed from the file's YAML frontmatter (`description:` field), path is the
+/// absolute (canonicalized) file path, enabled is always `true`. Returns an
+/// empty vec on any I/O error — callers return a graceful empty `skills` array.
+fn scan_skills_dir(dir: &Path) -> Vec<Value> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut skills: Vec<(String, Value)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => continue,
+        };
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let description = parse_skill_frontmatter_description(&content);
+        let abs_path = path.canonicalize_unchecked().to_string_lossy().into_owned();
+        let mut descriptor = serde_json::json!({
+            "name": name,
+            "path": abs_path,
+            "enabled": true,
+        });
+        if let Some(desc) = description {
+            descriptor["description"] = Value::String(desc);
+        }
+        skills.push((name, descriptor));
+    }
+    skills.sort_by(|a, b| a.0.cmp(&b.0));
+    skills.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Helper to convert a `Path` to a string for the `path` field without failing
+/// on non-UTF8 — falls back to lossy rendering (absolute path is still emitted).
+trait CanonicalizeUnchecked {
+    fn canonicalize_unchecked(&self) -> PathBuf;
+}
+impl CanonicalizeUnchecked for Path {
+    fn canonicalize_unchecked(&self) -> PathBuf {
+        std::fs::canonicalize(self).unwrap_or_else(|_| self.to_path_buf())
+    }
 }
 
 /// `provider.listOptions` — return `{ options: [] }`. Syncode has no
@@ -5932,10 +6106,51 @@ fn handle_provider_list_options(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, serde_json::json!({ "options": [] }))
 }
 
-/// `provider.readSkill` — return `{ skill: null }`. Mirrors readPlugin: the
-/// skill-detail consumer renders an empty state when the skill is null.
-fn handle_provider_read_skill(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null }))
+/// `provider.readSkill` — read a skill file at the requested `path` and return
+/// a `{ skill: { name, content, path, enabled } }` descriptor. The path must
+/// point to an existing readable file (typically surfaced by `listSkills`).
+/// Returns `{ skill: null }` when the path is missing/unreadable or points
+/// outside a `.skills` directory (basic path traversal guard).
+fn handle_provider_read_skill(id: Value, params: &Value) -> JsonRpcResponse {
+    let raw_path = match params.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null })),
+    };
+    let path = Path::new(raw_path);
+    // Basic traversal guard: require the canonical path to contain a `.skills`
+    // component, and reject non-`.md` extensions.
+    let canonical = match path.canonicalize_unchecked().canonicalize() {
+        Ok(c) => c,
+        Err(_) => return JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null })),
+    };
+    let in_skills = canonical
+        .components()
+        .any(|c| c.as_os_str() == ".skills");
+    let is_md = canonical.extension().and_then(|e| e.to_str()) == Some("md");
+    if !in_skills || !is_md {
+        return JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null }));
+    }
+    let content = match std::fs::read_to_string(&canonical) {
+        Ok(c) => c,
+        Err(_) => return JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null })),
+    };
+    let name = canonical
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let abs_path = canonical.to_string_lossy().into_owned();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "skill": {
+                "name": name,
+                "content": content,
+                "path": abs_path,
+                "enabled": true,
+            }
+        }),
+    )
 }
 
 /// `provider.compactThread` — LLM-backed (T6c-13). The composer calls this to
@@ -9711,28 +9926,39 @@ mod tests {
     async fn provider_empty_list_rpcs_return_minimal_shapes() {
         let state = WsState::new_in_memory(16);
 
-        // listSkills → { skills: [] }
+        // listSkills with no `cwd` and no .skills dir present → { skills: [] }
+        // (T6c-23 made this REAL: filesystem scan of `.skills/*.md`; with no
+        // skills dir on disk the result is an empty array.)
         let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "provider.listSkills"
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listSkills",
+            "params": { "cwd": "/nonexistent-syncode-skills-empty-test-9999" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
         assert_eq!(result["skills"].as_array().unwrap().len(), 0);
 
-        // listSkillsCatalog → { skills: [] }
+        // listSkillsCatalog with no `cwd` → { skills: [] }
         let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "provider.listSkillsCatalog"
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listSkillsCatalog",
+            "params": { "cwd": "/nonexistent-syncode-skills-empty-test-9999" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
         assert_eq!(result["skills"].as_array().unwrap().len(), 0);
 
-        // listCommands → { commands: [] }
+        // listCommands is now REAL (T6c-23): static per-provider native
+        // commands. With no provider param it defaults to claudeAgent and
+        // returns 5 entries (help/clear/compact/cost/doctor). The dedicated
+        // `test_list_commands_claude_includes_compact_and_cost` covers the
+        // content; here we just assert it's non-empty (REAL behavior).
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listCommands"
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["commands"].as_array().unwrap().len(), 0);
+        assert!(
+            !result["commands"].as_array().unwrap().is_empty(),
+            "listCommands should return static non-empty command list"
+        );
 
-        // listOptions → { options: [] }
+        // listOptions → { options: [] }  (still a stub — no option subsystem)
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions"
         });
@@ -9774,38 +10000,43 @@ mod tests {
     }
 
     /// getComposerCapabilities must echo the requested `provider` and return
-    /// every support flag as false (the composer renders a plain-prompt UI).
-    /// Defaults to "codex" when the provider param is absent.
+    /// the per-provider capability matrix (T6c-23): claude/codex full, gemini
+    /// partial, smaller providers minimal. Plugin flags stay false everywhere.
+    /// Defaults to "claudeAgent" when the provider param is absent.
     #[tokio::test]
-    async fn provider_get_composer_capabilities_all_false() {
+    async fn provider_get_composer_capabilities_per_provider_matrix() {
         let state = WsState::new_in_memory(16);
 
-        // Explicit provider request.
+        // gemini: skill mentions + native commands, but no skill discovery.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.getComposerCapabilities",
             "params": { "provider": "gemini" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
         assert_eq!(result["provider"], "gemini");
-        for flag in [
-            "supportsSkillMentions",
-            "supportsSkillDiscovery",
-            "supportsNativeSlashCommandDiscovery",
-            "supportsPluginMentions",
-            "supportsPluginDiscovery",
-            "supportsRuntimeModelList",
-            "supportsThreadCompaction",
-            "supportsThreadImport",
-        ] {
-            assert_eq!(result[flag], false, "{flag} should be false");
-        }
+        assert_eq!(result["supportsSkillMentions"], true);
+        assert_eq!(result["supportsSkillDiscovery"], false);
+        assert_eq!(result["supportsNativeSlashCommandDiscovery"], true);
+        // plugin flags stay false everywhere (no plugin subsystem).
+        assert_eq!(result["supportsPluginMentions"], false);
+        assert_eq!(result["supportsPluginDiscovery"], false);
+        // universal infrastructure flags.
+        assert_eq!(result["supportsRuntimeModelList"], true);
+        assert_eq!(result["supportsThreadCompaction"], true);
+        assert_eq!(result["supportsThreadImport"], true);
 
-        // Default when provider param absent.
+        // Default when provider param absent: now claudeAgent (the richest
+        // profile — full skill + command discovery).
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.getComposerCapabilities"
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["provider"], "codex", "default provider should be codex");
+        assert_eq!(
+            result["provider"], "claudeAgent",
+            "default provider should be claudeAgent"
+        );
+        assert_eq!(result["supportsSkillMentions"], true);
+        assert_eq!(result["supportsSkillDiscovery"], true);
     }
 
     /// compactThread with no thread history returns `{ ok: true }` (the
@@ -11510,6 +11741,203 @@ mod tests {
         assert!(
             outcome.is_err(),
             "unsubscribed connection must not receive pushes"
+        );
+    }
+
+    // ─── T6c-23: provider skills/commands/capabilities discovery ────────
+
+    #[test]
+    fn test_capabilities_claude_full_flags() {
+        let params = serde_json::json!({ "provider": "claude" });
+        let resp = handle_provider_get_composer_capabilities(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        assert_eq!(result["provider"], "claudeAgent");
+        assert_eq!(result["supportsSkillMentions"], true);
+        assert_eq!(result["supportsSkillDiscovery"], true);
+        assert_eq!(result["supportsNativeSlashCommandDiscovery"], true);
+        assert_eq!(result["supportsPluginMentions"], false);
+        assert_eq!(result["supportsPluginDiscovery"], false);
+        assert_eq!(result["supportsRuntimeModelList"], true);
+        assert_eq!(result["supportsThreadCompaction"], true);
+    }
+
+    #[test]
+    fn test_capabilities_codex_full_flags() {
+        let params = serde_json::json!({ "provider": "codex" });
+        let resp = handle_provider_get_composer_capabilities(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        assert_eq!(result["provider"], "codex");
+        assert_eq!(result["supportsSkillMentions"], true);
+        assert_eq!(result["supportsSkillDiscovery"], true);
+        assert_eq!(result["supportsNativeSlashCommandDiscovery"], true);
+    }
+
+    #[test]
+    fn test_capabilities_gemini_partial_flags() {
+        let params = serde_json::json!({ "provider": "gemini" });
+        let resp = handle_provider_get_composer_capabilities(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        assert_eq!(result["supportsSkillMentions"], true);
+        assert_eq!(result["supportsSkillDiscovery"], false);
+        assert_eq!(result["supportsNativeSlashCommandDiscovery"], true);
+    }
+
+    #[test]
+    fn test_capabilities_kilo_minimal_flags() {
+        let params = serde_json::json!({ "provider": "kilo" });
+        let resp = handle_provider_get_composer_capabilities(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        assert_eq!(result["supportsSkillMentions"], false);
+        assert_eq!(result["supportsSkillDiscovery"], false);
+        assert_eq!(result["supportsNativeSlashCommandDiscovery"], false);
+    }
+
+    #[test]
+    fn test_list_commands_claude_includes_compact_and_cost() {
+        let params = serde_json::json!({ "provider": "claude" });
+        let resp = handle_provider_list_commands(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        let names: Vec<&str> = result["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"/help"));
+        assert!(names.contains(&"/clear"));
+        assert!(names.contains(&"/compact"));
+        assert!(names.contains(&"/cost"));
+        assert!(names.contains(&"/doctor"));
+    }
+
+    #[test]
+    fn test_list_commands_codex_minimal() {
+        let params = serde_json::json!({ "provider": "codex" });
+        let resp = handle_provider_list_commands(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        let names: Vec<&str> = result["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["/help", "/clear"]);
+    }
+
+    #[test]
+    fn test_list_skills_scans_markdown_files() {
+        let tmp = std::env::temp_dir().join(format!(
+            "syncode-ws-skills-test-{}",
+            std::process::id()
+        ));
+        let skills_dir = tmp.join(".skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        // skill with frontmatter description
+        std::fs::write(
+            skills_dir.join("review.md"),
+            "---\nname: review\ndescription: Code review specialist.\n---\n# Review\nbody",
+        )
+        .unwrap();
+        // skill without frontmatter
+        std::fs::write(skills_dir.join("explore.md"), "# Explore\nplain body").unwrap();
+        // non-markdown file should be skipped
+        std::fs::write(skills_dir.join("ignore.txt"), "nope").unwrap();
+
+        let params = serde_json::json!({ "cwd": tmp.to_string_lossy() });
+        let resp = handle_provider_list_skills(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        let skills = result["skills"].as_array().unwrap();
+        assert_eq!(skills.len(), 2, "expected 2 markdown skills, got {skills:?}");
+        // sorted alphabetically by name
+        assert_eq!(skills[0]["name"], "explore");
+        assert_eq!(skills[1]["name"], "review");
+        assert_eq!(skills[1]["description"], "Code review specialist.");
+        assert_eq!(skills[1]["enabled"], true);
+        assert!(
+            skills[1]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("review.md"),
+            "path should be absolute and end with review.md"
+        );
+        assert!(
+            skills[0].get("description").is_none(),
+            "explore has no frontmatter description"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_list_skills_missing_dir_is_empty() {
+        let params =
+            serde_json::json!({ "cwd": "/nonexistent-syncode-skills-test-path-12345" });
+        let resp = handle_provider_list_skills(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_read_skill_reads_file() {
+        let tmp = std::env::temp_dir().join(format!(
+            "syncode-ws-readskill-test-{}",
+            std::process::id()
+        ));
+        let skills_dir = tmp.join(".skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let body = "---\ndescription: hello world\n---\n# Greet\nbody text";
+        std::fs::write(skills_dir.join("greet.md"), body).unwrap();
+        let abs = std::fs::canonicalize(skills_dir.join("greet.md")).unwrap();
+
+        let params = serde_json::json!({ "path": abs.to_string_lossy() });
+        let resp = handle_provider_read_skill(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        let skill = result["skill"].as_object().unwrap();
+        assert_eq!(skill["name"], "greet");
+        assert_eq!(skill["enabled"], true);
+        assert!(skill["content"].as_str().unwrap().contains("hello world"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_read_skill_rejects_path_outside_skills() {
+        let tmp = std::env::temp_dir().join(format!(
+            "syncode-ws-readskill-traversal-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let outside = tmp.join("secret.md");
+        std::fs::write(&outside, "secret").unwrap();
+        let abs = std::fs::canonicalize(&outside).unwrap();
+
+        let params = serde_json::json!({ "path": abs.to_string_lossy() });
+        let resp = handle_provider_read_skill(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        assert!(result["skill"].is_null(), "path outside .skills must return null");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_read_skill_missing_returns_null() {
+        let params = serde_json::json!({ "path": "" });
+        let resp = handle_provider_read_skill(Value::from(1), &params);
+        let result = resp.result.unwrap();
+        assert!(result["skill"].is_null());
+    }
+
+    #[test]
+    fn test_frontmatter_description_parser() {
+        let content = "---\nname: foo\ndescription: \"A skill.\"\n---\n# body";
+        assert_eq!(
+            parse_skill_frontmatter_description(content),
+            Some("A skill.".to_string())
+        );
+        assert_eq!(parse_skill_frontmatter_description("# no frontmatter"), None);
+        assert_eq!(
+            parse_skill_frontmatter_description("---\nname: foo\n---\nbody"),
+            None
         );
     }
 }
