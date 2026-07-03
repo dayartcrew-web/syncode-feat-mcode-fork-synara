@@ -120,6 +120,15 @@ import type {
   GitSummarizeDiffResult,
   ServerGenerateThreadRecapInput,
   ServerGenerateThreadRecapResult,
+  // T6c-14 GitHub-API ops (gh-CLI-backed).
+  GitHubRepositoryInput,
+  GitHubRepositoryResult,
+  GitPullRequestRefInput,
+  GitResolvePullRequestResult,
+  GitHandoffThreadInput,
+  GitHandoffThreadResult,
+  GitPreparePullRequestThreadInput,
+  GitPreparePullRequestThreadResult,
 } from "./shell";
 import type { WsWelcomePayload } from "./tier3/ws";
 // Provider discovery Tier-3 result types (T6c-7 provider RPC exposure). The
@@ -1061,6 +1070,42 @@ export const SERVED_RPC = {
     request: null as unknown as ServerGenerateThreadRecapInput,
     result: null as unknown as ServerGenerateThreadRecapResult,
   },
+
+  // ─── GitHub-API ops (T6c-14: gh-CLI-backed) ──────────────────────────
+  // Four RPCs the vendored MCode UI's PR-handoff surface calls. The backend
+  // `crates/syncode-ws/src/rpc.rs` handlers shell out to the user's `gh` CLI
+  // (authed via `gh auth login` — no OAuth/token handling in-process). The
+  // transport remaps the MCode dot-strings onto these slash keys (see
+  // MCODE_TO_SERVED in `wsTransport.ts`).
+  //   - `git/github-repository`         — detect the GitHub repo for a local
+  //     path (parses `git remote get-url origin`; enriches via `gh repo view`
+  //     when available). Returns `{ repository: { nameWithOwner, url } | null }`
+  //     (null = not a GitHub repo).
+  //   - `git/resolve-pull-request`      — `gh pr view <n> --json …` → MCode
+  //     `GitResolvePullRequestResult` shape.
+  //   - `git/handoff-thread`            — `gh pr create` from a branch. The
+  //     full worktree-handoff variant is STUBBED (returns a `GitHandoffThreadResult`
+  //     with worktree fields null + a `message` carrying the PR URL when the
+  //     PR-create sub-step succeeds).
+  //   - `git/prepare-pull-request-thread` — STUBBED (`{ ok:false, reason }` —
+  //     the PR→worktree checkout sequence isn't wired; compose via
+  //     `resolvePullRequest` + `worktreeCreate`).
+  "git/github-repository": {
+    request: null as unknown as GitHubRepositoryInput,
+    result: null as unknown as GitHubRepositoryResult,
+  },
+  "git/resolve-pull-request": {
+    request: null as unknown as GitPullRequestRefInput,
+    result: null as unknown as GitResolvePullRequestResult,
+  },
+  "git/handoff-thread": {
+    request: null as unknown as GitHandoffThreadInput,
+    result: null as unknown as GitHandoffThreadResult,
+  },
+  "git/prepare-pull-request-thread": {
+    request: null as unknown as GitPreparePullRequestThreadInput,
+    result: null as unknown as GitPreparePullRequestThreadResult,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -1120,18 +1165,15 @@ export const UNSERVED_RPC = [
   // `git/fetch`, `git/pull`, `git/push`, `git/worktree-*`, `git/init`,
   // `git/remove-index-lock`). The ops below remain unserved — they need
   // services syncode does not have:
-  //   - GitHub API (resolvePullRequest/githubRepository/preparePullRequestThread/
-  //     handoffThread) — needs OAuth + REST client
   //   - LLM (runStackedAction) — needs provider wiring (multi-phase commit/push/PR)
   //   - detached worktree (createDetachedWorktree) — niche variant of
   //     worktreeCreate; deferred
   //   - push channel (subscribeActionProgress) — T6c-future push delivery
-  //   (NOTE: `git.summarizeDiff` was served in T6c-13 — LLM-backed one-shot.)
-  "git.resolvePullRequest",
+  //   (NOTE: `git.summarizeDiff` was served in T6c-13 — LLM-backed one-shot.
+  //   `git.githubRepository` + `git.resolvePullRequest` + `git.handoffThread`
+  //   + `git.preparePullRequestThread` were UNSERVED until T6c-14; they are
+  //   NOW SERVED via the gh-CLI-backed GitHub-API ops — see SERVED_RPC.)
   "git.runStackedAction",
-  "git.githubRepository",
-  "git.handoffThread",
-  "git.preparePullRequestThread",
   "git.createDetachedWorktree",
   "git.subscribeActionProgress",
 

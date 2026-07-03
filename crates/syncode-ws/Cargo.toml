@@ -22,6 +22,9 @@ syncode-provider = { workspace = true }
 # `stash_apply`; fetch uses `Remote::download`; init uses `Repository::init`.
 # Same version pin as syncode-git (workspace `git2 = "0.20"`).
 git2 = { workspace = true }
+# `which` is used by the T6c-14 GitHub-API handlers to check whether the `gh`
+# / `git` CLI is on PATH before spawning it (matches syncode-git's pattern).
+which = "7"
 async-trait = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }

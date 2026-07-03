@@ -321,6 +321,15 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   // conflict resolution.
   "git.summarizeDiff": "git/summarize-diff",
   "server.generateThreadRecap": "server/generate-thread-recap",
+
+  // ─── T6c-14: GitHub-API ops (gh-CLI-backed) ──────────────────────────
+  // Four PR-handoff RPCs the vendored MCode UI calls. The backend shells out
+  // to the user's `gh` CLI (authed via `gh auth login`). Entries appended at
+  // the END to ease parallel-merge conflict resolution.
+  "git.githubRepository": "git/github-repository",
+  "git.resolvePullRequest": "git/resolve-pull-request",
+  "git.handoffThread": "git/handoff-thread",
+  "git.preparePullRequestThread": "git/prepare-pull-request-thread",
 };
 
 /**
