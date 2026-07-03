@@ -8,10 +8,12 @@
  *
  * ## Two registries
  *
- * 1. **`SERVED_RPC`** — the 19 methods `syncode-ws::rpc::dispatch_method`
- *    actually handles (plus `ping` + `rpc/listMethods`), each carrying concrete
- *    `Request`/`Result` types from the ts-rs-generated DTOs in
- *    `../types/*`. Calling these succeeds at runtime (T5 wires the transport).
+ * 1. **`SERVED_RPC`** — the methods `syncode-ws::rpc::dispatch_method`
+ *    actually handles (system + project + thread + turn + shell/snapshot +
+ *    git + server + terminal + auth + push; plus `ping` + `rpc/listMethods`),
+ *    each carrying concrete `Request`/`Result` types from the ts-rs-generated
+ *    DTOs in `../types/*` and the Tier-3 domain types. Calling these succeeds
+ *    at runtime (T5 wires the transport).
  *
  * 2. **`UNSERVED_RPC`** — the ~60 MCode RPC methods Syncode does NOT serve
  *    (git ops, terminal, server-meta, provider-discovery, automation, …).
@@ -82,6 +84,11 @@ import type {
   ServerConfig,
   ServerSettings,
 } from "./tier3/server";
+// Terminal Tier-3 result type (T6c-5 terminal PTY RPC exposure). The backend
+// `crates/syncode-ws/src/rpc.rs` `handle_terminal_*` handlers reuse
+// `syncode-terminal::SessionManager` and map its `SessionInfo` into the MCode
+// `TerminalSessionSnapshot` shape — see `frontend/src/contracts/tier3/terminal.ts`.
+import type { TerminalSessionSnapshot } from "./tier3/terminal";
 import type { WsWelcomePayload } from "./tier3/ws";
 
 // Minimal git input shapes for the served slash dispatch keys. The MCode UI
@@ -174,8 +181,84 @@ interface ServerSubscribeStubResult {
   note?: string;
 }
 
+// ─── Terminal PTY input/result shapes (T6c-5) ──────────────────────────
+//
+// `TerminalSessionSnapshot` is imported from Tier-3 `terminal.ts` (the
+// canonical MCode shape). The input shapes mirror the camelCase keys the
+// backend reads in `handle_terminal_*` (`terminalId`/`sessionId`, `cwd`,
+// `command`, `cols`/`rows`, `data`, `sequence`). The backend accepts both
+// `terminalId` (MCode convention) and `sessionId` (legacy tauri shape) as
+// the session key — `terminalId` wins when both are present.
+//
+// `terminal.env` (sent by `projectTerminalRunner` for project-script
+// terminals) is declared optional but NOT applied by the backend today
+// (syncode-terminal's `PtyHandle::spawn` doesn't accept per-session env —
+// documented gap; the PTY inherits the server process env).
+
+interface TerminalOpenInput {
+  terminalId?: string;
+  sessionId?: string;
+  threadId?: string;
+  cwd?: string;
+  command?: string;
+  args?: readonly string[];
+  env?: Readonly<Record<string, string>>;
+  cols?: number;
+  rows?: number;
+}
+interface TerminalWriteInput {
+  terminalId?: string;
+  sessionId?: string;
+  data: string;
+}
+interface TerminalResizeInput {
+  terminalId?: string;
+  sessionId?: string;
+  cols?: number;
+  rows?: number;
+}
+interface TerminalCloseInput {
+  terminalId?: string;
+  sessionId?: string;
+}
+interface TerminalAckOutputInput {
+  terminalId?: string;
+  sessionId?: string;
+  sequence?: number;
+  seq?: number;
+  ackedBytes?: number;
+}
+interface TerminalClearInput {
+  terminalId?: string;
+  sessionId?: string;
+}
+interface TerminalRestartInput {
+  terminalId?: string;
+  sessionId?: string;
+  cwd?: string;
+  command?: string;
+  cols?: number;
+  rows?: number;
+}
+interface TerminalCloseResult {
+  ok: boolean;
+}
+interface TerminalClearResult {
+  ok: boolean;
+}
+interface TerminalListResult {
+  sessions: readonly TerminalSessionSnapshot[];
+}
+// subscribeEvents is a stub (pull-based SessionManager — no push delivery).
+interface TerminalSubscribeStubResult {
+  subscribed: boolean;
+  method: string;
+  channel: string;
+  note?: string;
+}
+
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 32 entries (T6c-4 adds 9 server.* read/subscribe RPCs) ──
+// ─── SERVED_RPC — 41 entries (T6c-4 adds 9 server.*, T6c-5 adds 9 terminal.*) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -339,6 +422,63 @@ export const SERVED_RPC = {
     result: null as unknown as ServerSubscribeStubResult,
   },
 
+  // ─── Terminal PTY (syncode-terminal-backed, T6c-5) ───────────────────
+  // The cloned MCode UI's Terminal panel + project-script runner call these
+  // `terminal.*` RPCs. The transport remaps the MCode dot-strings
+  // (`terminal.open`, `terminal.write`, `terminal.resize`, `terminal.close`,
+  // `terminal.ackOutput`, `terminal.list`, `terminal.clear`,
+  // `terminal.restart`, `terminal.subscribeEvents`) onto these slash keys
+  // (see `MCODE_TO_SERVED` in `wsTransport.ts`). The backend
+  // `crates/syncode-ws/src/rpc.rs` `handle_terminal_*` handlers reuse
+  // `syncode-terminal::SessionManager` and map `SessionInfo` into the MCode
+  // `TerminalSessionSnapshot` shape.
+  //
+  // Known gaps (documented in `handle_terminal_*`):
+  //   - `terminal.env` (project-script runtime env) is NOT applied — the PTY
+  //     inherits the server process env (syncode-terminal's spawn has no
+  //     per-session env hook). Documented gap.
+  //   - `terminal.subscribeEvents` is a stub (pull-based SessionManager — no
+  //     push delivery). Real output push requires a per-session reader task —
+  //     T6c-future.
+  //   - `exitCode`/`exitSignal`/`history` in the snapshot are null/empty
+  //     (syncode-terminal doesn't track exit codes or scrollback).
+  "terminal/create": {
+    request: null as unknown as TerminalOpenInput,
+    result: null as unknown as TerminalSessionSnapshot,
+  },
+  "terminal/write": {
+    request: null as unknown as TerminalWriteInput,
+    result: null as unknown as null,
+  },
+  "terminal/resize": {
+    request: null as unknown as TerminalResizeInput,
+    result: null as unknown as null,
+  },
+  "terminal/close": {
+    request: null as unknown as TerminalCloseInput,
+    result: null as unknown as TerminalCloseResult,
+  },
+  "terminal/ack": {
+    request: null as unknown as TerminalAckOutputInput,
+    result: null as unknown as null,
+  },
+  "terminal/list": {
+    request: null as unknown as null,
+    result: null as unknown as TerminalListResult,
+  },
+  "terminal/clear": {
+    request: null as unknown as TerminalClearInput,
+    result: null as unknown as TerminalClearResult,
+  },
+  "terminal/restart": {
+    request: null as unknown as TerminalRestartInput,
+    result: null as unknown as TerminalSessionSnapshot,
+  },
+  "terminal/subscribe-events": {
+    request: null as unknown as null,
+    result: null as unknown as TerminalSubscribeStubResult,
+  },
+
   // ─── Auth ────────────────────────────────────────────────────────────
   "auth/bootstrap": {
     request: null as unknown as AuthBootstrapParams,
@@ -436,15 +576,14 @@ export const UNSERVED_RPC = [
   "git.removeWorktree",
   "git.subscribeActionProgress",
 
-  // ─── Terminal (crate exists, no RPC exposure) — ~8 ───────────────────
-  "terminal.open",
-  "terminal.write",
-  "terminal.resize",
-  "terminal.close",
-  "terminal.kill",
-  "terminal.list",
-  "terminal.subscribe",
-  "terminal.unsubscribe",
+  // ─── Terminal (CORE ops SERVED in T6c-5, advanced deferred) ──────────
+  // The core Terminal panel ops (open/new, write, resize, close/kill, ack,
+  // list, clear, restart, subscribeEvents) are SERVED — see SERVED_RPC. The
+  // backend reuses `syncode-terminal::SessionManager`. The pane-layout ops
+  // below (split/toggle/…) are UI-internal and never reach the backend; they
+  // stay client-side. No terminal.* RPCs remain unserved at the transport
+  // layer — this section is intentionally empty (kept as a marker for the
+  // domain).
 
   // ─── Server meta — read-side SERVED in T6c-4, write-side deferred ────
   // The core read RPCs (`server.getConfig`, `server.getSettings`,

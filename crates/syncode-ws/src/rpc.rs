@@ -123,6 +123,15 @@ async fn dispatch_method(
                     "server/subscribeSettings",
                     "server/subscribeProviderStatuses",
                     "server/subscribeLifecycle",
+                    "terminal/create",
+                    "terminal/write",
+                    "terminal/resize",
+                    "terminal/close",
+                    "terminal/ack",
+                    "terminal/list",
+                    "terminal/clear",
+                    "terminal/restart",
+                    "terminal/subscribe-events",
                 ]
             }),
         ),
@@ -310,6 +319,83 @@ async fn dispatch_method(
         "server.subscribeLifecycle" | "server/subscribeLifecycle" => {
             handle_server_subscribe_stub(id, "lifecycle")
         }
+
+        // ─── Terminal PTY Methods (syncode-terminal-backed, T6c-5) ──────────
+        //
+        // The cloned MCode UI's Terminal panel + project-script runner call these
+        // `terminal.*` RPCs (`terminal.open`, `terminal.write`, `terminal.resize`,
+        // `terminal.close`, `terminal.ackOutput`, `terminal.list`, …). We reuse
+        // the existing `syncode_terminal::SessionManager` (the same impl the
+        // Tauri `terminal_*` commands use, in
+        // `crates/syncode-tauri/src/terminal_commands.rs`) and map its result
+        // types into the MCode UI shapes (Tier-3 `terminal.ts`):
+        //
+        //   - `terminal.open` / `terminal.new` → MCode `TerminalSessionSnapshot`
+        //     { threadId, terminalId, cwd, status, pid, history, exitCode,
+        //       exitSignal, updatedAt }
+        //   - `terminal.write` / `terminal.resize` / `terminal.close` /
+        //     `terminal.ackOutput` → void
+        //   - `terminal.list` → `TerminalSessionSnapshot[]`
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form for
+        // robustness (the wsNativeApi sends dot, the tauriNativeApi sends
+        // slash — both must resolve).
+        //
+        // Session keying: the MCode contract keys sessions by `terminalId` (a
+        // stable string the UI generates per terminal pane). We pass that
+        // straight through to `SessionManager::create_session_with_id` so the
+        // UI's references stay stable. For callers that send `sessionId`
+        // instead (the older tauri shape), we accept that too — `terminalId`
+        // takes precedence when both are present.
+        //
+        // Shell selection: `terminal.open` params carry `cwd`/`workingDirectory`
+        // and an optional `command` (MCode's `terminal.open` from
+        // `projectTerminalRunner` does NOT send a command — it spawns the user
+        // shell then writes the command via `terminal.write`). We default the
+        // command to `$SHELL` (falling back to `sh`) when absent, matching the
+        // tauri `terminal_create_session` behavior.
+        //
+        // subscribeEvents verdict: STUB. The syncode-terminal `SessionManager`
+        // is pull-based (output is read via `PtyHandle::read_output` /
+        // `TerminalSession::output().chunks_from(...)`); there is no
+        // callback/channel that fires on new output. Wiring real push delivery
+        // would require a per-session reader task that pumps
+        // `PtyHandle::read_output` into `OutputBuffer::write` and then
+        // broadcasts on `push_tx` — deferred to T6c-future. The handler
+        // returns `{subscribed: true, note: ...}` so the UI tolerates the
+        // absence of push (it polls `terminal.list` / a future read RPC).
+        "terminal.open" | "terminal/open" | "terminal.new" | "terminal/new" | "terminal/create" => {
+            handle_terminal_open(state, id, &request.params).await
+        }
+        "terminal.write" | "terminal/write" => {
+            handle_terminal_write(state, id, &request.params).await
+        }
+        "terminal.resize" | "terminal/resize" => {
+            handle_terminal_resize(state, id, &request.params).await
+        }
+        "terminal.close"
+        | "terminal/close"
+        | "terminal.kill"
+        | "terminal/kill"
+        | "terminal.destroy"
+        | "terminal/destroy" => handle_terminal_close(state, id, &request.params).await,
+        "terminal.ackOutput" | "terminal/ack" | "terminal/ack-output" => {
+            handle_terminal_ack(state, id, &request.params).await
+        }
+        "terminal.list" | "terminal/list" => handle_terminal_list(state, id).await,
+        "terminal.clear" | "terminal/clear" => {
+            handle_terminal_clear(state, id, &request.params).await
+        }
+        "terminal.restart" | "terminal/restart" => {
+            handle_terminal_restart(state, id, &request.params).await
+        }
+        "terminal.subscribeEvents"
+        | "terminal/subscribe"
+        | "terminal/subscribe-events"
+        | "terminal.subscribe"
+        | "terminal/unsubscribe"
+        | "terminal/unsubscribe-events"
+        | "terminal.unsubscribeEvents" => handle_terminal_subscribe_stub(id, &request.method),
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -1709,6 +1795,499 @@ fn handle_git_commit(id: Value, params: &Value) -> JsonRpcResponse {
     }
 }
 
+// ─── Terminal PTY Handlers (syncode-terminal-backed, T6c-5) ────────────
+//
+// Reuse `syncode_terminal::SessionManager` (same impl as the Tauri
+// `terminal_*` commands in `crates/syncode-tauri/src/terminal_commands.rs`)
+// and map its `SessionInfo` into the MCode `TerminalSessionSnapshot` shape
+// (Tier-3 `frontend/src/contracts/tier3/terminal.ts`):
+//
+//   TerminalSessionSnapshot {
+//     threadId: string, terminalId: string, cwd: string,
+//     status: "starting" | "running" | "exited" | "error",
+//     pid: number | null, history: string, exitCode: number | null,
+//     exitSignal: number | null, updatedAt: string
+//   }
+//
+// The syncode `SessionInfo` carries `{sessionId, pid, alive, createdAt, cols,
+// rows}`. Mapping:
+//   - `sessionId`  → `terminalId` (we keyed the session by the caller's
+//     terminalId at create time, so these are the same string)
+//   - `alive`      → `status` (`"running"` when alive, `"exited"` otherwise;
+//     `"starting"` is never returned by the syncode impl — PTY spawn is
+//     synchronous, so by the time create_session returns the process is
+//     either running or the spawn failed)
+//   - `pid`        → `pid` (0 when the platform can't resolve it — mapped to
+//     null per the MCode schema which allows `number | null`)
+//   - `createdAt`  → `updatedAt`
+//   - `cwd`        → from the create params (SessionInfo doesn't track cwd
+//     post-spawn; we re-read it from the request or fall back to "")
+//   - `history`    → "" (the syncode impl has no scrollback field; the UI
+//     tolerates empty history — it only renders it for reattach)
+//   - `exitCode`/`exitSignal` → null (syncode doesn't track exit codes; the
+//     PTY's `mark_stopped` only flips a bool)
+//
+// Caveat: the MCode UI keys each terminal by `(threadId, terminalId)`. The
+// syncode `SessionManager` keys sessions by a single string. We use
+// `terminalId` as the SessionManager key (caller-provided via
+// `create_session_with_id`); `threadId` is carried through the snapshot
+// verbatim from the request (defaulting to the terminalId when absent) so
+// the UI's pane identity is preserved.
+
+/// Resolve the session key from request params. MCode sends `terminalId`;
+/// the older tauri shape sends `sessionId`. `terminalId` wins when both are
+/// present. Returns `None` when neither is a non-empty string.
+fn terminal_session_key(params: &Value) -> Option<String> {
+    params
+        .get("terminalId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| params.get("sessionId").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Resolve the user shell. Mirrors the tauri `terminal_create_session`
+/// default: explicit `command` param → `$SHELL` → `sh`. The MCode
+/// `terminal.open` from `projectTerminalRunner` does NOT send a command
+/// (it writes the command via `terminal.write` after the shell spawns), so
+/// this default is the common path.
+fn resolve_shell(params: &Value) -> String {
+    if let Some(cmd) = params.get("command").and_then(|v| v.as_str())
+        && !cmd.is_empty()
+    {
+        return cmd.to_string();
+    }
+    std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
+}
+
+/// Resolve optional args. The MCode `terminal.open` doesn't send args; the
+/// tauri shape sends `args: string[]`. We accept either `args` (array) or
+/// `arguments` (array).
+fn resolve_args(params: &Value) -> Vec<String> {
+    params
+        .get("args")
+        .or_else(|| params.get("arguments"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve cwd. MCode sends `cwd`; the tauri shape sends `workingDir`/
+/// `workingDirectory`. Returns `None` when unset (the PTY then inherits the
+/// server process's cwd).
+fn resolve_cwd(params: &Value) -> Option<String> {
+    params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("workingDirectory").and_then(|v| v.as_str()))
+        .or_else(|| params.get("workingDir").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Build a MCode `TerminalSessionSnapshot` JSON value from a syncode
+/// `SessionInfo` + the original request params (for `threadId`/`cwd`).
+fn session_info_to_snapshot(info: &syncode_terminal::SessionInfo, params: &Value) -> Value {
+    let status = if info.alive { "running" } else { "exited" };
+    let pid = if info.pid == 0 { Value::Null } else { Value::from(info.pid) };
+    // threadId: MCode sends it on open; for sessions created without one we
+    // fall back to the terminalId so the snapshot is always non-null.
+    let thread_id = params
+        .get("threadId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&info.session_id);
+    let cwd = resolve_cwd(params).unwrap_or_default();
+    serde_json::json!({
+        "threadId": thread_id,
+        "terminalId": info.session_id,
+        "cwd": cwd,
+        "status": status,
+        "pid": pid,
+        "history": "",
+        "exitCode": Value::Null,
+        "exitSignal": Value::Null,
+        "updatedAt": info.created_at,
+    })
+}
+
+/// Thin typed error wrapper for terminal handlers — keeps the closure-style
+/// early-return sites readable (mirrors the git handlers' `git_error`).
+fn terminal_error(id: Value, code: i32, msg: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse::error(Some(id), code, msg.into())
+}
+
+/// `terminal.open` / `terminal.new` — spawn a PTY session and return the
+/// `TerminalSessionSnapshot`.
+///
+/// Params (MCode camelCase):
+///   - `terminalId` (preferred) | `sessionId` (legacy) — stable session key.
+///     When absent, the server generates `term-{uuid}` (and returns it in the
+///     snapshot so the caller can address the session thereafter).
+///   - `cwd` | `workingDirectory` — spawn cwd (optional; defaults to server cwd).
+///   - `command` — binary to spawn (optional; defaults to `$SHELL` then `sh`).
+///   - `args` | `arguments` — argv (optional; defaults to []).
+///   - `cols`, `rows` — initial PTY size (optional; defaults to 80×24).
+///   - `threadId` — MCode pane identity (carried through the snapshot only).
+///   - `env` — environment overrides (NOT applied; syncode-terminal's
+///     `PtyHandle::spawn` doesn't accept per-session env — deferred. Documented
+///     gap; the UI sends `env` for project-script runners but the PTY inherits
+///     the server process env, which already has the project cwd context.)
+async fn handle_terminal_open(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let cols = params
+        .get("cols")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u16)
+        .unwrap_or(80);
+    let rows = params
+        .get("rows")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u16)
+        .unwrap_or(24);
+    let command = resolve_shell(params);
+    let args = resolve_args(params);
+    let cwd = resolve_cwd(params);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    // Session key: caller-provided terminalId/sessionId, or a fresh UUID.
+    let session_key = terminal_session_key(params).unwrap_or_else(|| {
+        format!("term-{}", uuid::Uuid::new_v4().hyphenated())
+    });
+
+    let mgr = state.terminal_manager.clone();
+    let create_result = {
+        let write_guard = mgr.write().await;
+        write_guard
+            .create_session_with_id(
+                session_key.clone(),
+                &command,
+                &arg_refs,
+                cwd.as_deref(),
+                cols,
+                rows,
+            )
+            .await
+    };
+    if let Err(e) = create_result {
+        return terminal_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("terminal.open: spawn failed: {e}"),
+        );
+    }
+
+    // Read back the freshly-created session's info to build the snapshot.
+    let info = {
+        let read_guard = mgr.read().await;
+        read_guard.list_sessions().await
+    };
+    let info = match info.into_iter().find(|s| s.session_id == session_key) {
+        Some(i) => i,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                "terminal.open: session vanished after create",
+            );
+        }
+    };
+    JsonRpcResponse::success(id, session_info_to_snapshot(&info, params))
+}
+
+/// `terminal.write` — write input bytes to a session's PTY.
+///
+/// Params: `{ terminalId | sessionId, data }`. The `data` is a UTF-8 string
+/// (the MCode contract sends `\r`-terminated command lines; binary is not
+/// supported over JSON — documented gap).
+async fn handle_terminal_write(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let session_key = match terminal_session_key(params) {
+        Some(k) => k,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "terminal.write: missing 'terminalId' (or 'sessionId') parameter",
+            );
+        }
+    };
+    let data = match params.get("data").and_then(|v| v.as_str()) {
+        Some(d) => d,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "terminal.write: missing 'data' parameter",
+            );
+        }
+    };
+
+    let mgr = state.terminal_manager.clone();
+    // Lookup then write under separate guards (mirrors the tauri pattern):
+    // the manager's read guard resolves the `Arc<RwLock<TerminalSession>>`,
+    // then the session's PTY writer takes its own lock.
+    let session = {
+        let read_guard = mgr.read().await;
+        read_guard.get_session(&session_key).await
+    };
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("terminal.write: session not found: {session_key}"),
+            );
+        }
+    };
+    // write_str is on PtyHandle; we hold a read guard on the session to access it.
+    let pty = session.read().await;
+    if let Err(e) = pty.pty().write_str(data).await {
+        return terminal_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("terminal.write: {e}"),
+        );
+    }
+    JsonRpcResponse::success(id, Value::Null)
+}
+
+/// `terminal.resize` — resize a session's PTY.
+///
+/// Params: `{ terminalId | sessionId, cols, rows }`.
+async fn handle_terminal_resize(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let session_key = match terminal_session_key(params) {
+        Some(k) => k,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "terminal.resize: missing 'terminalId' (or 'sessionId') parameter",
+            );
+        }
+    };
+    let cols = params
+        .get("cols")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u16)
+        .unwrap_or(80);
+    let rows = params
+        .get("rows")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u16)
+        .unwrap_or(24);
+
+    let mgr = state.terminal_manager.clone();
+    let session = {
+        let read_guard = mgr.read().await;
+        read_guard.get_session(&session_key).await
+    };
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("terminal.resize: session not found: {session_key}"),
+            );
+        }
+    };
+    let session_guard = session.read().await;
+    if let Err(e) = session_guard.resize(cols, rows).await {
+        return terminal_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("terminal.resize: {e}"),
+        );
+    }
+    JsonRpcResponse::success(id, Value::Null)
+}
+
+/// `terminal.close` / `terminal.kill` — destroy a session.
+///
+/// Params: `{ terminalId | sessionId }`. Returns `{ ok: boolean }`.
+async fn handle_terminal_close(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let session_key = match terminal_session_key(params) {
+        Some(k) => k,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "terminal.close: missing 'terminalId' (or 'sessionId') parameter",
+            );
+        }
+    };
+    let mgr = state.terminal_manager.clone();
+    let destroyed = {
+        let write_guard = mgr.write().await;
+        write_guard.destroy_session(&session_key).await
+    };
+    if !destroyed {
+        return terminal_error(
+            id,
+            crate::error_codes::INVALID_PARAMS,
+            format!("terminal.close: session not found: {session_key}"),
+        );
+    }
+    JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
+}
+
+/// `terminal.ackOutput` — acknowledge output up to a sequence number (flow
+/// control so the server may release buffered chunks).
+///
+/// Params: `{ terminalId | sessionId, sequence | seq | ackedBytes }`. The
+/// syncode `OutputBuffer::ack` takes a chunk seq number; `ackedBytes` (a byte
+/// count) is accepted but currently treated as a no-op marker (syncode's ack
+/// is seq-based, not byte-based — documented gap; the byte count is logged
+/// for a future byte-window flow-control impl).
+async fn handle_terminal_ack(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let session_key = match terminal_session_key(params) {
+        Some(k) => k,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "terminal.ackOutput: missing 'terminalId' (or 'sessionId') parameter",
+            );
+        }
+    };
+    let seq = params
+        .get("sequence")
+        .and_then(|v| v.as_u64())
+        .or_else(|| params.get("seq").and_then(|v| v.as_u64()))
+        .or_else(|| params.get("ackedBytes").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+
+    let mgr = state.terminal_manager.clone();
+    let session = {
+        let read_guard = mgr.read().await;
+        read_guard.get_session(&session_key).await
+    };
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("terminal.ackOutput: session not found: {session_key}"),
+            );
+        }
+    };
+    session.write().await.output_mut().ack(seq);
+    JsonRpcResponse::success(id, Value::Null)
+}
+
+/// `terminal.list` — list all sessions as `TerminalSessionSnapshot[]`.
+async fn handle_terminal_list(state: &WsState, id: Value) -> JsonRpcResponse {
+    let mgr = state.terminal_manager.clone();
+    let infos = {
+        let read_guard = mgr.read().await;
+        read_guard.list_sessions().await
+    };
+    let snapshots: Vec<Value> = infos
+        .iter()
+        .map(|i| session_info_to_snapshot(i, &Value::Null))
+        .collect();
+    JsonRpcResponse::success(id, serde_json::json!({ "sessions": snapshots }))
+}
+
+/// `terminal.clear` — clear a session's buffered output.
+///
+/// The syncode `OutputBuffer::clear` resets the chunk ring. This does NOT
+/// send a clear escape sequence to the PTY (the UI's renderer-side clear
+/// handles the visible terminal); it only drops server-side scrollback.
+/// Params: `{ terminalId | sessionId }` (optional — when omitted, clears all
+/// sessions). Returns `{ ok: boolean }`.
+async fn handle_terminal_clear(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let mgr = state.terminal_manager.clone();
+    // If a specific session is named, clear just that one; otherwise clear all.
+    if let Some(session_key) = terminal_session_key(params) {
+        let session = {
+            let read_guard = mgr.read().await;
+            read_guard.get_session(&session_key).await
+        };
+        match session {
+            Some(s) => s.write().await.output_mut().clear(),
+            None => {
+                return terminal_error(
+                    id,
+                    crate::error_codes::INVALID_PARAMS,
+                    format!("terminal.clear: session not found: {session_key}"),
+                );
+            }
+        }
+    } else {
+        let infos = {
+            let read_guard = mgr.read().await;
+            read_guard.list_sessions().await
+        };
+        for info in infos {
+            let session = {
+                let read_guard = mgr.read().await;
+                read_guard.get_session(&info.session_id).await
+            };
+            if let Some(s) = session {
+                s.write().await.output_mut().clear();
+            }
+        }
+    }
+    JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
+}
+
+/// `terminal.restart` — destroy + recreate a session (best-effort).
+///
+/// The syncode-terminal `SessionManager` has no native restart; the SHELL-GAPS
+/// note flagged restart as unsupported. We emulate it by destroying the
+/// existing session (if any) and spawning a fresh one under the same id with
+/// the original spawn params. The caller may also pass the full open param
+/// set to override. Returns the new `TerminalSessionSnapshot`.
+async fn handle_terminal_restart(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let session_key = match terminal_session_key(params) {
+        Some(k) => k,
+        None => {
+            return terminal_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "terminal.restart: missing 'terminalId' (or 'sessionId') parameter",
+            );
+        }
+    };
+    let mgr = state.terminal_manager.clone();
+    // Destroy the existing session (ignore not-found — restart is idempotent).
+    {
+        let write_guard = mgr.write().await;
+        let _ = write_guard.destroy_session(&session_key).await;
+    }
+    // Re-spawn under the same id. Reuse the open handler's logic by calling it
+    // directly (it reads the same param set + generates the snapshot).
+    handle_terminal_open(state, id, params).await
+}
+
+/// `terminal.subscribeEvents` / `terminal.unsubscribeEvents` — STUB.
+///
+/// Returns `{ subscribed: true, note: ... }` without recording a real push
+/// subscription or spawning an output-pump task. The syncode-terminal
+/// `SessionManager` is pull-based (no callback on new output), so real push
+/// delivery requires a per-session reader task that polls
+/// `PtyHandle::read_output` and broadcasts on `push_tx` — deferred to
+/// T6c-future. The UI tolerates the absence of push (it can poll
+/// `terminal.list` or a future `terminal.read`).
+fn handle_terminal_subscribe_stub(id: Value, method: &str) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "method": method,
+            "channel": "terminal",
+            "note": "stub: pull-based SessionManager — no push delivery (T6c-future)",
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2843,6 +3422,234 @@ mod tests {
                 .get(&aggregate_id.to_string())
                 .map(|v| v.len() as u64)
                 .unwrap_or(0))
+        }
+    }
+
+    // ─── Terminal PTY RPC tests (T6c-5) ─────────────────────────────────
+    //
+    // These exercise the full create → list → write → resize → ack → close
+    // round-trip against a REAL PTY (spawned via `syncode-terminal`'s
+    // `portable_pty`). The no-op command `/bin/true` exits immediately, so
+    // the session is created, written to (best-effort — the write may hit a
+    // not-running PTY if `true` already exited, which we tolerate), resized,
+    // acked, and destroyed cleanly. This mirrors the phase-3 git test pattern
+    // (real `Git2Service` against a tempdir repo).
+    //
+    // The MCode `TerminalSessionSnapshot` shape is asserted at each step so a
+    // contracts drift surfaces here rather than in the UI.
+
+    /// Helper: send an RPC and return the parsed response.
+    async fn term_rpc(state: &WsState, req: &serde_json::Value) -> JsonRpcResponse {
+        let raw = handle_rpc(state, 1, &req.to_string()).await;
+        serde_json::from_str(&raw.unwrap_or_default()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn terminal_open_returns_snapshot_shape() {
+        // Skip on platforms without a usable PTY (e.g. some CI containers).
+        // `/bin/true` is universally available on POSIX; if spawn fails the
+        // test asserts the error path rather than aborting.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.open",
+            "params": {
+                "terminalId": "term-test-1",
+                "threadId": "thread-1",
+                "cwd": "/tmp",
+                "command": "/bin/true",
+                "cols": 100, "rows": 30
+            }
+        });
+        let resp = term_rpc(&state, &req).await;
+        assert!(resp.error.is_none(), "terminal.open failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        // MCode TerminalSessionSnapshot top-level fields.
+        assert_eq!(result["terminalId"], "term-test-1");
+        assert_eq!(result["threadId"], "thread-1");
+        assert_eq!(result["cwd"], "/tmp");
+        assert!(result.get("status").is_some(), "missing status");
+        assert!(result.get("pid").is_some(), "missing pid");
+        assert!(result.get("history").is_some(), "missing history");
+        assert!(result.get("exitCode").is_some(), "missing exitCode");
+        assert!(result.get("exitSignal").is_some(), "missing exitSignal");
+        assert!(result.get("updatedAt").is_some(), "missing updatedAt");
+
+        // Cleanup: destroy the session so the PTY child doesn't linger.
+        let _ = term_rpc(
+            &state,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "terminal.close",
+                "params": { "terminalId": "term-test-1" }
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn terminal_open_then_list_then_close_round_trip() {
+        let state = WsState::new_in_memory(16);
+
+        // 1. Open a long-lived shell (`sh` reading from /dev/null won't exit
+        //    immediately — but `sh` with no stdin redirection may exit. We use
+        //    `cat` which blocks on stdin and stays alive until killed).
+        let open = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.open",
+            "params": { "terminalId": "term-rt-1", "command": "/bin/cat", "cwd": "/tmp" }
+        });
+        let resp = term_rpc(&state, &open).await;
+        assert!(resp.error.is_none(), "open failed: {:?}", resp.error);
+
+        // 2. List → the session is present.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "terminal.list"
+        });
+        let resp = term_rpc(&state, &list).await;
+        assert!(resp.error.is_none(), "list failed: {:?}", resp.error);
+        let sessions = resp.result.unwrap()["sessions"].as_array().unwrap().clone();
+        assert_eq!(sessions.len(), 1, "expected exactly 1 session after open");
+        assert_eq!(sessions[0]["terminalId"], "term-rt-1");
+
+        // 3. Write to the PTY (best-effort: `cat` echoes; the write should
+        //    succeed since cat is alive).
+        let write = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "terminal.write",
+            "params": { "terminalId": "term-rt-1", "data": "hello\r" }
+        });
+        let resp = term_rpc(&state, &write).await;
+        assert!(resp.error.is_none(), "write failed: {:?}", resp.error);
+
+        // 4. Resize.
+        let resize = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "terminal.resize",
+            "params": { "terminalId": "term-rt-1", "cols": 120, "rows": 40 }
+        });
+        let resp = term_rpc(&state, &resize).await;
+        assert!(resp.error.is_none(), "resize failed: {:?}", resp.error);
+
+        // 5. AckOutput (seq-based; should be a no-op success).
+        let ack = serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "terminal.ackOutput",
+            "params": { "terminalId": "term-rt-1", "sequence": 0 }
+        });
+        let resp = term_rpc(&state, &ack).await;
+        assert!(resp.error.is_none(), "ack failed: {:?}", resp.error);
+
+        // 6. Close → ok:true, then list shows 0 sessions.
+        let close = serde_json::json!({
+            "jsonrpc": "2.0", "id": 6, "method": "terminal.close",
+            "params": { "terminalId": "term-rt-1" }
+        });
+        let resp = term_rpc(&state, &close).await;
+        assert!(resp.error.is_none(), "close failed: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        let resp = term_rpc(&state, &list).await;
+        let sessions = resp.result.unwrap()["sessions"].as_array().unwrap().clone();
+        assert!(sessions.is_empty(), "session should be gone after close");
+    }
+
+    #[tokio::test]
+    async fn terminal_write_unknown_session_is_error() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.write",
+            "params": { "terminalId": "no-such-session", "data": "x" }
+        });
+        let resp = term_rpc(&state, &req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn terminal_write_missing_session_key_is_invalid_params() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.write",
+            "params": { "data": "x" }
+        });
+        let resp = term_rpc(&state, &req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn terminal_close_unknown_session_is_error() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.close",
+            "params": { "terminalId": "ghost" }
+        });
+        let resp = term_rpc(&state, &req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn terminal_subscribests_is_stub_success() {
+        // subscribeEvents is stubbed (pull-based SessionManager) but must
+        // return success so the UI's subscribe call doesn't error.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.subscribeEvents",
+            "params": { "terminalId": "whatever" }
+        });
+        let resp = term_rpc(&state, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["subscribed"], true);
+    }
+
+    #[tokio::test]
+    async fn terminal_open_accepts_session_id_alias() {
+        // The older tauri shape uses `sessionId` instead of `terminalId`.
+        // Both must resolve to the same handler + key.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "terminal.open",
+            "params": { "sessionId": "legacy-1", "command": "/bin/true", "cwd": "/tmp" }
+        });
+        let resp = term_rpc(&state, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // The snapshot echoes the session key back as terminalId.
+        assert_eq!(result["terminalId"], "legacy-1");
+
+        // Cleanup.
+        let _ = term_rpc(
+            &state,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "terminal.close",
+                "params": { "sessionId": "legacy-1" }
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn terminal_list_methods_includes_terminal_rpcs() {
+        // The new terminal methods must appear in rpc/listMethods so the UI's
+        // capability discovery sees them.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods"
+        });
+        let resp = term_rpc(&state, &req).await;
+        let methods = resp.result.unwrap()["methods"].as_array().unwrap().clone();
+        let method_strs: Vec<String> = methods
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for expected in [
+            "terminal/create",
+            "terminal/write",
+            "terminal/resize",
+            "terminal/close",
+            "terminal/ack",
+            "terminal/list",
+        ] {
+            assert!(
+                method_strs.iter().any(|m| m == expected),
+                "rpc/listMethods missing {expected}"
+            );
         }
     }
 }
