@@ -121,6 +121,15 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   // MCode `ping`-style server-meta calls are not served; only the literal
   // `ping` and `rpc/listMethods` slash methods are. The served slash names
   // are passed through directly by the dispatcher below.
+
+  // Orchestration bootstrap (T6c-2): the cloned MCode UI calls these
+  // dot-strings (`wsNativeApi.ts` getShellSnapshot / getSnapshot). They map to
+  // the served `shell/getSnapshot` / `snapshot/get` handlers, which compose
+  // the read_store into the UI's snapshot projection shapes. Without this
+  // remap the calls would fall through to the `null` branch and be
+  // client-stubbed with MethodNotFound — the shell would never load real data.
+  "orchestration.getShellSnapshot": "shell/getSnapshot",
+  "orchestration.getSnapshot": "snapshot/get",
 };
 
 /**

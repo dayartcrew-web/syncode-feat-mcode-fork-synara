@@ -42,6 +42,8 @@ import type { ListMethodsResult } from "../types/ListMethodsResult";
 import type { PingResult } from "../types/PingResult";
 import type { ProjectCreateParams } from "../types/ProjectCreateParams";
 import type { ProjectGetParams } from "../types/ProjectGetParams";
+import type { OrchestrationReadModel } from "./tier3/orchestration";
+import type { OrchestrationShellSnapshot } from "./tier3/orchestration";
 import type { ProjectListResult } from "../types/ProjectListResult";
 import type { ProjectSummary } from "../types/ProjectSummary";
 import type { ThreadCreateParams } from "../types/ThreadCreateParams";
@@ -66,7 +68,7 @@ import type { PushUnsubscribeParams } from "../types/PushUnsubscribeParams";
 import type { PushUnsubscribeResult } from "../types/PushUnsubscribeResult";
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 21 entries (19 in dispatch + ping + rpc/listMethods) ──
+// ─── SERVED_RPC — 23 entries (21 in dispatch + ping + rpc/listMethods) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -128,6 +130,21 @@ export const SERVED_RPC = {
   "turn/complete": {
     request: null as unknown as TurnCompleteParams,
     result: null as unknown as TurnSummary,
+  },
+
+  // ─── Shell / Snapshot (read-model bootstrap) ─────────────────────────
+  // The cloned MCode UI bootstraps its sidebar from `getShellSnapshot`. The
+  // transport remaps the MCode dot-strings (`orchestration.getShellSnapshot`,
+  // `orchestration.getSnapshot`) onto these slash methods. Results use the
+  // UI's own projection types — the backend composes the read_store into the
+  // matching field shapes (title/workspaceRoot/modelSelection/session/…).
+  "shell/getSnapshot": {
+    request: null as unknown as null,
+    result: null as unknown as OrchestrationShellSnapshot,
+  },
+  "snapshot/get": {
+    request: null as unknown as null,
+    result: null as unknown as OrchestrationReadModel,
   },
 
   // ─── Auth ────────────────────────────────────────────────────────────
