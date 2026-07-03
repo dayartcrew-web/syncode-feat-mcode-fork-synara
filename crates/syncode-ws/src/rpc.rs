@@ -123,6 +123,11 @@ async fn dispatch_method(
                     "server/subscribeSettings",
                     "server/subscribeProviderStatuses",
                     "server/subscribeLifecycle",
+                    "server/set-config",
+                    "server/update-settings",
+                    "server/refresh-providers",
+                    "server/update-provider",
+                    "server/upsert-keybinding",
                     "terminal/create",
                     "terminal/write",
                     "terminal/resize",
@@ -355,6 +360,38 @@ async fn dispatch_method(
         // stub: no push delivery (T6c-future)
         "server.subscribeLifecycle" | "server/subscribeLifecycle" => {
             handle_server_subscribe_stub(id, "lifecycle")
+        }
+
+        // ─── Server write-side stubs (T6c-10) ───────────────────────────────
+        //
+        // The cloned MCode UI persists user edits via these `server.*` write
+        // RPCs (`setConfig`, `updateSettings`, `refreshProviders`,
+        // `updateProvider`, `upsertKeybinding`). Syncode has no native
+        // settings/keybindings persistence layer, so each handler is a STUB:
+        // it validates the params shape and echoes the default read-side
+        // payload. The UI's optimistic update is overwritten by the echoed
+        // default on the next read, converging to "no changes persisted".
+        // Dispatch accepts BOTH dot-name AND slash form (the wsNativeApi sends
+        // dot, the tauriNativeApi sends slash — both must resolve).
+        //
+        // stub: no persistence — echoes default ServerConfig.
+        "server.setConfig" | "server/set-config" => handle_server_set_config(state, id),
+        // stub: no persistence — echoes default ServerSettings.
+        "server.updateSettings" | "server/update-settings" => {
+            handle_server_update_settings(id)
+        }
+        // stub: no provider probe — empty `{ providers: [] }`.
+        "server.refreshProviders" | "server/refresh-providers" => {
+            handle_server_refresh_providers(id)
+        }
+        // stub: validates `provider` non-empty, returns `{ providers: [] }`.
+        "server.updateProvider" | "server/update-provider" => {
+            handle_server_update_provider(id, &request.params)
+        }
+        // stub: validates params is an object, returns
+        // `{ keybindings: [], issues: [] }`.
+        "server.upsertKeybinding" | "server/upsert-keybinding" => {
+            handle_server_upsert_keybinding(id, &request.params)
         }
 
         // ─── Terminal PTY Methods (syncode-terminal-backed, T6c-5) ──────────
@@ -1501,7 +1538,11 @@ fn server_home_dir() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// `server.getConfig` — return a minimal valid `ServerConfig` shape.
+/// Build the minimal valid `ServerConfig` shape (MCode
+/// `frontend/src/contracts/tier3/server.ts`). Shared by the read-side
+/// `server.getConfig` handler and the write-side `server.setConfig` stub —
+/// both return the same default-config payload (the stub accepts the write
+/// but performs no persistence, mirroring the read view).
 ///
 /// Top-level fields returned:
 /// - `cwd`: process cwd (non-empty)
@@ -1516,7 +1557,7 @@ fn server_home_dir() -> Option<String> {
 ///   (`unsafe-no-auth` | `remote-reachable` | ...). Not part of the MCode
 ///   `ServerConfig` schema, but harmless as an extra field and useful for
 ///   the UI to display the active auth policy.
-fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse {
+fn build_default_server_config(state: &WsState) -> Value {
     let cwd = server_cwd();
     let home = server_home_dir();
     let worktrees_dir = format!("{}/.synara/worktrees", cwd.trim_end_matches('/'));
@@ -1548,17 +1589,24 @@ fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse {
     if let (Some(h), Some(obj)) = (home, cfg.as_object_mut()) {
         obj.insert("homeDir".into(), Value::String(h));
     }
-    JsonRpcResponse::success(id, cfg)
+    cfg
 }
 
-/// `server.getSettings` — return the MCode `DEFAULT_SERVER_SETTINGS` literal.
-/// The vendored UI references this exact shape for state initialization (see
-/// `frontend/src/contracts/tier3/server.ts` `DEFAULT_SERVER_SETTINGS`). Each
-/// provider is enabled with its conventional binary name and empty
+/// `server.getConfig` — return a minimal valid `ServerConfig` shape (see
+/// `build_default_server_config`).
+fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, build_default_server_config(state))
+}
+
+/// Build the MCode `DEFAULT_SERVER_SETTINGS` literal. Shared by the read-side
+/// `server.getSettings` handler and the write-side `server.updateSettings`
+/// stub. The vendored UI references this exact shape for state initialization
+/// (see `frontend/src/contracts/tier3/server.ts` `DEFAULT_SERVER_SETTINGS`).
+/// Each provider is enabled with its conventional binary name and empty
 /// `customModels`; the text-generation model selection defaults to
 /// `{ provider: "codex", model: "gpt-5.4-mini" }` (matches the literal).
-fn handle_server_get_settings(id: Value) -> JsonRpcResponse {
-    let settings = serde_json::json!({
+fn build_default_server_settings() -> Value {
+    serde_json::json!({
         "enableAssistantStreaming": false,
         "defaultThreadEnvMode": "local",
         "addProjectBaseDirectory": "",
@@ -1580,8 +1628,13 @@ fn handle_server_get_settings(id: Value) -> JsonRpcResponse {
             "pi": { "enabled": true, "binaryPath": "pi", "customModels": [], "agentDir": "" },
         },
         "skills": { "disabled": [] },
-    });
-    JsonRpcResponse::success(id, settings)
+    })
+}
+
+/// `server.getSettings` — return the MCode `DEFAULT_SERVER_SETTINGS` literal
+/// (see `build_default_server_settings`).
+fn handle_server_get_settings(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, build_default_server_settings())
 }
 
 /// `server.welcome` — return a `WsWelcomePayload` shape. MCode emits this as a
@@ -1688,6 +1741,109 @@ fn handle_server_subscribe_stub(id: Value, channel: &str) -> JsonRpcResponse {
             "channel": format!("server.{}", channel),
             "note": "stub: no push delivery (T6c-future)",
         }),
+    )
+}
+
+// ─── Server write-side stub Handlers (T6c-10) ────────────────────
+//
+// The cloned MCode UI persists user edits via these `server.*` write RPCs:
+//   - `server.setConfig`        → overwrite the ServerConfig (Settings panel
+//     "Apply"/"Reset" actions). MCode itself has no `setConfig` (the UI uses
+//     `updateSettings` / per-provider update RPCs), but the contracts layer
+//     and the task spec list it; we accept the write and echo the default
+//     config so the UI's optimistic state converges back to the read view.
+//   - `server.updateSettings`   → patch `ServerSettings` (Settings panel
+//     save). MCode accepts a `ServerSettingsPatch` and returns the full
+//     resolved `ServerSettings`.
+//   - `server.refreshProviders` → re-probe provider availability. MCode
+//     returns a `ServerProviderStatusesUpdatedPayload` (`{ providers: [] }`).
+//   - `server.updateProvider`   → re-probe a single provider. MCode accepts
+//     `{ provider: ProviderKind }` and returns the same payload shape.
+//   - `server.upsertKeybinding` → add/update a keybinding rule. MCode accepts
+//     a `KeybindingRule` and returns `{ keybindings, issues }`.
+//
+// Syncode has no native settings/keybindings persistence layer (no settings
+// file write path, no keybindings resolver), so each handler is a STUB: it
+// validates the params shape (rejecting malformed input with -32602) and
+// returns the default read-side payload — `build_default_server_config()` /
+// `build_default_server_settings()` / `{ providers: [] }` / `{ keybindings:
+// [], issues: [] }`. The UI's optimistic update is overwritten by the echoed
+// default on the next read, converging to "no changes persisted" — which
+// matches the documented gap (no settings subsystem).
+//
+// Ack shapes (mirrors of the read side):
+//   - setConfig           → ServerConfig (build_default_server_config)
+//   - updateSettings      → ServerSettings (build_default_server_settings)
+//   - refreshProviders    → { providers: [] }
+//   - updateProvider      → { providers: [] }   (validates `provider` non-empty)
+//   - upsertKeybinding    → { keybindings: [], issues: [] }
+//                          (validates `params` is a JSON object)
+
+/// `server.setConfig` — accept the write, echo the default `ServerConfig`.
+/// Performs no persistence (stub). Mirrors `server.getConfig` so the UI's
+/// post-save re-read converges to the unchanged default.
+fn handle_server_set_config(state: &WsState, id: Value) -> JsonRpcResponse {
+    // stub: no persistence — echo the default config.
+    JsonRpcResponse::success(id, build_default_server_config(state))
+}
+
+/// `server.updateSettings` — accept the patch, echo the default
+/// `ServerSettings`. Performs no persistence (stub). Mirrors
+/// `server.getSettings` so the UI's post-save re-read converges to the
+/// unchanged default.
+fn handle_server_update_settings(id: Value) -> JsonRpcResponse {
+    // stub: no persistence — echo the default settings.
+    JsonRpcResponse::success(id, build_default_server_settings())
+}
+
+/// `server.refreshProviders` — re-probe all providers. Returns an empty
+/// `ServerProviderStatusesUpdatedPayload` (`{ providers: [] }`) since syncode
+/// has no provider-availability probe. Performs no real refresh (stub).
+fn handle_server_refresh_providers(id: Value) -> JsonRpcResponse {
+    // stub: no provider probe — empty statuses payload.
+    JsonRpcResponse::success(id, serde_json::json!({ "providers": [] }))
+}
+
+/// `server.updateProvider` — re-probe a single provider. Validates that
+/// `params.provider` is present and non-empty (MCode `ServerProviderUpdateInput`
+/// is `{ provider: ProviderKind }`), then returns the empty
+/// `ServerProviderStatusesUpdatedPayload`. Performs no real refresh (stub).
+fn handle_server_update_provider(id: Value, params: &Value) -> JsonRpcResponse {
+    // Validate `provider` is a non-empty string (MCode ProviderKind union).
+    // Missing/empty/wrong-type → InvalidParams (-32602) so the UI surfaces a
+    // typed validation error rather than a silent no-op.
+    let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    if provider.trim().is_empty() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "Invalid params: 'provider' must be a non-empty string",
+        );
+    }
+    // stub: no provider probe — empty statuses payload.
+    JsonRpcResponse::success(id, serde_json::json!({ "providers": [] }))
+}
+
+/// `server.upsertKeybinding` — add/update a keybinding rule. Validates that
+/// `params` is a JSON object (MCode `ServerUpsertKeybindingInput` is a
+/// `KeybindingRule` struct), then returns the default upsert result shape
+/// (`{ keybindings: [], issues: [] }`). Performs no persistence (stub) —
+/// syncode has no keybindings resolver, so the echoed keybindings list is
+/// empty and the UI's optimistic add is dropped on the next re-read.
+fn handle_server_upsert_keybinding(id: Value, params: &Value) -> JsonRpcResponse {
+    // Validate `params` is an object (KeybindingRule is a struct). Non-object
+    // (null, array, primitive) → InvalidParams (-32602).
+    if !params.is_object() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "Invalid params: 'upsertKeybinding' expects a keybinding-rule object",
+        );
+    }
+    // stub: no keybindings resolver — empty result.
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "keybindings": [], "issues": [] }),
     )
 }
 
@@ -5622,6 +5778,11 @@ mod tests {
             "server/subscribeSettings",
             "server/subscribeProviderStatuses",
             "server/subscribeLifecycle",
+            "server/set-config",
+            "server/update-settings",
+            "server/refresh-providers",
+            "server/update-provider",
+            "server/upsert-keybinding",
         ] {
             assert!(
                 method_strs.contains(&expected),
@@ -5629,6 +5790,143 @@ mod tests {
                 expected
             );
         }
+    }
+
+    // ─── Server write-side stub tests (T6c-10) ──────────────────────────
+    //
+    // Each write-side RPC must:
+    //   1. Dispatch BOTH dot-form and slash-form to the same handler.
+    //   2. Return the documented ack shape (echo of the read-side default).
+    //   3. Validate params where required (`updateProvider`, `upsertKeybinding`)
+    //      — rejecting malformed input with -32602 InvalidParams.
+
+    #[tokio::test]
+    async fn server_set_config_echoes_default_config_shape() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.setConfig", "server/set-config"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "cwd": "/tmp/x" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            // Echoed default ServerConfig: required top-level fields present,
+            // arrays empty (no persistence — write is a stub).
+            assert!(!result["cwd"].as_str().unwrap_or("").is_empty(), "{}: cwd", method);
+            assert!(result["providers"].as_array().unwrap().is_empty(), "{}: providers", method);
+            assert!(result["issues"].as_array().unwrap().is_empty(), "{}: issues", method);
+        }
+    }
+
+    #[tokio::test]
+    async fn server_update_settings_echoes_default_settings_shape() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.updateSettings", "server/update-settings"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "enableAssistantStreaming": true }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            // Echoed default ServerSettings: provider set present with all 8 keys.
+            assert_eq!(result["defaultThreadEnvMode"], "local", "{}: env mode", method);
+            let providers = &result["providers"];
+            assert_eq!(providers["codex"]["binaryPath"], "codex", "{}: codex", method);
+            assert_eq!(providers["pi"]["binaryPath"], "pi", "{}: pi", method);
+            // The patch is NOT applied — the stub echoes the unchanged default.
+            assert_eq!(
+                result["enableAssistantStreaming"],
+                serde_json::Value::Bool(false),
+                "{}: stub must not persist the patch",
+                method
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn server_refresh_providers_returns_empty_status_payload() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.refreshProviders", "server/refresh-providers"] {
+            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            // ServerProviderStatusesUpdatedPayload: { providers: [] }.
+            assert!(result["providers"].is_array(), "{}: providers missing", method);
+            assert!(result["providers"].as_array().unwrap().is_empty(), "{}: not empty", method);
+        }
+    }
+
+    #[tokio::test]
+    async fn server_update_provider_validates_provider_param() {
+        let state = WsState::new_in_memory(16);
+
+        // Happy path: `provider` non-empty → success with `{ providers: [] }`.
+        for method in ["server.updateProvider", "server/update-provider"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "provider": "codex" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert!(result["providers"].as_array().unwrap().is_empty(), "{}: not empty", method);
+        }
+
+        // Validation: missing `provider` → InvalidParams (-32602).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "server/update-provider", "params": {}
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "missing provider should reject");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+
+        // Validation: empty string `provider` → InvalidParams (-32602).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "server/update-provider",
+            "params": { "provider": "  " }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "whitespace provider should reject");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn server_upsert_keybinding_validates_params_object() {
+        let state = WsState::new_in_memory(16);
+
+        // Happy path: params is a keybinding-rule object → success with the
+        // default empty result shape `{ keybindings: [], issues: [] }`.
+        for method in ["server.upsertKeybinding", "server/upsert-keybinding"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "key": "mod+k", "command": "test" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert!(result["keybindings"].as_array().unwrap().is_empty(), "{}: keybindings", method);
+            assert!(result["issues"].as_array().unwrap().is_empty(), "{}: issues", method);
+        }
+
+        // Validation: params null → InvalidParams (-32602).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "server/upsert-keybinding", "params": null
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "null params should reject");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+
+        // Validation: params array → InvalidParams (-32602).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "server/upsert-keybinding",
+            "params": [{ "key": "mod+k" }]
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "array params should reject");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
     }
 
     // ── Test-only in-memory EventRepository ────────────────────────────
