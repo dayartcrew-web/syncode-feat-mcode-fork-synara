@@ -6,6 +6,13 @@
 //! - `git` — git operations
 //! - `terminal` — terminal output
 //! - `automation` — automation status
+//! - `server.configUpdated` / `server.settingsUpdated` /
+//!   `server.providerStatusesUpdated` — server-settings push (T6c-18).
+//!   These are MCode-style dot-names (see
+//!   `frontend/src/contracts/tier3/ws.ts` `WS_CHANNELS`): the wire frame is
+//!   `push/server.configUpdated`, sliced back to `server.configUpdated` by
+//!   the transport. The `server.subscribe*` RPCs register a connection on
+//!   these channels so the push delivery loop forwards the matching writes.
 //! - `*` — wildcard: subscribe to all channels
 
 use std::collections::HashSet;
@@ -18,6 +25,20 @@ pub const CHANNEL_GIT: &str = "git";
 pub const CHANNEL_TERMINAL: &str = "terminal";
 pub const CHANNEL_AUTOMATION: &str = "automation";
 
+// ─── Server-settings push channels (T6c-18) ──────────────────────────
+//
+// MCode's `WS_CHANNELS` (`frontend/src/contracts/tier3/ws.ts`) names these
+// as `server.configUpdated` / `server.settingsUpdated` /
+// `server.providerStatusesUpdated`. The wire `push/<channel>` method embeds
+// the dot-name verbatim; the frontend transport slices off the `push/`
+// prefix and dispatches by the resulting channel string. These constants
+// must therefore use the dot-name so the push delivery loop's
+// `sub.is_subscribed(channel)` check matches the channel a write handler
+// broadcasts on.
+pub const CHANNEL_SERVER_CONFIG_UPDATED: &str = "server.configUpdated";
+pub const CHANNEL_SERVER_SETTINGS_UPDATED: &str = "server.settingsUpdated";
+pub const CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED: &str = "server.providerStatusesUpdated";
+
 /// All valid channel names
 pub const ALL_CHANNELS: &[&str] = &[
     CHANNEL_ALL,
@@ -26,6 +47,9 @@ pub const ALL_CHANNELS: &[&str] = &[
     CHANNEL_GIT,
     CHANNEL_TERMINAL,
     CHANNEL_AUTOMATION,
+    CHANNEL_SERVER_CONFIG_UPDATED,
+    CHANNEL_SERVER_SETTINGS_UPDATED,
+    CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
 ];
 
 /// Subscription manager for a single connection

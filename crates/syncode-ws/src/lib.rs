@@ -9,6 +9,7 @@ pub mod llm;
 pub mod push;
 pub mod rpc;
 pub mod server;
+pub mod settings;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};
@@ -126,6 +127,15 @@ pub struct WsState {
     /// Starts empty in `new_in_memory` (tests register a `MockLlmAdapter`);
     /// production deployments populate it from config (claude/codex/gemini/…).
     pub provider_registry: Arc<RwLock<syncode_provider::registry::ProviderRegistry>>,
+    /// In-memory server settings (T6c-18). Persists `ServerConfig` +
+    /// `ServerSettings` edits for the server session — the `server.*` write
+    /// RPCs (`setConfig`/`updateSettings`/`patchSettings`/`updateProvider`/
+    /// `upsertKeybinding`) merge into this store, the read RPCs (`getConfig`/
+    /// `getSettings`) return from it, and writes broadcast push events on
+    /// `push_tx` so subscribed connections receive the new state. Syncode has
+    /// no on-disk settings file; the store is rebuilt from defaults on each
+    /// server start (the documented gap: edits don't survive a restart).
+    pub settings: Arc<RwLock<crate::settings::ServerSettingsState>>,
 }
 
 impl WsState {
@@ -164,6 +174,20 @@ impl WsState {
         let orchestrator = orchestrator.with_event_publisher(Arc::new(publisher));
 
         let read_store = orchestrator.read_model_ref();
+        // Capture the auth mode as a kebab-case string for the in-memory
+        // server-config store (the `authMode` field is surfaced to the UI as
+        // an informational extra field — it's not part of the MCode schema,
+        // but harmless and useful). `AuthMode` serializes kebab-case
+        // (`unsafe-no-auth` | `remote-reachable` | …); fall back to the
+        // no-auth default if serialization ever fails (defensive — shouldn't
+        // happen for a unit enum).
+        let auth_mode = serde_json::to_value(auth_config.mode)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "unsafe-no-auth".to_string());
+        let settings = Arc::new(RwLock::new(
+            crate::settings::ServerSettingsState::new(auth_mode),
+        ));
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             push_tx,
@@ -184,6 +208,7 @@ impl WsState {
             provider_registry: Arc::new(RwLock::new(
                 syncode_provider::registry::ProviderRegistry::new(),
             )),
+            settings,
         }
     }
 
