@@ -70,10 +70,12 @@ import type { PushUnsubscribeParams } from "../types/PushUnsubscribeParams";
 import type { PushUnsubscribeResult } from "../types/PushUnsubscribeResult";
 // Git Tier-3 result/input types (T6c-3 git RPC exposure). The backend maps
 // syncode-git's types into these MCode shapes — see `crates/syncode-ws/src/rpc.rs`
-// `handle_git_*` handlers.
+// `handle_git_*` handlers. T6c-9 adds `GitStashInfoResult` for the advanced
+// stash RPCs.
 import type {
   GitBranch,
   GitReadWorkingTreeDiffInput,
+  GitStashInfoResult,
   GitStatusResult,
 } from "./tier3/git";
 // Server Tier-3 result/input types (T6c-4 server config RPC exposure). The
@@ -177,6 +179,128 @@ interface GitListBranchesResult {
   branches: readonly GitBranch[];
   isRepo: boolean;
   hasOriginRemote: boolean;
+}
+
+// ─── Git Advanced input/result shapes (T6c-9 stash/network/worktree/init) ─
+//
+// The backend `crates/syncode-ws/src/rpc.rs` `handle_git_*` advanced handlers
+// return these shapes. `GitStashInfoResult` is the canonical Tier-3 type
+// (vendored from MCode); the other result shapes are local best-effort
+// interfaces mirroring what the handlers emit (the backend serializes
+// syncode-git/git2 types directly + small ad-hoc JSON objects). The UI
+// surface that consumes these is the GitPanel's stash/worktree/network menus;
+// they read the top-level fields declared here.
+
+interface GitStashCreateInput {
+  cwd: string;
+  message?: string;
+}
+interface GitStashCreateResult {
+  ok: boolean;
+  /** null when there was nothing to stash. */
+  oid: string | null;
+  /** `stash@{N}` form, or null when nothing to stash. */
+  stashRef: string | null;
+  reason?: string;
+}
+interface GitStashIndexInput {
+  cwd: string;
+  /** stash index (0 = most recent). Defaults to 0 when omitted. */
+  index?: number;
+}
+interface GitStashEntry {
+  index: number;
+  message: string;
+  oid: string;
+  /** `stash@{N}` form. */
+  stashRef: string;
+}
+interface GitStashListResult {
+  stashes: readonly GitStashEntry[];
+}
+interface GitStashActionResult {
+  ok: boolean;
+}
+interface GitStashAndCheckoutResult {
+  /** Always false — this op is stubbed (use stashCreate + checkout). */
+  ok: boolean;
+  reason?: string;
+}
+interface GitNetworkInput {
+  cwd: string;
+  remote?: string;
+  branch?: string;
+  /** fetch-only: optional single refspec. */
+  refspec?: string;
+}
+interface GitFetchResult {
+  ok: boolean;
+  remote: string;
+  refspec: string;
+}
+// pull/push results reuse the syncode-git PushResult/PullResult wire shape:
+// `{ status: "pushed" | "skipped_up_to_date", branch, upstream_branch,
+//   set_upstream }` (push) / `{ status: "pulled" | "skipped_up_to_date",
+//   branch, upstream_branch }` (pull). Declared as local interfaces so the
+// served registry is type-safe without importing syncode-git's Rust types.
+interface GitPushResult {
+  status: "pushed" | "skipped_up_to_date";
+  branch: string;
+  upstream_branch: string;
+  set_upstream?: boolean;
+}
+interface GitPullResult {
+  status: "pulled" | "skipped_up_to_date";
+  branch: string;
+  upstream_branch: string;
+}
+interface GitInitInput {
+  /** Path to initialize (need not yet be a repo). */
+  cwd: string;
+}
+interface GitInitResult {
+  ok: boolean;
+  path: string;
+}
+interface GitRemoveIndexLockResult {
+  ok: boolean;
+  /** true when a lock file was removed, false when none was present. */
+  removed: boolean;
+  path: string;
+}
+interface GitWorktreeListResult {
+  worktrees: readonly {
+    path: string;
+    branch: string | null;
+    is_main: boolean;
+    is_locked: boolean;
+  }[];
+}
+interface GitWorktreeCreateInput {
+  cwd: string;
+  branch: string;
+  /** Optional filesystem path for the new worktree. */
+  path?: string;
+  /** Create the branch at HEAD if it doesn't exist (default true). */
+  createBranch?: boolean;
+}
+interface GitWorktreeCreateResult {
+  worktree: {
+    path: string;
+    branch: string;
+    is_main: boolean;
+    is_locked: boolean;
+  };
+}
+interface GitWorktreeRemoveInput {
+  cwd: string;
+  /** Worktree name (= branch it was created for). */
+  branch: string;
+  /** Force-remove a dirty/locked worktree. */
+  force?: boolean;
+}
+interface GitWorktreeRemoveResult {
+  ok: boolean;
 }
 
 // ─── Server config/env/diagnostics/subscribe shapes (T6c-4) ────────────
@@ -717,6 +841,80 @@ export const SERVED_RPC = {
     request: null as unknown as StatsGetProfileStatsInput,
     result: null as unknown as ProfileTokenStats,
   },
+
+  // ─── Git Advanced (stash / network / worktree / init, T6c-9) ─────────
+  // The cloned MCode GitPanel calls these `git.*` dot-strings beyond the
+  // core phase-3 surface (status/diff/branches/branch-CRUD/stage/commit).
+  // The transport remaps the MCode dot-strings onto these slash keys (see
+  // MCODE_TO_SERVED in `wsTransport.ts`). The backend
+  // `crates/syncode-ws/src/rpc.rs` `handle_git_*` advanced handlers use
+  // git2 directly (stash, fetch, init, removeIndexLock, worktree list/create/
+  // remove) and delegate to syncode-git's `Git2Service::{push,pull}` for the
+  // network ops. `git.stashAndCheckout` is a stub (`{ ok:false }` — the UI
+  // composes stash+checkout itself).
+  //
+  // Known gaps (documented in `handle_git_*`):
+  //   - `git.fetch` surfaces auth failures as generic INTERNAL_ERROR (no
+  //     auth-class classification; the CLI-backed push/pull paths classify
+  //     AuthenticationRequired distinctly).
+  //   - `git.stashAndCheckout` is a stub (compose via stashCreate + checkout).
+  //   - `git.pull` is --ff-only (no merge commits; fails on divergence).
+  "git/stash-list": {
+    request: null as unknown as GitCwdInput,
+    result: null as unknown as GitStashListResult,
+  },
+  "git/stash-create": {
+    request: null as unknown as GitStashCreateInput,
+    result: null as unknown as GitStashCreateResult,
+  },
+  "git/stash-apply": {
+    request: null as unknown as GitStashIndexInput,
+    result: null as unknown as GitStashActionResult,
+  },
+  "git/stash-drop": {
+    request: null as unknown as GitStashIndexInput,
+    result: null as unknown as GitStashActionResult,
+  },
+  "git/stash-info": {
+    request: null as unknown as GitStashIndexInput,
+    result: null as unknown as GitStashInfoResult,
+  },
+  "git/stash-and-checkout": {
+    request: null as unknown as GitNetworkInput,
+    result: null as unknown as GitStashAndCheckoutResult,
+  },
+  "git/fetch": {
+    request: null as unknown as GitNetworkInput,
+    result: null as unknown as GitFetchResult,
+  },
+  "git/pull": {
+    request: null as unknown as GitNetworkInput,
+    result: null as unknown as GitPullResult,
+  },
+  "git/push": {
+    request: null as unknown as GitNetworkInput,
+    result: null as unknown as GitPushResult,
+  },
+  "git/init": {
+    request: null as unknown as GitInitInput,
+    result: null as unknown as GitInitResult,
+  },
+  "git/remove-index-lock": {
+    request: null as unknown as GitCwdInput,
+    result: null as unknown as GitRemoveIndexLockResult,
+  },
+  "git/worktree-list": {
+    request: null as unknown as GitCwdInput,
+    result: null as unknown as GitWorktreeListResult,
+  },
+  "git/worktree-create": {
+    request: null as unknown as GitWorktreeCreateInput,
+    result: null as unknown as GitWorktreeCreateResult,
+  },
+  "git/worktree-remove": {
+    request: null as unknown as GitWorktreeRemoveInput,
+    result: null as unknown as GitWorktreeRemoveResult,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -768,33 +966,27 @@ export type ServedRpcResult<M extends ServedRpcMethod> =
  * The full typed request/response shapes for these are Tier 3 (deferred).
  */
 export const UNSERVED_RPC = [
-  // ─── Git (crate exists; CORE ops SERVED in T6c-3, advanced deferred) ──
+  // ─── Git (core ops SERVED in T6c-3; stash/network/worktree/init SERVED in T6c-9) ──
   // The core GitPanel ops (status/diff/listBranches/createBranch/checkout/
   // branchDelete/stage/unstage/commit) are SERVED — see SERVED_RPC. The
-  // advanced ops below remain unserved:
-  "git.worktreeList",
-  "git.worktreeCreate",
-  "git.worktreeRemove",
-  "git.stashList",
-  "git.stashCreate",
-  "git.stashApply",
-  "git.stashDrop",
-  "git.pull",
-  "git.push",
-  "git.fetch",
+  // advanced ops (stash/network/worktree/init/removeIndexLock) are NOW ALSO
+  // SERVED as of T6c-9 (mapped via MCODE_TO_SERVED to `git/stash-*`,
+  // `git/fetch`, `git/pull`, `git/push`, `git/worktree-*`, `git/init`,
+  // `git/remove-index-lock`). The ops below remain unserved — they need
+  // services syncode does not have:
+  //   - GitHub API (resolvePullRequest/githubRepository/preparePullRequestThread/
+  //     handoffThread) — needs OAuth + REST client
+  //   - LLM (runStackedAction/summarizeDiff) — needs provider wiring
+  //   - detached worktree (createDetachedWorktree) — niche variant of
+  //     worktreeCreate; deferred
+  //   - push channel (subscribeActionProgress) — T6c-future push delivery
   "git.resolvePullRequest",
   "git.runStackedAction",
   "git.summarizeDiff",
   "git.githubRepository",
   "git.handoffThread",
   "git.preparePullRequestThread",
-  "git.stashAndCheckout",
-  "git.stashInfo",
-  "git.removeIndexLock",
-  "git.init",
-  "git.createWorktree",
   "git.createDetachedWorktree",
-  "git.removeWorktree",
   "git.subscribeActionProgress",
 
   // ─── Terminal (CORE ops SERVED in T6c-5, advanced deferred) ──────────

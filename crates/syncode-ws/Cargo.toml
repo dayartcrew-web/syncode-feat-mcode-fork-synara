@@ -16,6 +16,12 @@ syncode-git = { path = "../syncode-git" }
 syncode-terminal = { workspace = true }
 syncode-automation = { workspace = true }
 syncode-provider = { workspace = true }
+# git2 is used directly for the advanced git RPCs (stash, fetch, init,
+# removeIndexLock) that syncode-git's `GitService` trait does not expose.
+# Stash uses `Repository::stash_save2`/`stash_foreach`/`stash_drop`/
+# `stash_apply`; fetch uses `Remote::download`; init uses `Repository::init`.
+# Same version pin as syncode-git (workspace `git2 = "0.20"`).
+git2 = { workspace = true }
 async-trait = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }

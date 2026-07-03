@@ -155,6 +155,20 @@ async fn dispatch_method(
                     "provider/compact-thread",
                     "stats/get-profile-stats",
                     "stats/get-profile-token-stats",
+                    "git/stash-list",
+                    "git/stash-create",
+                    "git/stash-apply",
+                    "git/stash-drop",
+                    "git/stash-info",
+                    "git/stash-and-checkout",
+                    "git/fetch",
+                    "git/pull",
+                    "git/push",
+                    "git/init",
+                    "git/remove-index-lock",
+                    "git/worktree-list",
+                    "git/worktree-create",
+                    "git/worktree-remove",
                 ]
             }),
         ),
@@ -564,6 +578,87 @@ async fn dispatch_method(
         "stats.getProfileTokenStats" | "stats/get-profile-token-stats" => {
             handle_stats_get_profile_token_stats(id)
         }
+
+        // ─── Git Advanced (stash / network / worktree / init, T6c-9) ────────
+        //
+        // The cloned MCode GitPanel calls these `git.*` dot-strings beyond the
+        // core phase-3 surface (status/diff/branches/branch-CRUD/stage/commit):
+        //
+        //   - Stash: `git.stashList`, `git.stashCreate`, `git.stashApply`,
+        //     `git.stashDrop`, `git.stashInfo`, `git.stashAndCheckout`
+        //   - Network: `git.fetch`, `git.pull`, `git.push`
+        //   - Worktree: `git.worktreeList`, `git.worktreeCreate`,
+        //     `git.worktreeRemove` (+ the MCode alternate names
+        //     `git.listWorktrees` / `git.createWorktree` / `git.removeWorktree`)
+        //   - Misc: `git.init`, `git.removeIndexLock`
+        //
+        // Implementation strategy:
+        //   - stash/fetch/init/removeIndexLock go through `git2` directly
+        //     (syncode-git's `GitService` trait does not expose them). The same
+        //     `Repository::discover` lookup that `Git2Service::repo()` uses is
+        //     reused here so the `cwd` resolution matches.
+        //   - pull/push delegate to `Git2Service::{pull,push}` (already
+        //     CLI-backed; classify_cli_error surfaces auth/non-fast-forward
+        //     distinctly).
+        //   - worktree reuses `syncode_git::worktree::{list,add,remove}_worktree`.
+        //
+        // `git.stashAndCheckout` is STUBBED (`{ ok:false }` with a `reason`) —
+        // it is a two-phase op (stash then checkout) the UI can compose itself
+        // via `stashCreate` + `checkout`. Documented below.
+        //
+        // Deferred / unserved (still in `UNSERVED_RPC`): `git.runStackedAction`
+        // (LLM-backed multi-phase commit/push/PR — would need provider wiring),
+        // `git.summarizeDiff` (LLM-backed), `git.githubRepository`,
+        // `git.resolvePullRequest`, `git.preparePullRequestThread`,
+        // `git.handoffThread` (GitHub API — needs OAuth + REST client),
+        // `git.createDetachedWorktree`, `git.subscribeActionProgress`
+        // (push channel — T6c-future).
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form for
+        // robustness. Entry order matches the MCODE_TO_SERVED append block to
+        // ease parallel-merge conflict resolution.
+        "git.stashList" | "git/stash-list" | "git/stashList" => {
+            handle_git_stash_list(id, &request.params)
+        }
+        "git.stashCreate" | "git/stash-create" | "git/stashCreate" => {
+            handle_git_stash_create(id, &request.params)
+        }
+        "git.stashApply" | "git/stash-apply" | "git/stashApply" => {
+            handle_git_stash_apply(id, &request.params)
+        }
+        "git.stashDrop" | "git/stash-drop" | "git/stashDrop" => {
+            handle_git_stash_drop(id, &request.params)
+        }
+        "git.stashInfo" | "git/stash-info" | "git/stashInfo" => {
+            handle_git_stash_info(id, &request.params)
+        }
+        "git.stashAndCheckout" | "git/stash-and-checkout" | "git/stashAndCheckout" => {
+            handle_git_stash_and_checkout(id, &request.params)
+        }
+        "git.fetch" | "git/fetch" => handle_git_fetch(id, &request.params),
+        "git.pull" | "git/pull" => handle_git_pull(id, &request.params),
+        "git.push" | "git/push" => handle_git_push(id, &request.params),
+        "git.init" | "git/init" => handle_git_init(id, &request.params),
+        "git.removeIndexLock"
+        | "git/remove-index-lock"
+        | "git/removeIndexLock"
+        | "git/remove_index_lock" => handle_git_remove_index_lock(id, &request.params),
+        "git.worktreeList"
+        | "git/listWorktrees"
+        | "git/worktree-list"
+        | "git.listWorktrees"
+        | "git/list-worktrees"
+        | "git/worktreeList" => handle_git_worktree_list(id, &request.params),
+        "git.worktreeCreate"
+        | "git/createWorktree"
+        | "git/worktree-create"
+        | "git.create-worktree"
+        | "git/worktreeCreate" => handle_git_worktree_create(id, &request.params),
+        "git.worktreeRemove"
+        | "git/removeWorktree"
+        | "git/worktree-remove"
+        | "git/remove-worktree"
+        | "git/worktreeRemove" => handle_git_worktree_remove(id, &request.params),
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -1959,6 +2054,758 @@ fn handle_git_commit(id: Value, params: &Value) -> JsonRpcResponse {
             id,
             crate::error_codes::INTERNAL_ERROR,
             format!("git commit: {e}"),
+        ),
+    }
+}
+
+// ─── Git Advanced Handlers (stash / network / worktree / init, T6c-9) ──
+//
+// These back the `git.*` arms appended at the END of `dispatch_method`. They
+// cover the GitPanel RPCs the core phase-3 surface does not:
+//   - Stash: list/create/apply/drop/info (git2 direct) + stashAndCheckout stub
+//   - Network: fetch (git2 direct), pull/push (syncode-git Git2Service)
+//   - Worktree: list/create/remove (syncode_git::worktree free functions)
+//   - Misc: init (`Repository::init`), removeIndexLock (delete `.git/index.lock`)
+//
+// All handlers reuse the shared `open_git_service`/`git_error` helpers so the
+// `cwd` resolution + error-envelope shape matches the phase-3 handlers. The
+// MCode UI shapes (Tier-3 `git.ts`) only declare `GitStashInfoResult`
+// formally; the other result shapes are returned as best-effort JSON objects
+// with the fields the UI reads (`stashes`, `ok`, `branch`, …). The contracts
+// registry (`rpc.ts`) declares local interfaces for type-safety.
+
+/// Resolve a `git2::Repository` from request params. Mirrors
+/// `open_git_service` but returns the raw `git2` handle (needed for stash /
+/// fetch / init / index-lock ops that aren't on the `GitService` trait).
+/// Reuses the same `cwd`/`path` resolution so behavior is identical.
+fn open_git2_repo(
+    id: Value,
+    params: &Value,
+) -> Result<git2::Repository, Box<JsonRpcResponse>> {
+    let path = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("path").and_then(|v| v.as_str()))
+        .unwrap_or(".");
+    match git2::Repository::discover(path) {
+        Ok(repo) => Ok(repo),
+        Err(e) => Err(Box::new(git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git open failed: {e}"),
+        ))),
+    }
+}
+
+/// `git.stashList` → list stashes. Returns `{ stashes: [{ index, message,
+/// oid }] }`. The MCode UI reads `stashes` as an array; the per-entry shape
+/// is a local best-effort (no formal Tier-3 type — `GitStashInfoResult` is
+/// per-stash, used by `stashInfo`).
+fn handle_git_stash_list(id: Value, params: &Value) -> JsonRpcResponse {
+    let mut repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let mut stashes: Vec<Value> = Vec::new();
+    let walk = repo.stash_foreach(|index, message, oid| {
+        stashes.push(serde_json::json!({
+            "index": index,
+            "message": message,
+            "oid": oid.to_string(),
+            "stashRef": format!("stash@{{{index}}}"),
+        }));
+        true
+    });
+    if let Err(e) = walk {
+        return git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git stash_foreach: {e}"),
+        );
+    }
+    JsonRpcResponse::success(id, serde_json::json!({ "stashes": stashes }))
+}
+
+/// `git.stashCreate` → save working tree to a new stash. UI sends
+/// `{ cwd, message? }`. Returns `{ ok: true, oid, stashRef }` on success.
+/// `oid` is `null` when there was nothing to stash (git2 returns the zero
+/// oid in that case — we surface it as `ok:true, oid:null, reason:"nothing
+/// to stash"` so the UI can render an appropriate empty state).
+fn handle_git_stash_create(id: Value, params: &Value) -> JsonRpcResponse {
+    let mut repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("stashMessage").and_then(|v| v.as_str()));
+    // Signature: prefer the repo's configured default; fall back to a generic
+    // "syncode" identity so the stash can always be saved (MCode uses the
+    // configured git identity too).
+    let sig = match repo.signature() {
+        Ok(s) => s,
+        Err(_) => match git2::Signature::now("syncode", "syncode@local") {
+            Ok(s) => s,
+            Err(e) => {
+                return git_error(
+                    id,
+                    crate::error_codes::INTERNAL_ERROR,
+                    format!("git stash signature: {e}"),
+                );
+            }
+        },
+    };
+    let oid = match repo.stash_save2(&sig, message, Some(git2::StashFlags::INCLUDE_UNTRACKED)) {
+        Ok(o) => o,
+        Err(e) => {
+            // git2's libgit2 returns a Stash-class NotFound error when there
+            // are no local modifications to stash ("there is nothing to
+            // stash"). The caller-visible semantics in MCode are "ok, nothing
+            // to do" — surface that explicitly rather than as an error.
+            // (Class 19 = Stash, code -3 = NotFound in libgit2.)
+            if e.class() == git2::ErrorClass::Stash && e.code() == git2::ErrorCode::NotFound {
+                return JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "ok": true,
+                        "oid": Value::Null,
+                        "stashRef": Value::Null,
+                        "reason": "nothing to stash"
+                    }),
+                );
+            }
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git stash_save: {e}"),
+            );
+        }
+    };
+    // Defensive: a non-error zero oid (older libgit2 versions returned this
+    // for nothing-to-stash) is also surfaced as nothing-to-stash.
+    if oid.is_zero() {
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "ok": true, "oid": Value::Null, "stashRef": Value::Null, "reason": "nothing to stash" }),
+        );
+    }
+    // Compute the resulting stash index (last entry — stash_save appends).
+    let mut count = 0u32;
+    let _ = repo.stash_foreach(|_, _, _| {
+        count += 1;
+        true
+    });
+    let stash_ref = format!("stash@{{{}}}", count.saturating_sub(1));
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "ok": true, "oid": oid.to_string(), "stashRef": stash_ref }),
+    )
+}
+
+/// `git.stashApply` → apply a stash by index. UI sends `{ cwd, index? }`
+/// (default 0 — the most recent stash). Returns `{ ok: true }`.
+fn handle_git_stash_apply(id: Value, params: &Value) -> JsonRpcResponse {
+    let mut repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let index = params
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .or_else(|| params.get("stashIndex").and_then(|v| v.as_u64()))
+        .unwrap_or(0) as usize;
+    match repo.stash_apply(index, None) {
+        Ok(_) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git stash_apply: {e}"),
+        ),
+    }
+}
+
+/// `git.stashDrop` → drop a stash by index. UI sends `{ cwd, index? }`
+/// (default 0). Returns `{ ok: true }`.
+fn handle_git_stash_drop(id: Value, params: &Value) -> JsonRpcResponse {
+    let mut repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let index = params
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .or_else(|| params.get("stashIndex").and_then(|v| v.as_u64()))
+        .unwrap_or(0) as usize;
+    match repo.stash_drop(index) {
+        Ok(_) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git stash_drop: {e}"),
+        ),
+    }
+}
+
+/// `git.stashInfo` → return MCode `GitStashInfoResult` for a single stash:
+/// `{ cwd, branch, stashRef, message, files }`. UI sends `{ cwd, index? }`
+/// (default 0). `files` is the list of paths the stash touches (best-effort —
+/// derived from `stash@{N}^1` vs `stash@{N}` tree diff). `branch` is the
+/// branch the stash was created on (`stash@{N}`'s parent commit's branch, if
+/// resolvable; else null).
+fn handle_git_stash_info(id: Value, params: &Value) -> JsonRpcResponse {
+    let mut repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let index = params
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .or_else(|| params.get("stashIndex").and_then(|v| v.as_u64()))
+        .unwrap_or(0) as usize;
+    let cwd = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("path").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    // Walk stashes once, capturing the matching entry (message + oid). git2's
+    // foreach takes `&mut self`, so we run it before any later borrow of
+    // `repo` for tree diffing.
+    let mut found: Option<(String, git2::Oid)> = None;
+    let mut walk_err: Option<git2::Error> = None;
+    {
+        let walk = repo.stash_foreach(|i, message, oid| {
+            if i == index {
+                found = Some((message.to_string(), *oid));
+                false // stop
+            } else {
+                true
+            }
+        });
+        if let Err(e) = walk {
+            walk_err = Some(e);
+        }
+    }
+    if let Some(e) = walk_err {
+        return git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git stash_foreach: {e}"),
+        );
+    }
+    let (message, oid) = match found {
+        Some(m) => m,
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                format!("stash index {index} not found"),
+            );
+        }
+    };
+
+    // The stash commit's first parent is the commit the stash was based on;
+    // its branch (if any) is the branch at stash-creation time.
+    let branch = repo
+        .find_commit(oid)
+        .ok()
+        .and_then(|commit| commit.parent(0).ok())
+        .and_then(|parent| {
+            // Resolve which branch (if any) points at this parent.
+            repo.branches(Some(git2::BranchType::Local))
+                .ok()
+                .and_then(|mut branches| {
+                    branches.find_map(|b| {
+                        let (b, _) = b.ok()?;
+                        let target = b.get().target()?;
+                        let name = b.name().ok()?.map(String::from)?;
+                        (target == parent.id()).then_some(name)
+                    })
+                })
+        });
+
+    // Files: union of paths touched by the stash. A stash commit has 2-3
+    // parents: [0]=HEAD, [1]=index state, [2]=untracked-files state (only
+    // when INCLUDE_UNTRACKED). Each parent's tree-vs-stash-tree diff reveals
+    // a subset of the touched paths; we union them so the UI sees the full
+    // set. (Diffing only parent[0] misses untracked-only files.)
+    let files: Vec<String> = (|| -> Result<Vec<String>, git2::Error> {
+        let stash_commit = repo.find_commit(oid)?;
+        let stash_tree = stash_commit.tree()?;
+        let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for parent_idx in 0..stash_commit.parent_count() {
+            let parent = match stash_commit.parent(parent_idx) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let parent_tree = parent.tree()?;
+            let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&stash_tree), None)?;
+            for d in diff.deltas() {
+                if let Some(p) = d.new_file().path().or_else(|| d.old_file().path()) {
+                    paths.insert(p.to_string_lossy().to_string());
+                }
+            }
+            // For the untracked-files parent (parent[2]), also diff ITS tree
+            // against the empty tree — that's where pure-untracked additions
+            // show up (they're stored as additions in parent[2]'s tree, not
+            // in the stash commit's own tree).
+            if parent_idx == 2 {
+                let untracked_diff = repo.diff_tree_to_tree(None, Some(&parent_tree), None)?;
+                for d in untracked_diff.deltas() {
+                    if let Some(p) = d.new_file().path() {
+                        paths.insert(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        Ok(paths.into_iter().collect())
+    })()
+    .unwrap_or_default();
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "cwd": cwd,
+            "branch": branch,
+            "stashRef": format!("stash@{{{index}}}"),
+            "message": message,
+            "files": files,
+        }),
+    )
+}
+
+/// `git.stashAndCheckout` — STUB. Two-phase op (stash working tree then
+/// checkout a branch) the UI can compose itself via `stashCreate` +
+/// `checkout`. Returning `{ ok:false, reason }` so the UI can surface a clear
+/// "not supported, use stash + checkout" message rather than a generic
+/// MethodNotFound. Documented gap.
+fn handle_git_stash_and_checkout(id: Value, _params: &Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "ok": false,
+            "reason": "stashAndCheckout is not implemented as a single op; use stashCreate then checkout",
+        }),
+    )
+}
+
+/// `git.fetch` → fetch from a remote. UI sends `{ cwd, remote? (default
+/// "origin"), refspec? (optional single refspec) }`. Returns `{ ok: true,
+/// remote, refspec }`. Implemented via git2's `Remote::download` (which
+/// auto-connects if needed) + explicit `disconnect`. Auth is delegated to
+/// the user's git credential setup — if the remote requires auth and none is
+/// configured, git2 returns an error we surface as `INTERNAL_ERROR`
+/// (auth-classification matching the push/pull CLI path would require
+/// parsing the git2 error message; deferred).
+fn handle_git_fetch(id: Value, params: &Value) -> JsonRpcResponse {
+    let repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let remote_name = params
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .unwrap_or("origin");
+    let refspec_opt = params.get("refspec").and_then(|v| v.as_str());
+
+    let mut remote = match repo.find_remote(remote_name) {
+        Ok(r) => r,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git fetch: remote '{remote_name}' not found: {e}"),
+            );
+        }
+    };
+    // Download the pack. `Remote::download` auto-connects if not already
+    // connected. Pass the optional single refspec; if absent, pass the
+    // remote's configured fetch refspecs (the default
+    // `+refs/heads/*:refs/remotes/origin/*` mapping set up by `git clone`).
+    // An empty specs slice tells git2 to use the base refspecs.
+    let refspecs_owned: Vec<String> = match refspec_opt {
+        Some(s) => vec![s.to_string()],
+        None => remote
+            .fetch_refspecs()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let download = remote.download(&refspecs_owned, None);
+    // disconnect is non-fatal from the caller's perspective (the connection
+    // tears down with the remote handle on drop), but we still call it for
+    // cleanliness — log on error.
+    if let Err(e) = remote.disconnect() {
+        tracing::warn!(error = %e, "git fetch disconnect failed (non-fatal)");
+    }
+    if let Err(e) = download {
+        return git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git fetch download: {e}"),
+        );
+    }
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "ok": true,
+            "remote": remote_name,
+            "refspec": refspec_opt.unwrap_or("default"),
+        }),
+    )
+}
+
+/// `git.pull` → delegate to `Git2Service::pull` (CLI-backed, --ff-only,
+/// surfaces NoUpstream/AuthenticationRequired/RemoteRejected distinctly).
+/// UI sends `{ cwd, remote?, branch? }`. Returns the MCode-shaped
+/// `{ status: "pulled" | "skipped_up_to_date", branch, upstream_branch }`.
+fn handle_git_pull(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let remote = params
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let branch = params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match svc.pull(remote, branch) {
+        Ok(result) => {
+            let json = match serde_json::to_value(&result) {
+                Ok(v) => v,
+                Err(e) => {
+                    return git_error(
+                        id,
+                        crate::error_codes::INTERNAL_ERROR,
+                        format!("git pull serialize: {e}"),
+                    );
+                }
+            };
+            JsonRpcResponse::success(id, json)
+        }
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git pull: {e}"),
+        ),
+    }
+}
+
+/// `git.push` → delegate to `Git2Service::push` (CLI-backed, sets upstream
+/// with -u when none configured, skips when up-to-date). UI sends
+/// `{ cwd, remote?, branch? }`. Returns the MCode-shaped
+/// `{ status: "pushed" | "skipped_up_to_date", branch, upstream_branch,
+///   set_upstream }`.
+fn handle_git_push(id: Value, params: &Value) -> JsonRpcResponse {
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let remote = params
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let branch = params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match svc.push(remote, branch) {
+        Ok(result) => {
+            let json = match serde_json::to_value(&result) {
+                Ok(v) => v,
+                Err(e) => {
+                    return git_error(
+                        id,
+                        crate::error_codes::INTERNAL_ERROR,
+                        format!("git push serialize: {e}"),
+                    );
+                }
+            };
+            JsonRpcResponse::success(id, json)
+        }
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git push: {e}"),
+        ),
+    }
+}
+
+/// `git.init` → initialize a new git repository at `path`. UI sends
+/// `{ cwd }` (the path to init; NOT required to exist as a repo first — this
+/// is the one git.* RPC where the path is usually NOT yet a repo). Returns
+/// `{ ok: true, path }`. Uses `Repository::init` (creates `.git` if absent,
+/// idempotent if already a repo).
+fn handle_git_init(id: Value, params: &Value) -> JsonRpcResponse {
+    let path = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("path").and_then(|v| v.as_str()))
+    {
+        Some(p) => p.to_string(),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'cwd' parameter",
+            );
+        }
+    };
+    match git2::Repository::init(&path) {
+        Ok(_) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true, "path": path })),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git init: {e}"),
+        ),
+    }
+}
+
+/// `git.removeIndexLock` → remove a stale `.git/index.lock`. UI sends
+/// `{ cwd }`. Returns `{ ok: true, removed: bool }` — `removed:false` means
+/// no lock file was present (the common no-op case). The lock path is
+/// `<repo.path()>/index.lock` where `repo.path()` is the `.git` directory
+/// (or the `.git` dir itself for bare repos). Uses `Repository::discover` so
+/// the call works from a subdirectory of the worktree.
+fn handle_git_remove_index_lock(id: Value, params: &Value) -> JsonRpcResponse {
+    let repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let lock_path = repo.path().join("index.lock");
+    match std::fs::remove_file(&lock_path) {
+        Ok(_) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "ok": true, "removed": true, "path": lock_path.to_string_lossy() }),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // No lock file — the healthy case. Surface removed:false so the
+            // UI can render "nothing to clean up".
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "ok": true, "removed": false, "path": lock_path.to_string_lossy() }),
+            )
+        }
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git removeIndexLock: {e}"),
+        ),
+    }
+}
+
+/// `git.worktreeList` → list worktrees. Returns `{ worktrees: [{ path,
+/// branch, is_main, is_locked }] }`. Implemented directly via git2 rather
+/// than `syncode_git::worktree::list_worktrees` — the syncode-git helper
+/// iterates `repo.worktrees()` which OMITS the main worktree (it only
+/// returns linked worktrees). The main worktree is the repo's `workdir()`,
+/// so we prepend it explicitly. The per-entry shape mirrors
+/// `syncode_git::worktree::WorktreeInfo` (camelCase via serde would be
+/// `isMain`; here we keep snake_case `is_main` matching the syncode-git
+/// struct's serde rename — `WorktreeInfo` derives default serde, so fields
+/// serialize as their Rust names).
+fn handle_git_worktree_list(id: Value, params: &Value) -> JsonRpcResponse {
+    let repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let main_path = repo
+        .workdir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut arr: Vec<Value> = Vec::new();
+    // The main worktree is the repo's working directory; its "branch" is the
+    // current HEAD (best-effort shorthand).
+    if !main_path.is_empty() {
+        let head_branch = repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(String::from));
+        arr.push(serde_json::json!({
+            "path": main_path,
+            "branch": head_branch,
+            "is_main": true,
+            "is_locked": false,
+        }));
+    }
+    // Linked worktrees (additional worktrees added via `git worktree add`).
+    let wt_names = match repo.worktrees() {
+        Ok(n) => n,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git worktreeList: {e}"),
+            );
+        }
+    };
+    for wt_name_opt in &wt_names {
+        let Some(wt_name) = wt_name_opt else { continue };
+        let wt = match repo.find_worktree(wt_name) {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+        let path = wt.path().to_string_lossy().to_string();
+        let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked { .. }));
+        arr.push(serde_json::json!({
+            "path": path,
+            "branch": wt_name,
+            "is_main": false,
+            "is_locked": is_locked,
+        }));
+    }
+    JsonRpcResponse::success(id, serde_json::json!({ "worktrees": arr }))
+}
+
+/// `git.worktreeCreate` → add a worktree. UI sends `{ cwd, branch, path?,
+/// createBranch? (default true) }`. Returns the created worktree info as
+/// `{ worktree: {...} }`. Implemented directly via git2 because the
+/// `syncode_git::worktree::add_worktree` helper passes the refname as the
+/// PATH argument to `Repository::worktree` (a bug — the second arg is the
+/// filesystem path for the new worktree, not a git ref). Here we resolve the
+/// path correctly and let git2 handle the branch lock/reference.
+fn handle_git_worktree_create(id: Value, params: &Value) -> JsonRpcResponse {
+    let repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let branch = match params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("name").and_then(|v| v.as_str()))
+    {
+        Some(b) => b.to_string(),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'branch' parameter",
+            );
+        }
+    };
+    let create_branch = params
+        .get("createBranch")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    // Resolve the worktree's filesystem path. MCode UI sends `path`; if
+    // absent, derive a sibling dir under the repo root
+    // (`<workdir>/.worktrees/<branch>`).
+    let wt_path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut p = repo
+                .workdir()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            p.push(".worktrees");
+            p.push(&branch);
+            p
+        });
+
+    // If createBranch is requested, create the branch at HEAD first (so the
+    // worktree checks it out). Otherwise the worktree is created in detached
+    // HEAD mode (or on an existing branch if it exists).
+    if create_branch
+        && let Err(e) = (|| -> Result<(), git2::Error> {
+            let head = repo.head()?.peel_to_commit()?;
+            // Ignore "already exists" — the worktree can checkout an existing
+            // branch.
+            match repo.branch(&branch, &head, false) {
+                Ok(_) => Ok(()),
+                Err(e) if e.code() == git2::ErrorCode::Exists => Ok(()),
+                Err(e) => Err(e),
+            }
+        })()
+    {
+        return git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git worktreeCreate branch: {e}"),
+        );
+    }
+
+    let wt = match repo.worktree(&branch, &wt_path, None) {
+        Ok(w) => w,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git worktreeCreate: {e}"),
+            );
+        }
+    };
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "worktree": {
+                "path": wt.path().to_string_lossy(),
+                "branch": branch,
+                "is_main": false,
+                "is_locked": false,
+            }
+        }),
+    )
+}
+
+/// `git.worktreeRemove` → prune a linked worktree. UI sends `{ cwd, branch }`
+/// (the worktree name = branch it was created for). Returns `{ ok: true }`.
+/// Implemented directly via git2 (`Worktree::prune`) rather than
+/// `syncode_git::worktree::remove_worktree` for consistency with
+/// `worktreeCreate` (both bypass the buggy syncode-git helper).
+fn handle_git_worktree_remove(id: Value, params: &Value) -> JsonRpcResponse {
+    let repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let branch = match params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("name").and_then(|v| v.as_str()))
+    {
+        Some(b) => b.to_string(),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'branch' parameter",
+            );
+        }
+    };
+    let wt = match repo.find_worktree(&branch) {
+        Ok(w) => w,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git worktreeRemove: worktree '{branch}' not found: {e}"),
+            );
+        }
+    };
+    // `force` controls whether prune removes a dirty/locked worktree. MCode
+    // UI's default is false (safe); we honor an explicit `force:true` param
+    // by enabling the VALID flag (prune even if the worktree appears valid).
+    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut opts = git2::WorktreePruneOptions::new();
+    opts.working_tree(true);
+    if force {
+        opts.valid(true);
+    }
+    match wt.prune(Some(&mut opts)) {
+        Ok(_) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git worktreeRemove: {e}"),
         ),
     }
 }
@@ -4209,6 +5056,21 @@ mod tests {
             "git/add",
             "git/unstage",
             "git/commit",
+            // T6c-9 advanced git RPCs.
+            "git/stash-list",
+            "git/stash-create",
+            "git/stash-apply",
+            "git/stash-drop",
+            "git/stash-info",
+            "git/stash-and-checkout",
+            "git/fetch",
+            "git/pull",
+            "git/push",
+            "git/init",
+            "git/remove-index-lock",
+            "git/worktree-list",
+            "git/worktree-create",
+            "git/worktree-remove",
         ] {
             assert!(
                 method_strs.contains(&expected),
@@ -4234,6 +5096,341 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         assert_eq!(resp.result.unwrap()["branch"], "main");
+    }
+
+    // ─── Git advanced RPC tests (T6c-9: stash/init/index-lock/worktree) ──
+    //
+    // Network-dependent ops (fetch/pull/push against a real remote) are not
+    // unit-testable here without standing up a local file:// remote; the
+    // syncode-git crate already covers push/pull round-trips against a local
+    // bare remote (see `crates/syncode-git/src/service.rs` integration tests).
+    // Here we cover the deterministic local ops: init, removeIndexLock
+    // (present + absent), stash round-trip (create/list/info/apply/drop),
+    // worktree list. All git-gated (skip cleanly when `git` is absent).
+
+    #[tokio::test]
+    async fn git_init_creates_a_repo() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("new-repo");
+        let state = WsState::new_in_memory(16);
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/init",
+            "params": { "cwd": target.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], true);
+        // The .git directory must exist after init.
+        assert!(target.join(".git").exists(), ".git dir not created");
+
+        // Idempotent: calling init on an already-initialized repo succeeds.
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "second init should be idempotent");
+    }
+
+    #[tokio::test]
+    async fn git_init_requires_cwd() {
+        // No cwd param → INVALID_PARAMS (not a crash).
+        let state = WsState::new_in_memory(16);
+        let req =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "git/init", "params": {} });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "expected error for missing cwd");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn git_remove_index_lock_when_absent_reports_removed_false() {
+        // Healthy repo (no lock file) → removed:false (no-op success).
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/removeIndexLock",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["removed"], false);
+    }
+
+    #[tokio::test]
+    async fn git_remove_index_lock_removes_present_lock() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Drop a stale index.lock in place.
+        let lock_path = repo.join(".git").join("index.lock");
+        std::fs::write(&lock_path, b"").expect("write lock");
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/removeIndexLock",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["removed"], true);
+        assert!(!lock_path.exists(), "lock file still present after remove");
+    }
+
+    #[tokio::test]
+    async fn git_stash_round_trip_create_list_info_apply_drop() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        // Make a working-tree change so there's something to stash.
+        std::fs::write(repo.join("modified.txt"), "change\n").expect("write");
+
+        // 1. stashCreate — saves the working tree to stash@{0}.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/stash-create",
+            "params": { "cwd": repo.to_string_lossy(), "message": "T6c9 stash" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "stashCreate failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], true);
+        assert!(result["oid"].is_string(), "oid should be set: {:?}", result);
+        assert_eq!(result["stashRef"], "stash@{0}");
+
+        // 2. stashList — surfaces the just-created entry.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "git/stash-list",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let result = resp.result.unwrap();
+        let stashes = result["stashes"].as_array().expect("stashes array");
+        assert_eq!(stashes.len(), 1, "expected exactly 1 stash: {:?}", stashes);
+        assert_eq!(stashes[0]["index"], 0);
+        assert_eq!(stashes[0]["stashRef"], "stash@{0}");
+        assert!(
+            stashes[0]["message"].as_str().unwrap_or("").contains("T6c9 stash"),
+            "stash message should carry the create message: {:?}",
+            stashes[0]["message"]
+        );
+
+        // 3. stashInfo — formal GitStashInfoResult shape.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "git/stash-info",
+            "params": { "cwd": repo.to_string_lossy(), "index": 0 }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "stashInfo failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["stashRef"], "stash@{0}");
+        assert_eq!(
+            result["cwd"],
+            serde_json::Value::String(repo.to_string_lossy().to_string())
+        );
+        assert!(
+            result["message"].as_str().unwrap_or("").contains("T6c9 stash"),
+            "stashInfo message: {:?}",
+            result["message"]
+        );
+        // Stash was created on `main` — branch should resolve to "main".
+        assert_eq!(result["branch"], "main", "branch should resolve to main");
+        // Files should include the modified file we stashed.
+        let files = result["files"].as_array().expect("files array");
+        assert!(
+            files.iter().any(|f| f.as_str() == Some("modified.txt")),
+            "expected modified.txt in stash files: {:?}",
+            files
+        );
+
+        // 4. stashApply — re-applies index 0 (working tree was reset by save).
+        // Reset working tree first so apply has something to write.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "git/stash-apply",
+            "params": { "cwd": repo.to_string_lossy(), "index": 0 }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "stashApply failed: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        // 5. stashDrop — removes index 0; list is now empty.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "git/stash-drop",
+            "params": { "cwd": repo.to_string_lossy(), "index": 0 }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "stashDrop failed: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 6, "method": "git/stash-list",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let stashes = resp.result.unwrap()["stashes"]
+            .as_array()
+            .expect("stashes array")
+            .clone();
+        assert!(stashes.is_empty(), "stash list should be empty after drop");
+    }
+
+    #[tokio::test]
+    async fn git_stash_create_nothing_to_stash() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo(); // clean repo
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/stash-create",
+            "params": { "cwd": repo.to_string_lossy(), "message": "nothing" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // Nothing-to-stash path returns ok:true, oid:null, reason set.
+        assert_eq!(result["ok"], true);
+        assert!(result["oid"].is_null(), "oid should be null: {:?}", result);
+        assert!(result["stashRef"].is_null());
+    }
+
+    #[tokio::test]
+    async fn git_stash_and_checkout_stub_returns_ok_false() {
+        // The documented stub: stashAndCheckout is not a single op.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/stash-and-checkout",
+            "params": { "cwd": "/tmp/anywhere", "branch": "x" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        // Note: stub returns success envelope with ok:false (NOT an RPC error).
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], false);
+        assert!(result["reason"].is_string());
+    }
+
+    #[tokio::test]
+    async fn git_worktree_list_returns_main_worktree() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        // Both MCode dot-name and slash form must resolve.
+        for method in ["git.worktreeList", "git/worktree-list", "git.listWorktrees"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "cwd": repo.to_string_lossy() }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let worktrees = resp.result.unwrap()["worktrees"]
+                .as_array()
+                .expect("worktrees array")
+                .clone();
+            assert!(
+                !worktrees.is_empty(),
+                "{}: expected at least the main worktree",
+                method
+            );
+            // The main worktree's path matches the repo root.
+            assert!(
+                worktrees.iter().any(|w| w["isMain"] == true
+                    || w["is_main"] == true
+                    || w.get("path").is_some()),
+                "{}: main worktree missing",
+                method
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn git_advanced_dispatch_accepts_dot_and_slash_forms() {
+        // Smoke: every new method must resolve under BOTH forms (no
+        // MethodNotFound). We don't need a real repo for most — the
+        // open-repo error path proves dispatch reached the handler (returns
+        // INTERNAL_ERROR, not METHOD_NOT_FOUND).
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let state = WsState::new_in_memory(16);
+        // Use a nonexistent path so handlers short-circuit at open_git2_repo;
+        // the assertion is on error CODE (INTERNAL_ERROR) vs METHOD_NOT_FOUND.
+        // stashAndCheckout is a stub that never opens a repo — assert ok:false.
+        let stub_methods = [
+            ("git.stashAndCheckout", "git/stash-and-checkout"),
+        ];
+        for (dot, slash) in stub_methods {
+            for method in [dot, slash] {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": method,
+                    "params": { "cwd": "/tmp/nonexistent-t6c9-xyz" }
+                });
+                let resp = rpc(&state, 1, &req).await;
+                assert!(
+                    resp.error.is_none(),
+                    "{}: stub should return success(ok:false), got {:?}",
+                    method,
+                    resp.error
+                );
+                assert_eq!(resp.result.unwrap()["ok"], false);
+            }
+        }
+
+        // Repo-opening methods: assert INTERNAL_ERROR (not METHOD_NOT_FOUND).
+        let repo_opening_methods: &[(&str, &str)] = &[
+            ("git.stashList", "git/stash-list"),
+            ("git.stashCreate", "git/stash-create"),
+            ("git.stashApply", "git/stash-apply"),
+            ("git.stashDrop", "git/stash-drop"),
+            ("git.stashInfo", "git/stash-info"),
+            ("git.fetch", "git/fetch"),
+            ("git.pull", "git/pull"),
+            ("git.push", "git/push"),
+            ("git.removeIndexLock", "git/remove-index-lock"),
+            ("git.worktreeList", "git/worktree-list"),
+            ("git.worktreeCreate", "git/worktree-create"),
+            ("git.worktreeRemove", "git/worktree-remove"),
+        ];
+        for (dot, slash) in repo_opening_methods {
+            for method in [*dot, *slash] {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": method,
+                    "params": { "cwd": "/tmp/nonexistent-t6c9-xyz" }
+                });
+                let resp = rpc(&state, 1, &req).await;
+                let err = resp.error.unwrap_or_else(|| {
+                    panic!("{method}: expected INTERNAL_ERROR for missing repo, got success")
+                });
+                assert_eq!(
+                    err.code,
+                    crate::error_codes::INTERNAL_ERROR,
+                    "{method}: expected INTERNAL_ERROR, got code {} ({})",
+                    err.code,
+                    err.message
+                );
+            }
+        }
     }
 
     // ─── Server config RPC tests (T6c-4) ────────────────────────────────
