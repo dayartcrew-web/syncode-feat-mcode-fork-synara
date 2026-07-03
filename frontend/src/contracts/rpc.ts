@@ -86,8 +86,16 @@ import type {
 import type {
   ServerConfig,
   ServerConfigIssue,
+  ServerGenerateAutomationIntentInput,
+  ServerGenerateAutomationIntentResult,
+  ServerGetProviderUsageSnapshotInput,
+  ServerGetProviderUsageSnapshotResult,
+  ServerListProviderUsageInput,
+  ServerListProviderUsageResult,
   ServerProviderStatus,
   ServerSettings,
+  ServerSettingsPatch,
+  ServerStopLocalServerInput,
 } from "./tier3/server";
 // Terminal Tier-3 result type (T6c-5 terminal PTY RPC exposure). The backend
 // `crates/syncode-ws/src/rpc.rs` `handle_terminal_*` handlers reuse
@@ -1168,6 +1176,51 @@ export const SERVED_RPC = {
     request: null as unknown as Record<string, unknown>,
     result: null as unknown as Record<string, unknown>,
   },
+
+  // ─── Server niche ops (T6c-17 — LAST batch; completes all RPCs) ──────
+  // The final 6 unserved server RPCs the vendored MCode UI calls.
+  // `server/generate-automation-intent` is REAL (LLM-backed one-shot): the
+  // backend `crates/syncode-ws/src/rpc.rs::handle_server_generate_automation_intent`
+  // prompts a registered provider CLI once, parses the JSON reply into the
+  // MCode `ServerGenerateAutomationIntentResult` shape, and returns it. If
+  // no provider is registered, the spawn fails, or the reply isn't JSON, the
+  // handler returns a not-automation result with the error/raw text in
+  // `reason` (never a panic). The other 5 are GRACEFUL STUBS returning
+  // documented empty/ack payloads:
+  //   - `server/patch-settings`              → echoes default `ServerSettings`
+  //     (no persistence — mirrors `server/update-settings`).
+  //   - `server/list-provider-usage`         → `[]` (no usage-tracking).
+  //   - `server/get-provider-usage-snapshot` → `null` (validates `provider`).
+  //   - `server/start-local-server`          → `{ ok:false, reason:"..." }`
+  //     (no local-server process-mgmt subsystem).
+  //   - `server/stop-local-server`           → `{ ok:true }` (no-op ack).
+  // The transport remaps the MCode dot-strings onto these slash keys (see
+  // MCODE_TO_SERVED in `wsTransport.ts`). After this batch: ZERO unserved
+  // RPCs at the transport layer.
+  "server/generate-automation-intent": {
+    request: null as unknown as ServerGenerateAutomationIntentInput,
+    result: null as unknown as ServerGenerateAutomationIntentResult,
+  },
+  "server/patch-settings": {
+    request: null as unknown as ServerSettingsPatch,
+    result: null as unknown as ServerSettings,
+  },
+  "server/list-provider-usage": {
+    request: null as unknown as ServerListProviderUsageInput,
+    result: null as unknown as ServerListProviderUsageResult,
+  },
+  "server/get-provider-usage-snapshot": {
+    request: null as unknown as ServerGetProviderUsageSnapshotInput,
+    result: null as unknown as ServerGetProviderUsageSnapshotResult,
+  },
+  "server/start-local-server": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "server/stop-local-server": {
+    request: null as unknown as ServerStopLocalServerInput,
+    result: null as unknown as Record<string, unknown>,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -1255,23 +1308,27 @@ export const UNSERVED_RPC = [
   // `server.upsertKeybinding`) are ALSO SERVED as of T6c-10 (stubs that echo
   // the default read-side payload — no persistence). The advanced server
   // RPCs below remain unserved (MethodNotFound):
-  "server.patchSettings",
   "server.listProviders",
   "server.getProviderStatuses",
   "server.getProviderAuthStatus",
-  "server.getProviderUsageSnapshot",
-  "server.listProviderUsage",
   "server.getUsage",
   "server.getRecap",
   // NOTE: `server.generateThreadRecap` was SERVED in T6c-13 (LLM-backed recap).
-  "server.startLocalServer",
-  "server.stopLocalServer",
   "server.listLocalServers",
   "server.listLocalServerProcesses",
   "server.listWorktrees",
-  "server.generateAutomationIntent",
   // NOTE: `server.transcribeVoice` / `server.voiceStart` / `server.voiceStop`
   // were SERVED in T6c-15 (graceful STT not-configured stubs).
+  // NOTE: the final 6 server niche RPCs were SERVED in T6c-17 —
+  // `server.patchSettings`, `server.listProviderUsage`,
+  // `server.getProviderUsageSnapshot`, `server.startLocalServer`,
+  // `server.stopLocalServer`, and `server.generateAutomationIntent` (the
+  // last one is REAL via an LLM one-shot; the rest are graceful stubs).
+  // After T6c-17 the only remaining server.* unserved entries are
+  // list-only/process-list RPCs the vendored UI does not actively call
+  // (`listLocalServers`, `listLocalServerProcesses`, `listWorktrees`) plus
+  // the legacy `getUsage`/`getRecap`/`listProviders`/`getProviderStatuses`/
+  // `getProviderAuthStatus` aliases (superseded by the served equivalents).
 
   // ─── Provider discovery (no backend surface) — ~9 ───────────────────
   "provider.listSkills",

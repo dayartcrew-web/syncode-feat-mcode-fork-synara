@@ -186,6 +186,13 @@ async fn dispatch_method(
                     "git/run-stacked-action",
                     "git/create-detached-worktree",
                     "git/subscribe-action-progress",
+                    // T6c-17: server niche ops (last batch).
+                    "server/generate-automation-intent",
+                    "server/patch-settings",
+                    "server/list-provider-usage",
+                    "server/get-provider-usage-snapshot",
+                    "server/start-local-server",
+                    "server/stop-local-server",
                 ]
             }),
         ),
@@ -852,6 +859,47 @@ async fn dispatch_method(
         // stub: no STT backend — no-op stop.
         "server.voiceStop" | "server/voice-stop" | "server/voiceStop" => {
             handle_server_voice_stop(id, &request.params)
+        }
+
+        // ─── Server niche ops (T6c-17 — last batch; completes all RPCs) ────
+        //
+        // The final 6 unserved server RPCs. `server.generateAutomationIntent`
+        // is REAL (LLM-backed via `invoke()` — the same one-shot flow as
+        // `compactThread`/`summarizeDiff`/`generateThreadRecap`); the other 5
+        // are STUBS that return documented empty/ack payloads (syncode has no
+        // settings persistence, usage-tracking, or local-server process-mgmt
+        // subsystem). After this batch: ZERO unserved RPCs.
+        //
+        // Dispatch accepts BOTH dot-name AND slash form.
+        //
+        // REAL (LLM): generates an `AutomationIntent` from a natural-language
+        // message by prompting the provider CLI once. The reply text is parsed
+        // as JSON into the MCode `ServerGenerateAutomationIntentResult` shape;
+        // a parse failure yields a not-automation result carrying the raw text.
+        "server.generateAutomationIntent"
+        | "server/generate-automation-intent" => {
+            handle_server_generate_automation_intent(state, id, &request.params).await
+        }
+        // stub: no settings persistence — echoes default `ServerSettings`
+        // (mirrors `server.updateSettings`).
+        "server.patchSettings" | "server/patch-settings" => {
+            handle_server_patch_settings(id)
+        }
+        // stub: no usage-tracking subsystem — empty usage list.
+        "server.listProviderUsage" | "server/list-provider-usage" => {
+            handle_server_list_provider_usage(id, &request.params)
+        }
+        // stub: no usage-tracking subsystem — null snapshot.
+        "server.getProviderUsageSnapshot" | "server/get-provider-usage-snapshot" => {
+            handle_server_get_provider_usage_snapshot(id, &request.params)
+        }
+        // stub: no local-server process-mgmt subsystem — graceful not-supported.
+        "server.startLocalServer" | "server/start-local-server" => {
+            handle_server_start_local_server(id)
+        }
+        // stub: no local-server process-mgmt subsystem — no-op ack.
+        "server.stopLocalServer" | "server/stop-local-server" => {
+            handle_server_stop_local_server(id, &request.params)
         }
 
         // ─── Push Subscription Methods ───────────────────────────
@@ -2067,6 +2115,245 @@ fn handle_server_voice_stop(id: Value, params: &Value) -> JsonRpcResponse {
             "listening": false
         }),
     )
+}
+
+// ─── Server niche ops Handlers (T6c-17 — last batch; completes all RPCs) ──
+//
+// The final 6 unserved server RPCs. `generateAutomationIntent` is REAL
+// (LLM-backed one-shot — see `invoke()` helper above). The other 5 are stubs
+// returning documented empty/ack payloads (syncode has no settings
+// persistence, no usage-tracking, no local-server process-mgmt subsystem).
+//
+// These complete the served set: after this block, every UI RPC reaches the
+// backend (ZERO unserved RPCs).
+
+/// `server.generateAutomationIntent` — REAL (LLM-backed, T6c-17). Given a
+/// natural-language `message` (e.g. "run tests every hour"), prompt the
+/// provider CLI once and parse the reply as an automation definition. The
+/// MCode `ServerGenerateAutomationIntentResult` shape is:
+/// `{ isAutomation, confidence, language, name, taskPrompt, schedule, mode,
+///    maxIterations, completionPolicy, missingFields, needsConfirmation,
+///    reason }`.
+///
+/// The LLM is instructed to respond with ONLY valid JSON carrying `{ name,
+/// command, schedule, mode }`. We extract these into the result fields and
+/// compute `missingFields` (any of name/schedule/taskPrompt absent). On any
+/// failure (no provider registered, spawn/send error, malformed JSON, empty
+/// reply) we return a not-automation result with `isAutomation: false`,
+/// `confidence: 0`, and the raw/error text in `reason` — the UI surfaces a
+/// clear "could not generate" state rather than a MethodNotFound or crash.
+///
+/// `params.message` (or `params.intent` / `params.prompt`) is required; if
+/// absent/empty we return InvalidParams (-32602) since there is nothing to
+/// generate from.
+async fn handle_server_generate_automation_intent(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    // Pull the user intent text. MCode's contract uses `message`; we accept a
+    // few aliases for robustness (`intent`, `prompt`, `text`).
+    let message = params
+        .get("message")
+        .or_else(|| params.get("intent"))
+        .or_else(|| params.get("prompt"))
+        .or_else(|| params.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if message.trim().is_empty() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "Invalid params: 'message' must be a non-empty string",
+        );
+    }
+
+    let system = "You are an automation assistant. Given a user's intent, generate an automation definition. Respond with ONLY valid JSON (no markdown fences, no prose) with this exact shape: {\"name\": string, \"command\": string, \"schedule\": string (cron-like or natural language), \"mode\": \"oneshot\"|\"scheduled\"|\"continuous\", \"confidence\": number (0..1)}. If the intent is not an automation, respond with {\"isAutomation\": false}.";
+    let prompt = format!("Intent: {message}\n\nGenerate the automation definition JSON.");
+    let provider = resolve_provider_param(params);
+    let model = resolve_model_param(params);
+
+    // Build the not-automation fallback result. Used when the LLM can't be
+    // invoked OR the reply isn't parseable as automation JSON.
+    let not_automation = |reason: String| -> Value {
+        serde_json::json!({
+            "isAutomation": false,
+            "confidence": 0.0,
+            "language": null,
+            "name": null,
+            "taskPrompt": null,
+            "schedule": null,
+            "mode": null,
+            "missingFields": ["name", "schedule", "taskPrompt", "mode"],
+            "needsConfirmation": false,
+            "reason": reason,
+        })
+    };
+
+    let reply = match invoke(state, &provider, model.as_deref(), system, &prompt).await {
+        Ok(text) => text,
+        Err(e) => {
+            return JsonRpcResponse::success(id, not_automation(e));
+        }
+    };
+
+    // Try to parse the reply as JSON. Tolerate markdown fences (```json ... ```).
+    let trimmed = reply.trim();
+    let json_str = strip_markdown_fence(trimmed);
+    let parsed: Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(_) => {
+            // Malformed JSON — return not-automation with the raw text so the
+            // UI / caller can inspect what the provider returned.
+            return JsonRpcResponse::success(
+                id,
+                not_automation(format!("LLM reply was not valid JSON: {reply}")),
+            );
+        }
+    };
+
+    // If the LLM explicitly said "not an automation", honor that.
+    let is_automation_flag = parsed
+        .get("isAutomation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_automation_flag
+        && parsed.get("name").is_none()
+        && parsed.get("command").is_none()
+    {
+        return JsonRpcResponse::success(id, not_automation(reply));
+    }
+
+    // Map the LLM JSON fields into the MCode result shape.
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let command = parsed
+        .get("command")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let schedule = parsed
+        .get("schedule")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let mode = parsed
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let confidence = parsed
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.8);
+
+    // Compute missing fields against the MCode union.
+    let mut missing: Vec<&str> = Vec::new();
+    if name.is_none() {
+        missing.push("name");
+    }
+    if schedule.is_none() {
+        missing.push("schedule");
+    }
+    if command.is_none() {
+        missing.push("taskPrompt");
+    }
+    if mode.is_none() {
+        missing.push("mode");
+    }
+
+    // `taskPrompt` in the MCode shape is the prompt to drive the automation;
+    // the LLM's `command` is the closest analog (what to run).
+    let result = serde_json::json!({
+        "isAutomation": true,
+        "confidence": confidence,
+        "language": null,
+        "name": name,
+        "taskPrompt": command,
+        "schedule": schedule,
+        "mode": mode,
+        "maxIterations": null,
+        "missingFields": missing,
+        "needsConfirmation": true,
+        "reason": null,
+    });
+    JsonRpcResponse::success(id, result)
+}
+
+/// Strip a leading ```json …``` (or ``` … ```) fence from a model reply so
+/// `serde_json` can parse it. Returns the input unchanged if no fence is
+/// present.
+fn strip_markdown_fence(s: &str) -> String {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("```json") {
+        return rest.trim().trim_end_matches("```").trim().to_string();
+    }
+    if let Some(rest) = s.strip_prefix("```") {
+        return rest.trim().trim_end_matches("```").trim().to_string();
+    }
+    s.to_string()
+}
+
+/// `server.patchSettings` — accept the patch, echo the default
+/// `ServerSettings`. Performs no persistence (stub). Mirrors
+/// `server.updateSettings` so the UI's post-save re-read converges to the
+/// unchanged default.
+fn handle_server_patch_settings(id: Value) -> JsonRpcResponse {
+    // stub: no persistence — echo the default settings.
+    JsonRpcResponse::success(id, build_default_server_settings())
+}
+
+/// `server.listProviderUsage` — return empty usage list. MCode's contract is
+/// `ServerListProviderUsageResult = readonly ServerProviderUsageSnapshot[]`;
+/// syncode has no usage-tracking subsystem, so we return an empty array
+/// (acknowledging the optional `forceRefresh` param without erroring).
+fn handle_server_list_provider_usage(id: Value, params: &Value) -> JsonRpcResponse {
+    let _ = params; // ack `forceRefresh` etc. — no behavior.
+    // stub: no usage-tracking subsystem — empty list.
+    JsonRpcResponse::success(id, serde_json::json!([]))
+}
+
+/// `server.getProviderUsageSnapshot` — return null snapshot. MCode's contract
+/// is `ServerGetProviderUsageSnapshotResult = ServerProviderUsageSnapshot |
+/// null`; syncode has no usage-tracking subsystem, so we return `null`.
+/// Validates that `params.provider` is a non-empty string to give a typed
+/// error rather than a silent null when the caller omits it.
+fn handle_server_get_provider_usage_snapshot(id: Value, params: &Value) -> JsonRpcResponse {
+    let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    if provider.trim().is_empty() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "Invalid params: 'provider' must be a non-empty string",
+        );
+    }
+    // stub: no usage-tracking subsystem — null snapshot.
+    JsonRpcResponse::success(id, Value::Null)
+}
+
+/// `server.startLocalServer` — return a graceful not-supported result.
+/// Syncode has no local-server process-mgmt subsystem (no dev-server spawn /
+/// port-bind / lifecycle tracking), so we acknowledge the call and return
+/// `{ ok: false, reason: "Local server management not supported in this mode" }`
+/// — the UI surfaces a clear "not available" state instead of MethodNotFound.
+fn handle_server_start_local_server(id: Value) -> JsonRpcResponse {
+    // stub: no local-server process-mgmt subsystem.
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "ok": false,
+            "reason": "Local server management not supported in this mode"
+        }),
+    )
+}
+
+/// `server.stopLocalServer` — no-op ack. Syncode has no local-server
+/// process-mgmt subsystem, so there is nothing to stop. Reads `params` to
+/// acknowledge the MCode `ServerStopLocalServerInput` (`{ pid, port }`) and
+/// returns `{ ok: true }`.
+fn handle_server_stop_local_server(id: Value, params: &Value) -> JsonRpcResponse {
+    let _ = params; // ack `{ pid, port }` — no behavior.
+    // stub: no local-server process-mgmt subsystem — no-op ack.
+    JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
 }
 
 // ─── Git Handlers (syncode-git-backed) ────────────────────────────
@@ -9064,6 +9351,246 @@ mod tests {
             "provider/compact-thread",
             "git/summarize-diff",
             "server/generate-thread-recap",
+        ] {
+            assert!(
+                listed.contains(expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
+    }
+
+    // ─── Server niche ops tests (T6c-17 — last batch; completes all RPCs) ─
+    //
+    // `generateAutomationIntent` is REAL (LLM-backed) — register a mock
+    // provider returning canned JSON and assert the parsed automation flows
+    // into the result. The 5 stubs are validated for both-forms dispatch +
+    // documented result shape.
+
+    /// generateAutomationIntent with a MockLlmAdapter returning valid JSON
+    /// parses the LLM reply into the MCode result shape (`isAutomation: true`,
+    /// name/command/schedule/mode populated).
+    #[tokio::test]
+    async fn server_generate_automation_intent_parses_llm_json() {
+        let state = WsState::new_in_memory(16);
+        let canned = r#"{"name":"hourly-tests","command":"cargo test","schedule":"0 * * * *","mode":"scheduled","confidence":0.9}"#;
+        register_mock_provider(&state, canned).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.generateAutomationIntent",
+            "params": { "message": "run tests every hour" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["isAutomation"], true, "must be flagged as automation");
+        assert_eq!(result["name"], "hourly-tests", "name must be parsed");
+        assert_eq!(result["taskPrompt"], "cargo test", "command must map to taskPrompt");
+        assert_eq!(result["schedule"], "0 * * * *", "schedule must be parsed");
+        assert_eq!(result["mode"], "scheduled", "mode must be parsed");
+        assert_eq!(result["confidence"], 0.9, "confidence must flow through");
+        let missing = result["missingFields"].as_array().expect("missingFields array");
+        assert!(missing.is_empty(), "no missing fields when all present: {missing:?}");
+        assert_eq!(result["needsConfirmation"], true);
+    }
+
+    /// generateAutomationIntent tolerates markdown-fenced JSON (```json …```)
+    /// — providers commonly wrap replies in fences.
+    #[tokio::test]
+    async fn server_generate_automation_intent_strips_markdown_fence() {
+        let state = WsState::new_in_memory(16);
+        let canned = "```json\n{\"name\":\"lint\",\"command\":\"make lint\",\"schedule\":\"daily\",\"mode\":\"oneshot\"}\n```";
+        register_mock_provider(&state, canned).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server/generate-automation-intent",
+            "params": { "message": "lint daily" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["isAutomation"], true, "fenced JSON must still parse");
+        assert_eq!(result["name"], "lint");
+        assert_eq!(result["schedule"], "daily");
+    }
+
+    /// generateAutomationIntent without a registered provider returns a
+    /// not-automation result (NOT a panic) carrying the error in `reason`.
+    #[tokio::test]
+    async fn server_generate_automation_intent_no_provider_returns_not_automation() {
+        let state = WsState::new_in_memory(16);
+        // No provider registered.
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.generateAutomationIntent",
+            "params": { "message": "deploy nightly" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["isAutomation"], false, "no provider → not automation");
+        let reason = result["reason"].as_str().expect("reason present");
+        assert!(
+            reason.contains("no provider registered"),
+            "reason should explain missing provider; got: {reason}"
+        );
+    }
+
+    /// generateAutomationIntent with malformed LLM reply returns a
+    /// not-automation result carrying the raw text in `reason` (graceful
+    /// failure, not a crash).
+    #[tokio::test]
+    async fn server_generate_automation_intent_malformed_json_returns_not_automation() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "sorry, I can't help with that").await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.generateAutomationIntent",
+            "params": { "message": "do something" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["isAutomation"], false, "malformed → not automation");
+        let reason = result["reason"].as_str().expect("reason present");
+        assert!(
+            reason.contains("not valid JSON"),
+            "reason should explain parse failure; got: {reason}"
+        );
+    }
+
+    /// generateAutomationIntent rejects empty `message` with InvalidParams.
+    #[tokio::test]
+    async fn server_generate_automation_intent_rejects_empty_message() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "{}").await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.generateAutomationIntent",
+            "params": { "message": "   " }
+        });
+        let resp = provider_rpc(&state, &req).await;
+        assert!(resp.error.is_some(), "empty message must reject");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    /// patchSettings echoes the default ServerSettings under BOTH forms
+    /// (mirrors updateSettings).
+    #[tokio::test]
+    async fn server_patch_settings_echoes_default_settings_shape() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.patchSettings", "server/patch-settings"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "enableAssistantStreaming": true }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["defaultThreadEnvMode"], "local", "{}: env mode", method);
+            assert_eq!(
+                result["enableAssistantStreaming"],
+                serde_json::Value::Bool(false),
+                "{}: stub must not persist the patch",
+                method
+            );
+        }
+    }
+
+    /// listProviderUsage returns an empty array under BOTH forms.
+    #[tokio::test]
+    async fn server_list_provider_usage_returns_empty_array() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.listProviderUsage", "server/list-provider-usage"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "forceRefresh": true }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert!(result.is_array(), "{}: result must be array", method);
+            assert!(result.as_array().unwrap().is_empty(), "{}: must be empty", method);
+        }
+    }
+
+    /// getProviderUsageSnapshot returns null (and validates `provider`).
+    #[tokio::test]
+    async fn server_get_provider_usage_snapshot_returns_null_and_validates() {
+        let state = WsState::new_in_memory(16);
+
+        // Happy path: provider non-empty → null snapshot. NOTE: a `Value::Null`
+        // result round-trips through JSON (serialize → deserialize) as `None`
+        // (serde's `Option<Value>` deserializes JSON `null` to `None`), so we
+        // accept EITHER `None` or `Some(Value::Null)` here — both mean the
+        // handler returned a null snapshot.
+        for method in [
+            "server.getProviderUsageSnapshot",
+            "server/get-provider-usage-snapshot",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "provider": "codex" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            match resp.result {
+                None => {} // null result deserialized to None (serde quirk).
+                Some(v) => assert!(v.is_null(), "{}: must be null, got {v}", method),
+            }
+        }
+
+        // Validation: missing provider → InvalidParams.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "server/get-provider-usage-snapshot",
+            "params": {}
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "missing provider must reject");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    /// startLocalServer returns graceful not-supported; stopLocalServer
+    /// returns `{ ok: true }`.
+    #[tokio::test]
+    async fn server_local_server_lifecycle_stubs_are_graceful() {
+        let state = WsState::new_in_memory(16);
+
+        // start: `{ ok: false, reason: ... }` under BOTH forms.
+        for method in ["server.startLocalServer", "server/start-local-server"] {
+            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["ok"], false, "{}: ok must be false", method);
+            let reason = result["reason"].as_str().expect("reason present");
+            assert!(!reason.is_empty(), "{}: reason must be non-empty", method);
+        }
+
+        // stop: `{ ok: true }` under BOTH forms.
+        for method in ["server.stopLocalServer", "server/stop-local-server"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "pid": 1234, "port": 8080 }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            assert_eq!(resp.result.unwrap()["ok"], true, "{}: ok must be true", method);
+        }
+    }
+
+    /// rpc/listMethods must advertise all 6 newly-served niche RPCs.
+    #[tokio::test]
+    async fn server_niche_rpcs_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let methods = provider_rpc(&state, &req).await.result.unwrap()["methods"]
+            .as_array()
+            .expect("methods is an array")
+            .clone();
+        let listed: std::collections::HashSet<String> = methods
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        for expected in [
+            "server/generate-automation-intent",
+            "server/patch-settings",
+            "server/list-provider-usage",
+            "server/get-provider-usage-snapshot",
+            "server/start-local-server",
+            "server/stop-local-server",
         ] {
             assert!(
                 listed.contains(expected),
