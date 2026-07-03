@@ -481,12 +481,18 @@ interface TerminalClearResult {
 interface TerminalListResult {
   sessions: readonly TerminalSessionSnapshot[];
 }
-// subscribeEvents is a stub (pull-based SessionManager — no push delivery).
-interface TerminalSubscribeStubResult {
+// subscribeEvents (T6c-11): records a real `terminal` channel subscription
+// on the originating connection. A per-session output-reader task broadcasts
+// `terminal/event` push frames (output/exited/error) onto the push bus;
+// connections subscribed here receive them via `push/terminal`.
+interface TerminalSubscribeResult {
   subscribed: boolean;
-  method: string;
   channel: string;
-  note?: string;
+  /** True if this call newly added the subscription (false = already subscribed). */
+  added?: boolean;
+  /** Present on unsubscribe responses. */
+  unsubscribed?: boolean;
+  removed?: boolean;
 }
 
 // ─── Provider discovery minimal input/result shapes (T6c-7) ────────────
@@ -708,9 +714,10 @@ export const SERVED_RPC = {
   //   - `terminal.env` (project-script runtime env) is NOT applied — the PTY
   //     inherits the server process env (syncode-terminal's spawn has no
   //     per-session env hook). Documented gap.
-  //   - `terminal.subscribeEvents` is a stub (pull-based SessionManager — no
-  //     push delivery). Real output push requires a per-session reader task —
-  //     T6c-future.
+  //   - `terminal.subscribeEvents` (T6c-11): records a real `terminal` channel
+  //     subscription. A per-session output-reader task broadcasts `terminal/event`
+  //     push frames (output/exited/error) onto the push bus; subscribed
+  //     connections receive them via `push/terminal`.
   //   - `exitCode`/`exitSignal`/`history` in the snapshot are null/empty
   //     (syncode-terminal doesn't track exit codes or scrollback).
   "terminal/create": {
@@ -747,7 +754,7 @@ export const SERVED_RPC = {
   },
   "terminal/subscribe-events": {
     request: null as unknown as null,
-    result: null as unknown as TerminalSubscribeStubResult,
+    result: null as unknown as TerminalSubscribeResult,
   },
 
   // ─── Automation (T6c-6 — syncode-automation-backed) ───────────────────
@@ -797,7 +804,7 @@ export const SERVED_RPC = {
   },
   "automation/subscribe": {
     request: null as unknown as null,
-    result: null as unknown as TerminalSubscribeStubResult,
+    result: null as unknown as TerminalSubscribeResult,
   },
 
   // ─── Auth ────────────────────────────────────────────────────────────

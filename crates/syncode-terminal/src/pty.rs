@@ -6,9 +6,9 @@
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 /// PTY errors
 #[derive(Debug, Error)]
@@ -37,11 +37,19 @@ pub struct PtyProcessInfo {
 /// A managed PTY session
 pub struct PtyHandle {
     /// PTY master handle
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    /// Read half of the PTY
+    master: Arc<tokio::sync::Mutex<Box<dyn MasterPty + Send>>>,
+    /// Read half of the PTY — a `std::sync::Mutex` because the PTY reader is
+    /// inherently blocking I/O (it has no readiness notification; `read`
+    /// blocks until bytes arrive). Wrapping it in `tokio::sync::Mutex` would
+    /// block the async executor thread. The reader is consumed from a
+    /// dedicated blocking reader thread (see `PtyHandle::read_output_blocking`)
+    /// so a `std::sync::Mutex` — which never crosses an `.await` — is both
+    /// correct and the lightest primitive.
     reader: Arc<Mutex<Box<dyn Read + Send>>>,
-    /// Write half of the PTY
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Write half of the PTY — `tokio::sync::Mutex` because `write` is called
+    /// from async contexts (the WS `terminal.write` handler) and should not
+    /// block a reactor thread while another write is in flight.
+    writer: Arc<tokio::sync::Mutex<Box<dyn Write + Send>>>,
     /// Process ID
     pid: u32,
     /// Whether the process is still running
@@ -105,9 +113,9 @@ impl PtyHandle {
         let pid = pid.unwrap_or(0);
 
         Ok(Self {
-            master: Arc::new(Mutex::new(pair.master)),
+            master: Arc::new(tokio::sync::Mutex::new(pair.master)),
             reader: Arc::new(Mutex::new(Box::new(reader))),
-            writer: Arc::new(Mutex::new(Box::new(writer))),
+            writer: Arc::new(tokio::sync::Mutex::new(Box::new(writer))),
             pid,
             running: AtomicBool::new(true),
             session_id,
@@ -173,10 +181,62 @@ impl PtyHandle {
         self.write(s.as_bytes()).await
     }
 
-    /// Read available output from the PTY (non-blocking, returns what's available)
-    pub async fn read_output(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
-        let mut reader = self.reader.lock().await;
+    /// Read available output from the PTY (blocking until bytes arrive).
+    ///
+    /// This is a **synchronous blocking** call — the underlying `portable_pty`
+    /// reader exposes no readiness notification, so `read` blocks the calling
+    /// thread until at least one byte is available (or the PTY closes, in which
+    /// case it returns `Ok(0)`). Callers MUST NOT invoke this from an async
+    /// task directly; use `tokio::task::spawn_blocking` (the WS push reader
+    /// task does exactly this — see `syncode_ws::rpc::spawn_terminal_reader`).
+    ///
+    /// Returns the number of bytes written into `buf`; `0` signals EOF (the
+    /// child process has exited and the PTY master is closed).
+    pub fn read_output_blocking(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
+        let mut reader = self
+            .reader
+            .lock()
+            .map_err(|e| PtyError::Io(format!("reader mutex poisoned: {e}")))?;
         let n = reader.read(buf).map_err(|e| PtyError::Io(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// Read available output from the PTY from an async context.
+    ///
+    /// This is a thin wrapper around [`PtyHandle::read_output_blocking`] that
+    /// offloads the blocking `read` to a tokio blocking thread (the PTY reader
+    /// is blocking std I/O with no readiness notification, so calling it
+    /// directly on a reactor thread would stall the async runtime). Use this
+    /// for on-demand reads (e.g. the `terminal_read_output` tauri command);
+    /// for continuous live-push, the WS reader task (`spawn_terminal_reader`)
+    /// calls `read_output_blocking` directly inside its own `spawn_blocking`
+    /// loop to avoid the extra allocation per iteration.
+    ///
+    /// Returns the number of bytes written into `buf`; `0` signals EOF.
+    pub async fn read_output(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
+        // The blocking closure must be `'static`, so it cannot borrow `buf`
+        // directly. We allocate an owned buffer inside the closure, read into
+        // it, and copy back into the caller's `buf` on the async side. The
+        // allocation is bounded by `buf.len()` (typically 4 KiB) and only
+        // paid on the on-demand read path — the live-push reader uses
+        // `read_output_blocking` directly to avoid it.
+        let cap = buf.len();
+        let reader = self.reader.clone();
+        let join_result = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, usize), PtyError> {
+            let mut local = vec![0u8; cap];
+            let mut guard = reader
+                .lock()
+                .map_err(|e| PtyError::Io(format!("reader mutex poisoned: {e}")))?;
+            let n = guard
+                .read(&mut local)
+                .map_err(|e| PtyError::Io(e.to_string()))?;
+            local.truncate(n);
+            Ok((local, n))
+        })
+        .await
+        .map_err(|e| PtyError::Io(format!("blocking task failed: {e}")))?;
+        let (bytes, n) = join_result?;
+        buf[..n].copy_from_slice(&bytes);
         Ok(n)
     }
 
