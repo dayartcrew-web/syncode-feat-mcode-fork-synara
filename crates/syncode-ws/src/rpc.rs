@@ -331,7 +331,7 @@ async fn dispatch_method(
         | "git/unstage" => handle_git_unstage(id, &request.params),
         "git.commit" | "git/commit" => handle_git_commit(id, &request.params),
 
-        // ─── Server config / settings / lifecycle (T6c-4) ───────────────────
+        // ─── Server config / settings / lifecycle (T6c-4, T6c-18) ───────────
         //
         // The cloned MCode UI calls these on startup:
         //   - `server.getConfig`        → drives Settings → availableEditors +
@@ -345,38 +345,50 @@ async fn dispatch_method(
         //   - `server.getDiagnostics`   → process/child/memory/projection
         //     counts (`ServerDiagnosticsResult`).
         //   - `server.subscribeConfig` / `subscribeSettings` /
-        //     `subscribeProviderStatuses` / `subscribeLifecycle` — stubs that
-        //     return success without emitting push events (T6c-future will wire
-        //     these to real push channels).
+        //     `subscribeProviderStatuses` — T6c-18 REAL: register on the
+        //     matching `server.*Updated` push channel + emit a snapshot of the
+        //     current stored state. `subscribeLifecycle` remains a stub (no
+        //     maintenance-task push in syncode).
         //
-        // Syncode has no native "server config" subsystem, so each handler
-        // returns a minimal valid MCode shape (required top-level fields
-        // present, arrays empty, optionals null). The auth mode is surfaced in
-        // `getConfig` from `WsAuthConfig` (cheap — already in WsState).
+        // T6c-18 makes `getConfig`/`getSettings` read from the in-memory
+        // `ServerSettingsState` (persists edits for the server session) and
+        // the write RPCs (`setConfig`/`updateSettings`/`patchSettings`/
+        // `updateProvider`/`upsertKeybinding`) merge into that store + push
+        // the new state to subscribed connections. The store is initialized
+        // from the default builders at `WsState` construction; the auth mode
+        // is surfaced in `getConfig` from `WsAuthConfig`.
         //
         // Dispatch accepts BOTH the MCode dot-name AND a slash form for
         // robustness (the tauriNativeApi sends slash, the wsNativeApi sends
         // dot — both must resolve).
-        "server.getConfig" | "server/getConfig" => handle_server_get_config(state, id),
-        "server.getSettings" | "server/getSettings" => handle_server_get_settings(id),
+        "server.getConfig" | "server/getConfig" => handle_server_get_config(state, id).await,
+        "server.getSettings" | "server/getSettings" => handle_server_get_settings(state, id).await,
         "server.welcome" | "server/welcome" => handle_server_welcome(state, id).await,
         "server.getEnvironment" | "server/getEnvironment" => handle_server_get_environment(id),
         "server.getDiagnostics" | "server/getDiagnostics" => {
             handle_server_get_diagnostics(state, id).await
         }
-        // stub: no push delivery (T6c-future)
+        // T6c-18: REAL subscription. Registers the connection on the matching
+        // `server.configUpdated` push channel so the delivery loop forwards
+        // writes from `server.setConfig` / `upsertKeybinding`. Emits an
+        // initial snapshot of the current config so a freshly-subscribed
+        // client has a basis to apply live deltas against.
         "server.subscribeConfig" | "server/subscribeConfig" => {
-            handle_server_subscribe_stub(id, "config")
+            handle_server_subscribe_config(state, conn_id, id).await
         }
-        // stub: no push delivery (T6c-future)
+        // T6c-18: REAL subscription — `server.settingsUpdated` channel.
         "server.subscribeSettings" | "server/subscribeSettings" => {
-            handle_server_subscribe_stub(id, "settings")
+            handle_server_subscribe_settings(state, conn_id, id).await
         }
-        // stub: no push delivery (T6c-future)
+        // T6c-18: REAL subscription — `server.providerStatusesUpdated`
+        // channel.
         "server.subscribeProviderStatuses" | "server/subscribeProviderStatuses" => {
-            handle_server_subscribe_stub(id, "providerStatuses")
+            handle_server_subscribe_provider_statuses(state, conn_id, id).await
         }
-        // stub: no push delivery (T6c-future)
+        // stub: no lifecycle push subsystem (no server-maintenance task). The
+        // welcome payload is delivered as a one-shot RPC response by
+        // `server.welcome`; subscribe remains a no-op ack so the UI's
+        // subscribe call resolves.
         "server.subscribeLifecycle" | "server/subscribeLifecycle" => {
             handle_server_subscribe_stub(id, "lifecycle")
         }
@@ -385,32 +397,39 @@ async fn dispatch_method(
         //
         // The cloned MCode UI persists user edits via these `server.*` write
         // RPCs (`setConfig`, `updateSettings`, `refreshProviders`,
-        // `updateProvider`, `upsertKeybinding`). Syncode has no native
-        // settings/keybindings persistence layer, so each handler is a STUB:
-        // it validates the params shape and echoes the default read-side
-        // payload. The UI's optimistic update is overwritten by the echoed
-        // default on the next read, converging to "no changes persisted".
+        // `updateProvider`, `upsertKeybinding`). T6c-18 makes these REAL:
+        // each handler merges the write into the in-memory `ServerSettingsState`
+        // (persists for the server session) and broadcasts a push event on the
+        // matching `server.*Updated` channel so subscribed connections receive
+        // the new state. The UI's optimistic update now converges with the
+        // server's stored view instead of being overwritten by the default.
         // Dispatch accepts BOTH dot-name AND slash form (the wsNativeApi sends
         // dot, the tauriNativeApi sends slash — both must resolve).
         //
-        // stub: no persistence — echoes default ServerConfig.
-        "server.setConfig" | "server/set-config" => handle_server_set_config(state, id),
-        // stub: no persistence — echoes default ServerSettings.
+        // T6c-18 REAL: merge into store + push `server.configUpdated`.
+        "server.setConfig" | "server/set-config" => {
+            handle_server_set_config(state, id, &request.params).await
+        }
+        // T6c-18 REAL: deep-merge patch into settings + push
+        // `server.settingsUpdated`.
         "server.updateSettings" | "server/update-settings" => {
-            handle_server_update_settings(id)
+            handle_server_update_settings(state, id, &request.params).await
         }
-        // stub: no provider probe — empty `{ providers: [] }`.
+        // T6c-18: re-list providers from the in-memory settings store (no
+        // external probe) + push `server.providerStatusesUpdated`.
         "server.refreshProviders" | "server/refresh-providers" => {
-            handle_server_refresh_providers(id)
+            handle_server_refresh_providers(state, id).await
         }
-        // stub: validates `provider` non-empty, returns `{ providers: [] }`.
+        // T6c-18 REAL: validates `provider` non-empty, returns the provider's
+        // current status from the settings store + pushes
+        // `server.providerStatusesUpdated`.
         "server.updateProvider" | "server/update-provider" => {
-            handle_server_update_provider(id, &request.params)
+            handle_server_update_provider(state, id, &request.params).await
         }
-        // stub: validates params is an object, returns
-        // `{ keybindings: [], issues: [] }`.
+        // T6c-18 REAL: validates params is an object, appends/updates the
+        // keybinding rule in the config store + pushes `server.configUpdated`.
         "server.upsertKeybinding" | "server/upsert-keybinding" => {
-            handle_server_upsert_keybinding(id, &request.params)
+            handle_server_upsert_keybinding(state, id, &request.params).await
         }
 
         // `server.generateThreadRecap` (T6c-13) — LLM-backed thread recap.
@@ -880,10 +899,10 @@ async fn dispatch_method(
         | "server/generate-automation-intent" => {
             handle_server_generate_automation_intent(state, id, &request.params).await
         }
-        // stub: no settings persistence — echoes default `ServerSettings`
-        // (mirrors `server.updateSettings`).
+        // T6c-18 REAL: deep-merge the patch into the settings store + push
+        // `server.settingsUpdated`. Mirrors `server.updateSettings`.
         "server.patchSettings" | "server/patch-settings" => {
-            handle_server_patch_settings(id)
+            handle_server_patch_settings(state, id, &request.params).await
         }
         // stub: no usage-tracking subsystem — empty usage list.
         "server.listProviderUsage" | "server/list-provider-usage" => {
@@ -1724,122 +1743,36 @@ fn iso_now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Resolve a non-empty default for `cwd`. Falls back to the process cwd, then
-/// `/` (guaranteed non-empty so the `TrimmedNonEmptyString` schema accepts it).
+/// Resolve a non-empty default for `cwd`. Delegates to
+/// [`crate::settings::server_cwd`] (single source of truth).
 fn server_cwd() -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from))
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "/".to_string())
+    crate::settings::server_cwd()
 }
 
-/// Resolve a non-empty default for `homeDir` from `HOME` (POSIX) / `USERPROFILE`
-/// (Windows). Returns `None` when unset (the field is optional in the schema).
+/// Resolve a non-empty default for `homeDir`. Delegates to
+/// [`crate::settings::server_home_dir`].
 fn server_home_dir() -> Option<String> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    crate::settings::server_home_dir()
 }
 
-/// Build the minimal valid `ServerConfig` shape (MCode
-/// `frontend/src/contracts/tier3/server.ts`). Shared by the read-side
-/// `server.getConfig` handler and the write-side `server.setConfig` stub —
-/// both return the same default-config payload (the stub accepts the write
-/// but performs no persistence, mirroring the read view).
-///
-/// Top-level fields returned:
-/// - `cwd`: process cwd (non-empty)
-/// - `worktreesDir`: `<cwd>/.synara/worktrees` (non-empty)
-/// - `keybindingsConfigPath`: `<home>/.synara/keybindings.json` (non-empty)
-/// - `keybindings`: empty array (no resolved rules; UI tolerates empty)
-/// - `issues`: empty array (no keybinding-config validation runs)
-/// - `providers`: empty array (no provider-availability probe)
-/// - `availableEditors`: empty array (no editor detection)
-/// - `homeDir`: `Option<HOME>` (omitted when unset; optional in schema)
-/// - `authMode`: syncode auth mode surfaced from `WsAuthConfig`
-///   (`unsafe-no-auth` | `remote-reachable` | ...). Not part of the MCode
-///   `ServerConfig` schema, but harmless as an extra field and useful for
-///   the UI to display the active auth policy.
-fn build_default_server_config(state: &WsState) -> Value {
-    let cwd = server_cwd();
-    let home = server_home_dir();
-    let worktrees_dir = format!("{}/.synara/worktrees", cwd.trim_end_matches('/'));
-    let keybindings_path = format!(
-        "{}/.synara/keybindings.json",
-        home.as_deref().unwrap_or(&cwd)
-    );
-    // The syncode `AuthMode` serializes kebab-case (`unsafe-no-auth`,
-    // `remote-reachable`, …). Surface it verbatim — the UI doesn't read this
-    // field today, but it's a cheap, accurate signal of the active policy.
-    let auth_mode = serde_json::to_value(state.auth_config.mode)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| "unsafe-no-auth".to_string());
-
-    let mut cfg = serde_json::json!({
-        "cwd": cwd,
-        "worktreesDir": worktrees_dir,
-        "keybindingsConfigPath": keybindings_path,
-        "keybindings": [],
-        "issues": [],
-        "providers": [],
-        "availableEditors": [],
-        "authMode": auth_mode,
-    });
-    // Insert `homeDir` only when HOME was resolvable (the field is optional in
-    // the MCode schema; absence deserializes as `undefined`). Single-level
-    // guard — clippy-clean (no collapsible-if nesting).
-    if let (Some(h), Some(obj)) = (home, cfg.as_object_mut()) {
-        obj.insert("homeDir".into(), Value::String(h));
-    }
-    cfg
+/// `server.getConfig` (T6c-18 REAL) — return the stored `ServerConfig` from
+/// the in-memory settings store. The store is initialized from the default
+/// builder at `WsState` construction and updated by `server.setConfig` /
+/// `upsertKeybinding` writes; reads therefore reflect the most recent edit
+/// for the server session (not just the static default).
+async fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse {
+    let config = state.settings.read().await.config.clone();
+    JsonRpcResponse::success(id, config)
 }
 
-/// `server.getConfig` — return a minimal valid `ServerConfig` shape (see
-/// `build_default_server_config`).
-fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, build_default_server_config(state))
-}
-
-/// Build the MCode `DEFAULT_SERVER_SETTINGS` literal. Shared by the read-side
-/// `server.getSettings` handler and the write-side `server.updateSettings`
-/// stub. The vendored UI references this exact shape for state initialization
-/// (see `frontend/src/contracts/tier3/server.ts` `DEFAULT_SERVER_SETTINGS`).
-/// Each provider is enabled with its conventional binary name and empty
-/// `customModels`; the text-generation model selection defaults to
-/// `{ provider: "codex", model: "gpt-5.4-mini" }` (matches the literal).
-fn build_default_server_settings() -> Value {
-    serde_json::json!({
-        "enableAssistantStreaming": false,
-        "defaultThreadEnvMode": "local",
-        "addProjectBaseDirectory": "",
-        "textGenerationModelSelection": {
-            "provider": "codex",
-            "model": "gpt-5.4-mini",
-        },
-        "providers": {
-            "codex": { "enabled": true, "binaryPath": "codex", "customModels": [], "homePath": "" },
-            "claudeAgent": { "enabled": true, "binaryPath": "claude", "customModels": [], "launchArgs": "" },
-            "cursor": { "enabled": true, "binaryPath": "cursor-agent", "customModels": [], "apiEndpoint": "" },
-            "gemini": { "enabled": true, "binaryPath": "gemini", "customModels": [] },
-            "grok": { "enabled": true, "binaryPath": "grok", "customModels": [] },
-            "kilo": { "enabled": true, "binaryPath": "kilo", "customModels": [], "serverUrl": "", "serverPassword": "" },
-            "opencode": {
-                "enabled": true, "binaryPath": "opencode", "customModels": [],
-                "serverUrl": "", "serverPassword": "", "experimentalWebSockets": false,
-            },
-            "pi": { "enabled": true, "binaryPath": "pi", "customModels": [], "agentDir": "" },
-        },
-        "skills": { "disabled": [] },
-    })
-}
-
-/// `server.getSettings` — return the MCode `DEFAULT_SERVER_SETTINGS` literal
-/// (see `build_default_server_settings`).
-fn handle_server_get_settings(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, build_default_server_settings())
+/// `server.getSettings` (T6c-18 REAL) — return the stored `ServerSettings`
+/// from the in-memory settings store. The store is initialized from the
+/// default builder and updated by `server.updateSettings` /
+/// `patchSettings` / `updateProvider` writes; reads reflect the most recent
+/// merged state for the server session.
+async fn handle_server_get_settings(state: &WsState, id: Value) -> JsonRpcResponse {
+    let settings = state.settings.read().await.settings.clone();
+    JsonRpcResponse::success(id, settings)
 }
 
 /// `server.welcome` — return a `WsWelcomePayload` shape. MCode emits this as a
@@ -1933,87 +1866,331 @@ async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcRes
     JsonRpcResponse::success(id, result)
 }
 
-/// Generic subscribe-stub for the `server.subscribe*` RPCs. Returns a success
-/// envelope without recording a real push subscription or emitting any push
-/// events. The UI tolerates no push delivery (it polls the read RPCs on a
-/// staleTime/refetch cadence). Real push delivery for these channels is
-/// T6c-future work.
+/// Generic subscribe-stub for the `server.subscribe*` RPCs that have no
+/// real push subsystem. Only `server.subscribeLifecycle` reaches this today
+/// (the lifecycle channel has no maintenance-task push in syncode). The
+/// config/settings/providerStatuses channels each have a dedicated handler
+/// that records a real subscription + emits an initial snapshot (T6c-18).
 fn handle_server_subscribe_stub(id: Value, channel: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         id,
         serde_json::json!({
             "subscribed": true,
             "channel": format!("server.{}", channel),
-            "note": "stub: no push delivery (T6c-future)",
+            "note": "stub: no push delivery for this channel",
         }),
     )
 }
 
-// ─── Server write-side stub Handlers (T6c-10) ────────────────────
+// ─── Server-settings subscribe handlers (T6c-18 — REAL) ───────────
 //
-// The cloned MCode UI persists user edits via these `server.*` write RPCs:
-//   - `server.setConfig`        → overwrite the ServerConfig (Settings panel
-//     "Apply"/"Reset" actions). MCode itself has no `setConfig` (the UI uses
-//     `updateSettings` / per-provider update RPCs), but the contracts layer
-//     and the task spec list it; we accept the write and echo the default
-//     config so the UI's optimistic state converges back to the read view.
-//   - `server.updateSettings`   → patch `ServerSettings` (Settings panel
-//     save). MCode accepts a `ServerSettingsPatch` and returns the full
-//     resolved `ServerSettings`.
-//   - `server.refreshProviders` → re-probe provider availability. MCode
-//     returns a `ServerProviderStatusesUpdatedPayload` (`{ providers: [] }`).
-//   - `server.updateProvider`   → re-probe a single provider. MCode accepts
-//     `{ provider: ProviderKind }` and returns the same payload shape.
-//   - `server.upsertKeybinding` → add/update a keybinding rule. MCode accepts
-//     a `KeybindingRule` and returns `{ keybindings, issues }`.
-//
-// Syncode has no native settings/keybindings persistence layer (no settings
-// file write path, no keybindings resolver), so each handler is a STUB: it
-// validates the params shape (rejecting malformed input with -32602) and
-// returns the default read-side payload — `build_default_server_config()` /
-// `build_default_server_settings()` / `{ providers: [] }` / `{ keybindings:
-// [], issues: [] }`. The UI's optimistic update is overwritten by the echoed
-// default on the next read, converging to "no changes persisted" — which
-// matches the documented gap (no settings subsystem).
-//
-// Ack shapes (mirrors of the read side):
-//   - setConfig           → ServerConfig (build_default_server_config)
-//   - updateSettings      → ServerSettings (build_default_server_settings)
-//   - refreshProviders    → { providers: [] }
-//   - updateProvider      → { providers: [] }   (validates `provider` non-empty)
-//   - upsertKeybinding    → { keybindings: [], issues: [] }
-//                          (validates `params` is a JSON object)
+// Each subscribe handler registers the originating connection on the matching
+// `server.*Updated` push channel (via the shared `SubscriptionRegistry`) and
+// emits an initial snapshot of the current stored state. The push delivery
+// loop (`run_push_delivery`) then forwards future writes from the matching
+// write handler to this connection as `push/<channel>` notifications. This is
+// the snapshot-then-stream pattern: the client applies live deltas against
+// the snapshot baseline.
 
-/// `server.setConfig` — accept the write, echo the default `ServerConfig`.
-/// Performs no persistence (stub). Mirrors `server.getConfig` so the UI's
-/// post-save re-read converges to the unchanged default.
-fn handle_server_set_config(state: &WsState, id: Value) -> JsonRpcResponse {
-    // stub: no persistence — echo the default config.
-    JsonRpcResponse::success(id, build_default_server_config(state))
+/// `server.subscribeConfig` — register on `server.configUpdated` and emit the
+/// current stored `ServerConfig` as the initial snapshot. Subsequent
+/// `server.setConfig` / `server.upsertKeybinding` writes fan out to this
+/// connection as `push/server.configUpdated` notifications.
+async fn handle_server_subscribe_config(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_SERVER_CONFIG_UPDATED);
+    // Emit the current stored config as a one-shot snapshot push so a
+    // freshly-subscribed client has the baseline. Best-effort: a missing
+    // connection (unregistered mid-flight) is silently a no-snapshot.
+    let snapshot_emitted =
+        emit_server_config_snapshot(state, conn_id, crate::channels::CHANNEL_SERVER_CONFIG_UPDATED)
+            .await;
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": crate::channels::CHANNEL_SERVER_CONFIG_UPDATED,
+            "added": added,
+            "snapshotEmitted": snapshot_emitted,
+        }),
+    )
 }
 
-/// `server.updateSettings` — accept the patch, echo the default
-/// `ServerSettings`. Performs no persistence (stub). Mirrors
-/// `server.getSettings` so the UI's post-save re-read converges to the
-/// unchanged default.
-fn handle_server_update_settings(id: Value) -> JsonRpcResponse {
-    // stub: no persistence — echo the default settings.
-    JsonRpcResponse::success(id, build_default_server_settings())
+/// `server.subscribeSettings` — register on `server.settingsUpdated` and emit
+/// the current stored `ServerSettings` snapshot.
+async fn handle_server_subscribe_settings(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED);
+    let snapshot_emitted = emit_server_settings_snapshot(
+        state,
+        conn_id,
+        crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED,
+    )
+    .await;
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED,
+            "added": added,
+            "snapshotEmitted": snapshot_emitted,
+        }),
+    )
 }
 
-/// `server.refreshProviders` — re-probe all providers. Returns an empty
-/// `ServerProviderStatusesUpdatedPayload` (`{ providers: [] }`) since syncode
-/// has no provider-availability probe. Performs no real refresh (stub).
-fn handle_server_refresh_providers(id: Value) -> JsonRpcResponse {
-    // stub: no provider probe — empty statuses payload.
-    JsonRpcResponse::success(id, serde_json::json!({ "providers": [] }))
+/// `server.subscribeProviderStatuses` — register on
+/// `server.providerStatusesUpdated` and emit the current provider list
+/// snapshot (derived from the settings store's `providers` map).
+async fn handle_server_subscribe_provider_statuses(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED);
+    let snapshot_emitted = emit_server_config_snapshot(
+        state,
+        conn_id,
+        crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
+    )
+    .await;
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
+            "added": added,
+            "snapshotEmitted": snapshot_emitted,
+        }),
+    )
+}
+
+/// Emit a snapshot of the current stored `ServerConfig`-derived state to
+/// `conn_id` as a `push/<channel>` notification with `event_type: "snapshot"`.
+/// Used by `subscribeConfig` (full config payload) and
+/// `subscribeProviderStatuses` (`{ providers }` slice). Best-effort: a missing
+/// connection is silently a no-op.
+async fn emit_server_config_snapshot(
+    state: &WsState,
+    conn_id: ConnectionId,
+    channel: &str,
+) -> bool {
+    let tx = match state.connections.read().await.get(&conn_id).cloned() {
+        Some(tx) => tx,
+        None => return false,
+    };
+    // Read-lock the store only for the snapshot build.
+    let data = {
+        let store = state.settings.read().await;
+        match channel {
+            crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED => {
+                // Provider-statuses snapshot: just the `providers` slice from
+                // the config (which is `[]` by default — no probe runs). This
+                // matches the `ServerProviderStatusesUpdatedPayload` shape.
+                serde_json::json!({
+                    "eventType": "snapshot",
+                    "aggregateId": Value::Null,
+                    "data": { "providers": store.config["providers"].clone() },
+                })
+            }
+            // configUpdated snapshot: the full `ServerConfigUpdatedPayload`
+            // shape is `{ issues, providers }` — both slices of the config.
+            _ => serde_json::json!({
+                "eventType": "snapshot",
+                "aggregateId": Value::Null,
+                "data": {
+                    "issues": store.config["issues"].clone(),
+                    "providers": store.config["providers"].clone(),
+                },
+            }),
+        }
+    };
+    push_frame(&tx, channel, &data)
+}
+
+/// Emit a snapshot of the current stored `ServerSettings` to `conn_id` as a
+/// `push/server.settingsUpdated` notification with `event_type: "snapshot"`.
+async fn emit_server_settings_snapshot(
+    state: &WsState,
+    conn_id: ConnectionId,
+    channel: &str,
+) -> bool {
+    let tx = match state.connections.read().await.get(&conn_id).cloned() {
+        Some(tx) => tx,
+        None => return false,
+    };
+    let data = {
+        let store = state.settings.read().await;
+        serde_json::json!({
+            "eventType": "snapshot",
+            "aggregateId": Value::Null,
+            "data": { "settings": store.settings.clone() },
+        })
+    };
+    push_frame(&tx, channel, &data)
+}
+
+/// Serialize + send a `push/<channel>` notification to a single connection.
+/// Best-effort: a send failure (dropped connection) returns false.
+fn push_frame(
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    channel: &str,
+    data: &Value,
+) -> bool {
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": format!("push/{}", channel),
+        "params": data,
+    });
+    serde_json::to_string(&msg)
+        .map(|s| tx.send(s).is_ok())
+        .unwrap_or(false)
+}
+
+// ─── Server write-side handlers (T6c-18 — REAL persistence + push) ─
+//
+// Each write handler:
+//   1. Validates the params shape (rejecting malformed input with -32602).
+//   2. Acquires a write lock on `state.settings` and applies the change
+//      (replace for setConfig, deep-merge for updateSettings/patchSettings,
+//      per-field for updateProvider/upsertKeybinding).
+//   3. Broadcasts a push event on the matching `server.*Updated` channel so
+//      subscribed connections receive the new state. The broadcast is
+//      best-effort (`let _ = state.push_tx.send(...)`): no subscribers is not
+//      an error, matching the `WsDomainEventPublisher` convention.
+//   4. Returns the updated full document (the read-side shape) so the UI's
+//      optimistic state converges with the server's stored view.
+//
+// Persistence scope: in-memory only, for the server session. Syncode has no
+// on-disk settings file, so edits don't survive a restart (the documented
+// gap — the store is rebuilt from defaults on each server start).
+
+/// `server.setConfig` — overwrite the stored `ServerConfig` with the params
+/// (validated as a JSON object). Pushes `server.configUpdated` with the
+/// `{ issues, providers }` slice. Returns the full updated config.
+async fn handle_server_set_config(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    // Validate `params` is a JSON object (ServerConfig is a struct). Non-object
+    // (null, array, primitive) → InvalidParams (-32602).
+    if !params.is_object() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "Invalid params: 'setConfig' expects a server-config object",
+        );
+    }
+    let updated = {
+        let mut store = state.settings.write().await;
+        // Replace wholesale (setConfig is a full overwrite, not a merge).
+        store.config = params.clone();
+        // Build the push payload (the `ServerConfigUpdatedPayload` slice)
+        // and the response (the full config) before releasing the lock.
+        let push_payload = serde_json::json!({
+            "issues": store.config["issues"].clone(),
+            "providers": store.config["providers"].clone(),
+        });
+        let response = store.config.clone();
+        (push_payload, response)
+    };
+    // Broadcast the update to subscribed connections. Best-effort: no
+    // subscribers is not an error.
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_SERVER_CONFIG_UPDATED.to_string(),
+        updated.0,
+    ));
+    JsonRpcResponse::success(id, updated.1)
+}
+
+/// `server.updateSettings` / `server.patchSettings` — deep-merge the patch
+/// into the stored `ServerSettings` and push `server.settingsUpdated` with the
+/// full resolved settings. Returns the full updated settings.
+async fn handle_server_update_settings(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    // Validate `params` is a JSON object (ServerSettingsPatch is a struct with
+    // all-optional fields). Non-object → InvalidParams (-32602).
+    if !params.is_object() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "Invalid params: 'updateSettings' expects a settings-patch object",
+        );
+    }
+    let updated = {
+        let mut store = state.settings.write().await;
+        crate::settings::merge_json(&mut store.settings, params);
+        store.settings.clone()
+    };
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED.to_string(),
+        serde_json::json!({ "settings": updated.clone() }),
+    ));
+    JsonRpcResponse::success(id, updated)
+}
+
+/// `server.patchSettings` — alias of `updateSettings` (same deep-merge
+/// semantics; MCode exposes both names for forward-compat with the contracts
+/// layer).
+async fn handle_server_patch_settings(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    handle_server_update_settings(state, id, params).await
+}
+
+/// `server.refreshProviders` — re-emit the current provider list from the
+/// settings store. Syncode has no external provider-availability probe, so the
+/// "refresh" is a no-op state-wise: the providers slice is whatever the last
+/// write stored (the default `[]` if no probe or updateProvider has run).
+/// Pushes `server.providerStatusesUpdated` and returns the
+/// `ServerProviderStatusesUpdatedPayload` (`{ providers: [...] }`).
+async fn handle_server_refresh_providers(state: &WsState, id: Value) -> JsonRpcResponse {
+    let providers = {
+        let store = state.settings.read().await;
+        store.config["providers"].clone()
+    };
+    let payload = serde_json::json!({ "providers": providers.clone() });
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED.to_string(),
+        payload.clone(),
+    ));
+    JsonRpcResponse::success(id, payload)
 }
 
 /// `server.updateProvider` — re-probe a single provider. Validates that
 /// `params.provider` is present and non-empty (MCode `ServerProviderUpdateInput`
-/// is `{ provider: ProviderKind }`), then returns the empty
-/// `ServerProviderStatusesUpdatedPayload`. Performs no real refresh (stub).
-fn handle_server_update_provider(id: Value, params: &Value) -> JsonRpcResponse {
+/// is `{ provider: ProviderKind }`). Syncode has no probe, so this re-emits the
+/// current provider list (the targeted provider's status is unchanged unless a
+/// prior `updateSettings` write updated its settings entry). Pushes
+/// `server.providerStatusesUpdated` and returns the payload.
+async fn handle_server_update_provider(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
     // Validate `provider` is a non-empty string (MCode ProviderKind union).
     // Missing/empty/wrong-type → InvalidParams (-32602) so the UI surfaces a
     // typed validation error rather than a silent no-op.
@@ -2025,17 +2202,28 @@ fn handle_server_update_provider(id: Value, params: &Value) -> JsonRpcResponse {
             "Invalid params: 'provider' must be a non-empty string",
         );
     }
-    // stub: no provider probe — empty statuses payload.
-    JsonRpcResponse::success(id, serde_json::json!({ "providers": [] }))
+    let providers = {
+        let store = state.settings.read().await;
+        store.config["providers"].clone()
+    };
+    let payload = serde_json::json!({ "providers": providers.clone() });
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED.to_string(),
+        payload.clone(),
+    ));
+    JsonRpcResponse::success(id, payload)
 }
 
 /// `server.upsertKeybinding` — add/update a keybinding rule. Validates that
-/// `params` is a JSON object (MCode `ServerUpsertKeybindingInput` is a
-/// `KeybindingRule` struct), then returns the default upsert result shape
-/// (`{ keybindings: [], issues: [] }`). Performs no persistence (stub) —
-/// syncode has no keybindings resolver, so the echoed keybindings list is
-/// empty and the UI's optimistic add is dropped on the next re-read.
-fn handle_server_upsert_keybinding(id: Value, params: &Value) -> JsonRpcResponse {
+/// `params` is a JSON object (MCode `KeybindingRule` is a struct), then
+/// appends/replaces the entry in the config's `keybindings` array (keyed by
+/// the rule's `id` if present, else appended). Pushes `server.configUpdated`
+/// with the `{ issues, providers }` slice and returns `{ keybindings, issues }`.
+async fn handle_server_upsert_keybinding(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
     // Validate `params` is an object (KeybindingRule is a struct). Non-object
     // (null, array, primitive) → InvalidParams (-32602).
     if !params.is_object() {
@@ -2045,10 +2233,48 @@ fn handle_server_upsert_keybinding(id: Value, params: &Value) -> JsonRpcResponse
             "Invalid params: 'upsertKeybinding' expects a keybinding-rule object",
         );
     }
-    // stub: no keybindings resolver — empty result.
+    let (keybindings, push_payload) = {
+        let mut store = state.settings.write().await;
+        // Ensure `keybindings` is an array (the default is `[]`; a prior
+        // setConfig write could have replaced it with a non-array).
+        let cfg_obj = store
+            .config
+            .as_object_mut()
+            .expect("stored ServerConfig is always an object");
+        if !cfg_obj["keybindings"].is_array() {
+            cfg_obj["keybindings"] = Value::Array(Vec::new());
+        }
+        let keybindings_arr = cfg_obj["keybindings"].as_array_mut().unwrap();
+        // Upsert by `id` if the rule carries one; else append. A matching id
+        // replaces; otherwise the rule is appended.
+        let rule_id = params.get("id").and_then(|v| v.as_str()).map(String::from);
+        let mut replaced = false;
+        if let Some(ref rid) = rule_id {
+            for entry in keybindings_arr.iter_mut() {
+                if entry.get("id").and_then(|v| v.as_str()) == Some(rid.as_str()) {
+                    *entry = params.clone();
+                    replaced = true;
+                    break;
+                }
+            }
+        }
+        if !replaced {
+            keybindings_arr.push(params.clone());
+        }
+        let keybindings = cfg_obj["keybindings"].clone();
+        let push_payload = serde_json::json!({
+            "issues": cfg_obj["issues"].clone(),
+            "providers": cfg_obj["providers"].clone(),
+        });
+        (keybindings, push_payload)
+    };
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_SERVER_CONFIG_UPDATED.to_string(),
+        push_payload,
+    ));
     JsonRpcResponse::success(
         id,
-        serde_json::json!({ "keybindings": [], "issues": [] }),
+        serde_json::json!({ "keybindings": keybindings, "issues": [] }),
     )
 }
 
@@ -2291,15 +2517,6 @@ fn strip_markdown_fence(s: &str) -> String {
         return rest.trim().trim_end_matches("```").trim().to_string();
     }
     s.to_string()
-}
-
-/// `server.patchSettings` — accept the patch, echo the default
-/// `ServerSettings`. Performs no persistence (stub). Mirrors
-/// `server.updateSettings` so the UI's post-save re-read converges to the
-/// unchanged default.
-fn handle_server_patch_settings(id: Value) -> JsonRpcResponse {
-    // stub: no persistence — echo the default settings.
-    JsonRpcResponse::success(id, build_default_server_settings())
 }
 
 /// `server.listProviderUsage` — return empty usage list. MCode's contract is
@@ -7953,18 +8170,24 @@ mod tests {
     #[tokio::test]
     async fn server_subscribe_stubs_return_success() {
         let state = WsState::new_in_memory(16);
-        for (method, channel_suffix) in [
-            ("server.subscribeConfig", "config"),
-            ("server.subscribeSettings", "settings"),
-            ("server.subscribeProviderStatuses", "providerStatuses"),
-            ("server.subscribeLifecycle", "lifecycle"),
+        // T6c-18: config/settings/providerStatuses subscribe are REAL — they
+        // register on the matching server.*Updated push channel. lifecycle
+        // remains a stub. All four return success with `subscribed: true`.
+        for (method, channel) in [
+            ("server.subscribeConfig", crate::channels::CHANNEL_SERVER_CONFIG_UPDATED),
+            ("server.subscribeSettings", crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED),
+            (
+                "server.subscribeProviderStatuses",
+                crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
+            ),
+            ("server.subscribeLifecycle", "server.lifecycle"),
         ] {
             let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
             assert_eq!(result["subscribed"], serde_json::Value::Bool(true), "{}", method);
-            assert_eq!(result["channel"], format!("server.{}", channel_suffix), "{}", method);
+            assert_eq!(result["channel"], channel, "{}", method);
         }
     }
 
@@ -8008,26 +8231,39 @@ mod tests {
     //      — rejecting malformed input with -32602 InvalidParams.
 
     #[tokio::test]
-    async fn server_set_config_echoes_default_config_shape() {
+    async fn server_set_config_persists_and_returns_stored_config() {
+        // T6c-18 REAL: setConfig overwrites the stored config with the params
+        // and returns the stored config (a full overwrite, not a merge).
         let state = WsState::new_in_memory(16);
         for method in ["server.setConfig", "server/set-config"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
-                "params": { "cwd": "/tmp/x" }
+                "params": {
+                    "cwd": "/tmp/x", "worktreesDir": "/tmp/x/wt",
+                    "keybindingsConfigPath": "/tmp/x/kb.json",
+                    "keybindings": [], "issues": [], "providers": [],
+                    "availableEditors": [], "authMode": "unsafe-no-auth",
+                }
             });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            // Echoed default ServerConfig: required top-level fields present,
-            // arrays empty (no persistence — write is a stub).
-            assert!(!result["cwd"].as_str().unwrap_or("").is_empty(), "{}: cwd", method);
+            // The stored config is the params verbatim (full overwrite).
+            assert_eq!(result["cwd"], "/tmp/x", "{}: cwd", method);
             assert!(result["providers"].as_array().unwrap().is_empty(), "{}: providers", method);
             assert!(result["issues"].as_array().unwrap().is_empty(), "{}: issues", method);
+
+            // Read back via getConfig confirms persistence.
+            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "server.getConfig" });
+            let resp = rpc(&state, 1, &req).await;
+            assert_eq!(resp.result.unwrap()["cwd"], "/tmp/x", "{}: read-back cwd", method);
         }
     }
 
     #[tokio::test]
-    async fn server_update_settings_echoes_default_settings_shape() {
+    async fn server_update_settings_persists_merged_settings() {
+        // T6c-18 REAL: updateSettings deep-merges the patch into the stored
+        // settings and returns the full resolved settings.
         let state = WsState::new_in_memory(16);
         for method in ["server.updateSettings", "server/update-settings"] {
             let req = serde_json::json!({
@@ -8037,18 +8273,18 @@ mod tests {
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            // Echoed default ServerSettings: provider set present with all 8 keys.
+            // The patch IS applied (REAL semantics — not the stub echo).
+            assert_eq!(
+                result["enableAssistantStreaming"],
+                serde_json::Value::Bool(true),
+                "{}: patch must be applied",
+                method
+            );
+            // Untouched default keys preserved (deep-merge).
             assert_eq!(result["defaultThreadEnvMode"], "local", "{}: env mode", method);
             let providers = &result["providers"];
             assert_eq!(providers["codex"]["binaryPath"], "codex", "{}: codex", method);
             assert_eq!(providers["pi"]["binaryPath"], "pi", "{}: pi", method);
-            // The patch is NOT applied — the stub echoes the unchanged default.
-            assert_eq!(
-                result["enableAssistantStreaming"],
-                serde_json::Value::Bool(false),
-                "{}: stub must not persist the patch",
-                method
-            );
         }
     }
 
@@ -8104,9 +8340,15 @@ mod tests {
     async fn server_upsert_keybinding_validates_params_object() {
         let state = WsState::new_in_memory(16);
 
-        // Happy path: params is a keybinding-rule object → success with the
-        // default empty result shape `{ keybindings: [], issues: [] }`.
-        for method in ["server.upsertKeybinding", "server/upsert-keybinding"] {
+        // Happy path: params is a keybinding-rule object → success. T6c-18
+        // REAL: the rule is appended to the stored config's `keybindings`
+        // array, so the returned `keybindings` reflects the upsert (length 1
+        // after the first call in each iteration's fresh state — but the
+        // loop reuses the same state, so the second iteration appends again).
+        for (i, method) in ["server.upsertKeybinding", "server/upsert-keybinding"]
+            .iter()
+            .enumerate()
+        {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
                 "params": { "key": "mod+k", "command": "test" }
@@ -8114,7 +8356,11 @@ mod tests {
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            assert!(result["keybindings"].as_array().unwrap().is_empty(), "{}: keybindings", method);
+            // The keybindings array contains the upserted rule (REAL — no
+            // longer empty). Both iterations append (no `id` to dedupe on).
+            let kbs = result["keybindings"].as_array().unwrap();
+            assert!(!kbs.is_empty(), "{}: keybindings must reflect the upsert", method);
+            assert_eq!(kbs.len(), i + 1, "{}: appended once per call", method);
             assert!(result["issues"].as_array().unwrap().is_empty(), "{}: issues", method);
         }
 
@@ -9468,7 +9714,9 @@ mod tests {
     /// patchSettings echoes the default ServerSettings under BOTH forms
     /// (mirrors updateSettings).
     #[tokio::test]
-    async fn server_patch_settings_echoes_default_settings_shape() {
+    async fn server_patch_settings_persists_merged_settings() {
+        // T6c-18 REAL: patchSettings deep-merges the patch (alias of
+        // updateSettings).
         let state = WsState::new_in_memory(16);
         for method in ["server.patchSettings", "server/patch-settings"] {
             let req = serde_json::json!({
@@ -9479,10 +9727,11 @@ mod tests {
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
             assert_eq!(result["defaultThreadEnvMode"], "local", "{}: env mode", method);
+            // The patch IS applied (REAL semantics — not the stub echo).
             assert_eq!(
                 result["enableAssistantStreaming"],
-                serde_json::Value::Bool(false),
-                "{}: stub must not persist the patch",
+                serde_json::Value::Bool(true),
+                "{}: patch must be applied",
                 method
             );
         }
@@ -10265,6 +10514,394 @@ mod tests {
         assert!(
             !still_registered,
             "close must remove the reader handle from the registry"
+        );
+    }
+
+    // ─── T6c-18: server-settings REAL (in-memory persistence + push) ──
+
+    /// Helper: send a JSON-RPC request and parse the response. Assumes the
+    /// call succeeds (no parse error).
+    async fn rpc_success(state: &WsState, method: &str, params: Value) -> JsonRpcResponse {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+        let response = handle_rpc(state, 1, &request.to_string()).await;
+        serde_json::from_str(&response.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_config_returns_stored_default() {
+        // A fresh server returns the default ServerConfig (initialized in
+        // WsState::new_with_auth). The stored config must be a non-empty
+        // object with the required top-level fields.
+        let state = WsState::new_in_memory(16);
+        let resp = rpc_success(&state, "server.getConfig", serde_json::json!({})).await;
+        assert!(resp.error.is_none(), "get_config failed: {:?}", resp.error);
+        let config = resp.result.unwrap();
+        assert!(config["cwd"].as_str().unwrap().contains('/'));
+        assert!(config["worktreesDir"].as_str().unwrap().contains(".synara"));
+        assert_eq!(config["keybindings"].as_array().unwrap().len(), 0);
+        assert_eq!(config["authMode"], "unsafe-no-auth");
+    }
+
+    #[tokio::test]
+    async fn get_settings_returns_stored_default() {
+        let state = WsState::new_in_memory(16);
+        let resp = rpc_success(&state, "server.getSettings", serde_json::json!({})).await;
+        assert!(resp.error.is_none());
+        let settings = resp.result.unwrap();
+        assert_eq!(settings["defaultThreadEnvMode"], "local");
+        assert_eq!(settings["providers"]["codex"]["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn set_config_persists_and_reads_back() {
+        // setConfig overwrites the stored config; a subsequent getConfig
+        // returns the written value (not the default). This is the core
+        // REAL behavior — the stub echoed the default.
+        let state = WsState::new_in_memory(16);
+        let new_config = serde_json::json!({
+            "cwd": "/custom/cwd",
+            "worktreesDir": "/custom/worktrees",
+            "keybindingsConfigPath": "/custom/kb.json",
+            "keybindings": [{ "id": "kb1", "key": "cmd+k" }],
+            "issues": [{ "kind": "keybindings.invalid-entry", "message": "bad" }],
+            "providers": [],
+            "availableEditors": [],
+            "authMode": "unsafe-no-auth",
+        });
+        let resp = rpc_success(&state, "server.setConfig", new_config.clone()).await;
+        assert!(resp.error.is_none(), "set_config failed: {:?}", resp.error);
+        let returned = resp.result.unwrap();
+        assert_eq!(returned["cwd"], "/custom/cwd");
+        assert_eq!(returned["keybindings"][0]["id"], "kb1");
+
+        // Read back — must reflect the write.
+        let resp = rpc_success(&state, "server.getConfig", serde_json::json!({})).await;
+        let config = resp.result.unwrap();
+        assert_eq!(config["cwd"], "/custom/cwd");
+        assert_eq!(config["keybindings"][0]["key"], "cmd+k");
+    }
+
+    #[tokio::test]
+    async fn set_config_rejects_non_object() {
+        let state = WsState::new_in_memory(16);
+        let resp =
+            rpc_success(&state, "server.setConfig", serde_json::json!("not-an-object")).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn update_settings_deep_merges_and_reads_back() {
+        // updateSettings applies a partial patch (deep-merge); a subsequent
+        // getSettings reflects the merge and preserves untouched keys.
+        let state = WsState::new_in_memory(16);
+        let patch = serde_json::json!({
+            "enableAssistantStreaming": true,
+            "textGenerationModelSelection": { "model": "claude-4-opus" },
+            "providers": { "codex": { "enabled": false } },
+        });
+        let resp = rpc_success(&state, "server.updateSettings", patch).await;
+        assert!(resp.error.is_none(), "update_settings failed: {:?}", resp.error);
+        let returned = resp.result.unwrap();
+        // Patched scalar.
+        assert_eq!(returned["enableAssistantStreaming"], true);
+        // Patched nested field, untouched sibling preserved (deep merge).
+        assert_eq!(returned["textGenerationModelSelection"]["model"], "claude-4-opus");
+        assert_eq!(
+            returned["textGenerationModelSelection"]["provider"],
+            "codex"
+        );
+        // Patched provider entry, untouched sibling providers preserved.
+        assert_eq!(returned["providers"]["codex"]["enabled"], false);
+        assert_eq!(returned["providers"]["claudeAgent"]["enabled"], true);
+        // Untouched top-level key preserved.
+        assert_eq!(returned["defaultThreadEnvMode"], "local");
+
+        // Read back.
+        let resp = rpc_success(&state, "server.getSettings", serde_json::json!({})).await;
+        let settings = resp.result.unwrap();
+        assert_eq!(settings["enableAssistantStreaming"], true);
+        assert_eq!(settings["providers"]["codex"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn patch_settings_aliases_update_settings() {
+        // patchSettings applies the same deep-merge as updateSettings.
+        let state = WsState::new_in_memory(16);
+        let patch = serde_json::json!({ "addProjectBaseDirectory": "/base" });
+        let resp = rpc_success(&state, "server.patchSettings", patch).await;
+        assert!(resp.error.is_none());
+        let resp = rpc_success(&state, "server.getSettings", serde_json::json!({})).await;
+        assert_eq!(resp.result.unwrap()["addProjectBaseDirectory"], "/base");
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_non_object() {
+        let state = WsState::new_in_memory(16);
+        let resp = rpc_success(&state, "server.updateSettings", serde_json::json!(42)).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn upsert_keybinding_appends_and_replaces() {
+        // First upsert appends; second upsert with the same id replaces.
+        let state = WsState::new_in_memory(16);
+        let rule_a = serde_json::json!({ "id": "kb1", "key": "cmd+a", "command": "A" });
+        let resp = rpc_success(&state, "server.upsertKeybinding", rule_a).await;
+        assert!(resp.error.is_none(), "upsert failed: {:?}", resp.error);
+        let returned = resp.result.unwrap();
+        assert_eq!(returned["keybindings"].as_array().unwrap().len(), 1);
+
+        // Second rule with a different id → append.
+        let rule_b = serde_json::json!({ "id": "kb2", "key": "cmd+b", "command": "B" });
+        let resp = rpc_success(&state, "server.upsertKeybinding", rule_b).await;
+        let returned = resp.result.unwrap();
+        assert_eq!(returned["keybindings"].as_array().unwrap().len(), 2);
+
+        // Replace kb1 by id.
+        let rule_a_v2 =
+            serde_json::json!({ "id": "kb1", "key": "cmd+shift+a", "command": "A2" });
+        let resp = rpc_success(&state, "server.upsertKeybinding", rule_a_v2).await;
+        let returned = resp.result.unwrap();
+        let kbs = returned["keybindings"].as_array().unwrap();
+        assert_eq!(kbs.len(), 2, "replace must not grow the array");
+        let kb1 = kbs.iter().find(|k| k["id"] == "kb1").unwrap();
+        assert_eq!(kb1["key"], "cmd+shift+a");
+
+        // The stored config reflects the upserts (read back via getConfig).
+        let resp = rpc_success(&state, "server.getConfig", serde_json::json!({})).await;
+        let config = resp.result.unwrap();
+        assert_eq!(config["keybindings"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn upsert_keybinding_rejects_non_object() {
+        let state = WsState::new_in_memory(16);
+        let resp =
+            rpc_success(&state, "server.upsertKeybinding", serde_json::json!([1, 2, 3])).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn update_provider_validates_and_returns_payload() {
+        let state = WsState::new_in_memory(16);
+        // Valid provider → success with `{ providers: [...] }` payload.
+        let resp = rpc_success(
+            &state,
+            "server.updateProvider",
+            serde_json::json!({ "provider": "codex" }),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap()["providers"].is_array());
+
+        // Missing/empty provider → InvalidParams.
+        let resp = rpc_success(
+            &state,
+            "server.updateProvider",
+            serde_json::json!({ "provider": "" }),
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn refresh_providers_returns_payload() {
+        let state = WsState::new_in_memory(16);
+        let resp = rpc_success(&state, "server.refreshProviders", serde_json::json!({})).await;
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap()["providers"].is_array());
+    }
+
+    #[tokio::test]
+    async fn set_config_pushes_config_updated_event() {
+        // setConfig broadcasts on push_tx with channel=server.configUpdated.
+        // A subscribed receiver picks up the `{ issues, providers }` payload.
+        let state = WsState::new_in_memory(16);
+        let mut rx = state.push_tx.subscribe();
+        let new_config = serde_json::json!({
+            "cwd": "/x", "worktreesDir": "/x/wt",
+            "keybindingsConfigPath": "/x/kb.json",
+            "keybindings": [], "issues": [{ "kind": "keybindings.malformed-config", "message": "m" }],
+            "providers": [], "availableEditors": [], "authMode": "unsafe-no-auth",
+        });
+        let _ = rpc_success(&state, "server.setConfig", new_config).await;
+        let (channel, data) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("configUpdated push should arrive")
+            .unwrap();
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_CONFIG_UPDATED);
+        assert!(data["issues"].is_array());
+        assert!(data["providers"].is_array());
+    }
+
+    #[tokio::test]
+    async fn update_settings_pushes_settings_updated_event() {
+        let state = WsState::new_in_memory(16);
+        let mut rx = state.push_tx.subscribe();
+        let patch = serde_json::json!({ "enableAssistantStreaming": true });
+        let _ = rpc_success(&state, "server.updateSettings", patch).await;
+        let (channel, data) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("settingsUpdated push should arrive")
+            .unwrap();
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED);
+        assert_eq!(data["settings"]["enableAssistantStreaming"], true);
+    }
+
+    #[tokio::test]
+    async fn subscribe_config_emits_snapshot_and_registers_channel() {
+        // subscribeConfig registers the connection on server.configUpdated
+        // and emits an initial snapshot via the per-connection tx. We verify
+        // both: (1) the subscription is recorded (so future writes forward),
+        // (2) a snapshot frame arrives on the connection's tx.
+        //
+        // For the live-push leg we must spawn `run_push_delivery` — that task
+        // is what forwards push_tx broadcasts onto the connection's mpsc tx
+        // (mirrors the production connection handler in server.rs). Without
+        // it the snapshot (sent directly to tx) arrives, but the setConfig
+        // broadcast on push_tx would have no consumer.
+        let state = std::sync::Arc::new(WsState::new_in_memory(16));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx.clone()).await;
+        let _delivery = tokio::spawn(crate::server::run_push_delivery(
+            std::sync::Arc::clone(&state),
+            1,
+            tx,
+        ));
+        // Let the delivery task subscribe to the push bus BEFORE the
+        // subscribe/setConfig calls run — broadcast only reaches receivers
+        // that exist at send time. Mirrors the e2e test in server.rs.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let resp = rpc_success(
+            &state,
+            "server.subscribeConfig",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["subscribed"], true);
+        assert_eq!(result["channel"], crate::channels::CHANNEL_SERVER_CONFIG_UPDATED);
+        assert_eq!(result["snapshotEmitted"], true);
+
+        // Snapshot frame should arrive on the connection tx.
+        let snapshot_msg = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("snapshot should arrive")
+            .unwrap();
+        assert!(snapshot_msg.contains("push/server.configUpdated"));
+        assert!(snapshot_msg.contains("snapshot"));
+
+        // The subscription is recorded — a subsequent setConfig forwards.
+        let _ = rpc_success(
+            &state,
+            "server.setConfig",
+            serde_json::json!({
+                "cwd": "/y", "worktreesDir": "/y/wt",
+                "keybindingsConfigPath": "/y/kb.json",
+                "keybindings": [], "issues": [], "providers": [],
+                "availableEditors": [], "authMode": "unsafe-no-auth",
+            }),
+        )
+        .await;
+        let live_msg = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("live configUpdated should arrive on subscribed conn")
+            .unwrap();
+        assert!(live_msg.contains("push/server.configUpdated"));
+        // The live frame is not a snapshot (it's the write payload).
+        assert!(!live_msg.contains("\"snapshot\""));
+    }
+
+    #[tokio::test]
+    async fn subscribe_settings_emits_snapshot() {
+        let state = WsState::new_in_memory(16);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        let resp = rpc_success(
+            &state,
+            "server.subscribeSettings",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["snapshotEmitted"], true);
+
+        let msg = rx.recv().await.unwrap();
+        assert!(msg.contains("push/server.settingsUpdated"));
+        assert!(msg.contains("snapshot"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_provider_statuses_emits_snapshot() {
+        let state = WsState::new_in_memory(16);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        let resp = rpc_success(
+            &state,
+            "server.subscribeProviderStatuses",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["channel"], crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED);
+
+        let msg = rx.recv().await.unwrap();
+        assert!(msg.contains("push/server.providerStatusesUpdated"));
+    }
+
+    #[tokio::test]
+    async fn push_subscribe_accepts_server_config_updated_channel() {
+        // The new server.*Updated channels must pass the push/subscribe
+        // validator (T6c-18 added them to ALL_CHANNELS).
+        let state = WsState::new_in_memory(16);
+        let resp = rpc_success(
+            &state,
+            "push/subscribe",
+            serde_json::json!({ "channel": crate::channels::CHANNEL_SERVER_CONFIG_UPDATED }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["subscribed"], true);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_subscriber_does_not_receive_writes() {
+        // A connection NOT subscribed to server.configUpdated must not
+        // receive the setConfig push (opt-in delivery).
+        let state = WsState::new_in_memory(16);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+        // No subscribe call — connection is registered but unsubscribed.
+
+        let _ = rpc_success(
+            &state,
+            "server.setConfig",
+            serde_json::json!({
+                "cwd": "/z", "worktreesDir": "/z/wt",
+                "keybindingsConfigPath": "/z/kb.json",
+                "keybindings": [], "issues": [], "providers": [],
+                "availableEditors": [], "authMode": "unsafe-no-auth",
+            }),
+        )
+        .await;
+        // No snapshot, no live frame — the channel must be silent.
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            outcome.is_err(),
+            "unsubscribed connection must not receive pushes"
         );
     }
 }
