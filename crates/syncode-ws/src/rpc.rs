@@ -153,6 +153,8 @@ async fn dispatch_method(
                     "provider/list-options",
                     "provider/read-skill",
                     "provider/compact-thread",
+                    "stats/get-profile-stats",
+                    "stats/get-profile-token-stats",
                 ]
             }),
         ),
@@ -530,6 +532,38 @@ async fn dispatch_method(
         "provider.listOptions" | "provider/list-options" => handle_provider_list_options(id),
         "provider.readSkill" | "provider/read-skill" => handle_provider_read_skill(id),
         "provider.compactThread" | "provider/compact-thread" => handle_provider_compact_thread(id),
+
+        // ─── Profile stats RPCs (T6c-8) ─────────────────────────
+        //
+        // The cloned MCode UI's Profile page calls these `stats.*` RPCs to render
+        // the activity heatmap, provider-usage breakdown, skill-usage list, token
+        // totals, and quota panel (`stats.getProfileStats`,
+        // `stats.getProfileTokenStats`). Syncode has no native stats aggregation
+        // subsystem (no prompt/turn/token accumulator, no daily-rollup store, no
+        // provider-quota poller), so each handler returns a **minimal valid MCode
+        // shape** — every schema-required top-level field present, arrays empty,
+        // counts 0, optionals null — so the UI's `.map`/`.find`/`.length` reads
+        // render an empty/zero state ("no activity yet") rather than crashing on
+        // `MethodNotFound`.
+        //
+        // Shape references (Tier-3 `frontend/src/contracts/tier3/stats.ts`,
+        // mirrored from MCode `packages/contracts/src/stats.ts`):
+        //   - ProfileStats         { generatedAt, timezone, identity, activity,
+        //                            activeHours, insights, providerModels[],
+        //                            skills[], mostUsedSkill, mostWorkedProject,
+        //                            quota }
+        //   - ProfileTokenStats    { available, lifetimeTotalTokens, peakDayTokens,
+        //                            peakDay, providers[], unavailableProviders[],
+        //                            heatmapMetric, heatmap[] }
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form for
+        // robustness (the wsNativeApi sends dot, the tauriNativeApi sends slash
+        // — both must resolve). Entry order matches the MCODE_TO_SERVED append
+        // block to ease parallel-merge conflict resolution.
+        "stats.getProfileStats" | "stats/get-profile-stats" => handle_stats_get_profile_stats(id),
+        "stats.getProfileTokenStats" | "stats/get-profile-token-stats" => {
+            handle_stats_get_profile_token_stats(id)
+        }
 
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
@@ -3285,6 +3319,96 @@ fn handle_provider_compact_thread(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
 }
 
+// ─── Profile stats handlers (T6c-8) ──────────────────────────────────
+
+/// `stats.getProfileStats` — return an empty `ProfileStats`. Syncode has no
+/// stats aggregation subsystem (no prompt/turn/token accumulator, no daily
+/// heatmap rollup, no provider-quota poller), so every aggregate is zeroed and
+/// every list is empty. The shape mirrors the MCode `ProfileStats` schema
+/// (Tier-3 `frontend/src/contracts/tier3/stats.ts`): all schema-required
+/// top-level fields are present so the UI's destructuring reads don't throw.
+///
+/// `generatedAt` is the current UTC time (the UI displays "generated at" — a
+/// live timestamp keeps that label honest); `timezone.utcOffsetMinutes` echoes
+/// the caller's request param (read best-effort, default 0) so the timezone
+/// card renders the caller's offset rather than a hard-coded 0.
+fn handle_stats_get_profile_stats(id: Value) -> JsonRpcResponse {
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "generatedAt": generated_at,
+            "timezone": {
+                "utcOffsetMinutes": 0,
+                "today": "",
+            },
+            "identity": {
+                "homeDirBasename": "",
+                "initials": "",
+                "defaultHandle": "",
+            },
+            "activity": {
+                "currentStreakDays": 0,
+                "longestStreakDays": 0,
+                "totalPromptsSent": 0,
+                "totalThreads": 0,
+                "promptsToday": 0,
+                "heatmapMetric": "prompts",
+                "heatmap": [],
+            },
+            "activeHours": {
+                "startHour": Value::Null,
+                "endHour": Value::Null,
+                "turnCount": 0,
+                "label": Value::Null,
+            },
+            "insights": {
+                "topProvider": Value::Null,
+                "topProviderPercent": Value::Null,
+                "topReasoning": Value::Null,
+                "topReasoningPercent": Value::Null,
+                "skillsExplored": 0,
+                "totalSkillsUsed": 0,
+            },
+            "providerModels": [],
+            "skills": [],
+            "mostUsedSkill": Value::Null,
+            "mostWorkedProject": Value::Null,
+            "quota": {
+                "status": "unavailable",
+                "provider": Value::Null,
+                "window": Value::Null,
+                "usedPercent": Value::Null,
+                "resetsAt": Value::Null,
+                "planName": Value::Null,
+            },
+        }),
+    )
+}
+
+/// `stats.getProfileTokenStats` — return an empty `ProfileTokenStats`. Syncode
+/// has no token-usage tracking (no per-turn token counter, no provider-quota
+/// poller), so `available` is `false` and every aggregate is null/empty. The
+/// shape mirrors the MCode `ProfileTokenStats` schema: all schema-required
+/// top-level fields are present (`available`, `heatmapMetric`, `providers`,
+/// `unavailableProviders`, `heatmap`) so the UI's token-usage panel renders a
+/// "token stats unavailable" state rather than crashing.
+fn handle_stats_get_profile_token_stats(id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "available": false,
+            "lifetimeTotalTokens": Value::Null,
+            "peakDayTokens": Value::Null,
+            "peakDay": Value::Null,
+            "providers": [],
+            "unavailableProviders": [],
+            "heatmapMetric": "tokens",
+            "heatmap": [],
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5212,5 +5336,152 @@ mod tests {
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
         assert_eq!(result["ok"], true);
+    }
+
+    // ─── Profile stats RPC tests (T6c-8) ──────────────────────────────
+
+    /// Both `stats.*` RPCs must resolve (no MethodNotFound) under BOTH the
+    /// MCode dot-name AND the slash form, and each must return a success
+    /// envelope.
+    #[tokio::test]
+    async fn stats_rpcs_resolve_both_forms() {
+        let state = WsState::new_in_memory(16);
+        // (dot-name, slash-name)
+        let cases: &[(&str, &str)] = &[
+            ("stats.getProfileStats", "stats/get-profile-stats"),
+            (
+                "stats.getProfileTokenStats",
+                "stats/get-profile-token-stats",
+            ),
+        ];
+        for (dot, slash) in cases {
+            for method in [*dot, *slash] {
+                let req =
+                    serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+                let resp = provider_rpc(&state, &req).await;
+                assert!(
+                    resp.error.is_none(),
+                    "{method} failed: {:?}",
+                    resp.error
+                );
+                assert!(resp.result.is_some(), "{method} returned null result");
+            }
+        }
+    }
+
+    /// rpc/listMethods must advertise the new stats methods so the UI's
+    /// capability discovery sees them.
+    #[tokio::test]
+    async fn stats_rpcs_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let resp = provider_rpc(&state, &req).await;
+        let methods = resp.result.unwrap()["methods"]
+            .as_array()
+            .expect("methods is an array")
+            .clone();
+        let listed: std::collections::HashSet<String> = methods
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        for expected in [
+            "stats/get-profile-stats",
+            "stats/get-profile-token-stats",
+        ] {
+            assert!(
+                listed.contains(expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
+    }
+
+    /// getProfileStats must return every schema-required `ProfileStats` field
+    /// (the UI destructures these unconditionally — missing fields crash the
+    /// render). Aggregates zeroed, arrays empty, optionals null.
+    #[tokio::test]
+    async fn stats_get_profile_stats_returns_full_shape() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "stats.getProfileStats",
+            "params": { "utcOffsetMinutes": -300 }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        // Top-level required fields.
+        for field in [
+            "generatedAt",
+            "timezone",
+            "identity",
+            "activity",
+            "activeHours",
+            "insights",
+            "providerModels",
+            "skills",
+            "mostUsedSkill",
+            "mostWorkedProject",
+            "quota",
+        ] {
+            assert!(
+                result.get(field).is_some(),
+                "ProfileStats missing required field {field}"
+            );
+        }
+        // generatedAt must be an ISO-8601 string (live UTC timestamp).
+        assert!(
+            result["generatedAt"].is_string(),
+            "generatedAt must be a string"
+        );
+        // Empty/zero aggregates.
+        assert_eq!(result["providerModels"].as_array().unwrap().len(), 0);
+        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+        assert_eq!(result["activity"]["heatmap"].as_array().unwrap().len(), 0);
+        assert_eq!(result["activity"]["totalPromptsSent"], 0);
+        assert_eq!(result["activity"]["currentStreakDays"], 0);
+        assert_eq!(result["activity"]["heatmapMetric"], "prompts");
+        // Optionals null.
+        assert!(result["mostUsedSkill"].is_null());
+        assert!(result["mostWorkedProject"].is_null());
+        // Quota unavailable (no provider-quota poller in syncode).
+        assert_eq!(result["quota"]["status"], "unavailable");
+        assert!(result["quota"]["provider"].is_null());
+    }
+
+    /// getProfileTokenStats must return every schema-required
+    /// `ProfileTokenStats` field with `available: false` (syncode has no token
+    /// tracking) and empty arrays.
+    #[tokio::test]
+    async fn stats_get_profile_token_stats_returns_full_shape() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "stats.getProfileTokenStats",
+            "params": { "utcOffsetMinutes": 0 }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        // Top-level required fields.
+        for field in [
+            "available",
+            "lifetimeTotalTokens",
+            "peakDayTokens",
+            "peakDay",
+            "providers",
+            "unavailableProviders",
+            "heatmapMetric",
+            "heatmap",
+        ] {
+            assert!(
+                result.get(field).is_some(),
+                "ProfileTokenStats missing required field {field}"
+            );
+        }
+        // available=false (syncode has no token tracking).
+        assert_eq!(result["available"], false);
+        // Null/empty aggregates.
+        assert!(result["lifetimeTotalTokens"].is_null());
+        assert!(result["peakDayTokens"].is_null());
+        assert!(result["peakDay"].is_null());
+        assert_eq!(result["providers"].as_array().unwrap().len(), 0);
+        assert_eq!(result["unavailableProviders"].as_array().unwrap().len(), 0);
+        assert_eq!(result["heatmap"].as_array().unwrap().len(), 0);
+        assert_eq!(result["heatmapMetric"], "tokens");
     }
 }
