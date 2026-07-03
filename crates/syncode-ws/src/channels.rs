@@ -39,6 +39,14 @@ pub const CHANNEL_SERVER_CONFIG_UPDATED: &str = "server.configUpdated";
 pub const CHANNEL_SERVER_SETTINGS_UPDATED: &str = "server.settingsUpdated";
 pub const CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED: &str = "server.providerStatusesUpdated";
 
+/// `server.lifecycle` — server-lifecycle events (welcome/welcome-event push).
+/// Used by `server.subscribeLifecycle` (T6c-phase-27): the handler registers
+/// the connection on this channel and pushes an initial `welcome` event (the
+/// same payload `server.welcome` returns) as the snapshot baseline. Future
+/// server-lifecycle state changes (e.g. shutdown notifications) will fan out
+/// via this channel.
+pub const CHANNEL_SERVER_LIFECYCLE: &str = "server.lifecycle";
+
 /// All valid channel names
 pub const ALL_CHANNELS: &[&str] = &[
     CHANNEL_ALL,
@@ -50,6 +58,7 @@ pub const ALL_CHANNELS: &[&str] = &[
     CHANNEL_SERVER_CONFIG_UPDATED,
     CHANNEL_SERVER_SETTINGS_UPDATED,
     CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
+    CHANNEL_SERVER_LIFECYCLE,
 ];
 
 /// Subscription manager for a single connection
