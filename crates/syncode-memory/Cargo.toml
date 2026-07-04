@@ -1,0 +1,19 @@
+[package]
+name = "syncode-memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Persistent memory layer — MemoryProvider trait + SQLite-backed interaction store"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { workspace = true }
+serde = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
