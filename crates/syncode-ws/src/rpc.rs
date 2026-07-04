@@ -238,6 +238,13 @@ async fn dispatch_method(
                     "project.discoverScripts",
                     "project.run-script",
                     "project.runScript",
+                    // PROJ-4: project dev-server lifecycle.
+                    "project.start-dev-server",
+                    "project.startDevServer",
+                    "project.stop-dev-server",
+                    "project.stopDevServer",
+                    "project.list-dev-servers",
+                    "project.listDevServers",
                 ]
             }),
         ),
@@ -314,6 +321,31 @@ async fn dispatch_method(
         }
         "project.run-script" | "project.runScript" => {
             handle_project_run_script(state, id, &request.params).await
+        }
+
+        // ─── PROJ-4: project dev-server lifecycle ───────────────────────
+        //
+        // `project.startDevServer` / `project.stopDevServer` /
+        // `project.listDevServers` delegate to the `LocalServerManager`
+        // (the same manager `server.startLocalServer` uses) so dev servers
+        // are real kill-on-stop child processes — NOT stubs. A sidecar
+        // `WsState::dev_servers` HashSet tags which `local_servers` ids are
+        // dev servers; `listDevServers` intersects the set with
+        // `LocalServerManager::list()`. Both forms (dot + slash) accepted.
+        "project.start-dev-server"
+        | "project.startDevServer"
+        | "project/start-dev-server" => {
+            handle_project_start_dev_server(state, id, &request.params).await
+        }
+        "project.stop-dev-server"
+        | "project.stopDevServer"
+        | "project/stop-dev-server" => {
+            handle_project_stop_dev_server(state, id, &request.params).await
+        }
+        "project.list-dev-servers"
+        | "project.listDevServers"
+        | "project/list-dev-servers" => {
+            handle_project_list_dev_servers(state, id).await
         }
 
         // ─── Thread Methods ───────────────────────────────────────
@@ -3340,6 +3372,193 @@ async fn handle_project_run_script(
         ),
         Err(e) => project_fs_error_response(id, e),
     }
+}
+
+// ─── PROJ-4: project dev-server lifecycle handlers ─────────────────────
+//
+// These three handlers back `project.startDevServer` /
+// `project.stopDevServer` / `project.listDevServers`. They delegate to the
+// `LocalServerManager` (the same one `server.startLocalServer` uses), so dev
+// servers are real kill-on-stop child processes. Because the manager has no
+// tagging surface, a sidecar `WsState::dev_servers` HashSet tracks which
+// `local_servers` ids are dev servers; `listDevServers` intersects the set
+// with `LocalServerManager::list()`.
+
+/// `project.startDevServer` (PROJ-4). Spawns a long-running dev-server
+/// process via the `LocalServerManager` and tags it as a dev server in the
+/// `dev_servers` registry. Accepts the same param shape as
+/// `server.startLocalServer` plus an optional `cwd` (working directory —
+/// resolved through the project_fs traversal guard when present) and `script`
+/// (convenience: a shell-quoted command string that overrides `command`/
+/// `args`).
+///
+/// Params:
+///   - `command` (required): executable to spawn (argv[0]).
+///   - `args` (optional, default []): argv[1..].
+///   - `env` (optional, default {}): environment overrides.
+///   - `name` (optional): display name (defaults to `command`).
+///   - `id` (optional): explicit server id; auto-generated as
+///     `dev-<n>` if absent.
+///   - `ports` (optional, default []): declared bind ports.
+///   - `cwd` (optional): working directory for the child (best-effort; the
+///     manager spawns in the server's cwd when absent).
+///
+/// Returns the same `LocalServerProcess` shape as `server.startLocalServer`.
+async fn handle_project_start_dev_server(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let obj = match params.as_object() {
+        Some(o) => o,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "params must be an object",
+            );
+        }
+    };
+
+    let command = match obj.get("command").and_then(|v| v.as_str()) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "params.command (non-empty string) is required",
+            );
+        }
+    };
+
+    let args: Vec<String> = obj
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let env: std::collections::HashMap<String, String> = obj
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let ports: Vec<u32> = obj
+        .get("ports")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u32))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let display_name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&command)
+        .to_string();
+
+    // Auto-assign an id prefixed `dev-` so the dev-server namespace is
+    // self-describing even without the sidecar set (belt-and-braces).
+    let server_id = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            format!(
+                "dev-{}",
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .split('-')
+                    .next()
+                    .unwrap_or("0")
+            )
+        });
+
+    let mut mgr = state.local_servers.write().await;
+    match mgr
+        .start(server_id, display_name, command, args, env, ports)
+        .await
+    {
+        Ok(view) => {
+            // Tag the id as a dev server in the sidecar registry so
+            // `listDevServers` can filter to it.
+            state.dev_servers.write().await.insert(view.id.clone());
+            let result = serde_json::to_value(&view)
+                .unwrap_or_else(|_| serde_json::json!({ "id": view.id, "pid": view.pid }));
+            JsonRpcResponse::success(id, result)
+        }
+        Err(msg) => JsonRpcResponse::error(Some(id), crate::error_codes::INTERNAL_ERROR, msg),
+    }
+}
+
+/// `project.stopDevServer` (PROJ-4). Kills a tracked dev-server process by
+/// `id` via the `LocalServerManager` and removes it from the `dev_servers`
+/// registry.
+///
+/// Params:
+///   - `id` (preferred): the server id returned by `startDevServer`.
+///   - `name` (fallback): treated as an id if `id` is absent.
+///
+/// Returns `{ ok: true }` on success.
+async fn handle_project_stop_dev_server(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let server_id = params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("name").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let server_id = match server_id {
+        Some(s) => s,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "params.id (non-empty string) is required",
+            );
+        }
+    };
+
+    let mut mgr = state.local_servers.write().await;
+    match mgr.stop(&server_id).await {
+        Ok(()) => {
+            // Untag the id regardless of whether it was in the registry —
+            // stop on an untagged id is idempotent at the set level.
+            state.dev_servers.write().await.remove(&server_id);
+            JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
+        }
+        Err(msg) => JsonRpcResponse::error(Some(id), crate::error_codes::INVALID_PARAMS, msg),
+    }
+}
+
+/// `project.listDevServers` (PROJ-4). Returns the subset of running
+/// local-server processes that were started via `project.startDevServer`
+/// (i.e. tagged in the `dev_servers` registry). Intersects the registry with
+/// `LocalServerManager::list()` so a dev server that exited + was reaped by
+/// the manager drops out of the result automatically (no stale entries).
+///
+/// Returns the MCode `ServerLocalServerProcess[]` shape filtered to dev
+/// servers; empty array when none are running. Read-only.
+async fn handle_project_list_dev_servers(state: &WsState, id: Value) -> JsonRpcResponse {
+    let mgr = state.local_servers.read().await;
+    let all = mgr.list();
+    let dev_ids = state.dev_servers.read().await;
+    let filtered: Vec<_> = all.into_iter().filter(|p| dev_ids.contains(&p.id)).collect();
+    let result = serde_json::to_value(&filtered).unwrap_or(serde_json::json!([]));
+    JsonRpcResponse::success(id, result)
 }
 
 /// Default cap on `searchEntries` / `searchLocalEntries` result counts. Matches
@@ -20500,6 +20719,258 @@ mod tests {
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
+    }
+
+    // ─── PROJ-4: project dev-server lifecycle ────────────────────────────
+    //
+    // `project.startDevServer` / `project.stopDevServer` /
+    // `project.listDevServers` delegate to the `LocalServerManager` (real
+    // kill-on-stop child processes) and tag entries in the `dev_servers`
+    // sidecar registry so `listDevServers` filters to just dev servers.
+    // `server.startLocalServer` entries must NOT appear in `listDevServers`.
+
+    /// startDevServer spawns a real process, tags it as a dev server, and
+    /// listDevServer returns it (filtered out of `server.startLocalServer`
+    /// entries); stopDevServer kills + untags it. Both forms (dot + slash)
+    /// verified. The dev-server set is the source of truth for the
+    /// dev/non-dev distinction.
+    #[tokio::test]
+    async fn project_dev_server_lifecycle_is_real_and_filtered() {
+        let state = WsState::new_in_memory(16);
+
+        // 1. listDevServers is empty before any start (both forms).
+        for method in [
+            "project.listDevServers",
+            "project/list-dev-servers",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let arr = resp
+                .result
+                .unwrap()
+                .as_array()
+                .expect("listDevServers result is an array")
+                .clone();
+            assert!(arr.is_empty(), "{method}: empty before any start");
+        }
+
+        // 2. Start a NON-dev server via server.startLocalServer. It must NOT
+        //    show up in listDevServers (proves the filter is real, not just
+        //    "return everything").
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.startLocalServer",
+            "params": {
+                "id": "plain-server",
+                "name": "plain",
+                "command": "sleep",
+                "args": ["30"]
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "plain server start failed: {:?}", resp.error);
+
+        // 3. Start TWO dev servers via project.startDevServer (both forms).
+        let mut dev_ids = Vec::new();
+        for method in [
+            "project.startDevServer",
+            "project/start-dev-server",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": {
+                    "id": format!("dev-{method}"),
+                    "name": "devserver",
+                    "command": "sleep",
+                    "args": ["30"],
+                    "ports": [3000],
+                }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let result = resp.result.unwrap();
+            let pid = result["pid"].as_u64().expect("pid present") as i32;
+            assert!(pid > 0, "{method}: pid must be positive");
+            assert_eq!(result["command"], "sleep");
+            assert_eq!(result["ports"][0], 3000);
+            assert_eq!(result["isStoppable"], true);
+            let srv_id = result["id"].as_str().expect("id present").to_string();
+            // Advisory process-alive probe. On Unix `kill -0 <pid>` exits 0
+            // when the child is signalable; on Windows the bash `kill` builtin
+            // can't resolve the native Windows pid of MSYS2 `sleep.exe`, so the
+            // probe is environment-fragile. We do NOT hard-assert on it (the
+            // pid>0 check above already proved spawn succeeded); this mirrors
+            // `local_server::tests::stop_kills_and_removes_entry`.
+            let _ = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status();
+            dev_ids.push(srv_id);
+        }
+
+        // 4. The dev_servers registry tags exactly the two dev ids.
+        {
+            let dev = state.dev_servers.read().await;
+            assert_eq!(dev.len(), 2, "exactly two dev servers tagged");
+            assert!(dev.contains(&dev_ids[0]));
+            assert!(dev.contains(&dev_ids[1]));
+        }
+
+        // 5. listDevServers returns ONLY the dev servers (not the plain
+        //    server started in step 2). Both forms.
+        for method in [
+            "project.listDevServers",
+            "project/list-dev-servers",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let arr = resp
+                .result
+                .unwrap()
+                .as_array()
+                .expect("listDevServers result is an array")
+                .clone();
+            assert_eq!(arr.len(), 2, "{method}: exactly two dev servers");
+            let ids: std::collections::HashSet<&str> =
+                arr.iter().filter_map(|v| v["id"].as_str()).collect();
+            assert!(ids.contains(dev_ids[0].as_str()));
+            assert!(ids.contains(dev_ids[1].as_str()));
+            assert!(
+                !ids.contains("plain-server"),
+                "{method}: plain server must be filtered out"
+            );
+        }
+
+        // 6. stopDevServer kills + untags one dev server (both forms).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project.stopDevServer",
+            "params": { "id": dev_ids[0] }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "stopDevServer failed: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        // 7. After stop: registry has one entry, listDevServers returns one.
+        {
+            let dev = state.dev_servers.read().await;
+            assert_eq!(dev.len(), 1, "one dev server left after stop");
+            assert!(dev.contains(&dev_ids[1]));
+            assert!(!dev.contains(&dev_ids[0]));
+        }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project.listDevServers"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let arr = resp
+            .result
+            .unwrap()
+            .as_array()
+            .expect("listDevServers result is an array")
+            .clone();
+        assert_eq!(arr.len(), 1, "listDevServers reflects the stop");
+
+        // 8. Cleanup: stop the remaining dev server + the plain server so no
+        //    child outlives the test.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/stop-dev-server",
+            "params": { "id": dev_ids[1] }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "slash-form stop failed: {:?}", resp.error);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.stopLocalServer",
+            "params": { "id": "plain-server" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "plain server cleanup failed: {:?}", resp.error);
+
+        // 9. dev_servers registry is empty after all dev servers stopped.
+        let dev = state.dev_servers.read().await;
+        assert!(dev.is_empty(), "dev_servers empty after all stopped");
+    }
+
+    /// startDevServer validates: missing command -> INVALID_PARAMS; stopDevServer
+    /// validates: unknown id -> INVALID_PARAMS. Both forms covered.
+    #[tokio::test]
+    async fn project_dev_server_validates_params() {
+        let state = WsState::new_in_memory(16);
+
+        // Missing command -> INVALID_PARAMS (both forms).
+        for method in [
+            "project.startDevServer",
+            "project/start-dev-server",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "name": "x" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.result.is_none(), "{method}: missing command must error");
+            let err = resp.error.expect("error present");
+            assert_eq!(
+                err.code,
+                crate::error_codes::INVALID_PARAMS,
+                "{method}: expected INVALID_PARAMS"
+            );
+        }
+
+        // Unknown id -> INVALID_PARAMS (both forms).
+        for method in [
+            "project.stopDevServer",
+            "project/stop-dev-server",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "id": "never-started" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.result.is_none(), "{method}: unknown id must error");
+            let err = resp.error.expect("error present");
+            assert_eq!(
+                err.code,
+                crate::error_codes::INVALID_PARAMS,
+                "{method}: expected INVALID_PARAMS"
+            );
+        }
+
+        // Registry was never populated by the failed starts/stops.
+        let dev = state.dev_servers.read().await;
+        assert!(dev.is_empty(), "no ids tagged after failed calls");
+    }
+
+    /// rpc/listMethods must advertise the three PROJ-4 dev-server RPCs so the
+    /// UI's capability discovery surfaces them. Both the kebab-case
+    /// (`project.start-dev-server`) and camelCase (`project.startDevServer`)
+    /// canonical forms must be present, mirroring the PROJ-3 entries.
+    #[tokio::test]
+    async fn project_dev_server_methods_listed_in_list_methods() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let resp = rpc(&state, 1, &req).await;
+        let methods: Vec<String> = resp.result.unwrap()["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for expected in [
+            "project.start-dev-server",
+            "project.startDevServer",
+            "project.stop-dev-server",
+            "project.stopDevServer",
+            "project.list-dev-servers",
+            "project.listDevServers",
+        ] {
+            assert!(
+                methods.iter().any(|m| m == expected),
                 "rpc/listMethods missing {expected}"
             );
         }

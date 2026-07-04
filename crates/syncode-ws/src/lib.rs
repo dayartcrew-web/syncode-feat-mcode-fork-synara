@@ -174,6 +174,17 @@ pub struct WsState {
     /// child + pid, `stop` kills + removes the entry. Mirrors the
     /// `terminal_manager` wiring (Arc<RwLock<…>> shared across connections).
     pub local_servers: Arc<RwLock<crate::local_server::LocalServerManager>>,
+    /// Dev-server id registry (PROJ-4). Tracks which `local_servers` ids are
+    /// dev servers (started via `project.startDevServer`) so `project.
+    /// listDevServers` can filter `LocalServerManager::list()` down to just the
+    /// dev-server entries. The `LocalServerManager` itself has no tagging
+    /// surface, so this sidecar set is the source of truth for the
+    /// dev-server/non-dev-server distinction. Mirrors the `local_servers`
+    /// wiring (Arc<RwLock<…>> shared across connections). An id is inserted on
+    /// `startDevServer` and removed on `stopDevServer` (or implicitly dropped
+    /// when the manager reports it no longer tracks it — `listDevServers`
+    /// intersects the set with `list()`).
+    pub dev_servers: Arc<RwLock<std::collections::HashSet<String>>>,
     /// Server start instant (T6c-phase-26). Captured in `new_with_auth` and
     /// consulted by `server.getDiagnostics` to report a real
     /// `process.uptimeSeconds` (elapsed since start). Monotonic — not wall
@@ -258,6 +269,7 @@ impl WsState {
             settings,
             usage: Arc::new(RwLock::new(crate::usage::UsageStore::new())),
             local_servers: Arc::new(RwLock::new(crate::local_server::LocalServerManager::new())),
+            dev_servers: Arc::new(RwLock::new(std::collections::HashSet::new())),
             started_at: std::time::Instant::now(),
         }
     }
