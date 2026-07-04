@@ -1423,9 +1423,6 @@ export const UNSERVED_RPC = [
   // dispatch arms aliasing to `provider.listAgents`,
   // `subscribeProviderStatuses`, the auth-config derivation,
   // `listProviderUsage`, and `generateThreadRecap` respectively.
-  "server.listLocalServers",
-  "server.listLocalServerProcesses",
-  "server.listWorktrees",
   // NOTE: `server.transcribeVoice` / `server.voiceStart` / `server.voiceStop`
   // were SERVED in T6c-15 (graceful STT not-configured stubs).
   // NOTE: the final 6 server niche RPCs were SERVED in T6c-17 —
@@ -1433,11 +1430,11 @@ export const UNSERVED_RPC = [
   // `server.getProviderUsageSnapshot`, `server.startLocalServer`,
   // `server.stopLocalServer`, and `server.generateAutomationIntent` (the
   // last one is REAL via an LLM one-shot; the rest are graceful stubs).
-  // After T6c-17 + SRV-5 the only remaining server.* unserved entries are
-  // list-only/process-list RPCs the vendored UI does not actively call
-  // (`listLocalServers`, `listLocalServerProcesses`, `listWorktrees`). The
-  // legacy `getUsage`/`getRecap`/`listProviders`/`getProviderStatuses`/
-  // `getProviderAuthStatus` aliases are NOW SERVED (SRV-5 thin dispatch arms).
+  // NOTE (SRV-6): `server.listLocalServers`, `server.listLocalServerProcesses`,
+  // and `server.listWorktrees` were SERVED in SRV-6 — they snapshot the
+  // `LocalServerManager` / delegate to `git.worktreeList`. After SRV-5 + SRV-6
+  // all server.* RPCs are served (legacy aliases via SRV-5 thin dispatch arms;
+  // list-only/process-list RPCs via SRV-6); no remaining unserved entries.
 
   // ─── Provider discovery (no backend surface) — ~9 ───────────────────
   "provider.listSkills",
