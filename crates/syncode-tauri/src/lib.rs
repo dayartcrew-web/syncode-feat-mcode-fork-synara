@@ -3,7 +3,10 @@
 //! Tauri app entry, IPC commands, auto-updater, system tray,
 //! and native window management.
 
+pub mod browser_commands;
 pub mod commands;
+pub mod desktop_commands;
+pub mod filesystem_commands;
 pub mod git_commands;
 pub mod shell_commands;
 pub mod terminal_commands;

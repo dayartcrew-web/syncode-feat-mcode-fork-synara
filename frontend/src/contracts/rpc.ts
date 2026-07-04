@@ -1489,14 +1489,27 @@ export const UNSERVED_RPC = [
   "auth.getWebSocketToken",
   "auth.getSessionState",
 
-  // ─── Desktop / browser / editor (Tauri-shell scope, no RPC) ─────────
-  "desktop.checkForUpdates",
-  "desktop.applyUpdate",
-  "desktop.openExternal",
-  "desktop.openInEditor",
-  "browser.captureScreenshot",
-  "browser.listTabs",
-  "filesystem.browse",
+  // ─── Desktop / browser / filesystem (DSK-2: Tauri IPC commands) ──────
+  // All 7 `desktop.*` / `browser.*` / `filesystem.*` RPC names the vendored
+  // MCode UI references are NOW SERVED via Tauri's `invoke()` bridge (NOT
+  // JSON-RPC dispatch — these never reach the WS layer). Each is backed by a
+  // real Tauri command registered in `crates/syncode-tauri/src/main.rs`:
+  //   - `desktop.checkForUpdates`  → `desktop_commands::check_for_updates`
+  //   - `desktop.applyUpdate`      → `desktop_commands::apply_update`
+  //   - `desktop.openExternal`     → `desktop_commands::open_external`
+  //   - `desktop.openInEditor`     → `desktop_commands::open_in_editor`
+  //   - `browser.captureScreenshot`→ `browser_commands::capture_screenshot`
+  //                                  (platform-limited graceful stub)
+  //   - `browser.listTabs`         → `browser_commands::list_tabs`
+  //                                  (platform-limited graceful stub)
+  //   - `filesystem.browse`        → `filesystem_commands::browse`
+  //                                  (returns empty selection when the
+  //                                   dialog plugin isn't registered)
+  // The frontend calls these via `@tauri-apps/api/core`'s `invoke()`, not
+  // the WS transport. They are intentionally NOT in `SERVED_RPC` (those are
+  // JSON-RPC method strings); they are REMOVED from `UNSERVED_RPC` so the
+  // cloned UI's imports of their names resolve to typed literals rather than
+  // `MethodNotFound`. (See DSK-2 progress report for details.)
 ] as const;
 
 /** Union of unserved MCode RPC method strings (typed `MethodNotFound` set). */
