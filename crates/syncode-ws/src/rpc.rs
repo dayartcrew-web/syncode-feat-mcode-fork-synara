@@ -681,9 +681,11 @@ async fn dispatch_method(
         // robustness (the wsNativeApi sends dot, the tauriNativeApi sends slash
         // — both must resolve). Entry order matches the MCODE_TO_SERVED append
         // block to ease parallel-merge conflict resolution.
-        "stats.getProfileStats" | "stats/get-profile-stats" => handle_stats_get_profile_stats(id),
+        "stats.getProfileStats" | "stats/get-profile-stats" => {
+            handle_stats_get_profile_stats(state, id).await
+        }
         "stats.getProfileTokenStats" | "stats/get-profile-token-stats" => {
-            handle_stats_get_profile_token_stats(id)
+            handle_stats_get_profile_token_stats(state, id).await
         }
 
         // ─── Git Advanced (stash / network / worktree / init, T6c-9) ────────
@@ -7446,8 +7448,100 @@ mod gh_parse {
 /// live timestamp keeps that label honest); `timezone.utcOffsetMinutes` echoes
 /// the caller's request param (read best-effort, default 0) so the timezone
 /// card renders the caller's offset rather than a hard-coded 0.
-fn handle_stats_get_profile_stats(id: Value) -> JsonRpcResponse {
+/// `stats.getProfileStats` — REAL (T6c-phase-28): the activity counts
+/// (`totalPromptsSent` / `totalThreads` / `promptsToday`), the per-provider
+/// breakdown (`providerModels`), and the `insights.topProvider` are now
+/// populated from real in-memory sources:
+///
+///   - **Activity**: `read_store` HashMaps — `totalPromptsSent` = turn count,
+///     `totalThreads` = thread count, `promptsToday` = turns created today
+///     (UTC date match on `created_at`).
+///   - **providerModels**: `usage.aggregate_by_provider()` — one entry per
+///     provider with recorded token usage, with `turnCount` = call_count and
+///     `percent` = the provider's share of total tokens across all providers.
+///   - **insights.topProvider / topProviderPercent**: the provider with the
+///     largest `total_tokens` share (null when there is no usage yet).
+///
+/// Fields that need deeper subsystems remain at their previous defaults:
+///   - `currentStreakDays` / `longestStreakDays` / `heatmap` / `activeHours`:
+///     need a daily rollup over the turn log (deferred — the activity heatmap
+///     is a separate T6c phase).
+///   - `skills` / `mostUsedSkill`: need a skills-usage subsystem (none exists).
+///   - `mostWorkedProject`: needs per-project turn aggregation (deferred).
+///   - `quota`: needs a provider-quota poller (none exists; stays
+///     `unavailable`).
+///   - `identity` / `timezone.today`: identity needs a user-profile subsystem
+///     (none exists); `timezone.utcOffsetMinutes` echoes the caller's request
+///     param best-effort so the timezone card at least shows the caller offset.
+///
+/// All schema-required top-level fields remain present so the UI's
+/// destructuring reads don't throw (Tier-3 `frontend/src/contracts/tier3/stats.ts`).
+async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcResponse {
     let generated_at = chrono::Utc::now().to_rfc3339();
+
+    // ── Activity counts from the read store ──────────────────────────────
+    // totalPromptsSent = turn count (each turn = one user prompt + assistant
+    //   response cycle, matching MCode's "prompts sent" semantic).
+    // totalThreads = thread count.
+    // promptsToday = turns whose `created_at` ISO timestamp date-matches today
+    //   (UTC). Best-effort parse — malformed entries are silently skipped.
+    let (total_prompts, total_threads, prompts_today): (u64, u64, u64) = {
+        let store = state.read_store.read().await;
+        let turns = store.turns.len() as u64;
+        let threads = store.threads.len() as u64;
+        let today = chrono::Utc::now().date_naive();
+        let mut today_count: u64 = 0;
+        for turn in store.turns.values() {
+            // `created_at` is an ISO-8601 string; parse the date portion only.
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&turn.created_at)
+                && dt.with_timezone(&chrono::Utc).date_naive() == today
+            {
+                today_count += 1;
+            }
+        }
+        (turns, threads, today_count)
+    };
+
+    // ── Per-provider usage breakdown + top-provider insight ──────────────
+    let aggregates = {
+        let usage = state.usage.read().await;
+        usage.aggregate_by_provider()
+    };
+    let grand_total_tokens: u64 = aggregates.iter().map(|a| a.total_tokens).sum();
+
+    let provider_models: Vec<Value> = aggregates
+        .iter()
+        .map(|agg| {
+            let percent = if grand_total_tokens > 0 {
+                (agg.total_tokens as f64 / grand_total_tokens as f64) * 100.0
+            } else {
+                0.0
+            };
+            // Round to 2 decimals for a clean UI label.
+            let percent = (percent * 100.0).round() / 100.0;
+            serde_json::json!({
+                "provider": agg.provider_id,
+                "model": agg.model,
+                "turnCount": agg.call_count,
+                "percent": percent,
+            })
+        })
+        .collect();
+
+    // Top provider = largest total_tokens share. Provider list is already
+    // sorted by provider_id (stable aggregate output); pick max by tokens.
+    let top_provider_agg: Option<&crate::usage::ProviderUsageAggregate> = aggregates
+        .iter()
+        .max_by_key(|a| a.total_tokens);
+    let (top_provider, top_provider_percent): (Value, Value) = match top_provider_agg {
+        Some(agg) if grand_total_tokens > 0 => {
+            let pct = (agg.total_tokens as f64 / grand_total_tokens as f64) * 100.0;
+            let pct = (pct * 100.0).round() / 100.0;
+            (Value::String(agg.provider_id.clone()), serde_json::json!(pct))
+        }
+        _ => (Value::Null, Value::Null),
+    };
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
@@ -7464,9 +7558,9 @@ fn handle_stats_get_profile_stats(id: Value) -> JsonRpcResponse {
             "activity": {
                 "currentStreakDays": 0,
                 "longestStreakDays": 0,
-                "totalPromptsSent": 0,
-                "totalThreads": 0,
-                "promptsToday": 0,
+                "totalPromptsSent": total_prompts,
+                "totalThreads": total_threads,
+                "promptsToday": prompts_today,
                 "heatmapMetric": "prompts",
                 "heatmap": [],
             },
@@ -7477,14 +7571,14 @@ fn handle_stats_get_profile_stats(id: Value) -> JsonRpcResponse {
                 "label": Value::Null,
             },
             "insights": {
-                "topProvider": Value::Null,
-                "topProviderPercent": Value::Null,
+                "topProvider": top_provider,
+                "topProviderPercent": top_provider_percent,
                 "topReasoning": Value::Null,
                 "topReasoningPercent": Value::Null,
                 "skillsExplored": 0,
                 "totalSkillsUsed": 0,
             },
-            "providerModels": [],
+            "providerModels": provider_models,
             "skills": [],
             "mostUsedSkill": Value::Null,
             "mostWorkedProject": Value::Null,
@@ -7500,22 +7594,92 @@ fn handle_stats_get_profile_stats(id: Value) -> JsonRpcResponse {
     )
 }
 
-/// `stats.getProfileTokenStats` — return an empty `ProfileTokenStats`. Syncode
-/// has no token-usage tracking (no per-turn token counter, no provider-quota
-/// poller), so `available` is `false` and every aggregate is null/empty. The
-/// shape mirrors the MCode `ProfileTokenStats` schema: all schema-required
-/// top-level fields are present (`available`, `heatmapMetric`, `providers`,
-/// `unavailableProviders`, `heatmap`) so the UI's token-usage panel renders a
-/// "token stats unavailable" state rather than crashing.
-fn handle_stats_get_profile_token_stats(id: Value) -> JsonRpcResponse {
+/// `stats.getProfileTokenStats` — REAL (T6c-phase-28): aggregates from the
+/// in-memory `UsageStore`. `available` is now `true` when at least one
+/// provider has recorded usage (the panel renders data instead of an empty
+/// state). Field mapping:
+///
+///   - `lifetimeTotalTokens`: sum of every provider's `total_tokens` across
+///     the retained log (null only when there is zero usage, so `available`
+///     stays false and the UI shows the empty state).
+///   - `providers`: the distinct provider ids with at least one recorded
+///     entry (matches MCode's `ProviderKind[]` shape — the panel labels each
+///     provider's contribution; per-provider magnitudes come from
+///     `getProfileStats.providerModels`).
+///   - `peakDayTokens` / `peakDay`: the single UTC day with the highest
+///     aggregate `total_tokens` across the log (null when fewer than two
+///     distinct days are present — one day isn't a meaningful "peak"; the
+///     shape's null state is preserved for the low-data case).
+///   - `unavailableProviders`: empty. We can't enumerate providers that
+///     *lack* usage without a registry snapshot, and the panel treats an
+///     empty list as "no known-gaps" (correct given our data).
+///   - `heatmap`: empty. A per-day heatmap needs the daily-rollup subsystem
+///     (deferred — same gap as `getProfileStats.activity.heatmap`).
+async fn handle_stats_get_profile_token_stats(state: &WsState, id: Value) -> JsonRpcResponse {
+    // Aggregate per-provider. `aggregate_by_provider()` returns one entry
+    // per provider with at least one recorded usage entry, sorted by id.
+    let aggregates = {
+        let usage = state.usage.read().await;
+        usage.aggregate_by_provider()
+    };
+
+    if aggregates.is_empty() {
+        // No usage recorded yet — preserve the empty state.
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "available": false,
+                "lifetimeTotalTokens": Value::Null,
+                "peakDayTokens": Value::Null,
+                "peakDay": Value::Null,
+                "providers": [],
+                "unavailableProviders": [],
+                "heatmapMetric": "tokens",
+                "heatmap": [],
+            }),
+        );
+    }
+
+    let lifetime_total: u64 = aggregates.iter().map(|a| a.total_tokens).sum();
+    let providers: Vec<Value> = aggregates
+        .iter()
+        .map(|a| Value::String(a.provider_id.clone()))
+        .collect();
+
+    // Peak-day approximation: re-walk the raw entries, group total_tokens by
+    // UTC date, and pick the max. We re-read the log for the per-entry
+    // timestamps (the aggregate loses the day dimension).
+    let (peak_day_tokens, peak_day): (Value, Value) = {
+        let usage = state.usage.read().await;
+        let mut by_day: std::collections::HashMap<chrono::NaiveDate, u64> =
+            std::collections::HashMap::new();
+        for entry in usage.entries().iter() {
+            let date = entry.timestamp.with_timezone(&chrono::Utc).date_naive();
+            *by_day.entry(date).or_insert(0) += entry.total_tokens as u64;
+        }
+        if by_day.len() < 2 {
+            // Fewer than two distinct days → no meaningful "peak" yet.
+            (Value::Null, Value::Null)
+        } else {
+            let (day, tokens) = by_day
+                .into_iter()
+                .max_by_key(|(_, t)| *t)
+                .unwrap_or((chrono::Utc::now().date_naive(), 0));
+            (
+                serde_json::json!(tokens),
+                Value::String(day.format("%Y-%m-%d").to_string()),
+            )
+        }
+    };
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "available": false,
-            "lifetimeTotalTokens": Value::Null,
-            "peakDayTokens": Value::Null,
-            "peakDay": Value::Null,
-            "providers": [],
+            "available": true,
+            "lifetimeTotalTokens": lifetime_total,
+            "peakDayTokens": peak_day_tokens,
+            "peakDay": peak_day,
+            "providers": providers,
             "unavailableProviders": [],
             "heatmapMetric": "tokens",
             "heatmap": [],
@@ -11281,6 +11445,234 @@ mod tests {
             .find(|l| l["label"] == "Total tokens")
             .unwrap();
         assert_eq!(codex_total["value"], "15");
+    }
+
+    // ── stats.getProfileStats / getProfileTokenStats (T6c-phase-28) ──────
+
+    /// Helper: insert a `TurnView` directly into the read store, mimicking
+    /// what the Projector would do after a `TurnStarted` event. Used so the
+    /// stats tests can exercise the activity-count aggregation without
+    /// spinning up a full turn-start → provider round-trip.
+    async fn seed_turn(state: &WsState, turn_id: &str, thread_id: &str, created_at: &str) {
+        use syncode_orchestration::read_model::TurnView;
+        let turn = TurnView {
+            id: turn_id.into(),
+            thread_id: thread_id.into(),
+            sequence: 1,
+            user_input: "hi".into(),
+            assistant_output: None,
+            status: "completed".into(),
+            git_checkpoint: None,
+            files_modified: vec![],
+            duration_ms: None,
+            created_at: created_at.into(),
+            completed_at: None,
+        };
+        let mut store = state.read_store.write().await;
+        store.turns.insert(turn_id.into(), turn);
+    }
+
+    /// `getProfileStats` returns REAL activity counts from the read store:
+    /// totalPromptsSent = turn count, totalThreads = thread count,
+    /// promptsToday = turns created today. Also asserts the per-provider
+    /// breakdown and top-provider insight populate from the usage log.
+    #[tokio::test]
+    async fn profile_stats_populates_activity_and_provider_models() {
+        let state = WsState::new_in_memory(16);
+
+        // Seed 3 turns (2 today, 1 yesterday) and 2 threads.
+        let now = chrono::Utc::now();
+        let today_iso = now.to_rfc3339();
+        let yesterday_iso = (now - chrono::Duration::days(1)).to_rfc3339();
+        seed_turn(&state, "t1", "th1", &today_iso).await;
+        seed_turn(&state, "t2", "th1", &today_iso).await;
+        seed_turn(&state, "t3", "th2", &yesterday_iso).await;
+        {
+            use syncode_orchestration::read_model::ThreadView;
+            let mut store = state.read_store.write().await;
+            store.threads.insert(
+                "th1".into(),
+                ThreadView {
+                    id: "th1".into(),
+                    project_id: "p1".into(),
+                    provider_id: "claude".into(),
+                    model: "sonnet".into(),
+                    status: "active".into(),
+                    title: None,
+                    git_checkpoint: None,
+                    runtime_mode: "approval-required".into(),
+                    interaction_mode: "default".into(),
+                    turn_count: 2,
+                    created_at: today_iso.clone(),
+                    updated_at: today_iso.clone(),
+                    session: None,
+                },
+            );
+            store.threads.insert(
+                "th2".into(),
+                ThreadView {
+                    id: "th2".into(),
+                    project_id: "p1".into(),
+                    provider_id: "codex".into(),
+                    model: "gpt-5".into(),
+                    status: "active".into(),
+                    title: None,
+                    git_checkpoint: None,
+                    runtime_mode: "approval-required".into(),
+                    interaction_mode: "default".into(),
+                    turn_count: 1,
+                    created_at: yesterday_iso.clone(),
+                    updated_at: yesterday_iso.clone(),
+                    session: None,
+                },
+            );
+        }
+
+        // Seed usage so providerModels + topProvider populate.
+        {
+            let mut usage = state.usage.write().await;
+            usage.record(crate::usage::UsageEntry {
+                provider_id: "claude".into(),
+                model: "sonnet".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                timestamp: now,
+            });
+            usage.record(crate::usage::UsageEntry {
+                provider_id: "codex".into(),
+                model: "gpt-5".into(),
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+                timestamp: now,
+            });
+        }
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "stats.getProfileStats"
+        });
+        let result = rpc(&state, 1, &req).await.result.unwrap();
+        let activity = &result["activity"];
+        assert_eq!(activity["totalPromptsSent"], 3, "turn count");
+        assert_eq!(activity["totalThreads"], 2, "thread count");
+        assert_eq!(activity["promptsToday"], 2, "turns created today");
+
+        // providerModels: claude 150/165 ≈ 90.91%, codex 15/165 ≈ 9.09%.
+        let pm = result["providerModels"].as_array().expect("array");
+        assert_eq!(pm.len(), 2, "one entry per provider with usage");
+        let claude = pm.iter().find(|v| v["provider"] == "claude").unwrap();
+        assert_eq!(claude["turnCount"], 1, "call count");
+        let pct = claude["percent"].as_f64().unwrap();
+        assert!(pct > 90.0 && pct < 91.0, "claude share ≈ 90.91%, got {pct}");
+
+        // topProvider = claude (largest total_tokens share).
+        assert_eq!(result["insights"]["topProvider"], "claude");
+        let top_pct = result["insights"]["topProviderPercent"].as_f64().unwrap();
+        assert!(top_pct > 90.0 && top_pct < 91.0, "top provider pct");
+    }
+
+    /// `getProfileStats` with no usage / no turns returns zeroed activity
+    /// and null topProvider (preserves the previous empty-state shape).
+    #[tokio::test]
+    async fn profile_stats_empty_state_when_no_data() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "stats.getProfileStats"
+        });
+        let result = rpc(&state, 1, &req).await.result.unwrap();
+        assert_eq!(result["activity"]["totalPromptsSent"], 0);
+        assert_eq!(result["activity"]["totalThreads"], 0);
+        assert_eq!(result["activity"]["promptsToday"], 0);
+        assert_eq!(result["providerModels"].as_array().unwrap().len(), 0);
+        assert!(result["insights"]["topProvider"].is_null());
+    }
+
+    /// `getProfileTokenStats` aggregates lifetime totals and per-provider
+    /// breakdown from the usage log; available=true when there is data.
+    #[tokio::test]
+    async fn profile_token_stats_aggregates_lifetime_and_providers() {
+        let state = WsState::new_in_memory(16);
+        {
+            let mut usage = state.usage.write().await;
+            // Two entries today + one yesterday → 2 distinct days, peak exists.
+            usage.record(crate::usage::UsageEntry {
+                provider_id: "claude".into(),
+                model: "sonnet".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                timestamp: chrono::Utc::now(),
+            });
+            usage.record(crate::usage::UsageEntry {
+                provider_id: "codex".into(),
+                model: "gpt-5".into(),
+                input_tokens: 200,
+                output_tokens: 100,
+                total_tokens: 300,
+                timestamp: chrono::Utc::now() - chrono::Duration::days(1),
+            });
+        }
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "stats.getProfileTokenStats"
+        });
+        let result = rpc(&state, 1, &req).await.result.unwrap();
+        assert_eq!(result["available"], true, "data exists");
+        assert_eq!(result["lifetimeTotalTokens"], 450, "150 + 300");
+
+        let providers = result["providers"].as_array().unwrap();
+        assert_eq!(providers.len(), 2, "two distinct providers");
+        assert!(providers.iter().any(|v| v == "claude"));
+        assert!(providers.iter().any(|v| v == "codex"));
+
+        // Peak day present (yesterday had 300 > today's 150).
+        assert!(!result["peakDayTokens"].is_null(), "peak day tokens");
+        assert!(!result["peakDay"].is_null(), "peak day label");
+        let peak = result["peakDayTokens"].as_u64().unwrap();
+        assert_eq!(peak, 300, "peak = highest-day total");
+    }
+
+    /// `getProfileTokenStats` with no usage → available=false + null totals
+    /// (preserves the empty-state shape, no crash).
+    #[tokio::test]
+    async fn profile_token_stats_empty_state_when_no_usage() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "stats.getProfileTokenStats"
+        });
+        let result = rpc(&state, 1, &req).await.result.unwrap();
+        assert_eq!(result["available"], false);
+        assert!(result["lifetimeTotalTokens"].is_null());
+        assert!(result["peakDayTokens"].is_null());
+        assert!(result["peakDay"].is_null());
+        assert_eq!(result["providers"].as_array().unwrap().len(), 0);
+    }
+
+    /// `getProfileTokenStats` with usage on only one distinct day → peak
+    /// stays null (a single day isn't a meaningful "peak").
+    #[tokio::test]
+    async fn profile_token_stats_single_day_no_peak() {
+        let state = WsState::new_in_memory(16);
+        {
+            let mut usage = state.usage.write().await;
+            usage.record(crate::usage::UsageEntry {
+                provider_id: "claude".into(),
+                model: "sonnet".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "stats.getProfileTokenStats"
+        });
+        let result = rpc(&state, 1, &req).await.result.unwrap();
+        assert_eq!(result["available"], true);
+        assert_eq!(result["lifetimeTotalTokens"], 150);
+        assert!(result["peakDayTokens"].is_null(), "single day → no peak");
+        assert!(result["peakDay"].is_null());
     }
 
     /// getProviderUsageSnapshot returns null when the provider has no usage,
