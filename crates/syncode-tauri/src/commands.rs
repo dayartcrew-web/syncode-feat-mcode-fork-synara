@@ -97,6 +97,12 @@ impl ProviderRegistryState {
     }
 }
 
+impl Default for ProviderRegistryState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Managed session store state
 pub struct SessionStoreState {
     pub sessions: std::sync::Mutex<Vec<SessionSummary>>,
@@ -107,6 +113,12 @@ impl SessionStoreState {
         Self {
             sessions: std::sync::Mutex::new(Vec::new()),
         }
+    }
+}
+
+impl Default for SessionStoreState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

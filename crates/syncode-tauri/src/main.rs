@@ -5,7 +5,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use syncode_tauri::{
-    commands, git_commands, shell_commands, terminal_commands, ws_commands, ws_setup,
+    browser_commands, commands, desktop_commands, filesystem_commands, git_commands,
+    shell_commands, terminal_commands, ws_commands, ws_setup,
 };
 use tauri::Manager;
 
@@ -13,6 +14,9 @@ fn main() {
     tauri::Builder::default()
         .manage(commands::ProviderRegistryState::new())
         .manage(commands::SessionStoreState::new())
+        // Managed updater state — desktop commands (DSK-2) read/mutate this
+        // to drive the check-for-updates / apply-update flow.
+        .manage(syncode_tauri::updater::UpdaterState::new())
         // Holds the WS server handle once `.setup()` boots it. Managed here
         // (before setup) so the WS commands can `try_state` it from the very
         // first invoke — they'll return "WS unavailable" until setup finishes,
@@ -30,6 +34,22 @@ fn main() {
             ws_commands::get_ws_endpoint,
             // shell
             shell_commands::shell_open_editor,
+            // desktop (DSK-2) — checkForUpdates / applyUpdate / openExternal /
+            // openInEditor. Back the `desktop.*` RPC names the MCode UI calls
+            // via Tauri invoke().
+            desktop_commands::check_for_updates,
+            desktop_commands::apply_update,
+            desktop_commands::open_external,
+            desktop_commands::open_in_editor,
+            // browser (DSK-2) — captureScreenshot / listTabs. Graceful
+            // platform-limited stubs (no portable webview-capture / tab-list
+            // API in Tauri v2 today); return typed fallbacks.
+            browser_commands::capture_screenshot,
+            browser_commands::list_tabs,
+            // filesystem (DSK-2) — browse. Native file/folder picker dialog;
+            // falls back to an empty-selection result when the dialog plugin
+            // isn't registered.
+            filesystem_commands::browse,
             // git
             git_commands::git_status,
             git_commands::git_diff,
