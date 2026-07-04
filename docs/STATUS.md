@@ -36,7 +36,7 @@
 |---|---|---|
 | `git.status` / `diff` / `readWorkingTreeDiff` / `log` / `branches` / `add`(stage) / `commit` / `createBranch` / `deleteBranch` / `checkout` | ✅ REAL | `syncode-git::Git2Service` |
 | `git.stashList` / `stashCreate` / `stashApply` / `stashDrop` / `stashInfo` / `fetch` / `init` / `removeIndexLock` / `worktreeList` / `worktreeCreate` / `worktreeRemove` / `pull` / `push` | ✅ REAL | git2 (stash/fetch/init/worktree) + syncode-git CLI (pull/push) |
-| `git.stashAndCheckout` | 🟡 STUB | (compose stashCreate + checkout) |
+| `git.stashAndCheckout` | ✅ REAL (GIT-1) | git2 two-phase: `stash_save2` → `checkout_tree`; best-effort `stash_apply` rollback on checkout failure |
 | `git.summarizeDiff` | ✅ REAL | provider CLI one-shot (LLM) |
 | `git.githubRepository` / `resolvePullRequest` | ✅ REAL | gh CLI (no token — uses gh auth; `gh repo view` / `gh pr view`) |
 | `git.handoffThread` | 🟡 PARTIAL | gh pr create real; worktree-handoff fields stub |
