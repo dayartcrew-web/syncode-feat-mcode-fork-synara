@@ -211,6 +211,13 @@ async fn dispatch_method(
                     "orchestration/replay-events",
                     "orchestration.repairState",
                     "orchestration/repair-state",
+                    // PROJ-1: project filesystem primitives (skeleton handlers;
+                    // full wiring lands in PROJ-2/3/4).
+                    "project/list-files",
+                    "project/read-file",
+                    "project/write-file",
+                    "project/list-directories",
+                    "project/search-files",
                 ]
             }),
         ),
@@ -229,6 +236,31 @@ async fn dispatch_method(
         "project/get" => handle_project_get(state, id, &request.params).await,
 
         "project/create" => handle_project_create(state, id, &request.params).await,
+
+        // ─── Project Filesystem Methods (PROJ-1 skeleton) ──────────
+        //
+        // PROJ-1 ships skeleton handlers wired to the new `project_fs`
+        // primitives (sandboxed read/write/list/search with a path-traversal
+        // guard). The handlers resolve `cwd` to the project root and delegate
+        // to `crate::project_fs`. Full RPC error-shaping, authz permissions,
+        // and the richer param handling (encoding, ranges, ignore globs)
+        // arrive in PROJ-2/3/4 — these skeletons return the primitive result
+        // directly so the foundation is exercised end-to-end today.
+        "project/list-files" | "project/listFiles" => {
+            handle_project_list_files(state, id, &request.params).await
+        }
+        "project/read-file" | "project/readFile" => {
+            handle_project_read_file(state, id, &request.params).await
+        }
+        "project/write-file" | "project/writeFile" => {
+            handle_project_write_file(state, id, &request.params).await
+        }
+        "project/list-directories" | "project/listDirectories" => {
+            handle_project_list_directories(state, id, &request.params).await
+        }
+        "project/search-files" | "project/searchFiles" => {
+            handle_project_search_files(state, id, &request.params).await
+        }
 
         // ─── Thread Methods ───────────────────────────────────────
         "thread/list" => {
@@ -1926,7 +1958,225 @@ async fn handle_project_create(state: &WsState, id: Value, params: &Value) -> Js
     }
 }
 
-// ─── Thread Handlers ───────────────────────────────────────────────
+// ─── Project Filesystem Handlers (PROJ-1 skeleton) ────────────────────
+//
+// These wrap the new `crate::project_fs` primitives (sandboxed read/write/
+// list/search with a path-traversal guard). PROJ-1 ships the foundation;
+// PROJ-2/3/4 will enrich them with authz permissions, richer param parsing,
+// pagination/limits, and RPC-shaped error mapping. For now they read `cwd`
+// as the project root and delegate directly so the primitives are exercised
+// end-to-end.
+
+/// Map a [`crate::project_fs::ProjectFsError`] to a JSON-RPC error response.
+/// Path traversal is surfaced with a `-32001` (UNAUTHORIZED-shaped) code —
+/// it's a security violation, not a generic invalid-param — so clients can
+/// distinguish "you tried to escape the sandbox" from "missing field".
+fn project_fs_error_response(
+    id: Value,
+    err: crate::project_fs::ProjectFsError,
+) -> JsonRpcResponse {
+    use crate::project_fs::ProjectFsError;
+    // Traversal is a security violation → use the authz error code (-32001);
+    // other mapping/param errors use INVALID_PARAMS; genuine IO failures use
+    // INTERNAL_ERROR.
+    let code = match &err {
+        ProjectFsError::PathTraversal => -32001,
+        ProjectFsError::InvalidRoot
+        | ProjectFsError::NotFound
+        | ProjectFsError::NotAFile => crate::error_codes::INVALID_PARAMS,
+        ProjectFsError::Io(_) => crate::error_codes::INTERNAL_ERROR,
+    };
+    JsonRpcResponse::error(Some(id), code, err.to_string())
+}
+
+/// `project/list-files` (PROJ-1 skeleton). Returns directory entries under
+/// `cwd / path` (or `cwd` when `path` is absent). PROJ-2 will add filtering
+/// by extension/ignore-globs and pagination.
+async fn handle_project_list_files(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let relative = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::project_fs::list_directory(Path::new(cwd), relative).await {
+        Ok(entries) => {
+            let arr: Vec<Value> = entries
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "name": e.name,
+                        "isDirectory": e.is_dir,
+                        "size": e.size,
+                    })
+                })
+                .collect();
+            JsonRpcResponse::success(id, serde_json::json!({ "entries": arr }))
+        }
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// `project/read-file` (PROJ-1 skeleton). Returns `{ content: <string> }`.
+/// PROJ-3 will add encoding detection (utf-8 vs base64 for binaries).
+async fn handle_project_read_file(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let relative = match params.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'path' parameter",
+            );
+        }
+    };
+    match crate::project_fs::read_file(Path::new(cwd), relative).await {
+        Ok(bytes) => {
+            // Skeleton: assume utf-8. PROJ-3 will detect encoding.
+            let content = String::from_utf8_lossy(&bytes).into_owned();
+            JsonRpcResponse::success(id, serde_json::json!({ "content": content }))
+        }
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// `project/write-file` (PROJ-1 skeleton). Writes `content` (utf-8 string)
+/// to `cwd / path`. Returns `{ written: <bytes> }`.
+async fn handle_project_write_file(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let relative = match params.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'path' parameter",
+            );
+        }
+    };
+    let content = match params.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c.as_bytes().to_vec(),
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'content' parameter",
+            );
+        }
+    };
+    match crate::project_fs::write_file(Path::new(cwd), relative, &content).await {
+        Ok(()) => {
+            JsonRpcResponse::success(id, serde_json::json!({ "written": content.len() }))
+        }
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// `project/list-directories` (PROJ-1 skeleton). Returns just the directory
+/// entries under `cwd / path`. PROJ-2 will add recursive depth + ignore globs.
+async fn handle_project_list_directories(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let relative = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::project_fs::list_directory(Path::new(cwd), relative).await {
+        Ok(entries) => {
+            let dirs: Vec<Value> = entries
+                .into_iter()
+                .filter(|e| e.is_dir)
+                .map(|e| serde_json::json!({ "name": e.name }))
+                .collect();
+            JsonRpcResponse::success(id, serde_json::json!({ "directories": dirs }))
+        }
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// `project/search-files` (PROJ-1 skeleton). Returns matching paths (relative
+/// to `cwd`, `/`-separated) whose name contains `query`. PROJ-4 will upgrade
+/// to glob/regex + content search.
+async fn handle_project_search_files(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let query = match params.get("query").and_then(|v| v.as_str()) {
+        Some(q) if !q.is_empty() => q,
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'query' parameter",
+            );
+        }
+    };
+    match crate::project_fs::search_files(Path::new(cwd), query).await {
+        Ok(matches) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "matches": matches, "query": query }),
+        ),
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+// ─── Thread Handlers ───────────────────────────────────────────────────
 
 async fn handle_thread_get(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
     let thread_id = match params.get("id").and_then(|v| v.as_str()) {
@@ -14506,6 +14756,100 @@ mod tests {
             outcome.is_err(),
             "unsubscribed connection must not receive pushes"
         );
+    }
+
+    // ─── PROJ-1: project_fs skeleton RPC dispatch ───────────────────────
+
+    /// Helper: build a `project/list-files` request over the WS layer.
+    async fn proj_list_files(cwd: &str, path: Option<&str>) -> JsonRpcResponse {
+        let state = WsState::new_in_memory(16);
+        let mut params = serde_json::json!({ "cwd": cwd });
+        if let Some(p) = path {
+            params["path"] = serde_json::Value::String(p.to_string());
+        }
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "project/list-files",
+            "params": params,
+        });
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
+        serde_json::from_str(&response.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn project_list_files_dispatches_and_returns_entries() {
+        // Smoke-test the skeleton RPC arm end-to-end: create a tempdir with
+        // one file, call `project/list-files`, expect an `entries` array.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+        tokio::fs::write(dir.path().join("hello.txt"), b"hi")
+            .await
+            .unwrap();
+
+        let resp = proj_list_files(&cwd, None).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let entries = resp.result.unwrap()["entries"].as_array().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "hello.txt");
+        assert_eq!(entries[0]["isDirectory"], false);
+    }
+
+    #[tokio::test]
+    async fn project_list_files_blocks_traversal_at_rpc_layer() {
+        // AC: path traversal → error. Verify the guard fires through the
+        // full RPC dispatch path, not just at the primitive layer.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+
+        let resp = proj_list_files(&cwd, Some("..")).await;
+        let err = resp.error.expect("traversal must error");
+        assert_eq!(err.code, -32001, "traversal → -32001; got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn project_list_files_missing_cwd_returns_invalid_params() {
+        let state = WsState::new_in_memory(16);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "project/list-files",
+            "params": {},
+        });
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
+        let resp: JsonRpcResponse = serde_json::from_str(&response.unwrap()).unwrap();
+        let err = resp.error.expect("missing cwd must error");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn project_fs_methods_listed_in_rpc_list_methods() {
+        // AC (implicit): the new methods must appear in rpc/listMethods so
+        // the UI's method discovery sees them.
+        let state = WsState::new_in_memory(16);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods"
+        });
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
+        let resp: JsonRpcResponse = serde_json::from_str(&response.unwrap()).unwrap();
+        let methods: Vec<String> = resp
+            .result
+            .unwrap()["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for expected in [
+            "project/list-files",
+            "project/read-file",
+            "project/write-file",
+            "project/list-directories",
+            "project/search-files",
+        ] {
+            assert!(
+                methods.contains(&expected.to_string()),
+                "rpc/listMethods missing {expected}"
+            );
+        }
     }
 
     // ─── T6c-23: provider skills/commands/capabilities discovery ────────
