@@ -7719,15 +7719,22 @@ fn handle_provider_list_skills_catalog(id: Value, params: &Value) -> JsonRpcResp
 /// directory (precedence: explicit `cwd` + `.plugins`, then
 /// `SYNCODE_PLUGINS_DIR` env, then relative `.plugins` fallback) for `*.json`
 /// plugin descriptor files. Each file is parsed as a `ProviderPluginDescriptor`
-/// (id, name, source, installed, enabled, installPolicy, authPolicy). Returns
-/// the full `ProviderListPluginsResult` shape: marketplaces/errors empty,
-/// remoteSyncError null, and the discovered plugins under a synthetic
+/// (id, name, source, installed, enabled, installPolicy, authPolicy), then the
+/// `installed`/`enabled`/`installPolicy` fields are overlaid from the
+/// install-state manifest (`~/.synara/plugins.json`, env-configurable via
+/// `SYNCODE_PLUGINS_MANIFEST`) when it has an entry for the plugin's `id`.
+/// Returns the full `ProviderListPluginsResult` shape: marketplaces/errors
+/// empty, remoteSyncError null, and the discovered plugins under a synthetic
 /// "local" marketplace. Missing dir → graceful empty marketplaces list.
+/// Remote marketplace sync (OAuth, remote catalog) is out of scope.
 fn handle_provider_list_plugins(id: Value, params: &Value) -> JsonRpcResponse {
+    let manifest_override = params
+        .get("pluginsManifestPath")
+        .and_then(|v| v.as_str());
     let dir = resolve_plugins_dir(params);
     let marketplaces: Vec<Value> = match dir {
         Some(d) => {
-            let plugins = scan_plugins_dir(&d);
+            let plugins = scan_plugins_dir(&d, manifest_override);
             if plugins.is_empty() {
                 Vec::new()
             } else {
@@ -7756,9 +7763,15 @@ fn handle_provider_list_plugins(id: Value, params: &Value) -> JsonRpcResponse {
 
 /// `provider.readPlugin` — read a plugin descriptor at the requested `path`.
 /// The path must point to an existing readable `*.json` file inside a `.plugins`
-/// directory (basic traversal guard). Returns `{ plugin: {...} }` with the full
+/// directory (basic traversal guard). The on-disk descriptor's
+/// `installed`/`enabled`/`installPolicy` fields are overlaid from the
+/// install-state manifest (`~/.synara/plugins.json`, env-configurable via
+/// `SYNCODE_PLUGINS_MANIFEST`). Returns `{ plugin: {...} }` with the full
 /// descriptor shape or `{ plugin: null }` when missing/unreadable/out-of-bounds.
 fn handle_provider_read_plugin(id: Value, params: &Value) -> JsonRpcResponse {
+    let manifest_override = params
+        .get("pluginsManifestPath")
+        .and_then(|v| v.as_str());
     let raw_path = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
         _ => return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null })),
@@ -7777,7 +7790,14 @@ fn handle_provider_read_plugin(id: Value, params: &Value) -> JsonRpcResponse {
     if !in_plugins || !is_json {
         return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null }));
     }
-    let plugin = read_plugin_descriptor(&canonical);
+    let plugin = match read_plugin_descriptor(&canonical) {
+        Some(mut d) => {
+            let manifest = read_plugins_manifest(manifest_override);
+            apply_plugin_install_state(&mut d, &manifest);
+            Value::Object(d.as_object().cloned().unwrap_or_default())
+        }
+        None => Value::Null,
+    };
     JsonRpcResponse::success(id, serde_json::json!({ "plugin": plugin }))
 }
 
@@ -8086,6 +8106,119 @@ fn provider_option_descriptors(kind: &str) -> Vec<Value> {
     })]
 }
 
+/// Per-plugin install-state entry loaded from the install manifest
+/// (`~/.synara/plugins.json` or `SYNCODE_PLUGINS_MANIFEST`). All fields
+/// optional so a sparse manifest only needs to record what differs from the
+/// default policy.
+#[derive(Debug, Clone, Default)]
+struct PluginInstallEntry {
+    installed: Option<bool>,
+    enabled: Option<bool>,
+    install_policy: Option<String>,
+}
+
+/// Resolve the install-state manifest path. Precedence: the explicit
+/// `override_path` (from the request's `pluginsManifestPath` param), then the
+/// `SYNCODE_PLUGINS_MANIFEST` env var, then `<home>/.synara/plugins.json`
+/// (using the same `HOME`/`USERPROFILE` resolution as `server_home_dir`).
+/// Returns `None` when none of those resolve to a usable path.
+fn resolve_plugins_manifest_path(override_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(p) = override_path.filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(p) = std::env::var_os("SYNCODE_PLUGINS_MANIFEST")
+        .filter(|p| !p.is_empty())
+    {
+        return Some(PathBuf::from(p));
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
+    Some(PathBuf::from(home).join(".synara").join("plugins.json"))
+}
+
+/// Read the install-state manifest and return a `HashMap<plugin_id, entry>`.
+/// `override_path` (from the request's `pluginsManifestPath` param) takes
+/// precedence over the env/configured path, which keeps tests race-free (no
+/// env mutation) and lets callers pin a manifest per request. Missing/
+/// unreadable/invalid manifest → empty map (callers fall back to defaults).
+/// The manifest is read fresh on each call (no caching) so external edits are
+/// picked up; persistence across restarts is provided by the file itself. The
+/// manifest shape is:
+/// `{ "plugins": { "<id>": { "installed": bool, "enabled": bool, "installPolicy": "auto"|"manual"|"disabled" } } }`
+fn read_plugins_manifest(
+    override_path: Option<&str>,
+) -> std::collections::HashMap<String, PluginInstallEntry> {
+    let mut map = std::collections::HashMap::new();
+    let path = match resolve_plugins_manifest_path(override_path) {
+        Some(p) => p,
+        None => return map,
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+    let parsed: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return map,
+    };
+    let entries = match parsed.get("plugins").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return map,
+    };
+    for (id, entry_val) in entries {
+        if !entry_val.is_object() {
+            continue;
+        }
+        let installed = entry_val.get("installed").and_then(|v| v.as_bool());
+        let enabled = entry_val.get("enabled").and_then(|v| v.as_bool());
+        let install_policy = entry_val
+            .get("installPolicy")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        map.insert(
+            id.clone(),
+            PluginInstallEntry {
+                installed,
+                enabled,
+                install_policy,
+            },
+        );
+    }
+    map
+}
+
+/// Overlay install-state from the manifest onto a base plugin descriptor.
+/// Mutates the descriptor's `installed`, `enabled`, and `installPolicy`
+/// fields in place when the manifest has an entry for the plugin's `id`.
+///
+/// Defaults when no manifest entry exists: `installed` stays `true` (the
+/// descriptor was discovered on disk → it is installed), `enabled` and
+/// `installPolicy` keep their file-derived values. The on-disk `installPolicy`
+/// vocabulary ("AVAILABLE") is mapped to the runtime vocabulary ("manual")
+/// when no manifest override is present so callers see a stable enum.
+fn apply_plugin_install_state(
+    descriptor: &mut Value,
+    manifest: &std::collections::HashMap<String, PluginInstallEntry>,
+) {
+    let id = match descriptor.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return,
+    };
+    if let Some(entry) = manifest.get(&id) {
+        if let Some(installed) = entry.installed {
+            descriptor["installed"] = Value::Bool(installed);
+        }
+        if let Some(enabled) = entry.enabled {
+            descriptor["enabled"] = Value::Bool(enabled);
+        }
+        if let Some(policy) = &entry.install_policy {
+            descriptor["installPolicy"] = Value::String(policy.clone());
+        }
+    }
+}
+
 /// Resolve the plugins directory for a `listPlugins`/`readPlugin` request.
 /// Precedence: explicit `cwd` param joined with `.plugins`, then the
 /// `SYNCODE_PLUGINS_DIR` env var, finally a relative `.plugins` fallback.
@@ -8106,13 +8239,18 @@ fn resolve_plugins_dir(params: &Value) -> Option<PathBuf> {
 /// `ProviderPluginDescriptor` per file. Each file is parsed as JSON; required
 /// fields are `id` and `name` (others default: source = local file path,
 /// installed/enabled = true, installPolicy = AVAILABLE, authPolicy = ON_USE).
-/// Invalid JSON or missing required fields → file is skipped. Returns sorted
-/// by id. Empty on any I/O error.
-fn scan_plugins_dir(dir: &Path) -> Vec<Value> {
+/// The on-disk descriptor's `installed`/`enabled`/`installPolicy` fields are
+/// then overlaid with the install-state manifest (`~/.synara/plugins.json`,
+/// env-configurable via `SYNCODE_PLUGINS_MANIFEST`, or pinned per-request via
+/// `manifest_override`) when it has an entry for the plugin's `id`. Invalid
+/// JSON or missing required fields → file is skipped. Returns sorted by id.
+/// Empty on any I/O error.
+fn scan_plugins_dir(dir: &Path, manifest_override: Option<&str>) -> Vec<Value> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
+    let manifest = read_plugins_manifest(manifest_override);
     let mut plugins: Vec<(String, Value)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -8122,15 +8260,17 @@ fn scan_plugins_dir(dir: &Path) -> Vec<Value> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Some(descriptor) = read_plugin_descriptor(&path) {
+        if let Some(mut descriptor) = read_plugin_descriptor(&path) {
             let id = descriptor
                 .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if !id.is_empty() {
-                plugins.push((id, descriptor));
+            if id.is_empty() {
+                continue;
             }
+            apply_plugin_install_state(&mut descriptor, &manifest);
+            plugins.push((id, descriptor));
         }
     }
     plugins.sort_by(|a, b| a.0.cmp(&b.0));
@@ -14021,6 +14161,152 @@ mod tests {
             "plugin outside .plugins must be null"
         );
     }
+
+    /// Helper: write a manifest JSON to a temp file and return its path.
+    /// Tests pass this path as the request's `pluginsManifestPath` param so
+    /// the install-state overlay is pinned per-request — no env mutation, no
+    /// cross-test races under parallelism.
+    fn write_plugin_manifest(content: &str) -> PathBuf {
+        let dir = tempfile::tempdir().expect("create temp manifest dir");
+        let manifest_path = dir.path().join("plugins.json");
+        std::fs::write(&manifest_path, content).unwrap();
+        // Leak the temp dir so the manifest file survives the request (the
+        // process is short-lived test binary; OS reaps its tempdir on exit).
+        std::mem::forget(dir);
+        manifest_path
+    }
+
+    /// listPlugins must overlay the install-state manifest onto discovered
+    /// descriptors: a manifest entry overrides `installed`/`enabled`/
+    /// `installPolicy`, while a plugin with no manifest entry keeps its
+    /// file-derived defaults (installed=true, enabled from file, AVAILABLE).
+    #[tokio::test]
+    async fn provider_list_plugins_overlays_install_state() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plugins_dir = tmp.path().join(".plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        // alpha: file says enabled=true, manifest says enabled=false + disabled.
+        std::fs::write(
+            plugins_dir.join("alpha.json"),
+            serde_json::json!({
+                "id": "alpha", "name": "Alpha", "enabled": true,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // beta: no manifest entry → keeps file defaults.
+        std::fs::write(
+            plugins_dir.join("beta.json"),
+            serde_json::json!({ "id": "beta", "name": "Beta" }).to_string(),
+        )
+        .unwrap();
+
+        let manifest = serde_json::json!({
+            "plugins": {
+                "alpha": { "installed": false, "enabled": false, "installPolicy": "disabled" }
+            }
+        });
+        let manifest_path = write_plugin_manifest(&manifest.to_string());
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listPlugins",
+            "params": {
+                "cwd": tmp.path(),
+                "pluginsManifestPath": manifest_path,
+            }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let plugins = result["marketplaces"][0]["plugins"].as_array().unwrap();
+        // alpha: manifest overrides installed/enabled/installPolicy.
+        assert_eq!(plugins[0]["id"], "alpha");
+        assert_eq!(plugins[0]["installed"], false);
+        assert_eq!(plugins[0]["enabled"], false);
+        assert_eq!(plugins[0]["installPolicy"], "disabled");
+        // beta: no manifest entry → file defaults (installed=true, AVAILABLE).
+        assert_eq!(plugins[1]["id"], "beta");
+        assert_eq!(plugins[1]["installed"], true);
+        assert_eq!(plugins[1]["installPolicy"], "AVAILABLE");
+    }
+
+    /// readPlugin must overlay the install-state manifest so a single-plugin
+    /// read reflects the manifest's `installed`/`enabled`/`installPolicy`.
+    #[tokio::test]
+    async fn provider_read_plugin_overlays_install_state() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plugins_dir = tmp.path().join(".plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let plugin_path = plugins_dir.join("alpha.json");
+        std::fs::write(
+            &plugin_path,
+            serde_json::json!({
+                "id": "alpha", "name": "Alpha", "enabled": true,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let manifest = serde_json::json!({
+            "plugins": {
+                "alpha": { "installed": true, "enabled": false, "installPolicy": "auto" }
+            }
+        });
+        let manifest_path = write_plugin_manifest(&manifest.to_string());
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.readPlugin",
+            "params": {
+                "path": plugin_path,
+                "pluginsManifestPath": manifest_path,
+            }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let plugin = &result["plugin"];
+        assert_eq!(plugin["id"], "alpha");
+        assert_eq!(plugin["installed"], true);
+        assert_eq!(plugin["enabled"], false);
+        assert_eq!(plugin["installPolicy"], "auto");
+    }
+
+    /// A non-existent manifest path must not break listPlugins — descriptors
+    /// fall back to file-derived defaults (installed=true, enabled from file,
+    /// AVAILABLE policy). The reader returns an empty map on read failure.
+    #[tokio::test]
+    async fn provider_list_plugins_missing_manifest_falls_back() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plugins_dir = tmp.path().join(".plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(
+            plugins_dir.join("alpha.json"),
+            serde_json::json!({
+                "id": "alpha", "name": "Alpha", "enabled": false,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Point at a non-existent manifest file → reader returns empty map.
+        let missing = tmp.path().join("nope.json");
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listPlugins",
+            "params": {
+                "cwd": tmp.path(),
+                "pluginsManifestPath": missing,
+            }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let plugin = &result["marketplaces"][0]["plugins"][0];
+        // File-derived defaults: installed=true, enabled from file (false),
+        // installPolicy=AVAILABLE.
+        assert_eq!(plugin["id"], "alpha");
+        assert_eq!(plugin["installed"], true);
+        assert_eq!(plugin["enabled"], false);
+        assert_eq!(plugin["installPolicy"], "AVAILABLE");
+    }
+
 
     /// getComposerCapabilities must echo the requested `provider` and return
     /// the per-provider capability matrix (T6c-23): claude/codex full, gemini
