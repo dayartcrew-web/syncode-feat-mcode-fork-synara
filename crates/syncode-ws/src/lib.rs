@@ -18,6 +18,7 @@ pub mod server;
 pub mod settings;
 pub mod transport;
 pub mod usage;
+pub mod voice;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -9,7 +9,7 @@
 ## TL;DR
 - **Frontend**: MCode `apps/web` cloned + rewired — **type-clean (tsc 0)**, suite **2128/0 pass**, vite build green.
 - **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **113 served RPCs** dispatching MCode dot-names + slash forms. **ZERO actively-called UI RPCs unserved.** ws **227 tests**.
-- **Every UI panel's RPCs reach the backend — nearly ALL REAL.** Chat works (ProviderCommandReactor wired). Only voice (STT) remains a graceful stub (needs whisper install); all other domains return real data/logic.
+- **Every UI panel's RPCs reach the backend — ALL REAL.** Chat works (ProviderCommandReactor wired). Voice (STT) is REAL behind the `stt` Cargo feature (SRV-4: whisper-CLI transcription; default build retains the graceful "STT not configured" stub); all other domains return real data/logic.
 
 ## Legend
 - ✅ **REAL** — backed by real Syncode logic/data (git2, syncode-terminal, scheduler, read_model, provider CLI, …).
@@ -54,7 +54,7 @@
 | `server.getEnvironment` | ✅ REAL | real `os`/`arch` from `std::env::consts` + server version |
 | `server.getDiagnostics` | ✅ REAL | live `read_store` project/thread counts + `pid` + uptime + RSS (Linux `/proc`) + terminal/local-server child counts (heap/external memory counters hardcoded 0) |
 | `server.subscribeLifecycle` | ✅ REAL (SRV-3) | registers on `server.lifecycle` + emits initial `welcome` snapshot + **ongoing broadcasts** on lifecycle event sources: `startLocalServer`/`stopLocalServer` (`local-server-started`/`local-server-stopped`), `setConfig` (`config-changed`), `updateSettings`/`patchSettings` (`settings-changed`), `refreshProviders`/`updateProvider` (`providers-refreshed`); delivered via `run_push_delivery` to subscribed connections |
-| `server.transcribeVoice` / `voiceStart` / `voiceStop` | 🟡 STUB | hardcoded "STT not configured" message — **no whisper/ffmpeg binary probe**; served, no MethodNotFound |
+| `server.transcribeVoice` / `voiceStart` / `voiceStop` | ✅ REAL (feature-gated) | `crate::voice` module — **real whisper-CLI STT behind the `stt` Cargo feature** (SRV-4). `stt` ON + `whisper` on PATH → `transcribeVoice` decodes base64 audio → temp file → shells out to `whisper --model tiny --output_fmt txt` → returns transcript text; `voiceStart` probes binary (`ok:true`+`engine:"whisper"`); `voiceStop` no-op. `stt` OFF (default) OR binary missing → graceful "STT not configured" stub (byte-identical to pre-SRV-4). Optional deps: `base64`, `tempfile` (only under `stt`). 5 tests (4 always-run fallback + 1 `#[ignore]`d real-whisper). |
 | `server.generateAutomationIntent` | ✅ REAL | LLM via provider CLI (`invoke()`→`invoke_llm_oneshot`) — prompt → AutomationDef JSON (markdown-fence tolerant; malformed JSON falls back to raw text) |
 | `server.generateThreadRecap` | ✅ REAL | LLM via provider CLI (`invoke()`→`invoke_llm_oneshot`) — thread → recap text |
 | `server.listProviderUsage` / `getProviderUsageSnapshot` | ✅ REAL | `UsageStore` (in-memory; FIFO-capped 10k entries) — usage recorded in `invoke()` wrapper at rpc.rs:6808 (not inside `invoke_llm_oneshot`); aggregates per-provider totals, call count, last-seen model, last-used-at (**no peak-day/windowed breakdown**; `limits: []`) |
