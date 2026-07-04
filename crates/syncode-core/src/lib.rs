@@ -6,6 +6,7 @@
 //! - Domain events (CQRS/Event Sourcing)
 //! - Port interfaces (trait definitions for external dependencies)
 
+pub mod agent;
 pub mod application;
 pub mod domain;
 pub mod ports;
@@ -36,3 +37,6 @@ pub use ports::{
     EventRepository, FileStatus, GitFileStatus, GitServicePort, GitStatus, PortError, ProviderPort,
     ReadModelRepository,
 };
+
+// Re-export agent workflow frame model
+pub use agent::{AgentMemory, AgentState, WorkflowStep};
