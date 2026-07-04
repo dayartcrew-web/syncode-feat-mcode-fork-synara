@@ -399,6 +399,17 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "server.getProviderUsageSnapshot": "server/get-provider-usage-snapshot",
   "server.startLocalServer": "server/start-local-server",
   "server.stopLocalServer": "server/stop-local-server",
+
+  // SRV-5: legacy server.* aliases. The vendored MCode UI still calls these
+  // dot-strings; each maps to a thin dispatch arm that aliases an existing
+  // served handler (see `dispatch_method` in `crates/syncode-ws/src/rpc.rs`).
+  // Without these remaps the dot-form calls would fall through to the `null`
+  // branch and be client-stubbed with MethodNotFound.
+  "server.listProviders": "server/list-providers",
+  "server.getProviderStatuses": "server/get-provider-statuses",
+  "server.getProviderAuthStatus": "server/get-provider-auth-status",
+  "server.getUsage": "server/get-usage",
+  "server.getRecap": "server/get-recap",
 };
 
 /**

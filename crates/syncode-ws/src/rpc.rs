@@ -1037,6 +1037,44 @@ async fn dispatch_method(
             handle_server_stop_local_server(state, id, &request.params).await
         }
 
+        // ─── Server legacy aliases (SRV-5 — thin dispatch to served equivalents) ──
+        //
+        // The cloned MCode UI still references five legacy `server.*` RPC names
+        // that are functionally superseded by their newer served equivalents.
+        // Each is a THIN ALIAS: it dispatches straight to the existing handler
+        // with the same params, so the contract surface doubles without any
+        // duplicate logic. Dispatch accepts BOTH the MCode dot-name AND a slash
+        // form for robustness (the wsNativeApi sends dot, the tauriNativeApi
+        // sends slash — both must resolve), matching every other arm above.
+        //
+        //   - `server.listProviders`            → `provider.listAgents`
+        //     (one entry per MCode-valid provider; same `{agents, source}` shape)
+        //   - `server.getProviderStatuses`      → `subscribeProviderStatuses`
+        //     snapshot slice (`{providers}`); no subscription side effect beyond
+        //     the existing handler's initial-snapshot emit
+        //   - `server.getProviderAuthStatus`    → derived from `WsAuthConfig`
+        //     (`{authMode, authRequired}`); no served equivalent, so it has its
+        //     own tiny handler reading `state.auth_config`
+        //   - `server.getUsage`                 → `listProviderUsage`
+        //     (per-provider usage snapshots aggregated from the in-memory log)
+        //   - `server.getRecap`                 → `generateThreadRecap`
+        //     (LLM-backed thread recap; requires non-empty `threadId`)
+        "server.listProviders" | "server/list-providers" => {
+            handle_provider_list_agents(id)
+        }
+        "server.getProviderStatuses" | "server/get-provider-statuses" => {
+            handle_server_subscribe_provider_statuses(state, conn_id, id).await
+        }
+        "server.getProviderAuthStatus" | "server/get-provider-auth-status" => {
+            handle_server_get_provider_auth_status(state, id).await
+        }
+        "server.getUsage" | "server/get-usage" => {
+            handle_server_list_provider_usage(state, id, &request.params).await
+        }
+        "server.getRecap" | "server/get-recap" => {
+            handle_server_generate_thread_recap(state, id, &request.params).await
+        }
+
         // ─── Orchestration generic RPCs (T6c-29 — REAL) ──────────────
         //
         // The cloned MCode UI drives the orchestration engine through a small
@@ -3883,6 +3921,29 @@ async fn handle_server_list_provider_usage(
         .map(|agg| usage_snapshot_json(&agg, "syncode-usage-log"))
         .collect();
     JsonRpcResponse::success(id, Value::Array(snapshots))
+}
+
+/// `server.getProviderAuthStatus` — SRV-5 legacy alias. There is no served
+/// equivalent, so this tiny handler derives the result directly from the
+/// server's [`WsAuthConfig`](syncode_auth::WsAuthConfig): the kebab-case
+/// `authMode` string (mirrors how `build_server_welcome_payload` serializes
+/// the mode) plus the `authRequired` boolean. This matches the shape the
+/// cloned MCode UI reads to decide whether to render the auth/login surface.
+async fn handle_server_get_provider_auth_status(
+    state: &WsState,
+    id: Value,
+) -> JsonRpcResponse {
+    let auth_mode = serde_json::to_value(state.auth_config.mode)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "unsafe-no-auth".to_string());
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "authMode": auth_mode,
+            "authRequired": state.auth_config.requires_authentication(),
+        }),
+    )
 }
 
 /// `server.getProviderUsageSnapshot` — REAL (T6c-19): returns a single
@@ -14463,6 +14524,128 @@ mod tests {
             .find(|l| l["label"] == "Total tokens")
             .unwrap();
         assert_eq!(codex_total["value"], "15");
+    }
+
+    // ── SRV-5: legacy server.* aliases (thin dispatch to served equivalents) ──
+    //
+    // Five legacy `server.*` method names the vendored MCode UI still calls.
+    // Each resolves under BOTH the dot-name AND slash form and dispatches to
+    // the existing served handler, so the alias must mirror that handler's
+    // result shape exactly (no MethodNotFound, no shape drift).
+
+    /// `server.listProviders` aliases `provider.listAgents` — must return the
+    /// same `{ agents, source }` shape under both forms.
+    #[tokio::test]
+    async fn server_list_providers_alias_mirrors_list_agents() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.listProviders", "server/list-providers"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let result = resp.result.unwrap();
+            assert!(
+                result["agents"].is_array(),
+                "{method}: agents must be array"
+            );
+            assert_eq!(
+                result["source"], "syncode",
+                "{method}: source must mirror provider.listAgents"
+            );
+        }
+    }
+
+    /// `server.getProviderStatuses` aliases `subscribeProviderStatuses` — must
+    /// succeed and surface the `{ providers }` snapshot slice under both forms.
+    /// Registers a connection so the snapshot emit path is exercised.
+    #[tokio::test]
+    async fn server_get_provider_statuses_alias_succeeds() {
+        let state = WsState::new_in_memory(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+        for method in [
+            "server.getProviderStatuses",
+            "server/get-provider-statuses",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["subscribed"], true, "{method}: subscribed ack");
+        }
+    }
+
+    /// `server.getProviderAuthStatus` derives from `WsAuthConfig` — must return
+    /// `{ authMode, authRequired }` under both forms. The default in-memory
+    /// state is no-auth (`unsafe-no-auth`, `authRequired: false`).
+    #[tokio::test]
+    async fn server_get_provider_auth_status_alias_derives_from_config() {
+        let state = WsState::new_in_memory(16);
+        for method in [
+            "server.getProviderAuthStatus",
+            "server/get-provider-auth-status",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let result = resp.result.unwrap();
+            assert!(
+                result["authMode"].is_string(),
+                "{method}: authMode must be string"
+            );
+            assert_eq!(
+                result["authRequired"], false,
+                "{method}: default in-memory state is no-auth"
+            );
+        }
+    }
+
+    /// `server.getUsage` aliases `listProviderUsage` — with no recorded usage
+    /// it must return an empty array under both forms (mirrors the served
+    /// equivalent's empty-log behavior).
+    #[tokio::test]
+    async fn server_get_usage_alias_mirrors_list_provider_usage() {
+        let state = WsState::new_in_memory(16);
+        for method in ["server.getUsage", "server/get-usage"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let result = resp.result.unwrap();
+            assert!(
+                result.is_array() && result.as_array().unwrap().is_empty(),
+                "{method}: must be empty array when no usage recorded"
+            );
+        }
+    }
+
+    /// `server.getRecap` aliases `generateThreadRecap` — with real history it
+    /// must invoke the provider and surface the canned reply in `recap` under
+    /// both forms (mirrors the served equivalent's LLM-backed flow).
+    #[tokio::test]
+    async fn server_get_recap_alias_invokes_provider() {
+        let state = WsState::new_in_memory(16);
+        register_mock_provider(&state, "RECAP: alias path worked.").await;
+        let thread_id = seed_thread_with_history(&state).await;
+        for method in ["server.getRecap", "server/get-recap"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "threadId": &thread_id }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            assert_eq!(
+                resp.result.unwrap()["recap"],
+                "RECAP: alias path worked.",
+                "{method}: canned reply must flow into recap"
+            );
+        }
     }
 
     // ── stats.getProfileStats / getProfileTokenStats (T6c-phase-28) ──────

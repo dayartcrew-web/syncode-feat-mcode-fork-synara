@@ -574,7 +574,7 @@ interface ProviderCompactThreadResult {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 105 entries (latest: AUTH-1 pairing-link RPCs +3) ──
+// ─── SERVED_RPC — 110 entries (latest: SRV-5 legacy server.* aliases +5) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -1266,6 +1266,32 @@ export const SERVED_RPC = {
     request: null as unknown as ServerStopLocalServerInput,
     result: null as unknown as Record<string, unknown>,
   },
+  // ─── SRV-5: legacy server.* aliases (thin dispatch to served equivalents) ──
+  // Five legacy `server.*` method names the vendored UI still references. Each
+  // is a thin alias dispatched to an existing handler, so the result shape
+  // mirrors the served equivalent exactly (see the alias target entries above
+  // for the canonical shapes). Listed here so the transport recognizes them as
+  // SERVED rather than falling through to `MethodNotFound`.
+  "server/list-providers": {
+    request: null as unknown as null,
+    result: null as unknown as ProviderListAgentsResult,
+  },
+  "server/get-provider-statuses": {
+    request: null as unknown as null,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "server/get-provider-auth-status": {
+    request: null as unknown as null,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "server/get-usage": {
+    request: null as unknown as ServerListProviderUsageInput,
+    result: null as unknown as ServerListProviderUsageResult,
+  },
+  "server/get-recap": {
+    request: null as unknown as ServerGenerateThreadRecapInput,
+    result: null as unknown as ServerGenerateThreadRecapResult,
+  },
   // ─── T6c-29: orchestration generic RPCs ───────────────────────────
   // All 6 accept a generic params object and return a generic result object;
   // the typed shapes live on the wire but are intentionally loose here (the
@@ -1390,12 +1416,13 @@ export const UNSERVED_RPC = [
   // `server.upsertKeybinding`) are ALSO SERVED as of T6c-10 (stubs that echo
   // the default read-side payload — no persistence). The advanced server
   // RPCs below remain unserved (MethodNotFound):
-  "server.listProviders",
-  "server.getProviderStatuses",
-  "server.getProviderAuthStatus",
-  "server.getUsage",
-  "server.getRecap",
   // NOTE: `server.generateThreadRecap` was SERVED in T6c-13 (LLM-backed recap).
+  // NOTE: the 5 legacy `server.*` aliases (`server.listProviders`,
+  // `server.getProviderStatuses`, `server.getProviderAuthStatus`,
+  // `server.getUsage`, `server.getRecap`) are NOW SERVED as of SRV-5 — thin
+  // dispatch arms aliasing to `provider.listAgents`,
+  // `subscribeProviderStatuses`, the auth-config derivation,
+  // `listProviderUsage`, and `generateThreadRecap` respectively.
   "server.listLocalServers",
   "server.listLocalServerProcesses",
   "server.listWorktrees",
@@ -1406,11 +1433,11 @@ export const UNSERVED_RPC = [
   // `server.getProviderUsageSnapshot`, `server.startLocalServer`,
   // `server.stopLocalServer`, and `server.generateAutomationIntent` (the
   // last one is REAL via an LLM one-shot; the rest are graceful stubs).
-  // After T6c-17 the only remaining server.* unserved entries are
+  // After T6c-17 + SRV-5 the only remaining server.* unserved entries are
   // list-only/process-list RPCs the vendored UI does not actively call
-  // (`listLocalServers`, `listLocalServerProcesses`, `listWorktrees`) plus
-  // the legacy `getUsage`/`getRecap`/`listProviders`/`getProviderStatuses`/
-  // `getProviderAuthStatus` aliases (superseded by the served equivalents).
+  // (`listLocalServers`, `listLocalServerProcesses`, `listWorktrees`). The
+  // legacy `getUsage`/`getRecap`/`listProviders`/`getProviderStatuses`/
+  // `getProviderAuthStatus` aliases are NOW SERVED (SRV-5 thin dispatch arms).
 
   // ─── Provider discovery (no backend surface) — ~9 ───────────────────
   "provider.listSkills",
