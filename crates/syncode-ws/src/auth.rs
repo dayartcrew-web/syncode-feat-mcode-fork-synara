@@ -96,6 +96,44 @@ pub fn required_permission(method: &str) -> Option<Permission> {
         | "auth/list-pairing-links"
         | "auth/listPairingLinks" => Some(Permission::Write),
 
+        // ─── Client-session management (AUTH-2) ───────────────────────────
+        //
+        // Four privileged RPCs that surface + manage the *live* WS sessions
+        // (authenticated connections). Unlike pairing links (bootstrap
+        // credentials), these operate on currently-connected principals:
+        //   - `listClientSessions`  → enumerate active authenticated connections
+        //   - `revokeClientSession` → invalidate one connection's auth (force
+        //     re-auth); the next protected call returns UNAUTHORIZED.
+        //   - `getWebSocketToken`   → issue a fresh bearer token bound to the
+        //     calling principal (e.g. for a reconnecting client or a sub-flow
+        //     that needs a discrete token).
+        //   - `getSessionState`     → return the calling session's auth state
+        //     (role, principal info, expiry).
+        //
+        // All four are gated by Write: enumerating/revoking sessions is
+        // privileged (an attacker could otherwise discover active owners or
+        // kick them off), and minting tokens is obviously privileged. Even
+        // `getSessionState` is Write-gated for symmetry — it surfaces the
+        // effective principal + policy, which a read-only Client shouldn't be
+        // able to probe about other sessions' reachability. The MCode UI only
+        // invokes these from the owner-scoped Settings/Security panel.
+        //
+        // Both dot-name AND slash form resolve here (matches AUTH-1 + the
+        // git.*/server.* convention) so the authz gate behaves identically
+        // regardless of which form the client sends.
+        "auth.listClientSessions"
+        | "auth/list-client-sessions"
+        | "auth/listClientSessions" => Some(Permission::Write),
+        "auth.revokeClientSession"
+        | "auth/revoke-client-session"
+        | "auth/revokeClientSession" => Some(Permission::Write),
+        "auth.getWebSocketToken"
+        | "auth/get-web-socket-token"
+        | "auth/getWebSocketToken" => Some(Permission::Write),
+        "auth.getSessionState"
+        | "auth/get-session-state"
+        | "auth/getSessionState" => Some(Permission::Write),
+
         // Unknown method → no permission gate here; the dispatcher will
         // return METHOD_NOT_FOUND downstream. We don't pre-reject so the
         // error path stays uniform regardless of auth state.
@@ -133,6 +171,18 @@ impl ConnectionAuth {
     /// Returns whether one was present.
     pub fn clear(&mut self, conn_id: ConnectionId) -> bool {
         self.principals.remove(&conn_id).is_some()
+    }
+
+    /// Enumerate every authenticated (connection, principal) pair. AUTH-2's
+    /// `auth.listClientSessions` consults this to surface the live session
+    /// roster. Returns a cloned snapshot (callers iterate without holding the
+    /// lock). No filtering is applied here — expiry (if any) is enforced
+    /// upstream by the caller via `Principal::is_expired`.
+    pub fn list(&self) -> Vec<(ConnectionId, Principal)> {
+        self.principals
+            .iter()
+            .map(|(id, p)| (*id, p.clone()))
+            .collect()
     }
 }
 
@@ -208,6 +258,13 @@ impl SharedConnectionAuth {
 
     pub async fn clear(&self, conn_id: ConnectionId) -> bool {
         self.inner.write().await.clear(conn_id)
+    }
+
+    /// Snapshot of every authenticated (connection, principal) pair. AUTH-2's
+    /// `auth.listClientSessions` reaches for this; the result is a cloned vec
+    /// so callers don't hold the lock while serializing.
+    pub async fn list_sessions(&self) -> Vec<(ConnectionId, Principal)> {
+        self.inner.read().await.list()
     }
 
     /// Authorize a call. Thin wrapper over [`authorize`] using this store.
@@ -366,6 +423,16 @@ mod tests {
             "auth/revoke-pairing-link",
             "auth.listPairingLinks",
             "auth/list-pairing-links",
+            // AUTH-2 client-session management — all four gated by Write
+            // (enumerating/revoking sessions + minting tokens is privileged).
+            "auth.listClientSessions",
+            "auth/list-client-sessions",
+            "auth.revokeClientSession",
+            "auth/revoke-client-session",
+            "auth.getWebSocketToken",
+            "auth/get-web-socket-token",
+            "auth.getSessionState",
+            "auth/get-session-state",
         ] {
             assert_eq!(required_permission(m), Some(Permission::Write), "{}", m);
         }

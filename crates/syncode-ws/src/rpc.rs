@@ -95,6 +95,10 @@ async fn dispatch_method(
                     "auth/createPairingCredential",
                     "auth/revokePairingLink",
                     "auth/listPairingLinks",
+                    "auth/listClientSessions",
+                    "auth/revokeClientSession",
+                    "auth/getWebSocketToken",
+                    "auth/getSessionState",
                     "project/list",
                     "project/get",
                     "project/create",
@@ -1174,6 +1178,44 @@ async fn dispatch_method(
         | "auth/list-pairing-links"
         | "auth/listPairingLinks" => handle_auth_list_pairing_links(state, id).await,
 
+        // ─── Client-session management (AUTH-2) ───────────────────────────
+        //
+        // Four privileged RPCs (all gated by Write — see `required_permission`)
+        // that surface + manage the LIVE WebSocket sessions (authenticated
+        // connections). Complement AUTH-1's pairing-link management (which
+        // operates on bootstrap CREDENTIALS): these operate on the currently-
+        // connected principals.
+        //   - `listClientSessions`  → enumerate active authenticated connections
+        //     (conn id, role, subject, expiry).
+        //   - `revokeClientSession` → invalidate one connection's auth; the next
+        //     protected call from it returns UNAUTHORIZED.
+        //   - `getWebSocketToken`   → mint a fresh bearer token bound to the
+        //     calling principal (e.g. for reconnect / sub-flow auth).
+        //   - `getSessionState`     → return the calling session's auth state.
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form (matches
+        // AUTH-1 + git.*/server.* convention).
+        "auth.listClientSessions"
+        | "auth/list-client-sessions"
+        | "auth/listClientSessions" => {
+            handle_auth_list_client_sessions(state, id).await
+        }
+        "auth.revokeClientSession"
+        | "auth/revoke-client-session"
+        | "auth/revokeClientSession" => {
+            handle_auth_revoke_client_session(state, id, &request.params).await
+        }
+        "auth.getWebSocketToken"
+        | "auth/get-web-socket-token"
+        | "auth/getWebSocketToken" => {
+            handle_auth_get_web_socket_token(state, conn_id, id, &request.params).await
+        }
+        "auth.getSessionState"
+        | "auth/get-session-state"
+        | "auth/getSessionState" => {
+            handle_auth_get_session_state(state, conn_id, id).await
+        }
+
         // ─── Unknown ────────────────────────────────────────────
         method => {
             tracing::warn!(method, "Unknown RPC method");
@@ -1981,6 +2023,200 @@ async fn handle_auth_list_pairing_links(state: &WsState, id: Value) -> JsonRpcRe
             format!("Failed to list pairing links: {e}"),
         ),
     }
+}
+
+// ─── Client-session Handlers (AUTH-2) ────────────────────────────────
+//
+// Four privileged RPCs (all require Write — see `required_permission`) that
+// manage the LIVE WebSocket sessions (authenticated connections), in contrast
+// to AUTH-1's pairing-link handlers (which manage bootstrap CREDENTIALS).
+//
+// The handlers are thin: the per-connection auth state (`state.conn_auth`) is
+// the source of truth for who is currently authenticated. `list` snapshots it;
+// `revoke` clears one connection's principal (force re-auth); `getToken`
+// mints a fresh bearer token via the shared session registry bound to the
+// calling principal; `getSessionState` reports the calling connection's auth.
+
+/// `auth.listClientSessions` — enumerate every currently-authenticated
+/// connection.
+///
+/// No params. Returns `{ "sessions": [ {connectionId, role, subject, expiresAt, issuedAt}, … ] }`.
+/// Sessions are filtered to non-expired principals (relative to now) so a
+/// connection whose principal's TTL has elapsed is not surfaced as "active".
+/// In `UnsafeNoAuth` mode the map is typically empty (no bootstrap happens),
+/// so the result is an empty list — backward-compatible and truthful.
+async fn handle_auth_list_client_sessions(state: &WsState, id: Value) -> JsonRpcResponse {
+    let now = chrono::Utc::now();
+    let sessions = state.conn_auth.list_sessions().await;
+    let view: Vec<_> = sessions
+        .into_iter()
+        .filter(|(_, p)| !p.is_expired(now))
+        .map(|(conn_id, p)| {
+            serde_json::json!({
+                "connectionId": conn_id,
+                "role": p.role,
+                "subject": p.subject,
+                "issuedAt": p.issued_at,
+                "expiresAt": p.expires_at,
+            })
+        })
+        .collect();
+    JsonRpcResponse::success(id, serde_json::json!({ "sessions": view }))
+}
+
+/// `auth.revokeClientSession` — invalidate one connection's authenticated
+/// principal. Idempotent.
+///
+/// Params: `connectionId` (number, required) — the connection id returned by
+/// `listClientSessions`.
+///
+/// Returns `{ "revoked": true, "hadSession": bool }`. `hadSession=false` means
+/// the connection had no authenticated principal (already logged out / never
+/// bootstrapped); the call still succeeds because the end state ("no auth on
+/// this connection") is achieved. The targeted connection's NEXT protected
+/// call returns UNAUTHORIZED — there is no proactive push to the client.
+async fn handle_auth_revoke_client_session(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let conn_id = match params.get("connectionId").and_then(|v| v.as_u64()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'connectionId' parameter",
+            );
+        }
+    };
+    let removed = state.conn_auth.clear(conn_id).await;
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "revoked": true, "hadSession": removed }),
+    )
+}
+
+/// `auth.getWebSocketToken` — mint a fresh bearer token bound to the CALLING
+/// connection's principal.
+///
+/// The token is issued into the shared `SessionRegistry` (the same store
+/// `auth/bootstrap` writes into), so it validates identically on subsequent
+/// requests. Intended use cases:
+///   - a reconnecting client that wants a discrete token (rather than
+///     re-presenting the original credential),
+///   - a sub-flow (e.g. a spawned worker) that needs its own token bound to
+///     the same principal.
+///
+/// Params (all optional):
+/// - `ttlMinutes` (number, default `60`) — token lifetime in minutes. Capped
+///   to [1, 10080] (one week) so a leaked token can't outlive a reasonable
+///   rotation window.
+///
+/// Returns `{ "token": string, "expiresAt": timestamp, "principal": {role, subject} }`.
+/// The principal is the calling connection's bound principal (the token
+/// inherits its identity + role). In `UnsafeNoAuth` mode the calling
+/// connection has no bound principal; we synthesize a default `Owner`
+/// principal so the token is still useful (mirrors the no-auth opt-in posture
+/// — the local trust boundary is the network boundary).
+async fn handle_auth_get_web_socket_token(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    use syncode_auth::principal::{Principal, Role};
+
+    // ttlMinutes: default 60 min. Clamp to [1, 10080] (one week).
+    let ttl = match params.get("ttlMinutes").and_then(|v| v.as_f64()) {
+        None => chrono::Duration::minutes(60),
+        Some(m) if !(1.0..=10080.0).contains(&m) => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "ttlMinutes must be between 1 and 10080 (minutes)",
+            );
+        }
+        Some(m) => chrono::Duration::minutes(m as i64),
+    };
+
+    // Resolve the calling principal. In requiring modes the authz gate has
+    // already guaranteed a bound principal exists (Write-gated). In
+    // UnsafeNoAuth the gate is bypassed, so fall back to a synthesized Owner
+    // principal (the no-auth opt-in posture: local network = trust boundary).
+    let principal = match state.conn_auth.get(conn_id).await {
+        Some(p) => p,
+        None => Principal::new("local-owner", Role::Owner, ttl),
+    };
+
+    // If the bound principal exists but we're minting a NEW token with a
+    // shorter TTL, honor the request's TTL by re-issuing a fresh principal
+    // (same subject + role) bound to `ttl`. The shared registry then validates
+    // the new token against its own (longer) expiry.
+    let minted = if principal.expires_at.as_datetime()
+        <= &(chrono::Utc::now() + ttl)
+    {
+        // Bound principal expires sooner than the requested TTL — keep the
+        // existing (shorter) expiry so we never mint a token that outlives the
+        // principal it represents.
+        principal.clone()
+    } else {
+        Principal::new(&principal.subject, principal.role, ttl)
+    };
+
+    let token = state.auth_config.sessions.issue(minted.clone());
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "token": token.as_str(),
+            "expiresAt": minted.expires_at,
+            "principal": {
+                "role": minted.role,
+                "subject": minted.subject,
+            },
+        }),
+    )
+}
+
+/// `auth.getSessionState` — return the calling connection's current auth
+/// state. Richer than `auth/status` (which is the lightweight pre-bootstrap
+/// probe): this surfaces the full principal (id, subject, role, permissions,
+/// issued/expires) + the server auth mode.
+///
+/// No params. Returns:
+/// ```jsonc
+/// { "authMode": "remote-reachable", "authenticated": bool,
+///   "principal": { id, subject, role, permissions, issuedAt, expiresAt } | null }
+/// ```
+/// In `UnsafeNoAuth` with no bound principal, `authenticated=false` and
+/// `principal=null` (but `authMode=unsafe-no-auth` so the caller knows the
+/// session is nonetheless trusted).
+async fn handle_auth_get_session_state(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let principal = state.conn_auth.get(conn_id).await;
+    let result = match principal {
+        Some(p) => serde_json::json!({
+            "authMode": state.auth_config.mode,
+            "authenticated": true,
+            "principal": {
+                "id": p.id,
+                "subject": p.subject,
+                "role": p.role,
+                "permissions": p.permissions,
+                "issuedAt": p.issued_at,
+                "expiresAt": p.expires_at,
+            },
+        }),
+        None => serde_json::json!({
+            "authMode": state.auth_config.mode,
+            "authenticated": false,
+            "principal": null,
+        }),
+    };
+    JsonRpcResponse::success(id, result)
 }
 
 // ─── Project Handlers ────────────────────────────────────────────
@@ -10610,6 +10846,337 @@ mod tests {
         .await;
         let resp = rpc(&state, 1, &list).await;
         assert!(resp.error.is_none(), "Owner should list: {:?}", resp.error);
+    }
+
+    // ─── AUTH-2 client-session RPC tests ────────────────────────────────
+    //
+    // Covers the four new privileged RPCs end-to-end through `handle_rpc`
+    // (authz gate → dispatch → handler → conn_auth / sessions), in BOTH auth
+    // modes (mirrors the AUTH-1 test structure above):
+    //   - no-auth (UnsafeNoAuth): the authz gate is bypassed; the handlers
+    //     surface the (empty / synthesized) state truthfully.
+    //   - remote (RemoteReachable): the gate is enforced — unauthenticated
+    //     calls are UNAUTHORIZED, authenticated Client calls are FORBIDDEN,
+    //     authenticated Owner calls succeed + observe real session state.
+
+    #[tokio::test]
+    async fn session_list_returns_empty_in_fresh_no_auth_state() {
+        // No-auth, no bootstrap → listClientSessions returns an empty roster
+        // (no connection has a bound principal). Truthful + backward-compat.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth.listClientSessions"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(
+            resp.result.unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn session_list_and_get_state_reflect_bootstrap_in_remote_mode() {
+        // Remote mode: bootstrap conn 1 as Owner, then list + getState.
+        let state = make_remote_state();
+        rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "auth/bootstrap",
+                "params": { "credential": "sk-owner-secret" }
+            }),
+        )
+        .await;
+
+        // listClientSessions surfaces conn 1.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth.listClientSessions"
+        });
+        let resp = rpc(&state, 1, &list).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let sessions = resp.result.unwrap()["sessions"].as_array().unwrap().clone();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["connectionId"], 1);
+        assert_eq!(sessions[0]["role"], "owner");
+        assert_eq!(sessions[0]["subject"], "owner");
+
+        // getSessionState returns the calling connection's principal + mode.
+        let state_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "auth.getSessionState"
+        });
+        let resp = rpc(&state, 1, &state_req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["authenticated"], true);
+        assert_eq!(result["authMode"], "remote-reachable");
+        assert_eq!(result["principal"]["role"], "owner");
+        assert_eq!(result["principal"]["subject"], "owner");
+        assert!(
+            result["principal"]["permissions"].is_object(),
+            "permissions surfaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_revoke_forces_reauth_in_remote_mode() {
+        // Remote mode: an Owner (conn 1) revokes ANOTHER connection's (conn 2)
+        // session, then conn 2's next protected call must be UNAUTHORIZED.
+        // (The realistic admin-revokes-a-session flow — not self-revocation,
+        // which would lock the caller out of confirming the result.)
+        let state = make_remote_state();
+        // conn 1 = admin (bootstrap as Owner).
+        rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "auth/bootstrap",
+                "params": { "credential": "sk-owner-secret" }
+            }),
+        )
+        .await;
+        // conn 2 = target (directly bind an Owner principal — the shared-
+        // secret authenticator only mints Owner, and we just need an
+        // authenticated session to revoke).
+        state
+            .conn_auth
+            .set(
+                2,
+                syncode_auth::principal::Principal::new_never_expiring(
+                    "dave",
+                    syncode_auth::principal::Role::Owner,
+                ),
+            )
+            .await;
+
+        // conn 2 CAN dispatch a protected method before revocation.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth.listClientSessions"
+        });
+        let resp = rpc(&state, 2, &list).await;
+        assert!(resp.error.is_none(), "conn 2 should be authorized pre-revoke");
+
+        // conn 1 (admin) revokes conn 2's session.
+        let revoke = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth.revokeClientSession",
+            "params": { "connectionId": 2 }
+        });
+        let resp = rpc(&state, 1, &revoke).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["hadSession"], true);
+
+        // Idempotent: revoking conn 2 again reports hadSession=false.
+        let resp = rpc(&state, 1, &revoke).await;
+        assert_eq!(resp.result.unwrap()["hadSession"], false);
+
+        // Now conn 2's protected call is UNAUTHORIZED (auth cleared).
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "auth.listClientSessions"
+        });
+        let resp = rpc(&state, 2, &list).await;
+        assert_eq!(
+            resp.error.unwrap().code,
+            crate::auth::auth_error_codes::UNAUTHORIZED,
+            "revoked session must not be able to dispatch protected methods"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_get_web_socket_token_issues_real_token_in_remote_mode() {
+        // Remote mode: an Owner connection mints a fresh WS token. The token
+        // must validate against the shared session registry.
+        let state = make_remote_state();
+        rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "auth/bootstrap",
+                "params": { "credential": "sk-owner-secret" }
+            }),
+        )
+        .await;
+
+        let get_token = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth.getWebSocketToken",
+            "params": { "ttlMinutes": 30 }
+        });
+        let resp = rpc(&state, 1, &get_token).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let token = result["token"].as_str().unwrap();
+        assert!(!token.is_empty(), "token must be a non-empty string");
+        assert_eq!(result["principal"]["role"], "owner");
+        assert!(result["expiresAt"].as_str().is_some(), "expiresAt present");
+
+        // The token validates against the shared registry → it's a REAL token.
+        let session_token = syncode_auth::SessionToken(token.to_string());
+        let principal = state
+            .auth_config
+            .sessions
+            .validate(&session_token, chrono::Utc::now());
+        assert!(
+            principal.is_some(),
+            "issued token must validate against the shared SessionRegistry"
+        );
+        assert_eq!(principal.unwrap().role, syncode_auth::principal::Role::Owner);
+    }
+
+    #[tokio::test]
+    async fn session_get_token_rejects_out_of_range_ttl() {
+        let state = make_remote_state();
+        rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "auth/bootstrap",
+                "params": { "credential": "sk-owner-secret" }
+            }),
+        )
+        .await;
+
+        // 0 → INVALID_PARAMS.
+        let bad = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth.getWebSocketToken",
+            "params": { "ttlMinutes": 0 }
+        });
+        let resp = rpc(&state, 1, &bad).await;
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+
+        // Over the 10080 cap → INVALID_PARAMS.
+        let bad = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "auth.getWebSocketToken",
+            "params": { "ttlMinutes": 999999 }
+        });
+        let resp = rpc(&state, 1, &bad).await;
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn session_rpc_unauthenticated_in_remote_mode_is_unauthorized() {
+        // In RemoteReachable mode, the 4 RPCs require Write → an
+        // unauthenticated connection gets UNAUTHORIZED.
+        let state = make_remote_state();
+        for method in [
+            "auth.listClientSessions",
+            "auth.revokeClientSession",
+            "auth.getWebSocketToken",
+            "auth.getSessionState",
+        ] {
+            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            let resp = rpc(&state, 1, &req).await;
+            assert_eq!(
+                resp.error.unwrap().code,
+                crate::auth::auth_error_codes::UNAUTHORIZED,
+                "{method} should be UNAUTHORIZED pre-auth"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_rpc_client_role_is_forbidden_owner_role_allowed() {
+        // In RemoteReachable mode, the 4 RPCs require Write.
+        //  - Client (read-only) → FORBIDDEN.
+        //  - Owner (full)       → allowed.
+        let state = make_remote_state();
+
+        // Bind a Client principal on conn 2 (shared-secret only mints Owner).
+        state
+            .conn_auth
+            .set(
+                2,
+                syncode_auth::principal::Principal::new_never_expiring(
+                    "carol",
+                    syncode_auth::principal::Role::Client,
+                ),
+            )
+            .await;
+
+        let get_state = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth.getSessionState"
+        });
+        let resp = rpc(&state, 2, &get_state).await;
+        assert_eq!(
+            resp.error.unwrap().code,
+            crate::auth::auth_error_codes::FORBIDDEN,
+            "Client should be FORBIDDEN from session RPCs"
+        );
+
+        // Owner on conn 1 (bootstrap) → allowed.
+        rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "auth/bootstrap",
+                "params": { "credential": "sk-owner-secret" }
+            }),
+        )
+        .await;
+        let resp = rpc(&state, 1, &get_state).await;
+        assert!(
+            resp.error.is_none(),
+            "Owner should call getSessionState: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn session_rpc_dot_name_and_slash_form_both_dispatch() {
+        // Dispatch accepts BOTH dot-name AND slash form for all 4 RPCs.
+        let state = WsState::new_in_memory(16);
+
+        // listClientSessions slash form.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth/list-client-sessions"
+        });
+        let resp = rpc(&state, 1, &list).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        // getSessionState slash form.
+        let get_state = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth/get-session-state"
+        });
+        let resp = rpc(&state, 1, &get_state).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        // getWebSocketToken slash form.
+        let get_token = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "auth/get-web-socket-token"
+        });
+        let resp = rpc(&state, 1, &get_token).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert!(
+            resp.result.unwrap()["token"].as_str().is_some(),
+            "slash form issues a token"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_list_methods_advertises_the_four_new_rpcs() {
+        // The 4 new methods must appear in rpc/listMethods so the UI's
+        // capability discovery surfaces them.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let resp = rpc(&state, 1, &req).await;
+        let methods: Vec<String> = resp.result.unwrap()["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for expected in [
+            "auth/listClientSessions",
+            "auth/revokeClientSession",
+            "auth/getWebSocketToken",
+            "auth/getSessionState",
+        ] {
+            assert!(
+                methods.iter().any(|m| m == expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
     }
 
     // ─── Git RPC tests ─────────────────────────────────────────────────

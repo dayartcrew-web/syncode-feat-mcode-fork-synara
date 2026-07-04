@@ -898,6 +898,39 @@ export const SERVED_RPC = {
     request: null as unknown as null,
     result: null as unknown as Record<string, unknown>,
   },
+  // AUTH-2 client-session management. All four require Write permission on
+  // the backend (see `required_permission` in `ws/auth.rs`), like the AUTH-1
+  // pairing RPCs above. They operate on LIVE WebSocket sessions (authenticated
+  // connections), complementing AUTH-1's pairing-CREDENTIAL surface:
+  //   - `listClientSessions`  → enumerate active authenticated connections
+  //     (returns `{ sessions: [{connectionId, role, subject, issuedAt, expiresAt}, …] }`).
+  //   - `revokeClientSession` → invalidate one connection's auth; the next
+  //     protected call from it returns UNAUTHORIZED
+  //     (params `{ connectionId }`, returns `{ revoked, hadSession }`).
+  //   - `getWebSocketToken`   → mint a fresh bearer token bound to the
+  //     calling principal (optional `{ ttlMinutes }`, returns
+  //     `{ token, expiresAt, principal: {role, subject} }`).
+  //   - `getSessionState`     → return the calling session's auth state
+  //     (returns `{ authMode, authenticated, principal | null }`).
+  // DTOs kept as `Record<string, unknown>` for now; the Rust-side shapes are
+  // the source of truth (`handle_auth_list_client_sessions` et al. in
+  // `crates/syncode-ws/src/rpc.rs`).
+  "auth/listClientSessions": {
+    request: null as unknown as null,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "auth/revokeClientSession": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "auth/getWebSocketToken": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "auth/getSessionState": {
+    request: null as unknown as null,
+    result: null as unknown as Record<string, unknown>,
+  },
 
   // ─── Push subscription ───────────────────────────────────────────────
   "push/subscribe": {
@@ -1481,13 +1514,12 @@ export const UNSERVED_RPC = [
   "orchestration.getFullThreadDiff",
   "orchestration.repairReadModel",
 
-  // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing RPCs served; these are not) ─────
+  // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing + AUTH-2 session RPCs served; these are not) ─────
   // AUTH-1: `auth.createPairingCredential`, `auth.revokePairingLink`, and
   // `auth.listPairingLinks` are now SERVED (Write-gated) — see SERVED_RPC.
-  "auth.listClientSessions",
-  "auth.revokeClientSession",
-  "auth.getWebSocketToken",
-  "auth.getSessionState",
+  // AUTH-2: `auth.listClientSessions`, `auth.revokeClientSession`,
+  // `auth.getWebSocketToken`, and `auth.getSessionState` are now SERVED
+  // (Write-gated) — see SERVED_RPC.
 
   // ─── Desktop / browser / filesystem (DSK-2: Tauri IPC commands) ──────
   // All 7 `desktop.*` / `browser.*` / `filesystem.*` RPC names the vendored
