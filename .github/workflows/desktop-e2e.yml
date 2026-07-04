@@ -1,0 +1,129 @@
+name: Desktop E2E (Tauri boot)
+
+# DSK-3 — boots the actual Tauri desktop binary under xvfb-run (Linux) and
+# verifies the full `.setup()` path: webview window creation → ws_setup::boot()
+# → managed WsRuntimeState → /ws listener. Closes the "boot E2E not verified"
+# gap in docs/STATUS.md.
+#
+# Two test layers run here:
+#   1. ws_setup_boot_wiring_e2e — headless WS-layer wiring test (always runs,
+#      no display needed). Proves boot() + WsRuntimeState + WS connect end-to-end.
+#   2. desktop_binary_boot_connects_ws — connects to the actual binary booted
+#      under xvfb-run. Proves the full shell (window + IPC + WS) comes up.
+#
+# The binary needs the compiled frontend dist (tauri::generate_context! embeds it
+# at compile time), so we build the frontend first, then the binary, then boot
+# it under a virtual display.
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "crates/syncode-tauri/**"
+      - "crates/syncode-ws/**"
+      - "crates/syncode-orchestration/**"
+      - "crates/syncode-persistence/**"
+      - "crates/syncode-provider/**"
+      - "frontend/**"
+      - ".github/workflows/desktop-e2e.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/syncode-tauri/**"
+      - "crates/syncode-ws/**"
+      - "crates/syncode-orchestration/**"
+      - "crates/syncode-persistence/**"
+      - "crates/syncode-provider/**"
+      - "frontend/**"
+      - ".github/workflows/desktop-e2e.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch: # allow manual runs on any branch
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # WS port the binary will bind — pinned so the test step knows where to point.
+  SYNCODE_WS_PORT: "30142"
+  SYNCODE_DB: "" # in-memory → hermetic, no SQLite file left behind
+  DESKTOP_E2E_WS_URL: "ws://127.0.0.1:30142/ws"
+
+jobs:
+  boot-e2e:
+    name: Desktop boot E2E (Linux xvfb)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xvfb
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Build frontend (dist for tauri::generate_context!)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Clippy (syncode-tauri)
+        # The desktop crate is the surface this workflow owns; run clippy here
+        # so a lint regression in the binary fails the boot E2E job.
+        run: cargo clippy -p syncode-tauri --all-targets -- -D warnings
+
+      - name: Build desktop binary
+        run: cargo build -p syncode-tauri
+
+      - name: Run headless WS-layer boot E2E
+        # ws_setup_boot_wiring_e2e needs no display — run it before xvfb to fail
+        # fast if the wiring itself is broken.
+        run: cargo test -p syncode-tauri --test boot_e2e ws_setup_boot_wiring_e2e -- --nocapture
+
+      - name: Boot desktop binary under xvfb-run
+        # xvfb-run provides a virtual X server so the webview window can be
+        # created headlessly. `-a` picks an free display number; `--server-args`
+        # gives it a reasonable screen size. The binary is backgrounded; we save
+        # its PID to tear it down after the test.
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x800x24" \
+            ./target/debug/syncode-tauri &
+          echo $! > desktop.pid
+          # Give setup() (window + ws_setup::boot) a beat to come up. The test
+          # itself retries the handshake for ~15s, but a short pre-warm avoids a
+          # flaky first-attempt log.
+          sleep 4
+
+      - name: Run full-shell boot E2E against live binary
+        env:
+          DESKTOP_E2E_WS_URL: ${{ env.DESKTOP_E2E_WS_URL }}
+        run: cargo test -p syncode-tauri --test boot_e2e desktop_binary_boot_connects_ws -- --nocapture
+
+      - name: Tear down desktop binary
+        if: always()
+        run: |
+          if [ -f desktop.pid ]; then
+            kill "$(cat desktop.pid)" 2>/dev/null || true
+            rm -f desktop.pid
+          fi
