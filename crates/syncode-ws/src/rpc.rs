@@ -961,7 +961,7 @@ async fn dispatch_method(
             handle_git_prepare_pull_request_thread(id, &request.params).await
         }
 
-        // ─── Voice STT Methods (T6c-15 — graceful not-configured stubs) ──
+        // ─── Voice STT Methods (SRV-4 — real whisper behind `stt` flag) ───
         //
         // The cloned MCode UI's voice panel calls these `server.*` RPCs to
         // drive speech-to-text (STT):
@@ -971,27 +971,23 @@ async fn dispatch_method(
         //   - `server.voiceStart`     — begin a streaming listening session
         //   - `server.voiceStop`      — end a streaming listening session
         //
-        // Syncode has NO STT backend (no whisper/ffmpeg CLI installed, no STT
-        // API configured), so each handler is a GRACEFUL STUB: it reads the
-        // params (audio blob / start-stop flags) without processing them and
-        // returns a typed "STT not configured" result so the UI surfaces a
-        // clear status instead of MethodNotFound or a crash.
+        // Handlers live in `crate::voice`. With the `stt` Cargo feature OFF
+        // (default) each returns the graceful "STT not configured" stub —
+        // byte-identical to the pre-SRV-4 inline handlers. With `stt` ON and
+        // the `whisper` CLI on PATH, `transcribeVoice` shells out to whisper
+        // and returns real transcript text; `voiceStart` reports the engine.
+        // Missing binary at runtime → graceful degrade (never a crash).
         //
         // Dispatch accepts BOTH dot-name AND slash form (the wsNativeApi sends
         // dot, the tauriNativeApi sends slash — both must resolve).
-        //
-        // stub: no STT backend (T6c-future — install whisper/ffmpeg or wire a
-        // STT provider) — returns a not-configured result.
         "server.transcribeVoice" | "server/transcribe-voice" | "server/transcribeVoice" => {
-            handle_server_transcribe_voice(id, &request.params)
+            crate::voice::handle_transcribe_voice(id, &request.params).await
         }
-        // stub: no STT backend — can't start listening.
         "server.voiceStart" | "server/voice-start" | "server/voiceStart" => {
-            handle_server_voice_start(id, &request.params)
+            crate::voice::handle_voice_start(id, &request.params).await
         }
-        // stub: no STT backend — no-op stop.
         "server.voiceStop" | "server/voice-stop" | "server/voiceStop" => {
-            handle_server_voice_stop(id, &request.params)
+            crate::voice::handle_voice_stop(id, &request.params).await
         }
 
         // ─── Server niche ops (T6c-17 — last batch; completes all RPCs) ────
@@ -3657,70 +3653,14 @@ async fn handle_server_upsert_keybinding(
     )
 }
 
-// ─── Voice STT Handlers (T6c-15 — graceful not-configured stubs) ──
+// ─── Voice STT Handlers — MOVED to `crate::voice` (SRV-4) ──────────────
 //
-// Syncode has no STT backend (no whisper/ffmpeg CLI, no STT API), so these
-// handlers do NOT process audio. They read the params (to accept the MCode
-// voice-input shapes without erroring) and return a typed "STT not
-// configured" result so the UI can surface a clear status. Real STT wiring
-// (whisper CLI subprocess, or a STT provider adapter) is deferred to
-// T6c-future.
-
-/// `server.transcribeVoice` — submit an audio blob for transcription. The
-/// MCode input carries an encoded audio blob (base64/binary) + format hint;
-/// we read `params` purely to acknowledge the call (we do not decode or
-/// process the blob) and return an empty-text / not-configured result. The
-/// UI then knows transcription is unavailable rather than receiving
-/// MethodNotFound.
-fn handle_server_transcribe_voice(id: Value, params: &Value) -> JsonRpcResponse {
-    // Acknowledge the audio blob param without processing it. We do not
-    // validate its shape strictly (the MCode contract is not in tier3), so
-    // any JSON object/array/primitive is tolerated — the result is the same
-    // "not configured" payload regardless.
-    let _ = params;
-    // stub: no STT backend (T6c-future — install whisper/ffmpeg or wire a
-    // STT provider) — return a not-configured transcription result.
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "text": "",
-            "error": "STT not configured — install whisper + ffmpeg (or configure a STT provider) to enable voice transcription"
-        }),
-    )
-}
-
-/// `server.voiceStart` — begin a streaming listening session. Without a STT
-/// backend we cannot capture or transcribe audio, so we return
-/// `{ ok: false, listening: false, reason: "STT not configured" }`. Reads
-/// `params` to acknowledge the call but performs no listening-side setup.
-fn handle_server_voice_start(id: Value, params: &Value) -> JsonRpcResponse {
-    let _ = params;
-    // stub: no STT backend — can't start listening.
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "ok": false,
-            "listening": false,
-            "reason": "STT not configured"
-        }),
-    )
-}
-
-/// `server.voiceStop` — end a streaming listening session. Since
-/// `voiceStart` never actually starts listening, this is a no-op that
-/// returns `{ ok: true, listening: false }`. Reads `params` to acknowledge
-/// the call.
-fn handle_server_voice_stop(id: Value, params: &Value) -> JsonRpcResponse {
-    let _ = params;
-    // stub: no STT backend — no-op stop.
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "ok": true,
-            "listening": false
-        }),
-    )
-}
+// The three voice handlers (`handle_transcribe_voice`, `handle_voice_start`,
+// `handle_voice_stop`) now live in `crate::voice` so the whisper-CLI
+// integration can be feature-gated behind the `stt` Cargo feature. The
+// dispatch arms above call into that module. With `stt` OFF (default) the
+// behaviour is byte-identical to the former inline stubs; with `stt` ON and
+// `whisper` on PATH, `transcribeVoice` returns real transcript text.
 
 // ─── Server niche ops Handlers (T6c-17 — last batch; completes all RPCs) ──
 //

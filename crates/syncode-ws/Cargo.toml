@@ -6,6 +6,16 @@ authors.workspace = true
 license.workspace = true
 description = "WebSocket transport — JSON-RPC server, push bus, channels, connection state machine"
 
+[features]
+# `stt` — real speech-to-text via the `whisper` CLI (whisper.cpp / OpenAI Python
+# whisper). When ENABLED, `server.transcribeVoice` shells out to `whisper` to
+# transcribe the posted audio blob; `voiceStart` probes for the binary; `voiceStop`
+# is a flag-flip-back. When DISABLED (the default), all three return the graceful
+# "STT not configured" stub — identical to today's behaviour, zero new deps.
+# `base64` is only required when `stt` is on (decoding the posted audio blob).
+default = []
+stt = ["dep:base64", "dep:tempfile"]
+
 [dependencies]
 syncode-core = { workspace = true }
 syncode-contracts = { path = "../syncode-contracts" }
@@ -24,7 +34,17 @@ syncode-provider = { workspace = true }
 git2 = { workspace = true }
 # `which` is used by the T6c-14 GitHub-API handlers to check whether the `gh`
 # / `git` CLI is on PATH before spawning it (matches syncode-git's pattern).
+# Also used by the `stt` feature to probe for `whisper`/`ffmpeg`.
 which = "7"
+# `base64` decodes the audio blob posted to `server.transcribeVoice`. Optional —
+# only pulled in when the `stt` feature is enabled (the default build keeps the
+# graceful "STT not configured" stub and needs no decoder).
+base64 = { version = "0.22", optional = true }
+# `tempfile` writes the decoded audio blob to disk for the `whisper` CLI to
+# read (whisper takes a path, not stdin). Optional — only under `stt`. The
+# dev-dependency copy (below) covers the rpc.rs integration tests in both
+# configs.
+tempfile = { version = "3", optional = true }
 async-trait = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }
