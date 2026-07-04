@@ -135,14 +135,18 @@ pub struct WsState {
     /// Starts empty in `new_in_memory` (tests register a `MockLlmAdapter`);
     /// production deployments populate it from config (claude/codex/gemini/…).
     pub provider_registry: Arc<RwLock<syncode_provider::registry::ProviderRegistry>>,
-    /// In-memory server settings (T6c-18). Persists `ServerConfig` +
+    /// In-memory server settings (T6c-18 + SRV-1). Persists `ServerConfig` +
     /// `ServerSettings` edits for the server session — the `server.*` write
     /// RPCs (`setConfig`/`updateSettings`/`patchSettings`/`updateProvider`/
     /// `upsertKeybinding`) merge into this store, the read RPCs (`getConfig`/
     /// `getSettings`) return from it, and writes broadcast push events on
-    /// `push_tx` so subscribed connections receive the new state. Syncode has
-    /// no on-disk settings file; the store is rebuilt from defaults on each
-    /// server start (the documented gap: edits don't survive a restart).
+    /// `push_tx` so subscribed connections receive the new state.
+    ///
+    /// SRV-1: when a SQLite pool is attached (via `attach_pool` after
+    /// construction — the server binary does this in `build_state`), every
+    /// mutation write-throughs to the `server_config` / `server_settings`
+    /// tables so edits survive a restart. Without a pool (the `new_in_memory`
+    /// path and tests) the store is purely in-memory (backward-compatible).
     pub settings: Arc<RwLock<crate::settings::ServerSettingsState>>,
     /// Provider token-usage log (T6c-19). Append-only record of every
     /// successful provider round trip (input/output/total tokens + provider

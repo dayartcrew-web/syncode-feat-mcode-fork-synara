@@ -47,8 +47,8 @@
 ### Server (config / Settings)
 | RPC | Status | Backed by |
 |---|---|---|
-| `server.getConfig` / `getSettings` | ✅ REAL | `ServerSettingsState` (`Arc<RwLock<Value>>` on `WsState`) — **session-scoped in-memory**; reads return live in-session state (not fresh defaults); **no disk persistence** (edits lost on restart) |
-| `server.setConfig` / `updateSettings` / `patchSettings` / `updateProvider` / `upsertKeybinding` / `refreshProviders` | ✅ REAL | mutate store (`setConfig` replaces `config`; `updateSettings`/`patchSettings` deep-merge `settings` via `merge_json`; `upsertKeybinding` upserts by id; `updateProvider`/`refreshProviders` re-emit providers) + push on change (`configUpdated`/`settingsUpdated`/`providerStatusesUpdated`) |
+| `server.getConfig` / `getSettings` | ✅ REAL | `ServerSettingsState` (`Arc<RwLock<Value>>` on `WsState`) — **on-disk persisted** (SRV-1): when the server binary attaches the SQLite pool, config/settings load from `server_config`/`server_settings` tables on startup and every mutation write-throughs; reads return live state. In-memory/test deployments (no pool) retain the session-scoped behavior. |
+| `server.setConfig` / `updateSettings` / `patchSettings` / `updateProvider` / `upsertKeybinding` / `refreshProviders` | ✅ REAL | mutate store (`setConfig` replaces `config`; `updateSettings`/`patchSettings` deep-merge `settings` via `merge_json`; `upsertKeybinding` upserts by id; `updateProvider`/`refreshProviders` re-emit providers) + push on change (`configUpdated`/`settingsUpdated`/`providerStatusesUpdated`) + **write-through to SQLite** (SRV-1: `server_config`/`server_settings` tables; no-op without an attached pool) |
 | `server.subscribeConfig` / `subscribeSettings` / `subscribeProviderStatuses` | ✅ REAL | register on channel + initial snapshot push + live push delivery |
 | `server.welcome` | ✅ REAL | derived payload: cwd→`projectName`, real `authRequired`/`authMode` from `WsAuthConfig`, `serverVersion`, git-repo identity |
 | `server.getEnvironment` | ✅ REAL | real `os`/`arch` from `std::env::consts` + server version |
@@ -119,7 +119,7 @@
 - **git/automation live event-push** — extend terminal reader-task pattern; git ops are synchronous so progress is limited.
 - **GitHub-API ops** — achievable via `gh api` subprocess (gh CLI authed); niche PR-handoff flow.
 - **voice ops** (transcribeVoice/…) — STT subsystem (different from LLM-text).
-- **Real persistence for server settings** — store + writes are real (`ServerSettingsState`) but session-scoped; nothing survives a restart. (No on-disk `settings.json`, no SQLite `config` table.)
+- **Real persistence for server settings** — ✅ **DONE (SRV-1)**: `ServerSettingsState` now write-throughs to SQLite `server_config`/`server_settings` tables; edits survive a restart (server binary attaches the pool in `build_state`).
 - **Desktop GUI boot E2E** — needs a display (headless-blocked).
 
 ---

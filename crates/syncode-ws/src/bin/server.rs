@@ -8,11 +8,14 @@
 //!
 //! # State backing
 //!
-//! Prefers a **SQLite-backed** `WsState` (persists events + read model across
-//! restarts) via `syncode-persistence::init_database` +
-//! `SqliteEventRepository`. If SQLite initialization fails, it falls back to
+//! Prefers a **SQLite-backed** `WsState` (persists events + read model +
+//! server config/settings across restarts) via
+//! `syncode-persistence::init_database` + `SqliteEventRepository`. The same
+//! pool is attached to the `ServerSettingsState` (SRV-1) so config/settings
+//! edits write-through to the `server_config` / `server_settings` tables and
+//! survive a restart. If SQLite initialization fails, it falls back to
 //! `WsState::new_in_memory` so the server always boots (graceful degradation —
-//! logged at `WARN`).
+//! logged at `WARN`); in that mode settings are in-memory only.
 //!
 //! # Configuration (environment)
 //!
@@ -100,10 +103,24 @@ async fn build_state() -> WsState {
 
     match syncode_persistence::init_database(&PathBuf::from(&db_path)).await {
         Ok(pool) => {
+            // SRV-1: clone the pool so the settings store can persist
+            // config/settings documents to the same SQLite database. The
+            // original pool backs the event repository (below).
+            let settings_pool = pool.clone();
             let repo: Arc<dyn EventRepository> = Arc::new(SqliteEventRepository::new(pool));
             let orchestrator = build_orchestrator(repo);
             tracing::info!(db_path = %db_path, "SQLite-backed event store initialized");
-            WsState::new(PUSH_CAPACITY, orchestrator)
+            let state = WsState::new(PUSH_CAPACITY, orchestrator);
+            // Attach the pool to the in-memory settings store: loads any
+            // persisted config/settings from disk and enables write-through on
+            // every subsequent mutation. Best-effort — a failure here leaves
+            // the store in-memory (the server still boots).
+            {
+                let mut store = state.settings.write().await;
+                store.attach_pool(settings_pool).await;
+            }
+            tracing::info!(db_path = %db_path, "server settings persistence enabled (SRV-1)");
+            state
         }
         Err(e) => {
             tracing::warn!(
