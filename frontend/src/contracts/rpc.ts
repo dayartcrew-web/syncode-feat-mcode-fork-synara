@@ -1417,7 +1417,6 @@ export const UNSERVED_RPC = [
   // UNSERVED_RPC). The remaining ~3 are still unserved.
   "orchestration.subscribeEvents",
   "orchestration.repairReadModel",
-  "orchestration.getLatestTurn",
 
   // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing RPCs served; these are not) ─────
   // AUTH-1: `auth.createPairingCredential`, `auth.revokePairingLink`, and
