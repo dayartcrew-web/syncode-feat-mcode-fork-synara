@@ -1401,7 +1401,7 @@ export type ServedRpcResult<M extends ServedRpcMethod> =
  * - **provider discovery** (~9 ops) — skills/plugins/models/agents/commands
  * - **automation** (~9 ops) — CRUD + run + subscribe
  * - **project file ops** (~10 ops) — readFile/listDirectories/search/discoverScripts/devServers
- * - **orchestration** (~7 ops) — snapshot/diff/replay/subscribe/dispatchCommand (not in served set)
+ * - **orchestration** (~7 ops) — snapshot/diff/replay/subscribe (dispatchCommand is now served — see ORCH-5)
  *
  * Method strings use MCode's **dot** convention (`git.status`) — the form
  * the cloned UI references. The T5 transport re-wire maps these to either a
@@ -1511,9 +1511,12 @@ export const UNSERVED_RPC = [
   // `syncode_git::diff::compute_diff`, returns `{ diff, note }`). ORCH-3:
   // `orchestration.repairReadModel` is NOW SERVED (drift detection + optional
   // repair via `Orchestrator::replay_read_model`, returns
-  // `{ driftDetected, repairedCount, seeded, repaired, details }`). The
-  // remaining ops below are still unserved.
-  "orchestration.dispatchCommand",
+  // `{ driftDetected, repairedCount, seeded, repaired, details }`). ORCH-5:
+  // `orchestration.dispatchCommand` is NOW SERVED (routes the `{type,
+  // ...payload}` shape through the matching `ApplicationService` method, with
+  // structured error mapping `data.kind` — see
+  // `handle_orchestration_dispatch_command` in rpc.rs). The remaining op below
+  // is still unserved.
   "orchestration.getFullThreadDiff",
 
   // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing + AUTH-2 session RPCs served; these are not) ─────
