@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::policies::CompletionPolicy;
+
 /// Unique automation identifier
 pub type AutomationId = syncode_core::EntityId;
 
@@ -77,6 +79,9 @@ pub struct AutomationDef {
     /// instead of creating a new one (MCode `mode: "heartbeat"`).
     #[serde(default)]
     pub target_thread_id: Option<String>,
+    /// How to determine whether a run completed successfully.
+    #[serde(default)]
+    pub completion_policy: CompletionPolicy,
 }
 
 impl AutomationDef {
@@ -107,6 +112,7 @@ impl AutomationDef {
             auto_commit_after: false,
             next_run_at: None,
             target_thread_id: None,
+            completion_policy: CompletionPolicy::default(),
         }
     }
 
@@ -244,5 +250,33 @@ mod tests {
         );
         def.env.insert("FOO".to_string(), "bar".to_string());
         assert_eq!(def.env.get("FOO").unwrap(), "bar");
+    }
+
+    #[test]
+    fn automation_def_completion_policy_default() {
+        let def = AutomationDef::new(
+            "comp".to_string(),
+            "echo hi".to_string(),
+            ScheduleType::Manual,
+        );
+        // New automations default to the exit-code-zero completion policy.
+        assert_eq!(def.completion_policy, CompletionPolicy::ExitCodeZero);
+    }
+
+    #[test]
+    fn automation_def_completion_policy_roundtrip() {
+        let mut def = AutomationDef::new(
+            "comp".to_string(),
+            "echo hi".to_string(),
+            ScheduleType::Manual,
+        );
+        def.completion_policy = CompletionPolicy::AiEvaluated {
+            stop_when: "build is green".to_string(),
+            confidence_threshold: 0.8,
+        };
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(json.contains("completionPolicy"));
+        let back: AutomationDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.completion_policy, def.completion_policy);
     }
 }
