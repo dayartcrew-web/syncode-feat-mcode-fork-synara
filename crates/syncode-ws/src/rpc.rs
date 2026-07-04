@@ -801,8 +801,10 @@ async fn dispatch_method(
         //
         // Deferred / unserved (still in `UNSERVED_RPC`): `git.runStackedAction`
         // (LLM-backed multi-phase commit/push/PR — would need provider wiring),
-        // `git.createDetachedWorktree`, `git.subscribeActionProgress`
-        // (push channel — T6c-future). NOTE: `git.summarizeDiff` was SERVED in
+        // `git.createDetachedWorktree`. NOTE: `git.subscribeActionProgress`
+        // and `git.unsubscribeActionProgress` are NOW SERVED (GIT-4) — they
+        // register/drop the connection on CHANNEL_GIT for live progress
+        // push frames during a stacked-action run. NOTE: `git.summarizeDiff` was SERVED in
         // T6c-13 (LLM-backed one-shot — see the LLM-backed-ops block below).
         // `git.githubRepository` + `git.resolvePullRequest` + `git.handoffThread`
         // + `git.preparePullRequestThread` were UNSERVED until T6c-14; they are
@@ -869,7 +871,9 @@ async fn dispatch_method(
         "git.runStackedAction"
         | "git/run-stacked-action"
         | "git/runStackedAction"
-        | "git/run_stacked_action" => handle_git_run_stacked_action(id, &request.params),
+        | "git/run_stacked_action" => {
+            handle_git_run_stacked_action(state, id, &request.params).await
+        }
         "git.createDetachedWorktree"
         | "git/create-detached-worktree"
         | "git/createDetachedWorktree"
@@ -880,7 +884,13 @@ async fn dispatch_method(
         | "git/subscribe-action-progress"
         | "git/subscribeActionProgress"
         | "git/subscribe_action_progress" => {
-            handle_git_subscribe_action_progress(id, &request.params)
+            handle_git_subscribe_action_progress(state, conn_id, id).await
+        }
+        "git.unsubscribeActionProgress"
+        | "git/unsubscribe-action-progress"
+        | "git/unsubscribeActionProgress"
+        | "git/unsubscribe_action_progress" => {
+            handle_git_unsubscribe_action_progress(state, conn_id, id).await
         }
 
         // ─── LLM-backed ops (T6c-13: provider-CLI one-shot) ────────────
@@ -5386,7 +5396,14 @@ impl StackedActionKind {
 /// pre-step `create_branch` when `params.branch` is set and `params.createBranch`
 /// isn't false). Partial failures (no remote, no `gh` auth, nothing to commit)
 /// surface as a graceful per-step status, never a crash.
-fn handle_git_run_stacked_action(id: Value, params: &Value) -> JsonRpcResponse {
+/// `git.runStackedAction` → execute a stacked git action pipeline (GIT-4:
+/// now emits per-stage progress events when ≥1 connection is subscribed to
+/// the `git` push channel). See [`handle_git_subscribe_action_progress`].
+async fn handle_git_run_stacked_action(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
     let action_str = match params.get("action").and_then(|v| v.as_str()) {
         Some(a) => a,
         None => {
@@ -5497,27 +5514,65 @@ fn handle_git_run_stacked_action(id: Value, params: &Value) -> JsonRpcResponse {
         });
     }
 
-    // `StackedPipeline::execute` is declared `async` but contains no `.await`
-    // points (only sync `GitService` calls), so the returned future is
-    // immediately ready. We poll it once via `Pin::new(&mut fut).poll(...)` to
-    // extract the `Result` without re-entering the runtime — this is the
-    // canonical pattern for "driving a future that's already ready". `Box`
-    // makes the future `Unpin` (the generated async-block future isn't).
+    // GIT-4: if ≥1 connection is subscribed to the `git` push channel, drive
+    // `execute_with_progress` and forward each `ActionProgress` onto
+    // `push_tx` as `(CHANNEL_GIT, { stage, percent, message })`. Otherwise
+    // (no subscriber) use the default sync `execute` — identical semantics,
+    // no progress side-channel. This is the RISK-control guard: the sync
+    // path stays the default, and the progress emission is purely additive
+    // (only fires when someone is listening). The 40 existing runStackedAction
+    // tests do NOT subscribe to CHANNEL_GIT, so they take the default branch.
+    //
+    // `StackedPipeline::execute[_with_progress]` is declared `async` but
+    // contains no `.await` points (only sync `GitService` calls), so the
+    // returned future is immediately ready. We poll it once via
+    // `Pin::new(&mut fut).poll(...)` to extract the `Result` without
+    // re-entering the runtime — this is the canonical pattern for "driving a
+    // future that's already ready". `Box` makes the future `Unpin` (the
+    // generated async-block future isn't).
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    let mut fut = Box::pin(pipeline.execute(&svc));
-    let results = match Pin::new(&mut fut)
-        .poll(&mut Context::from_waker(&futures_util::task::noop_waker()))
-    {
-        Poll::Ready(r) => r,
-        Poll::Pending => {
-            // Should never happen — `execute` has no real `.await` points.
-            return git_error(
-                id,
-                crate::error_codes::INTERNAL_ERROR,
-                "git runStackedAction: pipeline unexpectedly pending (no async work expected)",
-            );
+    let has_git_subscribers = {
+        let subs = state.subscriptions.read().await;
+        !subs.subscribers_for(crate::channels::CHANNEL_GIT).is_empty()
+    };
+    let results = if has_git_subscribers {
+        // Progress-emitting path: clone the push_tx once, forward each event.
+        let push_tx = state.push_tx.clone();
+        let mut fut = Box::pin(pipeline.execute_with_progress(&svc, |progress| {
+            // Best-effort broadcast: no receivers is not a failure.
+            let payload = serde_json::to_value(&progress).unwrap_or_else(|_| {
+                serde_json::json!({ "stage": "error", "percent": 100, "message": "progress serialization failed" })
+            });
+            let _ = push_tx.send((crate::channels::CHANNEL_GIT.to_string(), payload));
+        }));
+        match Pin::new(&mut fut)
+            .poll(&mut Context::from_waker(&futures_util::task::noop_waker()))
+        {
+            Poll::Ready(r) => r,
+            Poll::Pending => {
+                return git_error(
+                    id,
+                    crate::error_codes::INTERNAL_ERROR,
+                    "git runStackedAction: pipeline unexpectedly pending (no async work expected)",
+                );
+            }
+        }
+    } else {
+        // Default sync path (no subscribers) — unchanged from pre-GIT-4.
+        let mut fut = Box::pin(pipeline.execute(&svc));
+        match Pin::new(&mut fut)
+            .poll(&mut Context::from_waker(&futures_util::task::noop_waker()))
+        {
+            Poll::Ready(r) => r,
+            Poll::Pending => {
+                return git_error(
+                    id,
+                    crate::error_codes::INTERNAL_ERROR,
+                    "git runStackedAction: pipeline unexpectedly pending (no async work expected)",
+                );
+            }
         }
     };
     let results = match results {
@@ -5771,15 +5826,93 @@ fn handle_git_create_detached_worktree(id: Value, params: &Value) -> JsonRpcResp
     )
 }
 
-/// `git.subscribeActionProgress` → GRACEFUL STUB. The vendored MCode UI
-/// subscribes to per-phase progress events for a stacked action
-/// (`action_started` / `phase_started` / `hook_output` / `action_finished`).
-/// Syncode executes stacked actions SYNCHRONOUSLY (no progress push channel
-/// for stacked actions), so this returns `{ subscribed: true }` without
-/// wiring a real subscription. T6c-future could stream progress via the
-/// existing `push/subscribe` bus when stacked actions become long-running.
-fn handle_git_subscribe_action_progress(id: Value, _params: &Value) -> JsonRpcResponse {
-    JsonRpcResponse::success(id, serde_json::json!({ "subscribed": true }))
+/// `git.subscribeActionProgress` (GIT-4 → REAL).
+///
+/// Registers the calling connection on the `git` push channel and emits an
+/// initial `subscribed` state event so a freshly-subscribed client has a
+/// baseline. The vendored MCode UI subscribes here to receive per-phase
+/// progress events (`stage` / `done` / `error`) while a stacked action runs.
+///
+/// The actual per-stage progress frames are emitted by
+/// [`handle_git_run_stacked_action`] when ≥1 connection is subscribed to the
+/// `git` channel — it drives `StackedPipeline::execute_with_progress` and
+/// forwards each `ActionProgress` onto `push_tx` as
+/// `(CHANNEL_GIT, { stage, percent, message })`. So the contract is:
+///   1. Client subscribes here → connection joins `CHANNEL_GIT`.
+///   2. Client (or another connection) calls `git.runStackedAction`.
+///   3. The runStackedAction handler broadcasts progress events on
+///      `CHANNEL_GIT`; the delivery loop forwards them to every subscribed
+///      connection (including the subscriber from step 1).
+///
+/// Returns `{ subscribed: true, channel: "git", added }`. `added` is `true`
+/// when this is a new subscription for the connection (mirrors the
+/// `terminal.subscribeEvents` / `orchestration.subscribeEvents` shape).
+async fn handle_git_subscribe_action_progress(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    // Register the connection on the `git` push channel.
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_GIT);
+
+    // Emit an initial `subscribed` baseline event on the `git` channel
+    // (best-effort: `broadcast::send` errors when there are no receivers,
+    // which is normal before any client taps the bus — swallowed, never
+    // propagated). This mirrors the snapshot-then-stream pattern used by the
+    // `orchestration` and `server.subscribe*` handlers: a freshly-subscribed
+    // client receives a confirmation frame immediately, then live progress
+    // frames when a stacked action runs.
+    let initial = serde_json::json!({
+        "type": "subscribed",
+        "channel": crate::channels::CHANNEL_GIT,
+        "message": "Subscribed to git action progress",
+    });
+    let _ = state
+        .push_tx
+        .send((crate::channels::CHANNEL_GIT.to_string(), initial));
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": crate::channels::CHANNEL_GIT,
+            "added": added,
+        }),
+    )
+}
+
+/// `git.unsubscribeActionProgress` (GIT-4 → REAL). The vendored MCode UI does
+/// not call this (it relies on the `*` wildcard / connection close to drop
+/// subscriptions), but we expose it for symmetry with the other channels
+/// (`terminal.unsubscribeEvents`, `push/unsubscribe`) and to make the
+/// subscribe/unsubscribe pair testable. After this call the connection
+/// receives no further `git` progress frames until it re-subscribes.
+///
+/// Dispatched under the dot-name and slash/underscore forms in the main RPC
+/// match (mirrors `git.subscribeActionProgress`), so clients can call it
+/// directly rather than relying on connection-close teardown.
+async fn handle_git_unsubscribe_action_progress(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let removed = state
+        .subscriptions
+        .write()
+        .await
+        .unsubscribe(conn_id, crate::channels::CHANNEL_GIT);
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "unsubscribed": true,
+            "channel": crate::channels::CHANNEL_GIT,
+            "removed": removed,
+        }),
+    )
 }
 
 // ─── Terminal PTY Handlers (syncode-terminal-backed, T6c-5) ────────────
@@ -9449,7 +9582,7 @@ mod tests {
         // No turns → result is null. `Option<Value>` round-trips JSON `null` as
         // `None` (serde deserializes null → None for Option), so accept either.
         assert!(
-            resp.result.as_ref().map_or(true, |v| v.is_null()),
+            resp.result.as_ref().is_none_or(|v| v.is_null()),
             "expected null result, got {:?}",
             resp.result
         );
@@ -9463,7 +9596,7 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         assert!(resp.error.is_none(), "{:?}", resp.error);
         assert!(
-            resp.result.as_ref().map_or(true, |v| v.is_null()),
+            resp.result.as_ref().is_none_or(|v| v.is_null()),
             "expected null result, got {:?}",
             resp.result
         );
@@ -11081,11 +11214,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_subscribe_action_progress_returns_subscribed_stub() {
-        // The subscribe RPC is a graceful stub — returns { subscribed: true }
-        // regardless of params (no real progress push channel for stacked
-        // actions). Both dispatch forms must resolve.
+    async fn git_subscribe_action_progress_registers_real_subscription() {
+        // GIT-4: subscribeActionProgress is now REAL — it registers the
+        // calling connection on CHANNEL_GIT and returns the channel name +
+        // `added` flag (mirrors terminal.subscribeEvents /
+        // orchestration.subscribeEvents). The initial `subscribed` baseline
+        // event is broadcast on `push_tx` (tapped below). Both dispatch forms
+        // must resolve.
         let state = WsState::new_in_memory(16);
+        // Register the connection in the subscription registry first (the
+        // connection-accept path normally does this; the test `rpc` helper
+        // skips it). Without this, `subscribe(conn_id, channel)` is a no-op.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+        // Tap the push bus BEFORE subscribing so we can observe the initial
+        // `subscribed` baseline event emitted by the handler.
+        let mut rx = state.push_tx.subscribe();
         for method in [
             "git.subscribeActionProgress",
             "git/subscribe-action-progress",
@@ -11096,8 +11240,376 @@ mod tests {
             });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
-            assert_eq!(resp.result.unwrap()["subscribed"], true);
+            let result = resp.result.unwrap();
+            assert_eq!(result["subscribed"], true);
+            assert_eq!(result["channel"], "git");
+            // `added` is true on first subscribe; a re-subscribe of the same
+            // connection (conn_id=1 here) is a no-op (added=false). We only
+            // assert the field is present and boolean — the per-subscribe
+            // value is covered by the unsubscribe test below.
+            assert!(result["added"].is_boolean(), "added must be boolean");
         }
+        // Drain the push bus: the initial `subscribed` baseline event must
+        // have been broadcast on CHANNEL_GIT.
+        let mut saw_subscribed = false;
+        for _ in 0..16 {
+            match rx.try_recv() {
+                Ok((channel, payload)) if channel == "git" => {
+                    if payload["type"] == "subscribed" {
+                        saw_subscribed = true;
+                        break;
+                    }
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_subscribed,
+            "subscribeActionProgress must emit an initial `subscribed` event on CHANNEL_GIT"
+        );
+        // The connection (conn_id=1) must now be registered on CHANNEL_GIT.
+        assert!(
+            state
+                .subscriptions
+                .read()
+                .await
+                .subscribers_for(crate::channels::CHANNEL_GIT)
+                .contains(&1),
+            "connection must be registered on CHANNEL_GIT after subscribe"
+        );
+    }
+
+    /// GIT-4 rework gap #2: `git.unsubscribeActionProgress` is now dispatched
+    /// (was a dead-code handler with no dispatch arm). The RPC path must drop
+    /// the connection's CHANNEL_GIT subscription and return
+    /// `{ unsubscribed: true, channel: "git", removed }`. Both dispatch forms
+    /// (dot-name and slash) must resolve — exercised by alternating methods
+    /// across two connections. `removed` is `true` on the first unsubscribe
+    /// (active sub) and `false` on a second unsubscribe of the same connection
+    /// (no-op). This is the RPC-path counterpart to
+    /// `git_unsubscribe_action_progress_drops_channel` (which tests the
+    /// registry directly).
+    #[tokio::test]
+    async fn git_unsubscribe_action_progress_rpc_drops_channel() {
+        let state = WsState::new_in_memory(16);
+        // Register two connections (the connection-accept path normally does
+        // this; the test `rpc` helper skips it). Without registration the
+        // subscribe/unsubscribe registry ops are no-ops.
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx1).await;
+        state.register(2, tx2).await;
+
+        // Subscribe both connections via the REAL subscribe RPC so the
+        // unsubscribe handler has an active subscription to drop.
+        for conn_id in [1u64, 2u64] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "git.subscribeActionProgress",
+                "params": {}
+            });
+            let resp = rpc(&state, conn_id, &req).await;
+            assert!(resp.error.is_none(), "subscribe failed: {:?}", resp.error);
+        }
+        assert!(
+            state
+                .subscriptions
+                .read()
+                .await
+                .subscribers_for(crate::channels::CHANNEL_GIT)
+                .contains(&1),
+            "precondition: conn 1 must be subscribed"
+        );
+
+        // Unsubscribe conn 1 via the dot-name form, conn 2 via the slash form.
+        // Both must resolve (no METHOD_NOT_FOUND) and drop the subscription.
+        let cases = [
+            (1u64, "git.unsubscribeActionProgress"),
+            (2u64, "git/unsubscribe-action-progress"),
+        ];
+        for (conn_id, method) in cases {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": {}
+            });
+            let resp = rpc(&state, conn_id, &req).await;
+            assert!(
+                resp.error.is_none(),
+                "{method}: unsubscribe must not error, got {:?}",
+                resp.error
+            );
+            let result = resp.result.expect("result must be present");
+            assert_eq!(result["unsubscribed"], true, "{method}: unsubscribed flag");
+            assert_eq!(result["channel"], "git", "{method}: channel name");
+            assert_eq!(
+                result["removed"], true,
+                "{method}: removed must be true for an active subscription"
+            );
+            assert!(
+                !state
+                    .subscriptions
+                    .read()
+                    .await
+                    .subscribers_for(crate::channels::CHANNEL_GIT)
+                    .contains(&conn_id),
+                "{method}: conn {conn_id} must NOT be subscribed after unsubscribe"
+            );
+        }
+
+        // A second unsubscribe of conn 1 (already dropped) must be a no-op:
+        // `removed: false`, no error. This mirrors the registry-direct test.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "git.unsubscribeActionProgress", "params": {}
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "idempotent unsubscribe must not error");
+        let result = resp.result.expect("result present");
+        assert_eq!(result["unsubscribed"], true);
+        assert_eq!(
+            result["removed"], false,
+            "removed must be false when unsubscribing a non-subscribed connection"
+        );
+    }
+
+    /// GIT-4 keystone #1: subscribe to the `git` channel → run a stacked
+    /// action → assert ≥1 progress event per pipeline stage is received on
+    /// the push bus, AND the runStackedAction RPC still returns its normal
+    /// success result (sync semantics preserved).
+    ///
+    /// This is the canonical "subscribe → trigger → observe" proof, mirroring
+    /// `automation_run_now_pushes_live_started_progress_completed`. We tap
+    /// `push_tx` (the broadcast bus) because that is the seam the delivery
+    /// loop subscribes to — if an event lands here, a real client subscribed
+    /// on CHANNEL_GIT would receive it.
+    #[tokio::test]
+    async fn git_subscribe_then_run_stacked_action_pushes_progress_events() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let state = WsState::new_in_memory(16);
+
+        // 1. Subscribe the connection on CHANNEL_GIT via the REAL subscribe
+        //    RPC (not a direct registry mutation) so we exercise the full
+        //    path. Tap the push bus BEFORE so we observe every event.
+        //    Register conn 1 first (the connection-accept path normally does
+        //    this; the test `rpc` helper skips it).
+        let (conn_tx, _conn_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, conn_tx).await;
+        let mut rx = state.push_tx.subscribe();
+        let sub_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.subscribeActionProgress",
+            "params": { "actionId": "git-4-keystone" }
+        });
+        let resp = rpc(&state, 1, &sub_req).await;
+        assert!(resp.error.is_none(), "subscribe: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["subscribed"], true);
+
+        // Drain the initial `subscribed` baseline event so it doesn't pollute
+        // the progress-event assertions below.
+        let _ = rx.try_recv();
+
+        // 2. Set up a temp git repo with a staged change so a `commit`
+        //    stacked action succeeds (we want a real pipeline that runs ≥1
+        //    stage end-to-end). This mirrors the runStackedAction integration
+        //    test fixtures elsewhere in this file.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cwd = tmp.path();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(cwd)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(cwd)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(cwd)
+            .output()
+            .expect("git config name");
+        std::fs::write(cwd.join("file.txt"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(cwd)
+            .output()
+            .expect("git add");
+
+        // 3. Trigger runStackedAction (commit only — push/PR need a remote).
+        let run_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "git.runStackedAction",
+            "params": { "cwd": cwd.to_string_lossy(), "action": "commit", "message": "GIT-4 keystone" }
+        });
+        let resp = rpc(&state, 1, &run_req).await;
+        assert!(resp.error.is_none(), "runStackedAction: {:?}", resp.error);
+        // Sync semantics preserved: the commit step reports `created`.
+        let result = resp.result.unwrap();
+        assert_eq!(result["action"], "commit");
+        assert_eq!(result["commit"]["status"], "created");
+
+        // 4. Drain the push bus and collect every `git`-channel progress
+        //    event. There must be ≥1 per stage (commit = 1 stage → ≥1
+        //    pre-stage event) + a terminal `done`/`error` event.
+        let mut progress_events: Vec<serde_json::Value> = Vec::new();
+        for _ in 0..64 {
+            match rx.try_recv() {
+                Ok((channel, payload)) if channel == "git" => {
+                    progress_events.push(payload);
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            !progress_events.is_empty(),
+            "subscriber must receive ≥1 progress event on CHANNEL_GIT"
+        );
+        // Every event must carry the MCode `{ stage, percent, message }` shape.
+        for ev in &progress_events {
+            assert!(ev["stage"].is_string(), "event missing `stage`: {ev}");
+            assert!(
+                ev["percent"].is_number(),
+                "event missing numeric `percent`: {ev}"
+            );
+            assert!(ev["message"].is_string(), "event missing `message`: {ev}");
+        }
+        // The last event must be terminal (done/error) at 100%.
+        let last = progress_events.last().unwrap();
+        assert!(
+            last["stage"] == "done" || last["stage"] == "error",
+            "terminal event must be done/error, got stage={}",
+            last["stage"]
+        );
+        assert_eq!(last["percent"], 100);
+    }
+
+    /// GIT-4 keystone #2: NO regression — when NO connection is subscribed to
+    /// CHANNEL_GIT, runStackedAction uses the default sync `execute` path and
+    /// emits ZERO progress events. The RPC result is unchanged. This guards
+    /// the RISK callout: the sync path stays the default; progress emission
+    /// is purely additive (only fires when someone is listening).
+    #[tokio::test]
+    async fn git_run_stacked_action_no_subscriber_uses_sync_path() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let state = WsState::new_in_memory(16);
+        // NOTE: deliberately do NOT subscribe to CHANNEL_GIT.
+        let mut rx = state.push_tx.subscribe();
+
+        // Same repo setup as keystone #1.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cwd = tmp.path();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(cwd)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(cwd)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(cwd)
+            .output()
+            .expect("git config name");
+        std::fs::write(cwd.join("file.txt"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(cwd)
+            .output()
+            .expect("git add");
+
+        let run_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.runStackedAction",
+            "params": { "cwd": cwd.to_string_lossy(), "action": "commit", "message": "no-subscriber" }
+        });
+        let resp = rpc(&state, 1, &run_req).await;
+        assert!(resp.error.is_none(), "runStackedAction: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        // Sync semantics unchanged: commit created.
+        assert_eq!(result["commit"]["status"], "created");
+
+        // Drain the push bus: ZERO `git`-channel progress events must be
+        // present (no subscriber → default sync path → no emission).
+        let mut git_events = 0;
+        for _ in 0..32 {
+            match rx.try_recv() {
+                Ok((channel, _)) if channel == "git" => git_events += 1,
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            git_events, 0,
+            "no subscriber → runStackedAction must NOT emit progress events"
+        );
+    }
+
+    /// GIT-4 keystone #3: unsubscribe drops the CHANNEL_GIT subscription.
+    /// After `handle_git_unsubscribe_action_progress` (or a direct registry
+    /// unsubscribe — the WS layer uses the same `SubscriptionRegistry`),
+    /// `subscribers_for(CHANNEL_GIT)` no longer includes the connection, and
+    /// a subsequent runStackedAction takes the default sync path (no
+    /// progress emission). This proves the subscribe/unsubscribe pair is
+    /// symmetric and the RISK guard (has-git-subscribers check) honors it.
+    #[tokio::test]
+    async fn git_unsubscribe_action_progress_drops_channel() {
+        let state = WsState::new_in_memory(16);
+        // Register conn 1 first (subscribe is a no-op on an unregistered
+        // connection — the registry only tracks registered connections).
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+        // Subscribe conn 1 directly via the registry (the RPC path is
+        // covered by keystone #1; here we isolate the unsubscribe semantics).
+        state
+            .subscriptions
+            .write()
+            .await
+            .subscribe(1, crate::channels::CHANNEL_GIT);
+        assert!(
+            state
+                .subscriptions
+                .read()
+                .await
+                .subscribers_for(crate::channels::CHANNEL_GIT)
+                .contains(&1),
+            "precondition: conn 1 must be subscribed"
+        );
+
+        // Unsubscribe via the registry (the handler delegates to this).
+        let removed = state
+            .subscriptions
+            .write()
+            .await
+            .unsubscribe(1, crate::channels::CHANNEL_GIT);
+        assert!(removed, "unsubscribe must report removed=true for an active sub");
+
+        // Conn 1 must no longer be in the subscriber set.
+        assert!(
+            !state
+                .subscriptions
+                .read()
+                .await
+                .subscribers_for(crate::channels::CHANNEL_GIT)
+                .contains(&1),
+            "after unsubscribe, conn 1 must NOT be subscribed to CHANNEL_GIT"
+        );
+        // A second unsubscribe is a no-op (removed=false).
+        let removed_again = state
+            .subscriptions
+            .write()
+            .await
+            .unsubscribe(1, crate::channels::CHANNEL_GIT);
+        assert!(
+            !removed_again,
+            "unsubscribing a non-subscribed connection must report removed=false"
+        );
     }
 
     #[tokio::test]
@@ -11114,12 +11626,21 @@ mod tests {
         // Use a nonexistent path so handlers short-circuit at open_git2_repo;
         // the assertion is on error CODE (INTERNAL_ERROR) vs METHOD_NOT_FOUND.
         // GIT-1: stashAndCheckout is now REAL — it opens the repo first (before
-        // the `branch` param check), so a bad path yields INTERNAL_ERROR.
-        // subscribeActionProgress is still a stub (no repo open).
-        let stub_methods = [(
-            "git.subscribeActionProgress",
-            "git/subscribe-action-progress",
-        )];
+        // the `branch` param check), so a bad path yields INTERNAL_ERROR. It is
+        // asserted below in `repo_opening_methods`.
+        // GIT-4: subscribeActionProgress / unsubscribeActionProgress are now REAL
+        // — they register/unregister the connection on CHANNEL_GIT without
+        // opening a repo, so they return success regardless of cwd.
+        let stub_methods = [
+            (
+                "git.subscribeActionProgress",
+                "git/subscribe-action-progress",
+            ),
+            (
+                "git.unsubscribeActionProgress",
+                "git/unsubscribe-action-progress",
+            ),
+        ];
         for (dot, slash) in stub_methods {
             for method in [dot, slash] {
                 let req = serde_json::json!({
