@@ -12,7 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::acp_provider::{AcpProvider, AcpProviderConfig};
+use crate::acp_provider::AcpProviderConfig;
 use crate::trait_def::*;
 
 /// A shared adapter instance wrapped for async access
@@ -199,19 +199,49 @@ impl Default for ProviderRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// ACP factory — construct an adapter by provider id
+// Adapter factory — construct an adapter by provider id
 // ---------------------------------------------------------------------------
 
 /// Construct a fresh (un-spawned) adapter for a known provider id.
 ///
-/// The three ACP-speaking providers — [`PROVIDER_CURSOR`], [`PROVIDER_GROK`],
-/// [`PROVIDER_GEMINI`] — are built as [`AcpProvider`]s configured with their
-/// ACP subprocess spec. Returns `None` for any other id (HTTP providers and the
-/// remaining stubs are constructed directly by their owners, not via this
-/// factory). The caller is expected to `register_shared` the result.
+/// Every id in [`ALL_PROVIDERS`] is covered:
+/// - the three ACP-speaking providers — [`PROVIDER_CURSOR`], [`PROVIDER_GROK`],
+///   [`PROVIDER_GEMINI`] — are built as ACP providers (`crate::adapters::cursor::create`
+///   et al.) configured with their ACP subprocess spec;
+/// - the HTTP / native providers — [`PROVIDER_CODEX`], [`PROVIDER_CLAUDE`],
+///   [`PROVIDER_ANTHROPIC`], [`PROVIDER_OPENAI`], [`PROVIDER_PI`],
+///   [`PROVIDER_KILO`], [`PROVIDER_OPENCODE`] — are built directly from their
+///   real adapter constructors (e.g. [`crate::adapters::codex::CodexAdapter::new`]).
+///
+/// Returns `None` only for an unknown id. The caller is expected to
+/// `register_shared` the result.
+///
+/// `new()` / `spec()` / `create()` are cheap (they allocate state + a broadcast
+/// channel; no I/O, no subprocess), so this is safe to call from a request
+/// handler. Each branch returns the provider's real adapter.
 pub fn create_by_id(provider_id: &str) -> Option<SharedAdapter> {
-    let config = acp_config_for(provider_id)?;
-    Some(Arc::new(RwLock::new(AcpProvider::new(config))))
+    use crate::adapters::{anthropic, claude, codex, cursor, gemini, grok, kilo, openai, opencode, pi};
+
+    // Each branch constructs the provider's real (un-spawned) adapter and
+    // wraps it directly in the shared `Arc<RwLock<dyn ProviderAdapter>>` shape
+    // expected by the registry (a `Box<dyn>` would not itself satisfy the
+    // `ProviderAdapter` trait).
+    let adapter: SharedAdapter = match provider_id {
+        // ACP-backed providers — built from their env-configured subprocess spec.
+        PROVIDER_CURSOR => Arc::new(RwLock::new(cursor::create())),
+        PROVIDER_GROK => Arc::new(RwLock::new(grok::create())),
+        PROVIDER_GEMINI => Arc::new(RwLock::new(gemini::create())),
+        // Native / HTTP providers — built from their real adapter constructors.
+        PROVIDER_CODEX => Arc::new(RwLock::new(codex::CodexAdapter::new())),
+        PROVIDER_CLAUDE => Arc::new(RwLock::new(claude::ClaudeAdapter::new())),
+        PROVIDER_ANTHROPIC => Arc::new(RwLock::new(anthropic::AnthropicAdapter::new())),
+        PROVIDER_OPENAI => Arc::new(RwLock::new(openai::OpenAIAdapter::new())),
+        PROVIDER_PI => Arc::new(RwLock::new(pi::PiAdapter::new())),
+        PROVIDER_KILO => Arc::new(RwLock::new(kilo::KiloAdapter::new())),
+        PROVIDER_OPENCODE => Arc::new(RwLock::new(opencode::OpenCodeAdapter::new())),
+        _ => return None,
+    };
+    Some(adapter)
 }
 
 /// Build the [`AcpProviderConfig`] for an ACP provider id, or `None` if `id`
@@ -618,7 +648,7 @@ mod tests {
         assert_eq!(registry.default_provider_id(), PROVIDER_CODEX);
     }
 
-    // --- ACP factory -------------------------------------------------------
+    // --- Adapter factory ---------------------------------------------------
 
     #[tokio::test]
     async fn create_by_id_builds_acp_providers() {
@@ -635,9 +665,101 @@ mod tests {
     #[tokio::test]
     async fn create_by_id_unknown_returns_none() {
         assert!(create_by_id("nonexistent").is_none());
-        // HTTP providers and stubs are not ACP — not produced by this factory.
-        assert!(create_by_id(PROVIDER_OPENAI).is_none());
-        assert!(create_by_id(PROVIDER_CODEX).is_none());
+        assert!(create_by_id("").is_none());
+    }
+
+    /// The factory must produce a real adapter for every known provider id —
+    /// not just the three ACP providers. This is the core P0-1 fix: previously
+    /// the seven native/HTTP providers (codex, claude, anthropic, openai, pi,
+    /// kilo, opencode) returned `None`.
+    #[tokio::test]
+    async fn create_by_id_returns_some_for_all_known_providers() {
+        for id in ALL_PROVIDERS {
+            let adapter = create_by_id(id)
+                .unwrap_or_else(|| panic!("create_by_id({id}) returned None — must cover all 10 providers"));
+            let guard = adapter.read().await;
+            assert_eq!(
+                guard.provider_id(),
+                *id,
+                "identity mismatch for {id}"
+            );
+            assert_eq!(
+                guard.status(),
+                ProviderStatus::Disconnected,
+                "freshly-built adapter for {id} must be Disconnected"
+            );
+            assert!(
+                !guard.capabilities().is_empty(),
+                "{id} adapter advertises no capabilities"
+            );
+            assert!(
+                !guard.available_models().is_empty(),
+                "{id} adapter advertises no models"
+            );
+        }
+    }
+
+    /// Codex must round-trip through the factory and surface its real adapter
+    /// data (gpt-family model list, streaming + tool-use capabilities).
+    #[tokio::test]
+    async fn create_by_id_codex_builds_real_codex_adapter() {
+        let adapter = create_by_id(PROVIDER_CODEX)
+            .expect("create_by_id must build the codex adapter (P0-1 fix)");
+        let guard = adapter.read().await;
+        assert_eq!(guard.provider_id(), PROVIDER_CODEX);
+        assert_eq!(guard.status(), ProviderStatus::Disconnected);
+        let models = guard.available_models();
+        assert!(
+            models.iter().any(|m| m.contains("gpt")),
+            "codex models should include gpt-family entries, got {models:?}"
+        );
+        let caps = guard.capabilities();
+        assert!(caps.contains(&ProviderCapability::Streaming), "codex streams");
+        assert!(caps.contains(&ProviderCapability::ToolUse), "codex does tool use");
+    }
+
+    /// Claude must round-trip through the factory and surface its real adapter
+    /// data (claude-family model list, streaming + system-prompt capabilities).
+    #[tokio::test]
+    async fn create_by_id_claude_builds_real_claude_adapter() {
+        let adapter = create_by_id(PROVIDER_CLAUDE)
+            .expect("create_by_id must build the claude adapter (P0-1 fix)");
+        let guard = adapter.read().await;
+        assert_eq!(guard.provider_id(), PROVIDER_CLAUDE);
+        assert_eq!(guard.status(), ProviderStatus::Disconnected);
+        let models = guard.available_models();
+        assert!(
+            models.iter().any(|m| m.contains("claude")),
+            "claude models should include claude-family entries, got {models:?}"
+        );
+        let caps = guard.capabilities();
+        assert!(caps.contains(&ProviderCapability::Streaming), "claude streams");
+        assert!(
+            caps.contains(&ProviderCapability::SystemPrompt),
+            "claude supports system prompts"
+        );
+    }
+
+    /// Anthropic must round-trip through the factory and surface its real
+    /// adapter data (model list + capabilities).
+    #[tokio::test]
+    async fn create_by_id_anthropic_builds_real_anthropic_adapter() {
+        let adapter = create_by_id(PROVIDER_ANTHROPIC)
+            .expect("create_by_id must build the anthropic adapter (P0-1 fix)");
+        let guard = adapter.read().await;
+        assert_eq!(guard.provider_id(), PROVIDER_ANTHROPIC);
+        assert_eq!(guard.status(), ProviderStatus::Disconnected);
+        let models = guard.available_models();
+        assert!(
+            !models.is_empty(),
+            "anthropic adapter must surface a real model list, got {models:?}"
+        );
+        let caps = guard.capabilities();
+        assert!(!caps.is_empty(), "anthropic adapter must advertise capabilities");
+        assert!(
+            caps.contains(&ProviderCapability::Streaming),
+            "anthropic streams"
+        );
     }
 
     #[test]
