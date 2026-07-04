@@ -53,7 +53,7 @@
 | `server.welcome` | ✅ REAL | derived payload: cwd→`projectName`, real `authRequired`/`authMode` from `WsAuthConfig`, `serverVersion`, git-repo identity |
 | `server.getEnvironment` | ✅ REAL | real `os`/`arch` from `std::env::consts` + server version |
 | `server.getDiagnostics` | ✅ REAL | live `read_store` project/thread counts + `pid` + uptime + RSS (Linux `/proc`) + terminal/local-server child counts (heap/external memory counters hardcoded 0) |
-| `server.subscribeLifecycle` | 🟡 PARTIAL | registers + emits **one** initial `welcome` snapshot; no ongoing maintenance/lifecycle broadcast source |
+| `server.subscribeLifecycle` | ✅ REAL (SRV-3) | registers on `server.lifecycle` + emits initial `welcome` snapshot + **ongoing broadcasts** on lifecycle event sources: `startLocalServer`/`stopLocalServer` (`local-server-started`/`local-server-stopped`), `setConfig` (`config-changed`), `updateSettings`/`patchSettings` (`settings-changed`), `refreshProviders`/`updateProvider` (`providers-refreshed`); delivered via `run_push_delivery` to subscribed connections |
 | `server.transcribeVoice` / `voiceStart` / `voiceStop` | 🟡 STUB | hardcoded "STT not configured" message — **no whisper/ffmpeg binary probe**; served, no MethodNotFound |
 | `server.generateAutomationIntent` | ✅ REAL | LLM via provider CLI (`invoke()`→`invoke_llm_oneshot`) — prompt → AutomationDef JSON (markdown-fence tolerant; malformed JSON falls back to raw text) |
 | `server.generateThreadRecap` | ✅ REAL | LLM via provider CLI (`invoke()`→`invoke_llm_oneshot`) — thread → recap text |

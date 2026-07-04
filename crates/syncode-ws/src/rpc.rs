@@ -3096,13 +3096,21 @@ async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcRes
     JsonRpcResponse::success(id, result)
 }
 
-/// `server.subscribeLifecycle` (T6c-phase-27 — REAL) — register on
-/// `server.lifecycle` and emit an initial `welcome` event as the snapshot
-/// baseline. The payload mirrors `server.welcome` so a client that subscribes
-/// to lifecycle (rather than calling `server.welcome` directly) still receives
-/// the same bootstrap state. Future server-lifecycle broadcasts (e.g. shutdown
-/// notices) will fan out via the delivery loop's `is_subscribed` check on this
-/// channel.
+/// `server.subscribeLifecycle` (SRV-3 — REAL) — register on `server.lifecycle`
+/// and emit an initial `welcome` event as the snapshot baseline. The payload
+/// mirrors `server.welcome` so a client that subscribes to lifecycle (rather
+/// than calling `server.welcome` directly) still receives the same bootstrap
+/// state.
+///
+/// Ongoing lifecycle events fan out via this channel: the event sources below
+/// call [`broadcast_lifecycle_event`] whenever server state changes, and the
+/// push delivery loop (`run_push_delivery`) forwards those broadcasts to every
+/// connection registered on `server.lifecycle`. Wired event sources:
+///   - `startLocalServer` / `stopLocalServer` → `local-server-started` /
+///     `local-server-stopped`
+///   - `setConfig` → `config-changed`; `updateSettings` / `patchSettings` →
+///     `settings-changed`
+///   - `refreshProviders` / `updateProvider` → `providers-refreshed`
 ///
 /// The push uses the same snapshot-then-stream pattern as
 /// `subscribeConfig`/`subscribeSettings`: register the connection, then send
@@ -3141,6 +3149,35 @@ async fn handle_server_subscribe_lifecycle(
             "welcome": welcome,
         }),
     )
+}
+
+/// Broadcast a server-lifecycle event on [`CHANNEL_SERVER_LIFECYCLE`] (SRV-3).
+///
+/// Every lifecycle event source (local-server start/stop, config/settings
+/// writes, provider refresh) calls this after its primary effect + domain
+/// push so a client subscribed via `server.subscribeLifecycle` receives
+/// ongoing notifications following the initial `welcome` snapshot.
+///
+/// The envelope mirrors the `welcome` event (`eventType` / `aggregateId` /
+/// `data`) so the lifecycle channel's frame shape is uniform. `event`
+/// discriminates the specific event (e.g. `"local-server-started"`),
+/// `aggregate_id` carries the affected entity id (or `Null`), and `data`
+/// holds the event-specific details. Best-effort: no subscribers is not an
+/// error (matches the `WsDomainEventPublisher` convention).
+fn broadcast_lifecycle_event(
+    state: &WsState,
+    event: &str,
+    aggregate_id: Value,
+    data: Value,
+) {
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_SERVER_LIFECYCLE.to_string(),
+        serde_json::json!({
+            "eventType": event,
+            "aggregateId": aggregate_id,
+            "data": data,
+        }),
+    ));
 }
 
 // ─── Server-settings subscribe handlers (T6c-18 — REAL) ───────────
@@ -3379,6 +3416,15 @@ async fn handle_server_set_config(state: &WsState, id: Value, params: &Value) ->
         crate::channels::CHANNEL_SERVER_CONFIG_UPDATED.to_string(),
         updated.0,
     ));
+    // SRV-3: mirror the config change on the lifecycle channel so
+    // `server.subscribeLifecycle` subscribers receive a `config-changed`
+    // event alongside the dedicated `server.configUpdated` push.
+    broadcast_lifecycle_event(
+        state,
+        "config-changed",
+        Value::Null,
+        serde_json::json!({ "config": updated.1 }),
+    );
     JsonRpcResponse::success(id, updated.1)
 }
 
@@ -3410,6 +3456,15 @@ async fn handle_server_update_settings(
         crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED.to_string(),
         serde_json::json!({ "settings": updated.clone() }),
     ));
+    // SRV-3: mirror the settings change on the lifecycle channel so
+    // `server.subscribeLifecycle` subscribers receive a `settings-changed`
+    // event alongside the dedicated `server.settingsUpdated` push.
+    broadcast_lifecycle_event(
+        state,
+        "settings-changed",
+        Value::Null,
+        serde_json::json!({ "settings": updated.clone() }),
+    );
     JsonRpcResponse::success(id, updated)
 }
 
@@ -3440,6 +3495,15 @@ async fn handle_server_refresh_providers(state: &WsState, id: Value) -> JsonRpcR
         crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED.to_string(),
         payload.clone(),
     ));
+    // SRV-3: broadcast a `providers-refreshed` lifecycle event so
+    // `server.subscribeLifecycle` subscribers learn provider statuses were
+    // re-emitted.
+    broadcast_lifecycle_event(
+        state,
+        "providers-refreshed",
+        Value::Null,
+        payload.clone(),
+    );
     JsonRpcResponse::success(id, payload)
 }
 
@@ -3477,6 +3541,15 @@ async fn handle_server_update_provider(
         crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED.to_string(),
         payload.clone(),
     ));
+    // SRV-3: broadcast a `providers-refreshed` lifecycle event (provider
+    // re-probe) so `server.subscribeLifecycle` subscribers learn the targeted
+    // provider was updated.
+    broadcast_lifecycle_event(
+        state,
+        "providers-refreshed",
+        serde_json::Value::String(provider.to_string()),
+        payload.clone(),
+    );
     JsonRpcResponse::success(id, payload)
 }
 
@@ -4002,6 +4075,15 @@ async fn handle_server_start_local_server(
         Ok(view) => {
             let result = serde_json::to_value(&view)
                 .unwrap_or_else(|_| serde_json::json!({ "id": view.id, "pid": view.pid }));
+            // SRV-3: broadcast a `local-server-started` lifecycle event so
+            // `server.subscribeLifecycle` subscribers learn a local server
+            // came up (mirrors the welcome snapshot-then-stream pattern).
+            broadcast_lifecycle_event(
+                state,
+                "local-server-started",
+                serde_json::Value::String(view.id.clone()),
+                result.clone(),
+            );
             JsonRpcResponse::success(id, result)
         }
         Err(msg) => JsonRpcResponse::error(Some(id), crate::error_codes::INTERNAL_ERROR, msg),
@@ -4039,7 +4121,18 @@ async fn handle_server_stop_local_server(
 
     let mut mgr = state.local_servers.write().await;
     match mgr.stop(&server_id).await {
-        Ok(()) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Ok(()) => {
+            // SRV-3: broadcast a `local-server-stopped` lifecycle event so
+            // `server.subscribeLifecycle` subscribers learn the server went
+            // down.
+            broadcast_lifecycle_event(
+                state,
+                "local-server-stopped",
+                serde_json::Value::String(server_id.clone()),
+                serde_json::json!({ "id": server_id }),
+            );
+            JsonRpcResponse::success(id, serde_json::json!({ "ok": true }))
+        }
         Err(msg) => JsonRpcResponse::error(Some(id), crate::error_codes::INVALID_PARAMS, msg),
     }
 }
@@ -16152,6 +16245,257 @@ mod tests {
             "conn 1 should be subscribed to server.lifecycle (got {:?})",
             subscribers
         );
+    }
+
+    /// Helper: subscribe conn 1 to lifecycle, drain the initial `welcome`
+    /// broadcast, then return a fresh broadcast receiver that observes only
+    /// subsequent lifecycle events. Mirrors the snapshot-then-stream seam the
+    /// delivery loop reads from. `bcast_rx` is created AFTER subscribe returns
+    /// so it does NOT see the welcome (only the events triggered after it).
+    async fn lifecycle_sub_after_welcome(
+        state: &WsState,
+    ) -> tokio::sync::broadcast::Receiver<(String, serde_json::Value)> {
+        let resp = rpc_success(state, "server.subscribeLifecycle", serde_json::json!({})).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        // Fresh receiver: only sees events sent after this point (the welcome
+        // was already sent inside subscribeLifecycle and is skipped).
+        state.push_tx.subscribe()
+    }
+
+    /// Helper: drain `bcast_rx` until a `server.lifecycle` broadcast arrives
+    /// (or timeout). Some write handlers (setConfig/updateSettings/
+    /// refreshProviders) emit TWO broadcasts — the dedicated `server.*Updated`
+    /// channel first, then the lifecycle mirror — so we must skip the
+    /// non-lifecycle frames to assert on the lifecycle payload.
+    async fn next_lifecycle_event(
+        bcast_rx: &mut tokio::sync::broadcast::Receiver<(String, serde_json::Value)>,
+    ) -> (String, serde_json::Value) {
+        let deadline = std::time::Duration::from_millis(500);
+        loop {
+            let (channel, data) = tokio::time::timeout(deadline, bcast_rx.recv())
+                .await
+                .expect("a lifecycle event should arrive on push_tx")
+                .expect("broadcast channel not closed");
+            if channel == crate::channels::CHANNEL_SERVER_LIFECYCLE {
+                return (channel, data);
+            }
+            // Skip non-lifecycle broadcasts (e.g. server.configUpdated emitted
+            // just before the lifecycle mirror in the same handler).
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_receives_local_server_started_event() {
+        // SRV-3: after subscribing to lifecycle, a `startLocalServer` write
+        // must broadcast a `local-server-started` event on the lifecycle
+        // channel (so subscribers learn a local server came up).
+        let state = WsState::new_in_memory(16);
+        let mut bcast_rx = lifecycle_sub_after_welcome(&state).await;
+
+        let resp = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "server.startLocalServer",
+                "params": {
+                    "id": "lifecycle-started",
+                    "name": "sleeper",
+                    "command": "sleep",
+                    "args": ["30"],
+                }
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let started_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let (channel, data) = next_lifecycle_event(&mut bcast_rx).await;
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert_eq!(data["eventType"], "local-server-started");
+        assert_eq!(data["aggregateId"], started_id);
+        assert_eq!(data["data"]["command"], "sleep");
+
+        // Cleanup: stop the spawned process.
+        let _ = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "server.stopLocalServer",
+                "params": { "id": "lifecycle-started" }
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_receives_local_server_stopped_event() {
+        // SRV-3: a `stopLocalServer` write must broadcast a
+        // `local-server-stopped` event on the lifecycle channel.
+        let state = WsState::new_in_memory(16);
+
+        // Start a server BEFORE subscribing so the `started` event doesn't
+        // pollute the lifecycle receiver.
+        let start_resp = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "server.startLocalServer",
+                "params": {
+                    "id": "lifecycle-stopped",
+                    "name": "sleeper",
+                    "command": "sleep",
+                    "args": ["30"],
+                }
+            }),
+        )
+        .await;
+        assert!(start_resp.error.is_none(), "{:?}", start_resp.error);
+
+        let mut bcast_rx = lifecycle_sub_after_welcome(&state).await;
+
+        let resp = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "server.stopLocalServer",
+                "params": { "id": "lifecycle-stopped" }
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        let (channel, data) = next_lifecycle_event(&mut bcast_rx).await;
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert_eq!(data["eventType"], "local-server-stopped");
+        assert_eq!(data["aggregateId"], "lifecycle-stopped");
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_receives_config_changed_after_set_config() {
+        // SRV-3: a `setConfig` write must broadcast a `config-changed` event
+        // on the lifecycle channel (in addition to the existing
+        // `server.configUpdated` push).
+        let state = WsState::new_in_memory(16);
+        let mut bcast_rx = lifecycle_sub_after_welcome(&state).await;
+
+        let resp = rpc_success(
+            &state,
+            "server.setConfig",
+            serde_json::json!({
+                "cwd": "/lc", "worktreesDir": "/lc/wt",
+                "keybindingsConfigPath": "/lc/kb.json",
+                "keybindings": [], "issues": [], "providers": [],
+                "availableEditors": [], "authMode": "unsafe-no-auth",
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        let (channel, data) = next_lifecycle_event(&mut bcast_rx).await;
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert_eq!(data["eventType"], "config-changed");
+        assert_eq!(data["data"]["config"]["cwd"], "/lc");
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_receives_settings_changed_after_update_settings() {
+        // SRV-3: an `updateSettings` write must broadcast a `settings-changed`
+        // event on the lifecycle channel (in addition to the existing
+        // `server.settingsUpdated` push).
+        let state = WsState::new_in_memory(16);
+        let mut bcast_rx = lifecycle_sub_after_welcome(&state).await;
+
+        let resp = rpc_success(
+            &state,
+            "server.updateSettings",
+            serde_json::json!({ "ui": { "theme": "dark" } }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        let (channel, data) = next_lifecycle_event(&mut bcast_rx).await;
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert_eq!(data["eventType"], "settings-changed");
+        assert_eq!(data["data"]["settings"]["ui"]["theme"], "dark");
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_receives_providers_refreshed_event() {
+        // SRV-3: `refreshProviders` must broadcast a `providers-refreshed`
+        // event on the lifecycle channel.
+        let state = WsState::new_in_memory(16);
+        let mut bcast_rx = lifecycle_sub_after_welcome(&state).await;
+
+        let resp = rpc_success(&state, "server.refreshProviders", serde_json::json!({})).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        let (channel, data) = next_lifecycle_event(&mut bcast_rx).await;
+        assert_eq!(channel, crate::channels::CHANNEL_SERVER_LIFECYCLE);
+        assert_eq!(data["eventType"], "providers-refreshed");
+        assert!(data["data"]["providers"].is_array());
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_delivers_local_server_started_to_subscribed_connection() {
+        // SRV-3 end-to-end: the forwarded `push/server.lifecycle` frame must
+        // arrive on a connection that subscribed to lifecycle (proves the
+        // delivery loop fans out the ongoing event, not just the welcome).
+        let state = std::sync::Arc::new(WsState::new_in_memory(16));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx.clone()).await;
+        let _delivery = tokio::spawn(crate::server::run_push_delivery(
+            std::sync::Arc::clone(&state),
+            1,
+            tx,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Subscribe → welcome forwarded onto rx.
+        let resp = rpc_success(&state, "server.subscribeLifecycle", serde_json::json!({})).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let welcome_frame = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("welcome push should arrive on connection tx")
+            .unwrap();
+        assert!(welcome_frame.contains("push/server.lifecycle"));
+        assert!(welcome_frame.contains("welcome"));
+
+        // Trigger an ongoing lifecycle event.
+        let resp = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "server.startLocalServer",
+                "params": {
+                    "id": "lifecycle-e2e",
+                    "name": "sleeper",
+                    "command": "sleep",
+                    "args": ["30"],
+                }
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        // The ongoing event must be forwarded as a second `push/server.lifecycle`
+        // frame carrying `local-server-started`.
+        let ongoing = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("local-server-started push should arrive on connection tx")
+            .unwrap();
+        assert!(ongoing.contains("push/server.lifecycle"));
+        assert!(ongoing.contains("local-server-started"));
+
+        // Cleanup.
+        let _ = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "server.stopLocalServer",
+                "params": { "id": "lifecycle-e2e" }
+            }),
+        )
+        .await;
     }
 
     #[tokio::test]
