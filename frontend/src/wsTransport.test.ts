@@ -267,17 +267,56 @@ describe("WsTransport", () => {
     transport.dispose();
   });
 
-  it("rejects genuinely unserved orchestration methods client-side", async () => {
-    // Sanity: the remap is specific. An orchestration method the backend does
-    // NOT serve must still reject with MethodNotFound without reaching the wire.
+  it("remaps orchestration.repairReadModel to the served repair-state method (ORCH-3)", async () => {
+    // ORCH-3: `orchestration.repairReadModel` (the MCode alias) is now served
+    // — it maps onto the same `orchestration/repair-state` dispatch arm as
+    // `orchestration.repairState`. The frame must reach the wire remapped.
     const transport = new WsTransport("ws://localhost:3020");
     const socket = sockets[0]!;
     socket.readyState = MockWebSocket.OPEN;
     socket.emit("open");
 
-    await expect(transport.request("orchestration.repairReadModel")).rejects.toThrow(
-      /Method not found/,
-    );
+    const pending = transport.request("orchestration.repairReadModel");
+
+    await flushMicrotasks();
+
+    expect(socket.sent).toHaveLength(1);
+    const sentFrame = JSON.parse(socket.sent[0] as string);
+    expect(sentFrame.method).toBe("orchestration/repair-state");
+
+    const responseFrame = {
+      jsonrpc: "2.0",
+      id: sentFrame.id,
+      result: {
+        driftDetected: false,
+        repairedCount: 0,
+        seeded: 0,
+        repaired: true,
+        details: {
+          before: { projects: 0, threads: 0, turns: 0, messages: 0, checkpoints: 0 },
+          after: { projects: 0, threads: 0, turns: 0, messages: 0, checkpoints: 0 },
+        },
+      },
+    };
+    socket.emit("message", { data: JSON.stringify(responseFrame) });
+    await expect(pending).resolves.toEqual(responseFrame.result);
+
+    transport.dispose();
+  });
+
+  it("rejects genuinely unserved orchestration methods client-side", async () => {
+    // Sanity: the remap is specific. An orchestration method the backend does
+    // NOT serve must still reject with MethodNotFound without reaching the wire.
+    // (`orchestration.repairReadModel` was the previous example but is now
+    // SERVED as of ORCH-3 — use a method that remains unserved.)
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = sockets[0]!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.emit("open");
+
+    await expect(
+      transport.request("orchestration.unservedSyntheticMethod" as never),
+    ).rejects.toThrow(/Method not found/);
     expect(socket.sent).toHaveLength(0);
 
     transport.dispose();

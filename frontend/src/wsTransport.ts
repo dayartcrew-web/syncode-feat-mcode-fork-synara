@@ -145,6 +145,10 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "orchestration.getFullThreadDiff": "orchestration/get-full-thread-diff",
   "orchestration.replayEvents": "orchestration/replay-events",
   "orchestration.repairState": "orchestration/repair-state",
+  // ORCH-3: MCode's `orchestration.repairReadModel` is an alias for the
+  // repairState handler (drift detection + optional replay overwrite). The
+  // backend's dispatch arms accept both forms.
+  "orchestration.repairReadModel": "orchestration/repair-state",
 
   // Orchestration subscribe (ORCH-4): `wsNativeApi.ts` calls these dot-strings
   // (`subscribeShell` / `subscribeEvents`) to register on the `orchestration`

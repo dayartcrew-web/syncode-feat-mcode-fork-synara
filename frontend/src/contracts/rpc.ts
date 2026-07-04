@@ -1475,11 +1475,13 @@ export const UNSERVED_RPC = [
   // `orchestration` push channel + emit an initial ShellSnapshot — see
   // SERVED_RPC + MCODE_TO_SERVED). ORCH-6: `orchestration.getTurnDiff` is NOW
   // SERVED (loads two `CheckpointView`s, computes diff via
-  // `syncode_git::diff::compute_diff`, returns `{ diff, note }`). The
+  // `syncode_git::diff::compute_diff`, returns `{ diff, note }`). ORCH-3:
+  // `orchestration.repairReadModel` is NOW SERVED (drift detection + optional
+  // repair via `Orchestrator::replay_read_model`, returns
+  // `{ driftDetected, repairedCount, seeded, repaired, details }`). The
   // remaining ops below are still unserved.
   "orchestration.dispatchCommand",
   "orchestration.getFullThreadDiff",
-  "orchestration.repairReadModel",
 
   // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing RPCs served; these are not) ─────
   // AUTH-1: `auth.createPairingCredential`, `auth.revokePairingLink`, and
