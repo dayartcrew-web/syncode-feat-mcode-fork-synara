@@ -303,6 +303,17 @@ async fn dispatch_method(
         // `snapshotSequence`, `projects`, `threads`, `updatedAt`).
         "snapshot/get" | "orchestration.getSnapshot" => handle_snapshot_get(state, id).await,
 
+        // ─── Orchestration: latest turn by thread ──────────────────────────
+        // The cloned MCode UI calls `orchestration.getLatestTurn` to fetch the
+        // most recent turn for a thread (highest `sequence` / turn_number). The
+        // handler reads the read_store's `turns` map, filters by `threadId`, and
+        // returns the TurnView with the maximum sequence (or `null` if the
+        // thread has no turns). Dispatch accepts the slash alias for robustness
+        // (same dual-key convention as the other orchestration.* methods).
+        "orchestration.getLatestTurn" | "orchestration/getLatestTurn" => {
+            handle_orchestration_get_latest_turn(state, id, &request.params).await
+        }
+
         // ─── Git Methods (syncode-git-backed) ─────────────────────
         // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
         // `git.readWorkingTreeDiff`, `git.listBranches`, …). We reuse the
@@ -2397,6 +2408,44 @@ async fn handle_snapshot_get(state: &WsState, id: Value) -> JsonRpcResponse {
             "updatedAt": now_iso(),
         }),
     )
+}
+
+/// `orchestration.getLatestTurn` handler — returns the most recent TurnView for
+/// a thread (the one with the highest `sequence` / turn_number), or `null` if
+/// the thread has no turns.
+///
+/// Params: `{ threadId: string }`. Reads the read_store's `turns` map (keyed by
+/// turn id), filters by `threadId`, and selects the entry with the maximum
+/// `sequence`. Mirrors the read-only pattern used by `handle_snapshot_get`
+/// (acquire the read lock, collect from the store, return JSON).
+async fn handle_orchestration_get_latest_turn(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let thread_id = match params.get("threadId").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'threadId' parameter",
+            );
+        }
+    };
+
+    let store = state.read_store.read().await;
+    // Find the turn with the highest sequence for this thread. `max_by_key`
+    // returns the last element among equal maxima (stable for ties), matching
+    // "latest" semantics. If no turns match, return `null`.
+    let latest = store
+        .turns
+        .values()
+        .filter(|t| t.thread_id == thread_id)
+        .max_by_key(|t| t.sequence)
+        .cloned()
+        .map(|t| serde_json::to_value(&t).unwrap_or(Value::Null));
+    JsonRpcResponse::success(id, latest.unwrap_or(Value::Null))
 }
 
 // ─── Server config / settings / lifecycle Handlers (T6c-4) ───────
@@ -8589,6 +8638,116 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0]["deletedAt"], serde_json::Value::Null);
         assert_eq!(projects[0]["title"], "RM Project");
+    }
+
+    // ── orchestration.getLatestTurn ─────────────────────────────────────
+    // The cloned MCode UI fetches the most recent turn for a thread via this
+    // call. Verifies the dispatch resolves and the handler returns the real
+    // TurnView with the highest `sequence` (turn_number) for the given thread.
+
+    #[tokio::test]
+    async fn test_orchestration_get_latest_turn_returns_highest_sequence() {
+        let state = WsState::new_in_memory(16);
+
+        // Seed a project + thread.
+        let create_proj = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "LT Project", "rootPath": "/tmp/lt" }
+        });
+        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        let project_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let create_thread = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "thread/create",
+            "params": { "projectId": project_id, "providerId": "codex", "model": "gpt-5" }
+        });
+        let resp = handle_rpc(&state, 1, &create_thread.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "thread/create failed: {:?}", resp.error);
+        let thread_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Start three turns with increasing sequences (1, 2, 3).
+        for seq in 1..=3u64 {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 10 + seq, "method": "turn/start",
+                "params": {
+                    "threadId": thread_id,
+                    "sequence": seq,
+                    "userInput": format!("Question {}", seq)
+                }
+            });
+            let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+            let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+            assert!(resp.error.is_none(), "turn/start seq={} failed: {:?}", seq, resp.error);
+        }
+
+        // getLatestTurn must return the turn with sequence 3 (highest).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 99, "method": "orchestration.getLatestTurn",
+            "params": { "threadId": thread_id }
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let turn = resp.result.unwrap();
+        // TurnView serializes snake_case (no serde rename_all on the struct).
+        assert_eq!(turn["thread_id"], thread_id, "wrong thread");
+        assert_eq!(turn["sequence"], 3, "expected highest sequence");
+        assert_eq!(turn["user_input"], "Question 3");
+        assert_eq!(turn["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn test_orchestration_get_latest_turn_null_when_no_turns() {
+        let state = WsState::new_in_memory(16);
+
+        // Seed a project + thread but no turns.
+        let create_proj = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "Empty Project", "rootPath": "/tmp/empty" }
+        });
+        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        let project_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let create_thread = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "thread/create",
+            "params": { "projectId": project_id, "providerId": "codex", "model": "gpt-5" }
+        });
+        let resp = handle_rpc(&state, 1, &create_thread.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        let thread_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Thread has no turns → result must be null.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "orchestration.getLatestTurn",
+            "params": { "threadId": thread_id }
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        // No turns → result is null. `Option<Value>` round-trips JSON `null` as
+        // `None` (serde deserializes null → None for Option), so accept either.
+        assert!(
+            resp.result.as_ref().map_or(true, |v| v.is_null()),
+            "expected null result, got {:?}",
+            resp.result
+        );
+
+        // A threadId with no matches at all (bogus id) also returns null.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 6, "method": "orchestration.getLatestTurn",
+            "params": { "threadId": "does-not-exist" }
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert!(
+            resp.result.as_ref().map_or(true, |v| v.is_null()),
+            "expected null result, got {:?}",
+            resp.result
+        );
     }
 
     #[tokio::test]
