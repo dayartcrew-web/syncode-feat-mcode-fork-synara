@@ -88,8 +88,17 @@ pub enum CompletionPolicy {
     AllowedExitCodes(Vec<i32>),
     /// Always consider successful (fire and forget)
     AlwaysSuccess,
-    /// Use AI evaluation to determine success
-    AiEvaluated { prompt: String },
+    /// Use AI evaluation to determine success.
+    ///
+    /// `stop_when` is a natural-language description of the condition under
+    /// which the automation should stop (e.g. "all tests pass"). The
+    /// automation is considered complete once the evaluator's confidence that
+    /// `stop_when` is satisfied meets or exceeds `confidence_threshold`
+    /// (a value in the range `0.0..=1.0`).
+    AiEvaluated {
+        stop_when: String,
+        confidence_threshold: f64,
+    },
 }
 
 impl CompletionPolicy {
@@ -213,5 +222,31 @@ mod tests {
         assert!(json.contains("exponential_backoff"));
         let back: RetryPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(policy, back);
+    }
+
+    #[test]
+    fn completion_policy_ai_evaluated_roundtrip() {
+        let policy = CompletionPolicy::AiEvaluated {
+            stop_when: "all tests pass".to_string(),
+            confidence_threshold: 0.9,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        assert!(json.contains("ai_evaluated"));
+        assert!(json.contains("stop_when"));
+        assert!(json.contains("confidence_threshold"));
+        let back: CompletionPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy, back);
+    }
+
+    #[test]
+    fn completion_policy_ai_evaluated_is_success() {
+        let policy = CompletionPolicy::AiEvaluated {
+            stop_when: "all tests pass".to_string(),
+            confidence_threshold: 0.95,
+        };
+        // AI evaluation requires separate processing; until then a zero exit
+        // code is treated as success.
+        assert!(policy.is_success(0));
+        assert!(!policy.is_success(1));
     }
 }
