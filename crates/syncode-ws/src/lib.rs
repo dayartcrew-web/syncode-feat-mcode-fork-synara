@@ -11,6 +11,7 @@ pub mod auth;
 pub mod channels;
 pub mod llm;
 pub mod local_server;
+pub mod project_fs;
 pub mod push;
 pub mod rpc;
 pub mod server;
