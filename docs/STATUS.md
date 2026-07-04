@@ -81,7 +81,7 @@
 |---|---|---|
 | `provider.listModels` / `listAgents` | ✅ REAL | `ALL_PROVIDERS` static (8 real provider descriptors) |
 | `provider.getComposerCapabilities` / `listSkills` / `listSkillsCatalog` / `listCommands` / `readSkill` | ✅ REAL | per-provider capability flags + filesystem `.skills/*.md` scan + static native commands + skill file read (traversal-guarded) |
-| `provider.listPlugins` / `readPlugin` / `listOptions` | 🟡 STUB-empty | no plugin marketplace/options subsystem |
+| `provider.listPlugins` / `readPlugin` / `listOptions` | ✅ REAL | filesystem `.plugins/*.json` scan (per-plugin `id`/`name`/`source`/`description`/`version`) + install-state manifest overlay at `~/.synara/plugins.json` (env-configurable via `SYNCODE_PLUGINS_MANIFEST`, per-request-pinnable via `pluginsManifestPath`) — drives real `installed`/`enabled`/`installPolicy` (`auto`\|`manual`\|`disabled`) fields. **Remote marketplace sync (OAuth, remote catalog) is out of scope.** |
 | `provider.compactThread` | ✅ REAL | provider CLI one-shot (LLM compaction) |
 
 ### Stats (Profile)
