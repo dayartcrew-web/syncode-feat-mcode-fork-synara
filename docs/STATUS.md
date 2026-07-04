@@ -1,6 +1,6 @@
 # Syncode — Clone+Rewire Status & REAL-vs-STUB Matrix
 
-> **Status (2026-07-03): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32.
+> **Status (2026-07-04): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32. **Server (config/Settings) section re-audited 2026-07-04** against code post-sync to `7789fa9`.
 >
 > This is the single source of truth for "mana yang masih stub vs real app-wired." Other docs (`COMPARISON-FRONTEND`, `CONTRACTS-BRIDGE-DESIGN`, `SHELL-GAPS`, `TEST_SUMMARY`, `CRATES`, `ARCHITECTURE`) carry detail/history; this file carries current status.
 
@@ -42,17 +42,19 @@
 ### Server (config / Settings)
 | RPC | Status | Backed by |
 |---|---|---|
-| `server.getConfig` / `getSettings` | ✅ REAL | `ServerSettingsState` (in-memory store; reads return persisted state) |
-| `server.setConfig` / `updateSettings` / `patchSettings` / `updateProvider` / `upsertKeybinding` / `refreshProviders` | ✅ REAL | merge into store (deep-merge) + push on change (`configUpdated`/`settingsUpdated`/`providerStatusesUpdated`) |
-| `server.subscribeConfig` / `subscribeSettings` / `subscribeProviderStatuses` | ✅ REAL | register + initial snapshot + live push delivery |
-| `server.welcome` / `getEnvironment` / `getDiagnostics` | 🟡 STUB-defaults | no subsystem — defaults + real `authMode` + live projection counts (diagnostics) |
-| `server.subscribeLifecycle` | 🟡 STUB | no maintenance-task push subsystem |
-| `server.transcribeVoice` / `voiceStart` / `voiceStop` | 🟡 STUB | graceful "STT not configured" (no whisper/ffmpeg) — served, no MethodNotFound |
-| `server.generateAutomationIntent` | ✅ REAL | LLM via provider CLI (invoke_llm_oneshot — prompt→AutomationDef JSON) |
-| `server.patchSettings` | ✅ REAL | merge into ServerSettingsState (same as updateSettings) |
-| `server.listProviderUsage` / `getProviderUsageSnapshot` | ✅ REAL | `UsageStore` (in-memory) — records token usage from LLM ops (invoke_llm_oneshot → ProviderResponse.result usage extraction); aggregates by provider |
-| `server.startLocalServer` / `stopLocalServer` | 🟡 STUB | no local-server process-mgmt subsystem |
-| _(remaining 48 in UNSERVED_RPC)_ | ⛔ non-actively-called | legacy aliases + list/process RPCs the vendored UI doesn't invoke |
+| `server.getConfig` / `getSettings` | ✅ REAL | `ServerSettingsState` (`Arc<RwLock<Value>>` on `WsState`) — **session-scoped in-memory**; reads return live in-session state (not fresh defaults); **no disk persistence** (edits lost on restart) |
+| `server.setConfig` / `updateSettings` / `patchSettings` / `updateProvider` / `upsertKeybinding` / `refreshProviders` | ✅ REAL | mutate store (`setConfig` replaces `config`; `updateSettings`/`patchSettings` deep-merge `settings` via `merge_json`; `upsertKeybinding` upserts by id; `updateProvider`/`refreshProviders` re-emit providers) + push on change (`configUpdated`/`settingsUpdated`/`providerStatusesUpdated`) |
+| `server.subscribeConfig` / `subscribeSettings` / `subscribeProviderStatuses` | ✅ REAL | register on channel + initial snapshot push + live push delivery |
+| `server.welcome` | ✅ REAL | derived payload: cwd→`projectName`, real `authRequired`/`authMode` from `WsAuthConfig`, `serverVersion`, git-repo identity |
+| `server.getEnvironment` | ✅ REAL | real `os`/`arch` from `std::env::consts` + server version |
+| `server.getDiagnostics` | ✅ REAL | live `read_store` project/thread counts + `pid` + uptime + RSS (Linux `/proc`) + terminal/local-server child counts (heap/external memory counters hardcoded 0) |
+| `server.subscribeLifecycle` | 🟡 PARTIAL | registers + emits **one** initial `welcome` snapshot; no ongoing maintenance/lifecycle broadcast source |
+| `server.transcribeVoice` / `voiceStart` / `voiceStop` | 🟡 STUB | hardcoded "STT not configured" message — **no whisper/ffmpeg binary probe**; served, no MethodNotFound |
+| `server.generateAutomationIntent` | ✅ REAL | LLM via provider CLI (`invoke()`→`invoke_llm_oneshot`) — prompt → AutomationDef JSON (markdown-fence tolerant; malformed JSON falls back to raw text) |
+| `server.generateThreadRecap` | ✅ REAL | LLM via provider CLI (`invoke()`→`invoke_llm_oneshot`) — thread → recap text |
+| `server.listProviderUsage` / `getProviderUsageSnapshot` | ✅ REAL | `UsageStore` (in-memory; FIFO-capped 10k entries) — usage recorded in `invoke()` wrapper at rpc.rs:6808 (not inside `invoke_llm_oneshot`); aggregates per-provider totals, call count, last-seen model, last-used-at (**no peak-day/windowed breakdown**; `limits: []`) |
+| `server.startLocalServer` / `stopLocalServer` | ✅ REAL | `LocalServerManager` (local_server.rs) — real `tokio::process::Command` spawn + `Child::kill`/`wait` reap; tracks pid (T6c-phase-24; tests verify real spawn/kill) |
+| _(8 server.* in frontend `UNSERVED_RPC`)_ | ⛔ non-actively-called | `listProviders`, `getProviderStatuses`, `getProviderAuthStatus`, `getUsage`, `getRecap`, `listLocalServers`, `listLocalServerProcesses`, `listWorktrees` — legacy aliases the vendored UI doesn't invoke |
 
 ### Terminal (Terminal panel)
 | RPC | Status | Backed by |
@@ -112,7 +114,7 @@
 - **git/automation live event-push** — extend terminal reader-task pattern; git ops are synchronous so progress is limited.
 - **GitHub-API ops** — achievable via `gh api` subprocess (gh CLI authed); niche PR-handoff flow.
 - **voice ops** (transcribeVoice/…) — STT subsystem (different from LLM-text).
-- **Real persistence for server settings** — currently write-stubs (no settings store).
+- **Real persistence for server settings** — store + writes are real (`ServerSettingsState`) but session-scoped; nothing survives a restart. (No on-disk `settings.json`, no SQLite `config` table.)
 - **Desktop GUI boot E2E** — needs a display (headless-blocked).
 
 ---
