@@ -40,7 +40,7 @@
 | `git.summarizeDiff` | ✅ REAL | provider CLI one-shot (LLM) |
 | `git.githubRepository` / `resolvePullRequest` | ✅ REAL | gh CLI (no token — uses gh auth; `gh repo view` / `gh pr view`) |
 | `git.handoffThread` | ✅ REAL | gh pr create (branch mode) + git2 worktree add (worktree mode, `targetMode:"worktree"` populates `worktreePath`/`associatedWorktreeBranch`/`changesTransferred`/`conflictsDetected`) |
-| `git.preparePullRequestThread` | 🟡 STUB | composable via resolvePullRequest + worktreeCreate |
+| `git.preparePullRequestThread` | ✅ REAL (GIT-3) | composes `gh pr view` (resolve PR head branch) + git2 worktree add on the head ref; returns `GitPreparePullRequestThreadResult` (`{ pullRequest, branch, worktreePath }`); worktree step degrades gracefully to `null` when the head branch can't be linked |
 | `git.runStackedAction` / `createDetachedWorktree` | ✅ REAL | syncode-git StackedPipeline (action mapping) + `git worktree add --detach` |
 | `git.subscribeActionProgress` | ✅ REAL (GIT-4) | registers connection on `git` push channel + emits initial `subscribed` event; `runStackedAction` drives `StackedPipeline::execute_with_progress` and broadcasts per-stage `{stage,percent,message}` events on `CHANNEL_GIT` (only when ≥1 subscriber; default sync path unchanged) |
 

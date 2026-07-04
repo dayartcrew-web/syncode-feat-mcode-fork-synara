@@ -953,9 +953,13 @@ async fn dispatch_method(
         //     `git.worktreeCreate`) and populates the MCode worktree-handoff
         //     fields (`worktreePath`, `associatedWorktreeBranch`,
         //     `changesTransferred`, `conflictsDetected`).
-        //   - `git.preparePullRequestThread` — prepare a worktree/branch for a
-        //     PR. STUBBED (`{ ok:false, reason }`) — the MCode shape implies
-        //     a checkout + worktree-add sequence we don't wire here.
+        //   - `git.preparePullRequestThread` — REAL (GIT-3): composes
+        //     `git.resolvePullRequest` (resolve the PR's head branch via
+        //     `gh pr view`) + `git.worktreeCreate` (link a worktree on that
+        //     head branch). Returns the MCode `GitPreparePullRequestThreadResult`
+        //     shape: `{ pullRequest, branch, worktreePath }`. The worktree step
+        //     degrades gracefully (worktreePath:null) when the head branch
+        //     can't be linked — the PR resolution is always surfaced.
         //
         // Dispatch accepts BOTH the MCode dot-name AND a slash form.
         "git.githubRepository" | "git/github-repository" | "git/githubRepository" => {
@@ -9872,21 +9876,114 @@ fn current_branch_for_cwd(cwd: &str) -> Result<String, git2::Error> {
         .ok_or_else(|| git2::Error::from_str("HEAD is unborn or detached"))
 }
 
-/// `git.preparePullRequestThread` → prepare a worktree/branch for a PR.
+/// `git.preparePullRequestThread` → resolve a PR and prepare a worktree on its
+/// head branch.
 ///
-/// STUBBED. The MCode shape (`GitPreparePullRequestThreadResult`) implies a
-/// two-phase op: resolve the PR (via `git.resolvePullRequest`), then create a
-/// local worktree + checkout the PR's head branch. The worktree plumbing
-/// (`git worktree add`) is available via `git.worktreeCreate`, but wiring the
-/// full sequence (PR resolve → branch checkout → worktree add → associate with
-/// the thread) is deferred. We return a clear `{ ok:false, reason }` envelope
-/// so the UI can render a fallback rather than a MethodNotFound.
-async fn handle_git_prepare_pull_request_thread(id: Value, _params: &Value) -> JsonRpcResponse {
+/// REAL (GIT-3): composes `git.resolvePullRequest` + `git.worktreeCreate`:
+///   1. Resolve the PR via `gh pr view <ref> --json ...` (the same `gh_parse`
+///      parsing path as `git.resolvePullRequest`) to obtain `headBranch`.
+///   2. Create a worktree on the PR's head ref via git2 (the same
+///      `create_handoff_worktree` plumbing as `git.handoffThread` worktree
+///      mode). The head branch is created at HEAD if it doesn't already exist
+///      locally (mirrors `git.worktreeCreate`'s `createBranch:true` default).
+///
+/// Returns the MCode `GitPreparePullRequestThreadResult` shape:
+///   `{ pullRequest: GitResolvedPullRequest, branch, worktreePath }`.
+///
+/// `worktreePath` is `null` when the worktree could not be created (e.g. the
+/// head branch is empty and HEAD is unborn, or a filesystem error). The PR
+/// resolution + the `branch` (head branch name) are always populated when the
+/// PR resolves, so the UI can fall back to a manual checkout even if the
+/// worktree step fails.
+///
+/// Params: `{ cwd?, number? | url? }`. Exactly one of `number` (int) or `url`
+/// (string) selects the PR (same as `git.resolvePullRequest`).
+async fn handle_git_prepare_pull_request_thread(id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = resolve_cwd_or_dot(params);
+
+    // ── Phase 1: resolve the PR (compose with `git.resolvePullRequest`). ──
+    // Re-use the exact same gh + parse_pr_view path so the resolved shape is
+    // byte-identical to `git.resolvePullRequest`'s `pullRequest` field.
+    let pr_ref = params
+        .get("number")
+        .and_then(|v| v.as_i64().map(|n| n.to_string()))
+        .or_else(|| params.get("url").and_then(|v| v.as_str()).map(String::from));
+    let Some(pr_ref) = pr_ref else {
+        return param_error(
+            id,
+            "git.preparePullRequestThread requires 'number' (int) or 'url' (string)",
+        );
+    };
+    if pr_ref.trim().is_empty() {
+        return param_error(
+            id,
+            "git.preparePullRequestThread requires a non-empty 'number' or 'url'",
+        );
+    }
+
+    let gh_json = match run_cli_capture(
+        "gh",
+        &cwd,
+        &[
+            "pr",
+            "view",
+            &pr_ref,
+            "--json",
+            "number,title,state,headRefName,baseRefName,url",
+        ],
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git.preparePullRequestThread resolve PR: {e}"),
+            );
+        }
+    };
+    let pr = match gh_parse::parse_pr_view(&gh_json) {
+        Ok(p) => p,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git.preparePullRequestThread parse gh output: {e}"),
+            );
+        }
+    };
+
+    // The head branch drives the worktree. An empty headRefName (older gh
+    // payloads, deleted branches) means we can't place a worktree on it — we
+    // still return the resolved PR + branch, with worktreePath:null.
+    let head_branch = pr
+        .get("headBranch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // ── Phase 2: create a worktree on the PR head ref (compose with ──────
+    // `git.worktreeCreate`). Re-uses the handoff worktree helper, which
+    // creates the branch at HEAD if absent and links a worktree at
+    // `<repo>/.worktrees/<branch>` (or `params.worktreePath` if given). On
+    // any failure we degrade gracefully: the PR resolution is the primary
+    // deliverable; the worktree is a convenience.
+    let worktree_path = if head_branch.is_empty() {
+        None
+    } else {
+        match create_handoff_worktree(id.clone(), &cwd, &head_branch, params) {
+            Ok(w) => Some(w.path),
+            Err(_) => None,
+        }
+    };
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "ok": false,
-            "reason": "git.preparePullRequestThread is stubbed — PR→worktree checkout sequence not wired (compose via git.resolvePullRequest + git.worktreeCreate)"
+            "pullRequest": pr,
+            "branch": head_branch,
+            "worktreePath": worktree_path,
         }),
     )
 }
@@ -16800,11 +16897,15 @@ mod tests {
         assert_eq!(pr["baseBranch"], "");
     }
 
-    /// `git.preparePullRequestThread` is stubbed — it must resolve (no
-    /// MethodNotFound) under BOTH the dot-name AND the slash form and return
-    /// a `{ ok:false, reason }` envelope (not an error).
+    /// `git.preparePullRequestThread` requires a `number` or `url` param —
+    /// missing both is rejected with INVALID_PARAMS (param validation guard,
+    /// exercised under BOTH dispatch forms so neither form slips past the
+    /// guard into a panic). (GIT-3: the handler is now REAL — previously this
+    /// asserted the `{ ok:false, reason }` stub envelope; with the real
+    /// composition the first guard is the same param check as
+    /// `git.resolvePullRequest`.)
     #[tokio::test]
-    async fn git_prepare_pull_request_thread_stub_resolves_both_forms() {
+    async fn git_prepare_pull_request_thread_requires_ref() {
         let state = WsState::new_in_memory(16);
         for method in [
             "git.preparePullRequestThread",
@@ -16814,12 +16915,174 @@ mod tests {
                 "jsonrpc": "2.0", "id": 1, "method": method, "params": {}
             });
             let resp = rpc(&state, 1, &req).await;
-            assert!(resp.error.is_none(), "{method} errored: {:?}", resp.error);
-            let result = resp.result.expect("stub returns a result envelope");
-            assert_eq!(result["ok"], false, "{method} must report ok:false");
             assert!(
-                result["reason"].as_str().is_some(),
-                "{method} must carry a reason string"
+                resp.error.is_some(),
+                "{method}: missing ref must be rejected with an error"
+            );
+            assert_eq!(
+                resp.error.unwrap().code,
+                crate::error_codes::INVALID_PARAMS,
+                "{method}: missing ref must yield INVALID_PARAMS"
+            );
+        }
+    }
+
+    /// `git.preparePullRequestThread` (GIT-3) composes resolve + worktree. When
+    /// `gh` cannot resolve the PR (no GitHub remote on the temp repo, or `gh`
+    /// not installed), the handler must surface a graceful INTERNAL_ERROR —
+    /// never a panic, never a stub envelope. The resolved-PR phase fails before
+    /// the worktree phase runs, so no worktree is created. Verifies the
+    /// graceful-degradation contract on a real temp git repo.
+    #[tokio::test]
+    async fn git_prepare_pull_request_thread_gh_failure_is_internal_error() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        // temp repo WITHOUT a GitHub origin → gh pr view cannot succeed.
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.preparePullRequestThread",
+            "params": {
+                "cwd": repo.to_string_lossy(),
+                "number": 1,
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        // gh failure is surfaced as a JSON-RPC INTERNAL_ERROR (NOT a stub
+        // `{ ok:false }` envelope — the handler is REAL now).
+        assert!(
+            resp.error.is_some(),
+            "gh failure must surface as a JSON-RPC error, got {:?}",
+            resp.result
+        );
+        assert_eq!(
+            resp.error.as_ref().unwrap().code,
+            crate::error_codes::INTERNAL_ERROR,
+            "gh failure must yield INTERNAL_ERROR"
+        );
+        // The error message must reference the resolve-PR phase (the first
+        // composition step), confirming we reached the real handler and not a
+        // stub short-circuit.
+        let msg = resp.error.unwrap().message;
+        assert!(
+            msg.contains("resolve PR"),
+            "error must come from the resolve-PR phase, got: {msg}"
+        );
+    }
+
+    /// `git.preparePullRequestThread` (GIT-3) must resolve identically under
+    /// BOTH dispatch forms (MCode dot-name + slash form) — the slash form is
+    /// the wsNativeApi's variant, the dot-name is the tauriNativeApi's. Both
+    /// must reach the same handler and produce the same outcome (here, the
+    /// same INTERNAL_ERROR from gh on a no-remote temp repo). Guards against a
+    /// dispatch-table regression that would silently 404 one form.
+    #[tokio::test]
+    async fn git_prepare_pull_request_thread_dispatches_both_forms() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+        let mut codes: Vec<i32> = Vec::new();
+        for method in [
+            "git.preparePullRequestThread",
+            "git/prepare-pull-request-thread",
+            "git/preparePullRequestThread",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": {
+                    "cwd": repo.to_string_lossy(),
+                    "number": 42,
+                }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            // Every form must reach the handler (no MethodNotFound=-32601).
+            let code = resp
+                .error
+                .as_ref()
+                .map(|e| e.code)
+                .unwrap_or(0);
+            assert_ne!(
+                code, -32601,
+                "{method}: must not be MethodNotFound (dispatch table regression)"
+            );
+            codes.push(code);
+        }
+        // All three forms produce the same outcome (gh INTERNAL_ERROR on a
+        // no-remote repo) — a dispatch-table mismatch would surface as
+        // divergent codes.
+        assert!(
+            codes.iter().all(|&c| c == codes[0]),
+            "all dispatch forms must yield the same code, got {codes:?}"
+        );
+    }
+
+    /// `git.preparePullRequestThread` (GIT-3) — the composition result shape.
+    /// When `gh` IS available AND authed AND the PR resolves, the handler must
+    /// return the MCode `GitPreparePullRequestThreadResult` shape:
+    /// `{ pullRequest: {...}, branch, worktreePath }`. We can't stage a real
+    /// GitHub PR in CI, so this is a `#[ignore]`-gated integration test: run
+    /// it manually against a real repo with an open PR (set
+    /// `GIT_PREPARE_PR_TEST_REPO` to the repo path and
+    /// `GIT_PREPARE_PR_TEST_NUMBER` to an open PR number). Verifies the full
+    /// resolve→worktree composition end-to-end including the worktree directory
+    /// existing on disk.
+    #[tokio::test]
+    #[ignore = "requires a real GitHub repo + open PR (set GIT_PREPARE_PR_TEST_REPO + GIT_PREPARE_PR_TEST_NUMBER)"]
+    async fn git_prepare_pull_request_thread_real_pr_composition() {
+        let Some(repo) = std::env::var_os("GIT_PREPARE_PR_TEST_REPO") else {
+            eprintln!("skipping: GIT_PREPARE_PR_TEST_REPO not set");
+            return;
+        };
+        let Ok(num) = std::env::var("GIT_PREPARE_PR_TEST_NUMBER") else {
+            eprintln!("skipping: GIT_PREPARE_PR_TEST_NUMBER not set");
+            return;
+        };
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.preparePullRequestThread",
+            "params": {
+                "cwd": repo.to_string_lossy(),
+                "number": num.parse::<i64>().unwrap(),
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(
+            resp.error.is_none(),
+            "real-PR composition must succeed, got error: {:?}",
+            resp.error
+        );
+        let result = resp.result.expect("result envelope");
+        // MCode GitPreparePullRequestThreadResult shape.
+        let pr = &result["pullRequest"];
+        assert!(pr.is_object(), "pullRequest must be an object, got {result}");
+        assert!(
+            pr["number"].as_i64().is_some(),
+            "pullRequest.number must be populated"
+        );
+        assert!(
+            pr["headBranch"].as_str().is_some_and(|s| !s.is_empty()),
+            "pullRequest.headBranch must be non-empty"
+        );
+        let branch = result["branch"].as_str().expect("branch string");
+        assert!(
+            !branch.is_empty(),
+            "branch must echo the head branch name"
+        );
+        assert_eq!(
+            branch,
+            pr["headBranch"].as_str().unwrap(),
+            "branch must equal pullRequest.headBranch"
+        );
+        // The worktree must exist on disk when worktreePath is populated.
+        if let Some(wt) = result["worktreePath"].as_str() {
+            assert!(
+                std::path::Path::new(wt).is_dir(),
+                "worktreePath must point to a real directory: {wt}"
             );
         }
     }
