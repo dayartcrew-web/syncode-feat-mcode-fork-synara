@@ -319,12 +319,9 @@ async fn dispatch_method(
         // orchestrator's `replay_read_model` seeds the projection from any
         // stored aggregate snapshots, then replays each aggregate's tail, so
         // `seed + tail == full replay` (plain full replay when no snapshots).
-        // Returns `{ replayed, seeded }` — `replayed` is the total number of
-        // events read, `seeded` is the number of snapshots used (0 on a cold
-        // store with no snapshots).
-        "orchestration.replayEvents" | "orchestration/replayEvents" => {
-            handle_orchestration_replay_events(state, id).await
-        }
+        // Note: `orchestration.replayEvents` is handled in the orchestration
+        // dispatch block below (line ~998) via the 3-arg variant that also
+        // supports optional `aggregateId` scoping.
 
         // ─── Git Methods (syncode-git-backed) ─────────────────────
         // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
@@ -995,7 +992,7 @@ async fn dispatch_method(
         "orchestration.getFullThreadDiff" | "orchestration/get-full-thread-diff" => {
             handle_orchestration_get_full_thread_diff(state, id, &request.params).await
         }
-        "orchestration.replayEvents" | "orchestration/replay-events" => {
+        "orchestration.replayEvents" | "orchestration/replay-events" | "orchestration/replayEvents" => {
             handle_orchestration_replay_events(state, id, &request.params).await
         }
         "orchestration.repairState" | "orchestration/repair-state" => {
@@ -1488,11 +1485,11 @@ async fn handle_orchestration_replay_events(
     let scope = aggregate_id.unwrap_or("all").to_string();
 
     match state.orchestrator.replay_read_model().await {
-        Ok(count) => JsonRpcResponse::success(
+        Ok((replayed, seeded)) => JsonRpcResponse::success(
             id,
             serde_json::json!({
-                "replayed": true,
-                "eventsReplayed": count,
+                "replayed": replayed,
+                "seeded": seeded,
                 "scope": scope,
             }),
         ),
@@ -2458,31 +2455,6 @@ async fn handle_orchestration_get_latest_turn(
         .cloned()
         .map(|t| serde_json::to_value(&t).unwrap_or(Value::Null));
     JsonRpcResponse::success(id, latest.unwrap_or(Value::Null))
-}
-
-/// `orchestration.replayEvents` handler — rebuilds the in-memory read model
-/// from the event repository. Delegates to `Orchestrator::replay_read_model`
-/// (pipeline.rs:690), which seeds the projection from any stored aggregate
-/// snapshots then replays each aggregate's tail.
-///
-/// Returns `{ replayed, seeded }` where `replayed` is the total number of
-/// events read from the repository and `seeded` is the number of snapshots
-/// used to seed the projection (0 when none exist).
-async fn handle_orchestration_replay_events(state: &WsState, id: Value) -> JsonRpcResponse {
-    match state.orchestrator.replay_read_model().await {
-        Ok((replayed, seeded)) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({
-                "replayed": replayed,
-                "seeded": seeded,
-            }),
-        ),
-        Err(e) => JsonRpcResponse::error(
-            Some(id),
-            crate::error_codes::INTERNAL_ERROR,
-            format!("replay_read_model failed: {e}"),
-        ),
-    }
 }
 
 // ─── Server config / settings / lifecycle Handlers (T6c-4) ───────
