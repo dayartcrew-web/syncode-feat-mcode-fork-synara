@@ -8,8 +8,8 @@
 
 ## TL;DR
 - **Frontend**: MCode `apps/web` cloned + rewired — **type-clean (tsc 0)**, suite **2128/0 pass**, vite build green.
-- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **113 served RPCs** dispatching MCode dot-names + slash forms. **ZERO actively-called UI RPCs unserved.**
-- **Every UI panel's RPCs reach the backend.** Read-side is REAL where Syncode has the subsystem; STUB-defaults where it doesn't. Terminal streams live output; automations actually execute; LLM ops work via provider CLI (no API key).
+- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **113 served RPCs** dispatching MCode dot-names + slash forms. **ZERO actively-called UI RPCs unserved.** ws **227 tests**.
+- **Every UI panel's RPCs reach the backend — nearly ALL REAL.** Chat works (ProviderCommandReactor wired). Only voice (STT) remains a graceful stub (needs whisper install); all other domains return real data/logic.
 
 ## Legend
 - ✅ **REAL** — backed by real Syncode logic/data (git2, syncode-terminal, scheduler, read_model, provider CLI, …).
@@ -80,7 +80,7 @@
 ### Stats (Profile)
 | RPC | Status | Backed by |
 |---|---|---|
-| `stats.getProfileStats` / `getProfileTokenStats` | 🟡 STUB-empty | no stats/telemetry subsystem |
+| `stats.getProfileStats` / `getProfileTokenStats` | ✅ REAL | `read_store` (project/thread/turn/message counts) + `UsageStore` (per-provider token totals, lifetime tokens, peak day, provider breakdown) |
 
 ### Auth / infra
 | RPC | Status | Backed by |
