@@ -1,6 +1,6 @@
 # Syncode — Clone+Rewire Status & REAL-vs-STUB Matrix
 
-> **Status (2026-07-04): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32. **Server (config/Settings) section re-audited 2026-07-04** against code post-sync to `7789fa9`.
+> **Status (2026-07-04): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32. **Server (config/Settings) section re-audited 2026-07-04** against code post-sync to `7789fa9`. **Desktop WS spawn (DSK-1) added 2026-07-04** — in-process WS server now boots inside Tauri `.setup()`.
 >
 > This is the single source of truth for "mana yang masih stub vs real app-wired." Other docs (`COMPARISON-FRONTEND`, `CONTRACTS-BRIDGE-DESIGN`, `SHELL-GAPS`, `TEST_SUMMARY`, `CRATES`, `ARCHITECTURE`) carry detail/history; this file carries current status.
 
@@ -105,10 +105,11 @@
 | Contracts bridge (`@t3tools/contracts` shim) | ✅ complete — 139 Tier-3 symbols + RPC registry + 44-event union + branded IDs |
 | Transport (`wsTransport` JSON-RPC) | ✅ Effect-free; `MCODE_TO_SERVED` (88 mappings) |
 | Standalone WS backend | ✅ `cargo run -p syncode-ws --bin server` (SQLite, env-configurable) |
+| **In-process WS server (Tauri)** | ✅ **DSK-1** — desktop `.setup()` spawns the same axum WS server (`ws_setup::boot`) on `SYNCODE_WS_PORT` (default **30101**); shared `WsState` managed by Tauri → IPC commands + WS handlers see the same backend. `/ws` endpoint verified reachable (101 upgrade + JSON-RPC ping round-trip). 5 integration tests (`tests/ws_spawn.rs`). |
 | Terminal live output | ✅ reader-task → push bus |
 | Automation execution | ✅ `ProcessRunExecutor` (sh -c) |
 | LLM ops | ✅ provider CLI one-shot (`llm.rs::invoke_llm_oneshot`) — **no API key** (providers use CLI auth) |
-| Desktop shell (Tauri) | ✅ builds + 28 commands wired; **boot E2E not verified** (headless — needs a display) |
+| Desktop shell (Tauri) | ✅ builds + **29 commands** wired (added `getWsEndpoint`); WS server spawned in `.setup()` (DSK-1). **GUI window boot still needs a display** (headless-blocked), but WS-layer boot E2E verified. |
 
 ## Test/quality state
 - **Frontend**: tsc **0 errors**, vitest **2128 pass / 0 fail**, vite build green.
@@ -120,7 +121,7 @@
 - **GitHub-API ops** — achievable via `gh api` subprocess (gh CLI authed); niche PR-handoff flow.
 - **voice ops** (transcribeVoice/…) — STT subsystem (different from LLM-text).
 - **Real persistence for server settings** — ✅ **DONE (SRV-1)**: `ServerSettingsState` now write-throughs to SQLite `server_config`/`server_settings` tables; edits survive a restart (server binary attaches the pool in `build_state`).
-- **Desktop GUI boot E2E** — needs a display (headless-blocked).
+- **Desktop GUI boot E2E** — needs a display (headless-blocked). **WS-layer boot is verified** (DSK-1: server spawns in `.setup()`, `/ws` reachable, JSON-RPC round-trips); only the webview window rendering is unverified without a display.
 
 ---
 
