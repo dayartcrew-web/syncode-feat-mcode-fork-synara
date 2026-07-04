@@ -1221,6 +1221,36 @@ export const SERVED_RPC = {
     request: null as unknown as ServerStopLocalServerInput,
     result: null as unknown as Record<string, unknown>,
   },
+  // ─── T6c-29: orchestration generic RPCs ───────────────────────────
+  // All 6 accept a generic params object and return a generic result object;
+  // the typed shapes live on the wire but are intentionally loose here (the
+  // engine-side Command/Result enums are Rust-only). The transport remaps the
+  // MCode dot-strings onto these slash keys (see MCODE_TO_SERVED in
+  // wsTransport.ts).
+  "orchestration/dispatch-command": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "orchestration/subscribe-shell": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "orchestration/get-turn-diff": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "orchestration/get-full-thread-diff": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "orchestration/replay-events": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "orchestration/repair-state": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -1362,11 +1392,11 @@ export const UNSERVED_RPC = [
   "project.startDevServer",
   "project.stopDevServer",
 
-  // ─── Orchestration extras (beyond served thread/turn set) — ~7 ──────
-  "orchestration.dispatchCommand",
-  "orchestration.getFullThreadDiff",
-  "orchestration.getTurnDiff",
-  "orchestration.replayEvents",
+  // ─── Orchestration extras (beyond served thread/turn set) ────────────
+  // T6c-29 made 4 of these SERVED (dispatchCommand, getFullThreadDiff,
+  // getTurnDiff, replayEvents — mapped to slash forms via MCODE_TO_SERVED).
+  // subscribeShell / repairState are NEW served RPCs (no MCode dot-name in
+  // UNSERVED_RPC). The remaining ~3 are still unserved.
   "orchestration.subscribeEvents",
   "orchestration.repairReadModel",
   "orchestration.getLatestTurn",

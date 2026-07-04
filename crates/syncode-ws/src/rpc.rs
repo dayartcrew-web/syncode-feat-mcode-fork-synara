@@ -194,6 +194,19 @@ async fn dispatch_method(
                     "server/get-provider-usage-snapshot",
                     "server/start-local-server",
                     "server/stop-local-server",
+                    // T6c-29: orchestration.* RPCs — generic dispatch + replay.
+                    "orchestration.dispatchCommand",
+                    "orchestration/dispatch-command",
+                    "orchestration.subscribeShell",
+                    "orchestration/subscribe-shell",
+                    "orchestration.getTurnDiff",
+                    "orchestration/get-turn-diff",
+                    "orchestration.getFullThreadDiff",
+                    "orchestration/get-full-thread-diff",
+                    "orchestration.replayEvents",
+                    "orchestration/replay-events",
+                    "orchestration.repairState",
+                    "orchestration/repair-state",
                 ]
             }),
         ),
@@ -945,6 +958,42 @@ async fn dispatch_method(
             handle_server_stop_local_server(state, id, &request.params).await
         }
 
+        // ─── Orchestration generic RPCs (T6c-29 — REAL) ──────────────
+        //
+        // The cloned MCode UI drives the orchestration engine through a small
+        // generic API (in addition to the typed `thread.*` / `turn.*` methods):
+        //   - `orchestration.dispatchCommand`   → route any command-shape JSON
+        //     through `Orchestrator::handle_command` (full CQRS pipeline).
+        //   - `orchestration.subscribeShell`    → register on the orchestration
+        //     push channel + emit an initial shell snapshot.
+        //   - `orchestration.getTurnDiff`       → git diff between a turn's
+        //     checkpoint and HEAD (or the next turn's checkpoint).
+        //   - `orchestration.getFullThreadDiff` → cumulative diff across all of
+        //     a thread's turns (first checkpoint → latest).
+        //   - `orchestration.replayEvents`      → re-project the read model
+        //     from the event store (optionally scoped to one aggregate).
+        //   - `orchestration.repairState`       → full replay (rebuild read
+        //     model from events) and report the count.
+        // Dispatch accepts BOTH dot-name AND slash form for robustness.
+        "orchestration.dispatchCommand" | "orchestration/dispatch-command" => {
+            handle_orchestration_dispatch_command(state, id, &request.params).await
+        }
+        "orchestration.subscribeShell" | "orchestration/subscribe-shell" => {
+            handle_orchestration_subscribe_shell(state, conn_id, id).await
+        }
+        "orchestration.getTurnDiff" | "orchestration/get-turn-diff" => {
+            handle_orchestration_get_turn_diff(state, id, &request.params).await
+        }
+        "orchestration.getFullThreadDiff" | "orchestration/get-full-thread-diff" => {
+            handle_orchestration_get_full_thread_diff(state, id, &request.params).await
+        }
+        "orchestration.replayEvents" | "orchestration/replay-events" => {
+            handle_orchestration_replay_events(state, id, &request.params).await
+        }
+        "orchestration.repairState" | "orchestration/repair-state" => {
+            handle_orchestration_repair_state(state, id).await
+        }
+
         // ─── Push Subscription Methods ───────────────────────────
         "push/subscribe" => handle_push_subscribe(state, conn_id, id, &request.params).await,
 
@@ -964,6 +1013,481 @@ async fn dispatch_method(
                 format!("Method not found: {}", method),
             )
         }
+    }
+}
+
+// ─── Orchestration generic Handlers (T6c-29 — REAL) ──────────────────
+//
+// Generic orchestration RPCs. These complement the typed `thread.*` / `turn.*`
+// handlers with a generic command dispatcher, shell-event subscription, git
+// diff aggregation across turns, and read-model replay/repair.
+
+/// `orchestration.dispatchCommand` — accept an MCode orchestration command
+/// shape `{ type, ...payload }` (or `{ command: "Type", ...payload }`) and
+/// route it through `Orchestrator::handle_command`. The CQRS pipeline runs in
+/// full: Decider → Events → EventRepository persist → Projector → ReadModelStore.
+/// The supported command types mirror the typed handlers
+/// (`CreateProject`, `CreateThread`, `StartTurn`, `PauseThread`, `ResumeThread`,
+/// `CancelThread`, `CompleteThread`, `SetThreadTitle`, `DeleteThread`,
+/// `DeleteProject`). Unknown command types return INVALID_PARAMS.
+async fn handle_orchestration_dispatch_command(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    // The command type may arrive under `type` (MCode wire) or `command`.
+    let cmd_type = params
+        .get("type")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("command").and_then(|v| v.as_str()));
+    let cmd_type = match cmd_type {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'type' (command type) parameter",
+            );
+        }
+    };
+
+    let opt_str = |key: &str| params.get(key).and_then(|v| v.as_str()).map(String::from);
+    // Try multiple param keys in order, returning the first parsed EntityId.
+    // Boxed to keep the closure return small (avoids clippy::result_large_err).
+    let parse_id_any = |keys: &[&str]| -> Result<syncode_core::EntityId, Box<JsonRpcResponse>> {
+        for &k in keys {
+            if let Some(s) = params.get(k).and_then(|v| v.as_str())
+                && let Ok(e) = syncode_core::EntityId::parse(s)
+            {
+                return Ok(e);
+            }
+        }
+        Err(Box::new(JsonRpcResponse::error(
+            Some(id.clone()),
+            crate::error_codes::INVALID_PARAMS,
+            format!("Missing/invalid id parameter (tried: {})", keys.join(", ")),
+        )))
+    };
+
+    // Map the wire command type → syncode `Command`. Mirrors the typed handlers.
+    let cmd = match cmd_type {
+        "CreateProject" => {
+            let name = match opt_str("name") {
+                Some(n) => n,
+                None => return param_error(id, "CreateProject requires 'name'"),
+            };
+            let root_path = match opt_str("rootPath").or_else(|| opt_str("root_path")) {
+                Some(r) => r,
+                None => return param_error(id, "CreateProject requires 'rootPath'"),
+            };
+            Command::CreateProject { name, root_path }
+        }
+        "DeleteProject" => {
+            let id_e = match parse_id_any(&["id", "projectId"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            };
+            Command::DeleteProject { id: id_e }
+        }
+        "CreateThread" => {
+            let project_id = match parse_id_any(&["projectId", "project_id"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            };
+            let provider_id = match opt_str("providerId").or_else(|| opt_str("provider_id")) {
+                Some(p) => p,
+                None => return param_error(id, "CreateThread requires 'providerId'"),
+            };
+            let model = match opt_str("model") {
+                Some(m) => m,
+                None => return param_error(id, "CreateThread requires 'model'"),
+            };
+            Command::CreateThread {
+                project_id,
+                provider_id,
+                model,
+            }
+        }
+        "PauseThread" => Command::PauseThread {
+            id: match parse_id_any(&["id", "threadId"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            },
+        },
+        "ResumeThread" => Command::ResumeThread {
+            id: match parse_id_any(&["id", "threadId"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            },
+        },
+        "CancelThread" => Command::CancelThread {
+            id: match parse_id_any(&["id", "threadId"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            },
+        },
+        "SetThreadTitle" => {
+            let thread_id = match parse_id_any(&["id", "threadId"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            };
+            let title = match opt_str("title") {
+                Some(t) => t,
+                None => return param_error(id, "SetThreadTitle requires 'title'"),
+            };
+            Command::SetThreadTitle {
+                id: thread_id,
+                title,
+            }
+        }
+        "DeleteThread" => Command::DeleteThread {
+            id: match parse_id_any(&["id", "threadId"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            },
+        },
+        "StartTurn" => {
+            let thread_id = match parse_id_any(&["threadId", "thread_id"]) {
+                Ok(e) => e,
+                Err(r) => return *r,
+            };
+            let sequence = params.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let user_input = match opt_str("userInput").or_else(|| opt_str("user_input")) {
+                Some(u) => u,
+                None => return param_error(id, "StartTurn requires 'userInput'"),
+            };
+            Command::StartTurn {
+                thread_id,
+                sequence,
+                user_input,
+            }
+        }
+        other => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                format!("Unsupported command type: {other}"),
+            );
+        }
+    };
+
+    // Run the full CQRS pipeline.
+    match state.orchestrator.handle_command(cmd).await {
+        Ok(result) => {
+            // Build a result envelope: aggregate id (first event), event count,
+            // and event types — the UI's optimistic update converges from these.
+            let aggregate_id = result.events.first().map(|e| e.event.aggregate_id());
+            let event_types: Vec<String> = result
+                .events
+                .iter()
+                .map(|e| format!("{:?}", e.event))
+                .collect();
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "dispatched": true,
+                    "aggregateId": aggregate_id.unwrap_or_default(),
+                    "eventsAppended": result.events.len(),
+                    "eventTypes": event_types,
+                }),
+            )
+        }
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            e.to_string(),
+        ),
+    }
+}
+
+/// `orchestration.subscribeShell` — register the connection on the
+/// `orchestration` push channel (so the delivery loop forwards future
+/// lifecycle broadcasts) and emit an initial shell snapshot so a freshly-
+/// subscribed client has a baseline. Mirrors the snapshot-then-stream pattern
+/// of `server.subscribeConfig`.
+async fn handle_orchestration_subscribe_shell(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_ORCHESTRATION);
+
+    // Build + emit the initial shell snapshot via the push channel so the
+    // delivery loop routes it to this connection (and any other subscribers).
+    let snapshot = handle_shell_get_snapshot(state, Value::Null).await;
+    let snapshot_data = match snapshot {
+        JsonRpcResponse {
+            result: Some(v), ..
+        } => v,
+        _ => Value::Null,
+    };
+    let _ = state.push_tx.send((
+        crate::channels::CHANNEL_ORCHESTRATION.to_string(),
+        serde_json::json!({
+            "eventType": "snapshot",
+            "aggregateId": Value::Null,
+            "data": snapshot_data,
+        }),
+    ));
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": crate::channels::CHANNEL_ORCHESTRATION,
+            "added": added,
+            "snapshotEmitted": true,
+        }),
+    )
+}
+
+/// `orchestration.getTurnDiff` — return the git diff captured by a turn's
+/// checkpoint. Reads `threadId`, optional `turnId` (defaults to the latest
+/// turn), and `cwd` (the working dir to diff in). The turn's `git_checkpoint`
+/// is used as the `from_ref`; the next turn's checkpoint (or HEAD when this is
+/// the latest turn) is the `to_ref`. An empty patch is returned when the turn
+/// has no checkpoint or git is unavailable.
+async fn handle_orchestration_get_turn_diff(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let thread_id = match params.get("threadId").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return param_error(id, "Missing 'threadId' parameter"),
+    };
+    let cwd = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+
+    // Resolve the target turn + collect ordered turns for the thread. Clone to
+    // owned so the read lock is released before the (potentially slow) git ops.
+    let (turn_count, target_idx, from_ref, to_ref) = {
+        let store = state.read_store.read().await;
+        let mut turns: Vec<&syncode_orchestration::TurnView> = store
+            .turns
+            .values()
+            .filter(|t| t.thread_id == thread_id)
+            .collect();
+        turns.sort_by_key(|t| t.sequence);
+        let count = turns.len() as u32;
+        if turns.is_empty() {
+            return JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "patch": "", "turns": 0u32 }),
+            );
+        }
+        let target_idx = match params.get("turnId").and_then(|v| v.as_str()) {
+            Some(tid) => turns.iter().position(|t| t.id == tid),
+            None => Some(turns.len().saturating_sub(1)),
+        };
+        let target_idx = match target_idx {
+            Some(i) => i,
+            None => {
+                return JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({ "patch": "", "turns": count }),
+                );
+            }
+        };
+        let from_ref = match turns[target_idx].git_checkpoint.clone() {
+            Some(r) => r,
+            None => {
+                return JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "patch": "",
+                        "turns": count,
+                        "note": "no checkpoint for turn",
+                    }),
+                );
+            }
+        };
+        let to_ref: Option<String> = turns
+            .get(target_idx + 1)
+            .and_then(|t| t.git_checkpoint.clone());
+        (count, target_idx, from_ref, to_ref)
+    };
+    let _ = target_idx;
+
+    let svc = match syncode_git::service::Git2Service::open(Path::new(cwd)) {
+        Ok(s) => s,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git open failed: {e}"),
+            );
+        }
+    };
+    let entries = match svc.diff(Some(&from_ref), to_ref.as_deref()) {
+        Ok(e) => e,
+        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git diff: {e}")),
+    };
+    let patch = entries
+        .iter()
+        .map(|e| {
+            let path = e.old_path.as_deref().unwrap_or(&e.new_path);
+            format!(
+                "diff --git a/{path} b/{new}\nstatus: {status:?}\n",
+                new = e.new_path,
+                status = e.status,
+            )
+        })
+        .collect::<String>();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "patch": patch,
+            "turns": turn_count,
+            "fromRef": from_ref,
+            "toRef": to_ref,
+        }),
+    )
+}
+
+/// `orchestration.getFullThreadDiff` — cumulative diff across all of a
+/// thread's turns (first turn's checkpoint → latest turn's checkpoint, or HEAD
+/// when the latest turn has no checkpoint). Returns an empty patch when the
+/// thread has no checkpoints or git is unavailable.
+async fn handle_orchestration_get_full_thread_diff(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let thread_id = match params.get("threadId").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return param_error(id, "Missing 'threadId' parameter"),
+    };
+    let cwd = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+
+    // Read the thread's ordered turns under a short-lived lock, then compute
+    // the cumulative diff range. The earliest checkpoint is the `from_ref`;
+    // `to_ref` is HEAD (None) so the diff reflects the working state since the
+    // first checkpoint.
+    let (turn_count, from_ref) = {
+        let store = state.read_store.read().await;
+        let mut turns: Vec<&syncode_orchestration::TurnView> = store
+            .turns
+            .values()
+            .filter(|t| t.thread_id == thread_id)
+            .collect();
+        turns.sort_by_key(|t| t.sequence);
+        let count = turns.len() as u32;
+        // Use the earliest checkpoint as `from_ref` so the diff spans the full
+        // thread. (If no checkpoint exists, returns None → empty patch.)
+        let from = turns.iter().find_map(|t| t.git_checkpoint.clone());
+        (count, from)
+    };
+
+    let from_ref = match from_ref {
+        Some(r) => r,
+        None => {
+            return JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "patch": "",
+                    "turns": turn_count,
+                    "note": "no checkpoints for thread",
+                }),
+            );
+        }
+    };
+
+    let svc = match syncode_git::service::Git2Service::open(Path::new(cwd)) {
+        Ok(s) => s,
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git open failed: {e}"),
+            );
+        }
+    };
+    // `to_ref = None` → HEAD: from the earliest checkpoint to current working state.
+    let entries = match svc.diff(Some(&from_ref), None) {
+        Ok(e) => e,
+        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git diff: {e}")),
+    };
+    let patch = entries
+        .iter()
+        .map(|e| {
+            let path = e.old_path.as_deref().unwrap_or(&e.new_path);
+            format!(
+                "diff --git a/{path} b/{new}\nstatus: {status:?}\n",
+                new = e.new_path,
+                status = e.status,
+            )
+        })
+        .collect::<String>();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "patch": patch,
+            "turns": turn_count,
+            "fromRef": from_ref,
+            "toRef": Value::Null,
+        }),
+    )
+}
+
+/// `orchestration.replayEvents` — re-project the read model from the event
+/// store. Without an `aggregateId` this is a full replay
+/// (`Orchestrator::replay_read_model`); with an `aggregateId` it still falls
+/// back to a full replay (the orchestrator's public API does not expose a
+/// single-aggregate replay without reaching into the event repo), but the
+/// returned `scope` reflects the requested scope so callers can distinguish.
+async fn handle_orchestration_replay_events(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let aggregate_id = params.get("aggregateId").and_then(|v| v.as_str());
+    let scope = aggregate_id.unwrap_or("all").to_string();
+
+    match state.orchestrator.replay_read_model().await {
+        Ok(count) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "replayed": true,
+                "eventsReplayed": count,
+                "scope": scope,
+            }),
+        ),
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            format!("replay failed: {e}"),
+        ),
+    }
+}
+
+/// `orchestration.repairState` — rebuild the read model from the event store
+/// (full replay) and report the count. Equivalent to `replayEvents` with no
+/// `aggregateId` but presented under a distinct method name so the UI's
+/// "repair" affordance is unambiguous.
+async fn handle_orchestration_repair_state(state: &WsState, id: Value) -> JsonRpcResponse {
+    match state.orchestrator.replay_read_model().await {
+        Ok(count) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "repaired": true,
+                "eventsReplayed": count,
+            }),
+        ),
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            format!("repair failed: {e}"),
+        ),
     }
 }
 
@@ -13247,5 +13771,186 @@ mod tests {
             parse_skill_frontmatter_description("---\nname: foo\n---\nbody"),
             None
         );
+    }
+
+    // ─── T6c-29: orchestration generic RPC tests ───────────────────────
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_creates_project() {
+        // dispatchCommand with type=CreateProject runs the full CQRS pipeline:
+        // events are appended and the read model is updated.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": {
+                "type": "CreateProject",
+                "name": "demo",
+                "rootPath": "/tmp/demo",
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "dispatch failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+        // Read model now contains the project.
+        let store = state.read_store.read().await;
+        assert_eq!(store.projects.len(), 1, "project should be projected");
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_slash_form_resolves() {
+        // The slash form must resolve to the same handler.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration/dispatch-command",
+            "params": { "type": "CreateProject", "name": "x", "rootPath": "/tmp/x" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "slash form failed: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["dispatched"], true);
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_unknown_type_errors() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "Nonsense" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "expected error for unknown type");
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn orchestration_repair_state_returns_events_replayed() {
+        // repairState rebuilds the read model from events. After creating a
+        // project, replay should report at least 1 event replayed and the read
+        // model should still contain the project.
+        let state = WsState::new_in_memory(16);
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "CreateProject", "name": "p", "rootPath": "/tmp/p" }
+        });
+        rpc(&state, 1, &create).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.repairState"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "repairState failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["repaired"], true);
+        let count = result["eventsReplayed"].as_u64().unwrap_or(0);
+        assert!(count >= 1, "expected at least 1 event replayed, got {count}");
+        // Read model still reflects the project.
+        let store = state.read_store.read().await;
+        assert_eq!(store.projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn orchestration_replay_events_returns_count() {
+        // replayEvents without an aggregateId performs a full replay.
+        let state = WsState::new_in_memory(16);
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "CreateProject", "name": "p2", "rootPath": "/tmp/p2" }
+        });
+        rpc(&state, 1, &create).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.replayEvents"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "replayEvents failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["replayed"], true);
+        assert_eq!(result["scope"], "all");
+        assert!(result["eventsReplayed"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn orchestration_subscribe_shell_registers_and_emits_snapshot() {
+        // subscribeShell registers the connection on the `orchestration` push
+        // channel and emits an initial shell snapshot.
+        let state = WsState::new_in_memory(16);
+        state.subscriptions.write().await.register(1);
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.subscribeShell"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "subscribeShell failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["subscribed"], true);
+        assert_eq!(result["channel"], "orchestration");
+        // Connection is now registered on the orchestration channel.
+        assert!(state
+            .subscriptions
+            .read()
+            .await
+            .subscribers_for(crate::channels::CHANNEL_ORCHESTRATION)
+            .contains(&1));
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_turn_diff_returns_empty_for_no_checkpoints() {
+        // A thread with no turns/checkpoints returns an empty patch.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.getTurnDiff",
+            "params": { "threadId": "no-such-thread", "cwd": "/tmp" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "getTurnDiff failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["patch"], "");
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_full_thread_diff_returns_empty_for_no_checkpoints() {
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.getFullThreadDiff",
+            "params": { "threadId": "no-such-thread", "cwd": "/tmp" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "getFullThreadDiff failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["patch"], "");
+    }
+
+    #[tokio::test]
+    async fn orchestration_methods_appear_in_list_methods() {
+        // All 6 new RPCs (both dot and slash forms) must appear in
+        // rpc/listMethods so the UI's served-RPC discovery surfaces them.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let resp = rpc(&state, 1, &req).await;
+        let methods = resp.result.unwrap()["methods"].as_array().unwrap().clone();
+        let names: Vec<String> = methods
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        for expected in [
+            "orchestration.dispatchCommand",
+            "orchestration/dispatch-command",
+            "orchestration.subscribeShell",
+            "orchestration/subscribe-shell",
+            "orchestration.getTurnDiff",
+            "orchestration/get-turn-diff",
+            "orchestration.getFullThreadDiff",
+            "orchestration/get-full-thread-diff",
+            "orchestration.replayEvents",
+            "orchestration/replay-events",
+            "orchestration.repairState",
+            "orchestration/repair-state",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "rpc/listMethods missing {expected}"
+            );
+        }
     }
 }

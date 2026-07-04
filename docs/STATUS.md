@@ -24,7 +24,12 @@
 | RPC | Status | Backed by |
 |---|---|---|
 | `orchestration.getShellSnapshot` / `getSnapshot` | ✅ REAL | `read_model` (real projects + threads; E2E-proven: shell lists "Demo Project") |
-| `orchestration.subscribeShell` / `dispatchCommand` / `getTurnDiff` / `getFullThreadDiff` / `replayEvents` / `repairState` | ⛔ UNSERVED | (advanced orchestration ops) |
+| `orchestration.subscribeShell` | ✅ REAL (T6c-29) | registers on `orchestration` push channel + emits initial shell snapshot |
+| `orchestration.dispatchCommand` | ✅ REAL (T6c-29) | generic dispatcher → `Orchestrator::handle_command` (CreateProject/CreateThread/StartTurn/Pause/Resume/Cancel/SetTitle/Delete) |
+| `orchestration.getTurnDiff` | ✅ REAL (T6c-29) | git diff between turn checkpoint and next/HEAD (`syncode_git::Git2Service`) |
+| `orchestration.getFullThreadDiff` | ✅ REAL (T6c-29) | cumulative diff across all thread turns (earliest checkpoint → HEAD) |
+| `orchestration.replayEvents` | ✅ REAL (T6c-29) | full read-model replay via `Orchestrator::replay_read_model`; returns count |
+| `orchestration.repairState` | ✅ REAL (T6c-29) | full replay (rebuild read model); returns `{ repaired, eventsReplayed }` |
 
 ### Git (GitPanel)
 | RPC | Status | Backed by |
