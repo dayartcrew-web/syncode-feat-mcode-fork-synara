@@ -305,8 +305,7 @@ pub fn merge_json(target: &mut Value, patch: &Value) {
     // already validated the patch is an object, so a non-object target is
     // the only realistic path here, and replacing it with the patch is the
     // correct outcome (the field was previously missing or wrong-typed).
-    let (Some(target_obj), Some(patch_obj)) = (target.as_object_mut(), patch.as_object())
-    else {
+    let (Some(target_obj), Some(patch_obj)) = (target.as_object_mut(), patch.as_object()) else {
         // Replace wholesale — preserves patch semantics for scalar/array
         // patches against a non-object target.
         *target = patch.clone();

@@ -16,7 +16,8 @@ async fn boot_server() -> (String, tokio::task::JoinHandle<()>) {
     let state = Arc::new(syncode_ws::WsState::new_in_memory(256));
     let app = syncode_ws::server::build_ws_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await.expect("bind ephemeral port");
+        .await
+        .expect("bind ephemeral port");
     let port = listener.local_addr().unwrap().port();
     let url = format!("ws://127.0.0.1:{}/ws", port);
 
@@ -27,10 +28,12 @@ async fn boot_server() -> (String, tokio::task::JoinHandle<()>) {
     (url, handle)
 }
 
-async fn connect(url: &str) -> tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-> {
-    let (stream, _) = tokio_tungstenite::connect_async(url).await.expect("connect");
+async fn connect(
+    url: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let (stream, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     stream
 }
 
@@ -43,43 +46,68 @@ async fn rpc_call(
 ) -> Value {
     let id = json!(uuid::Uuid::new_v4().to_string());
     let request = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-    stream.send(Message::Text(request.to_string().into())).await.expect("send");
+    stream
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .expect("send");
 
     tokio::time::timeout(Duration::from_secs(5), async {
         while let Some(Ok(msg)) = stream.next().await {
             if let Message::Text(text) = msg {
                 let v: Value = serde_json::from_str(&text).expect("parse json");
-                if v.get("id").is_some() { return v; }
+                if v.get("id").is_some() {
+                    return v;
+                }
             }
         }
         panic!("stream closed without response");
-    }).await.expect("timeout reading response")
+    })
+    .await
+    .expect("timeout reading response")
 }
 
 #[tokio::test]
 async fn ws_real_tcp_ping_pong() {
-    if !e2e_enabled() { eprintln!("[skip] ws e2e: set SYNICODE_WS_E2E=1"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] ws e2e: set SYNICODE_WS_E2E=1");
+        return;
+    }
     let (url, handle) = boot_server().await;
     let mut stream = connect(&url).await;
     let response = rpc_call(&mut stream, "ping", json!({})).await;
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["result"], "pong");
-    assert!(response.get("error").is_none(), "unexpected error: {:?}", response["error"]);
+    assert!(
+        response.get("error").is_none(),
+        "unexpected error: {:?}",
+        response["error"]
+    );
     let _ = stream.close(None).await;
     handle.abort();
 }
 
 #[tokio::test]
 async fn ws_real_tcp_project_create_and_list() {
-    if !e2e_enabled() { eprintln!("[skip] ws e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] ws e2e");
+        return;
+    }
     let (url, handle) = boot_server().await;
     let mut stream = connect(&url).await;
 
-    let create_resp = rpc_call(&mut stream, "project/create", json!({
-        "name": "e2e-project", "rootPath": "/tmp/e2e"
-    })).await;
-    assert!(create_resp.get("error").is_none(),
-        "project/create failed: {:?}", create_resp["error"]);
+    let create_resp = rpc_call(
+        &mut stream,
+        "project/create",
+        json!({
+            "name": "e2e-project", "rootPath": "/tmp/e2e"
+        }),
+    )
+    .await;
+    assert!(
+        create_resp.get("error").is_none(),
+        "project/create failed: {:?}",
+        create_resp["error"]
+    );
 
     let list_resp = rpc_call(&mut stream, "project/list", json!({})).await;
     let projects = list_resp["result"]["projects"].as_array().unwrap();
@@ -91,11 +119,17 @@ async fn ws_real_tcp_project_create_and_list() {
 
 #[tokio::test]
 async fn ws_real_tcp_invalid_method_returns_error() {
-    if !e2e_enabled() { eprintln!("[skip] ws e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] ws e2e");
+        return;
+    }
     let (url, handle) = boot_server().await;
     let mut stream = connect(&url).await;
     let response = rpc_call(&mut stream, "nonexistent/method", json!({})).await;
-    assert!(response.get("error").is_some(), "expected error for unknown method");
+    assert!(
+        response.get("error").is_some(),
+        "expected error for unknown method"
+    );
     assert_eq!(response["error"]["code"], -32601);
     let _ = stream.close(None).await;
     handle.abort();
@@ -103,14 +137,25 @@ async fn ws_real_tcp_invalid_method_returns_error() {
 
 #[tokio::test]
 async fn ws_real_tcp_push_subscribe() {
-    if !e2e_enabled() { eprintln!("[skip] ws e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] ws e2e");
+        return;
+    }
     let (url, handle) = boot_server().await;
     let mut stream = connect(&url).await;
-    let sub_resp = rpc_call(&mut stream, "push/subscribe", json!({
-        "channels": ["*"]
-    })).await;
-    assert!(sub_resp.get("error").is_none(),
-        "push/subscribe failed: {:?}", sub_resp["error"]);
+    let sub_resp = rpc_call(
+        &mut stream,
+        "push/subscribe",
+        json!({
+            "channels": ["*"]
+        }),
+    )
+    .await;
+    assert!(
+        sub_resp.get("error").is_none(),
+        "push/subscribe failed: {:?}",
+        sub_resp["error"]
+    );
     let _ = stream.close(None).await;
     handle.abort();
 }

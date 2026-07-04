@@ -7,6 +7,7 @@
 use crate::{ConnectionId, JsonRpcRequest, JsonRpcResponse, WsState};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use syncode_git::service::GitService;
 use syncode_orchestration::Command;
 
@@ -297,9 +298,7 @@ async fn dispatch_method(
         // activities). Same dual-key pattern. Returns an
         // `OrchestrationReadModel`-shaped payload (top-level
         // `snapshotSequence`, `projects`, `threads`, `updatedAt`).
-        "snapshot/get" | "orchestration.getSnapshot" => {
-            handle_snapshot_get(state, id).await
-        }
+        "snapshot/get" | "orchestration.getSnapshot" => handle_snapshot_get(state, id).await,
 
         // ─── Git Methods (syncode-git-backed) ─────────────────────
         // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
@@ -314,35 +313,26 @@ async fn dispatch_method(
         // The UI sends params under camelCase keys (`cwd`, `branch`,
         // `paths`, `scope`, `message`); we read them verbatim.
         "git.status" | "git/status" => handle_git_status(id, &request.params),
-        "git.diff"
-        | "git/diff"
-        | "git.readWorkingTreeDiff"
-        | "git/readWorkingTreeDiff" => handle_git_diff(id, &request.params),
-        "git.branchList"
-        | "git.listBranches"
-        | "git/listBranches"
-        | "git.branches"
+        "git.diff" | "git/diff" | "git.readWorkingTreeDiff" | "git/readWorkingTreeDiff" => {
+            handle_git_diff(id, &request.params)
+        }
+        "git.branchList" | "git.listBranches" | "git/listBranches" | "git.branches"
         | "git/branches" => handle_git_branches(id, &request.params),
-        "git.branchCreate"
-        | "git.createBranch"
-        | "git/createBranch"
-        | "git/create-branch" => handle_git_create_branch(id, &request.params),
-        "git.branchCheckout"
-        | "git.checkout"
-        | "git/checkout"
-        | "git/check-out" => handle_git_checkout(id, &request.params),
-        "git.branchDelete"
-        | "git.deleteBranch"
-        | "git/deleteBranch"
-        | "git/delete-branch" => handle_git_delete_branch(id, &request.params),
-        "git.stage"
-        | "git.stageFiles"
-        | "git/stageFiles"
-        | "git/add" => handle_git_stage(id, &request.params),
-        "git.unstage"
-        | "git.unstageFiles"
-        | "git/unstageFiles"
-        | "git/unstage" => handle_git_unstage(id, &request.params),
+        "git.branchCreate" | "git.createBranch" | "git/createBranch" | "git/create-branch" => {
+            handle_git_create_branch(id, &request.params)
+        }
+        "git.branchCheckout" | "git.checkout" | "git/checkout" | "git/check-out" => {
+            handle_git_checkout(id, &request.params)
+        }
+        "git.branchDelete" | "git.deleteBranch" | "git/deleteBranch" | "git/delete-branch" => {
+            handle_git_delete_branch(id, &request.params)
+        }
+        "git.stage" | "git.stageFiles" | "git/stageFiles" | "git/add" => {
+            handle_git_stage(id, &request.params)
+        }
+        "git.unstage" | "git.unstageFiles" | "git/unstageFiles" | "git/unstage" => {
+            handle_git_unstage(id, &request.params)
+        }
         "git.commit" | "git/commit" => handle_git_commit(id, &request.params),
 
         // ─── Server config / settings / lifecycle (T6c-4, T6c-18) ───────────
@@ -511,12 +501,10 @@ async fn dispatch_method(
         "terminal.resize" | "terminal/resize" => {
             handle_terminal_resize(state, id, &request.params).await
         }
-        "terminal.close"
-        | "terminal/close"
-        | "terminal.kill"
-        | "terminal/kill"
-        | "terminal.destroy"
-        | "terminal/destroy" => handle_terminal_close(state, id, &request.params).await,
+        "terminal.close" | "terminal/close" | "terminal.kill" | "terminal/kill"
+        | "terminal.destroy" | "terminal/destroy" => {
+            handle_terminal_close(state, id, &request.params).await
+        }
         "terminal.ackOutput" | "terminal/ack" | "terminal/ack-output" => {
             handle_terminal_ack(state, id, &request.params).await
         }
@@ -531,9 +519,9 @@ async fn dispatch_method(
         | "terminal/subscribe"
         | "terminal/subscribe-events"
         | "terminal.subscribe" => handle_terminal_subscribe(state, conn_id, id).await,
-        "terminal/unsubscribe"
-        | "terminal/unsubscribe-events"
-        | "terminal.unsubscribeEvents" => handle_terminal_unsubscribe(state, conn_id, id).await,
+        "terminal/unsubscribe" | "terminal/unsubscribe-events" | "terminal.unsubscribeEvents" => {
+            handle_terminal_unsubscribe(state, conn_id, id).await
+        }
 
         // ─── Automation Methods (syncode-automation-backed) ───────
         // The cloned MCode Automations panel calls `automation.*` RPCs
@@ -557,9 +545,7 @@ async fn dispatch_method(
         // Dispatch accepts BOTH the MCode dot-name AND the slash form for
         // robustness (the transport remap converts dot → slash, but a caller
         // bypassing the remap still resolves).
-        "automation.list" | "automation/list" => {
-            handle_automation_list(state, id).await
-        }
+        "automation.list" | "automation/list" => handle_automation_list(state, id).await,
         "automation.create" | "automation/create" => {
             handle_automation_create(state, id, &request.params).await
         }
@@ -572,10 +558,9 @@ async fn dispatch_method(
         "automation.delete" | "automation/delete" => {
             handle_automation_delete(state, id, &request.params).await
         }
-        "automation.runNow"
-        | "automation/run-now"
-        | "automation.run"
-        | "automation/run" => handle_automation_run_now(state, id, &request.params).await,
+        "automation.runNow" | "automation/run-now" | "automation.run" | "automation/run" => {
+            handle_automation_run_now(state, id, &request.params).await
+        }
         "automation.cancelRun" | "automation/cancel-run" => {
             handle_automation_cancel_run(state, id, &request.params).await
         }
@@ -767,12 +752,10 @@ async fn dispatch_method(
         | "git/remove-index-lock"
         | "git/removeIndexLock"
         | "git/remove_index_lock" => handle_git_remove_index_lock(id, &request.params),
-        "git.worktreeList"
-        | "git/listWorktrees"
-        | "git/worktree-list"
-        | "git.listWorktrees"
-        | "git/list-worktrees"
-        | "git/worktreeList" => handle_git_worktree_list(id, &request.params),
+        "git.worktreeList" | "git/listWorktrees" | "git/worktree-list" | "git.listWorktrees"
+        | "git/list-worktrees" | "git/worktreeList" => {
+            handle_git_worktree_list(id, &request.params)
+        }
         "git.worktreeCreate"
         | "git/createWorktree"
         | "git/worktree-create"
@@ -869,9 +852,9 @@ async fn dispatch_method(
         "git.githubRepository" | "git/github-repository" | "git/githubRepository" => {
             handle_git_github_repository(id, &request.params).await
         }
-        "git.resolvePullRequest"
-        | "git/resolve-pull-request"
-        | "git/resolvePullRequest" => handle_git_resolve_pull_request(id, &request.params).await,
+        "git.resolvePullRequest" | "git/resolve-pull-request" | "git/resolvePullRequest" => {
+            handle_git_resolve_pull_request(id, &request.params).await
+        }
         "git.handoffThread" | "git/handoff-thread" | "git/handoffThread" => {
             handle_git_handoff_thread(id, &request.params).await
         }
@@ -902,9 +885,9 @@ async fn dispatch_method(
         //
         // stub: no STT backend (T6c-future — install whisper/ffmpeg or wire a
         // STT provider) — returns a not-configured result.
-        "server.transcribeVoice"
-        | "server/transcribe-voice"
-        | "server/transcribeVoice" => handle_server_transcribe_voice(id, &request.params),
+        "server.transcribeVoice" | "server/transcribe-voice" | "server/transcribeVoice" => {
+            handle_server_transcribe_voice(id, &request.params)
+        }
         // stub: no STT backend — can't start listening.
         "server.voiceStart" | "server/voice-start" | "server/voiceStart" => {
             handle_server_voice_start(id, &request.params)
@@ -929,8 +912,7 @@ async fn dispatch_method(
         // message by prompting the provider CLI once. The reply text is parsed
         // as JSON into the MCode `ServerGenerateAutomationIntentResult` shape;
         // a parse failure yields a not-automation result carrying the raw text.
-        "server.generateAutomationIntent"
-        | "server/generate-automation-intent" => {
+        "server.generateAutomationIntent" | "server/generate-automation-intent" => {
             handle_server_generate_automation_intent(state, id, &request.params).await
         }
         // T6c-18 REAL: deep-merge the patch into the settings store + push
@@ -2470,7 +2452,13 @@ async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcRes
     // neither child process exposes its RSS portably without /proc walks,
     // which is out of scope for a diagnostics summary). Both reads are
     // cheap (HashMap snapshot / Vec clone under a short-lived lock).
-    let terminal_count = state.terminal_manager.read().await.list_sessions().await.len();
+    let terminal_count = state
+        .terminal_manager
+        .read()
+        .await
+        .list_sessions()
+        .await
+        .len();
     let local_server_count = state.local_servers.read().await.list().len();
     let child_total_count = terminal_count + local_server_count;
 
@@ -2577,9 +2565,12 @@ async fn handle_server_subscribe_config(
     // Emit the current stored config as a one-shot snapshot push so a
     // freshly-subscribed client has the baseline. Best-effort: a missing
     // connection (unregistered mid-flight) is silently a no-snapshot.
-    let snapshot_emitted =
-        emit_server_config_snapshot(state, conn_id, crate::channels::CHANNEL_SERVER_CONFIG_UPDATED)
-            .await;
+    let snapshot_emitted = emit_server_config_snapshot(
+        state,
+        conn_id,
+        crate::channels::CHANNEL_SERVER_CONFIG_UPDATED,
+    )
+    .await;
     JsonRpcResponse::success(
         id,
         serde_json::json!({
@@ -2628,11 +2619,10 @@ async fn handle_server_subscribe_provider_statuses(
     conn_id: ConnectionId,
     id: Value,
 ) -> JsonRpcResponse {
-    let added = state
-        .subscriptions
-        .write()
-        .await
-        .subscribe(conn_id, crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED);
+    let added = state.subscriptions.write().await.subscribe(
+        conn_id,
+        crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
+    );
     let snapshot_emitted = emit_server_config_snapshot(
         state,
         conn_id,
@@ -2753,11 +2743,7 @@ fn push_frame(
 /// `server.setConfig` — overwrite the stored `ServerConfig` with the params
 /// (validated as a JSON object). Pushes `server.configUpdated` with the
 /// `{ issues, providers }` slice. Returns the full updated config.
-async fn handle_server_set_config(
-    state: &WsState,
-    id: Value,
-    params: &Value,
-) -> JsonRpcResponse {
+async fn handle_server_set_config(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
     // Validate `params` is a JSON object (ServerConfig is a struct). Non-object
     // (null, array, primitive) → InvalidParams (-32602).
     if !params.is_object() {
@@ -2866,7 +2852,10 @@ async fn handle_server_update_provider(
     // Validate `provider` is a non-empty string (MCode ProviderKind union).
     // Missing/empty/wrong-type → InvalidParams (-32602) so the UI surfaces a
     // typed validation error rather than a silent no-op.
-    let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if provider.trim().is_empty() {
         return JsonRpcResponse::error(
             Some(id),
@@ -3117,10 +3106,7 @@ async fn handle_server_generate_automation_intent(
         .get("isAutomation")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if !is_automation_flag
-        && parsed.get("name").is_none()
-        && parsed.get("command").is_none()
-    {
+    if !is_automation_flag && parsed.get("name").is_none() && parsed.get("command").is_none() {
         return JsonRpcResponse::success(id, not_automation(reply));
     }
 
@@ -3237,7 +3223,10 @@ async fn handle_server_get_provider_usage_snapshot(
     id: Value,
     params: &Value,
 ) -> JsonRpcResponse {
-    let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if provider.trim().is_empty() {
         return JsonRpcResponse::error(
             Some(id),
@@ -3247,10 +3236,7 @@ async fn handle_server_get_provider_usage_snapshot(
     }
     let store = state.usage.read().await;
     match store.aggregate_for(provider) {
-        Some(agg) => JsonRpcResponse::success(
-            id,
-            usage_snapshot_json(&agg, "syncode-usage-log"),
-        ),
+        Some(agg) => JsonRpcResponse::success(id, usage_snapshot_json(&agg, "syncode-usage-log")),
         None => {
             // No usage recorded for this provider → null (UI shows empty state).
             JsonRpcResponse::success(id, Value::Null)
@@ -3395,7 +3381,11 @@ async fn handle_server_start_local_server(
         .unwrap_or_else(|| {
             format!(
                 "local-{}",
-                uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0")
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .split('-')
+                    .next()
+                    .unwrap_or("0")
             )
         });
 
@@ -3405,16 +3395,11 @@ async fn handle_server_start_local_server(
         .await
     {
         Ok(view) => {
-            let result = serde_json::to_value(&view).unwrap_or_else(|_| {
-                serde_json::json!({ "id": view.id, "pid": view.pid })
-            });
+            let result = serde_json::to_value(&view)
+                .unwrap_or_else(|_| serde_json::json!({ "id": view.id, "pid": view.pid }));
             JsonRpcResponse::success(id, result)
         }
-        Err(msg) => JsonRpcResponse::error(
-            Some(id),
-            crate::error_codes::INTERNAL_ERROR,
-            msg,
-        ),
+        Err(msg) => JsonRpcResponse::error(Some(id), crate::error_codes::INTERNAL_ERROR, msg),
     }
 }
 
@@ -3450,11 +3435,7 @@ async fn handle_server_stop_local_server(
     let mut mgr = state.local_servers.write().await;
     match mgr.stop(&server_id).await {
         Ok(()) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
-        Err(msg) => JsonRpcResponse::error(
-            Some(id),
-            crate::error_codes::INVALID_PARAMS,
-            msg,
-        ),
+        Err(msg) => JsonRpcResponse::error(Some(id), crate::error_codes::INVALID_PARAMS, msg),
     }
 }
 
@@ -3535,7 +3516,13 @@ fn handle_git_status(id: Value, params: &Value) -> JsonRpcResponse {
     };
     let status = match svc.status() {
         Ok(s) => s,
-        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git status: {e}")),
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git status: {e}"),
+            );
+        }
     };
 
     // Map syncode `GitFileStatus` → MCode `GitStatusFile` (path +
@@ -3586,7 +3573,13 @@ fn handle_git_diff(id: Value, params: &Value) -> JsonRpcResponse {
 
     let entries = match svc.diff(old_ref, new_ref) {
         Ok(e) => e,
-        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git diff: {e}")),
+        Err(e) => {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git diff: {e}"),
+            );
+        }
     };
 
     // Synthesize a minimal textual patch: one header line per changed file
@@ -3627,7 +3620,10 @@ fn handle_git_branches(id: Value, params: &Value) -> JsonRpcResponse {
     // Resolve the first current branch (the default) — MCode UI uses
     // `isDefault` to mark the repo's default branch. syncode-git doesn't
     // track defaults; we mark the current branch as default (best-effort).
-    let default_name = branches.iter().find(|b| b.is_current).map(|b| b.name.clone());
+    let default_name = branches
+        .iter()
+        .find(|b| b.is_current)
+        .map(|b| b.name.clone());
 
     let mapped: Vec<Value> = branches
         .iter()
@@ -3666,7 +3662,13 @@ fn handle_git_create_branch(id: Value, params: &Value) -> JsonRpcResponse {
         .or_else(|| params.get("name").and_then(|v| v.as_str()))
     {
         Some(n) => n.to_string(),
-        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'branch' parameter"),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'branch' parameter",
+            );
+        }
     };
     // MCode UI passes `publish` (bool); we always checkout the new branch
     // (matches the UI's createBranch+checkout sequence).
@@ -3697,7 +3699,13 @@ fn handle_git_checkout(id: Value, params: &Value) -> JsonRpcResponse {
         .or_else(|| params.get("refName").and_then(|v| v.as_str()))
     {
         Some(r) => r.to_string(),
-        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'branch' parameter"),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'branch' parameter",
+            );
+        }
     };
     match svc.checkout(&ref_name) {
         Ok(_) => JsonRpcResponse::success(id, Value::Null),
@@ -3721,7 +3729,13 @@ fn handle_git_delete_branch(id: Value, params: &Value) -> JsonRpcResponse {
         .or_else(|| params.get("name").and_then(|v| v.as_str()))
     {
         Some(n) => n.to_string(),
-        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'branch' parameter"),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'branch' parameter",
+            );
+        }
     };
     match svc.delete_branch(&name) {
         Ok(_) => JsonRpcResponse::success(id, Value::Null),
@@ -3813,7 +3827,13 @@ fn handle_git_commit(id: Value, params: &Value) -> JsonRpcResponse {
         .or_else(|| params.get("commitMessage").and_then(|v| v.as_str()))
     {
         Some(m) => m.to_string(),
-        None => return git_error(id, crate::error_codes::INVALID_PARAMS, "Missing 'message' parameter"),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'message' parameter",
+            );
+        }
     };
     match svc.commit(&message) {
         Ok(_) => JsonRpcResponse::success(id, Value::Null),
@@ -3845,10 +3865,7 @@ fn handle_git_commit(id: Value, params: &Value) -> JsonRpcResponse {
 /// `open_git_service` but returns the raw `git2` handle (needed for stash /
 /// fetch / init / index-lock ops that aren't on the `GitService` trait).
 /// Reuses the same `cwd`/`path` resolution so behavior is identical.
-fn open_git2_repo(
-    id: Value,
-    params: &Value,
-) -> Result<git2::Repository, Box<JsonRpcResponse>> {
+fn open_git2_repo(id: Value, params: &Value) -> Result<git2::Repository, Box<JsonRpcResponse>> {
     let path = params
         .get("cwd")
         .and_then(|v| v.as_str())
@@ -4196,11 +4213,7 @@ fn handle_git_fetch(id: Value, params: &Value) -> JsonRpcResponse {
         Some(s) => vec![s.to_string()],
         None => remote
             .fetch_refspecs()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.map(String::from))
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|s| s.map(String::from)).collect())
             .unwrap_or_default(),
     };
     let download = remote.download(&refspecs_owned, None);
@@ -4236,14 +4249,8 @@ fn handle_git_pull(id: Value, params: &Value) -> JsonRpcResponse {
         Ok(s) => s,
         Err(resp) => return *resp,
     };
-    let remote = params
-        .get("remote")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let branch = params
-        .get("branch")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let remote = params.get("remote").and_then(|v| v.as_str()).unwrap_or("");
+    let branch = params.get("branch").and_then(|v| v.as_str()).unwrap_or("");
     match svc.pull(remote, branch) {
         Ok(result) => {
             let json = match serde_json::to_value(&result) {
@@ -4276,14 +4283,8 @@ fn handle_git_push(id: Value, params: &Value) -> JsonRpcResponse {
         Ok(s) => s,
         Err(resp) => return *resp,
     };
-    let remote = params
-        .get("remote")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let branch = params
-        .get("branch")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let remote = params.get("remote").and_then(|v| v.as_str()).unwrap_or("");
+    let branch = params.get("branch").and_then(|v| v.as_str()).unwrap_or("");
     match svc.push(remote, branch) {
         Ok(result) => {
             let json = match serde_json::to_value(&result) {
@@ -4561,7 +4562,10 @@ fn handle_git_worktree_remove(id: Value, params: &Value) -> JsonRpcResponse {
     // `force` controls whether prune removes a dirty/locked worktree. MCode
     // UI's default is false (safe); we honor an explicit `force:true` param
     // by enabling the VALID flag (prune even if the worktree appears valid).
-    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let mut opts = git2::WorktreePruneOptions::new();
     opts.working_tree(true);
     if force {
@@ -4710,9 +4714,7 @@ fn handle_git_run_stacked_action(id: Value, params: &Value) -> JsonRpcResponse {
     if let Some(name) = branch_name.as_ref()
         && create_branch
     {
-        match <syncode_git::service::Git2Service as GitService>::create_branch(
-            &svc, name, true,
-        ) {
+        match <syncode_git::service::Git2Service as GitService>::create_branch(&svc, name, true) {
             Ok(_) => branch_status = "created".to_string(),
             Err(e) => {
                 // Surface the branch-create failure but continue the pipeline
@@ -4787,9 +4789,9 @@ fn handle_git_run_stacked_action(id: Value, params: &Value) -> JsonRpcResponse {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     let mut fut = Box::pin(pipeline.execute(&svc));
-    let results = match Pin::new(&mut fut).poll(&mut Context::from_waker(
-        &futures_util::task::noop_waker(),
-    )) {
+    let results = match Pin::new(&mut fut)
+        .poll(&mut Context::from_waker(&futures_util::task::noop_waker()))
+    {
         Poll::Ready(r) => r,
         Poll::Pending => {
             // Should never happen — `execute` has no real `.await` points.
@@ -4878,10 +4880,7 @@ fn handle_git_run_stacked_action(id: Value, params: &Value) -> JsonRpcResponse {
         } else if out.starts_with("Created PR") {
             pr_status = if r.success {
                 "created".to_string()
-            } else if err
-                .map(|e| e.contains("already exists"))
-                .unwrap_or(false)
-            {
+            } else if err.map(|e| e.contains("already exists")).unwrap_or(false) {
                 "opened_existing".to_string()
             } else {
                 "skipped_not_requested".to_string()
@@ -5164,7 +5163,11 @@ fn resolve_cwd(params: &Value) -> Option<String> {
 /// `SessionInfo` + the original request params (for `threadId`/`cwd`).
 fn session_info_to_snapshot(info: &syncode_terminal::SessionInfo, params: &Value) -> Value {
     let status = if info.alive { "running" } else { "exited" };
-    let pid = if info.pid == 0 { Value::Null } else { Value::from(info.pid) };
+    let pid = if info.pid == 0 {
+        Value::Null
+    } else {
+        Value::from(info.pid)
+    };
     // threadId: MCode sends it on open; for sessions created without one we
     // fall back to the terminalId so the snapshot is always non-null.
     let thread_id = params
@@ -5225,9 +5228,8 @@ async fn handle_terminal_open(state: &WsState, id: Value, params: &Value) -> Jso
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     // Session key: caller-provided terminalId/sessionId, or a fresh UUID.
-    let session_key = terminal_session_key(params).unwrap_or_else(|| {
-        format!("term-{}", uuid::Uuid::new_v4().hyphenated())
-    });
+    let session_key = terminal_session_key(params)
+        .unwrap_or_else(|| format!("term-{}", uuid::Uuid::new_v4().hyphenated()));
 
     let mgr = state.terminal_manager.clone();
     let create_result = {
@@ -5809,8 +5811,7 @@ const AUTOMATION_OVERLAY_KEY: &str = "__mcode_overlay__:";
 fn is_scheduler_controlled(key: &str) -> bool {
     matches!(
         key,
-        "id"
-            | "name"
+        "id" | "name"
             | "enabled"
             | "schedule"
             | "nextRunAt"
@@ -5829,7 +5830,10 @@ fn is_scheduler_controlled(key: &str) -> bool {
 /// to Manual (syncode's ScheduleType doesn't model them — kept as Manual so
 /// they never auto-fire; the panel still lists them).
 fn parse_schedule(input: &Value) -> syncode_automation::ScheduleType {
-    let kind = input.get("type").and_then(|v| v.as_str()).unwrap_or("manual");
+    let kind = input
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("manual");
     match kind {
         "once" => {
             let run_at = input
@@ -5927,27 +5931,30 @@ fn def_to_mcode_definition(def: &syncode_automation::AutomationDef) -> Value {
     let now = chrono::Utc::now().to_rfc3339();
     map.entry("projectId").or_insert(Value::Null);
     map.entry("sourceThreadId").or_insert(Value::Null);
-    map.entry("prompt")
-        .or_insert(Value::String(String::new()));
-    map.entry("modelSelection")
-        .or_insert(serde_json::json!({ "providerId": "claude", "modelId": "claude-sonnet-4-20250514" }));
+    map.entry("prompt").or_insert(Value::String(String::new()));
+    map.entry("modelSelection").or_insert(
+        serde_json::json!({ "providerId": "claude", "modelId": "claude-sonnet-4-20250514" }),
+    );
     map.entry("runtimeMode")
         .or_insert(Value::String("approval-required".into()));
     map.entry("interactionMode")
         .or_insert(Value::String("default".into()));
-    map.entry("worktreeMode").or_insert(Value::String("auto".into()));
+    map.entry("worktreeMode")
+        .or_insert(Value::String("auto".into()));
     map.entry("mode")
         .or_insert(Value::String("standalone".into()));
     map.entry("targetThreadId").or_insert(Value::Null);
     map.entry("maxIterations").or_insert(Value::Null);
     map.entry("stopOnError").or_insert(Value::Bool(true));
-    map.entry("minimumIntervalSeconds").or_insert(serde_json::json!(60));
+    map.entry("minimumIntervalSeconds")
+        .or_insert(serde_json::json!(60));
     map.entry("maxRuntimeSeconds").or_insert(Value::Null);
     map.entry("retryPolicy")
         .or_insert(serde_json::json!({ "type": "none" }));
     map.entry("misfirePolicy")
         .or_insert(Value::String("coalesce".into()));
-    map.entry("acknowledgedRisks").or_insert(serde_json::json!([]));
+    map.entry("acknowledgedRisks")
+        .or_insert(serde_json::json!([]));
     map.entry("iterationCount").or_insert(serde_json::json!(0));
     // nextRunAt / archivedAt — ensure present (Null if unset).
     map.entry("nextRunAt").or_insert(Value::Null);
@@ -5963,10 +5970,7 @@ fn def_to_mcode_definition(def: &syncode_automation::AutomationDef) -> Value {
 /// syncode run carries id/automationId/status/startedAt/endedAt/error; the
 /// MCode shape adds projectId/threadId/trigger/scheduledFor/result/etc.
 /// Missing fields are defaulted so UI field accesses stay well-typed.
-fn run_to_mcode_run(
-    run: &syncode_automation::AutomationRun,
-    project_id: &str,
-) -> Value {
+fn run_to_mcode_run(run: &syncode_automation::AutomationRun, project_id: &str) -> Value {
     let mut out = serde_json::to_value(run).unwrap_or_else(|_| Value::Object(Default::default()));
     let map = out.as_object_mut().expect("serialized run is an object");
     let now = chrono::Utc::now().to_rfc3339();
@@ -5977,12 +5981,17 @@ fn run_to_mcode_run(
     map.entry("trigger")
         .or_insert(serde_json::json!({ "type": "manual" }));
     // MCode uses `scheduledFor`; the syncode run doesn't track it — default to now.
-    map.entry("scheduledFor").or_insert(Value::String(now.clone()));
+    map.entry("scheduledFor")
+        .or_insert(Value::String(now.clone()));
     map.entry("claimedBy").or_insert(Value::Null);
     map.entry("claimedAt").or_insert(Value::Null);
     map.entry("leaseExpiresAt").or_insert(Value::Null);
-    map.entry("finishedAt")
-        .or_insert(run.ended_at.clone().map(Value::String).unwrap_or(Value::Null));
+    map.entry("finishedAt").or_insert(
+        run.ended_at
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
     map.entry("threadCreateCommandId").or_insert(Value::Null);
     map.entry("turnStartCommandId").or_insert(Value::Null);
     map.entry("messageId").or_insert(Value::Null);
@@ -5999,9 +6008,12 @@ fn run_to_mcode_run(
         .unwrap_or_else(|| Value::Object(Default::default()));
     if let Value::Object(mut result_map) = result_value {
         result_map.entry("unread").or_insert(Value::Bool(unread));
-        result_map
-            .entry("archivedAt")
-            .or_insert(archived_at.clone().map(Value::String).unwrap_or(Value::Null));
+        result_map.entry("archivedAt").or_insert(
+            archived_at
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
         map.insert("result".to_string(), Value::Object(result_map));
     }
     map.entry("permissionSnapshot")
@@ -6014,10 +6026,18 @@ fn run_to_mcode_run(
             "allowedCapabilities": ["send-turn"],
             "createdAt": now.clone(),
         }));
-    map.entry("createdAt")
-        .or_insert(run.started_at.clone().map(Value::String).unwrap_or(Value::String(now.clone())));
-    map.entry("updatedAt")
-        .or_insert(run.ended_at.clone().map(Value::String).unwrap_or(Value::String(now)));
+    map.entry("createdAt").or_insert(
+        run.started_at
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::String(now.clone())),
+    );
+    map.entry("updatedAt").or_insert(
+        run.ended_at
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::String(now)),
+    );
     out
 }
 
@@ -6296,7 +6316,16 @@ async fn handle_automation_run_now(state: &WsState, id: Value, params: &Value) -
     };
 
     match scheduler
-        .trigger_with_delay(&auto_id, syncode_automation::executor::Delay::Immediate)
+        .trigger_with_events(
+            &auto_id,
+            syncode_automation::executor::Delay::Immediate,
+            // PUSH-1: live event push. The sink forwards run-started /
+            // run-progress / run-completed onto `push_tx` (CHANNEL_AUTOMATION)
+            // *during* the run — mirroring the terminal reader-task pattern.
+            // No-op-safe: no subscribers → broadcast::send returns SendError,
+            // swallowed by the sink.
+            Arc::new(crate::push::AutomationPushSink::new(state.push_tx.clone())),
+        )
         .await
     {
         Ok(run_id) => {
@@ -6306,11 +6335,11 @@ async fn handle_automation_run_now(state: &WsState, id: Value, params: &Value) -
                 .unwrap_or_else(|| syncode_automation::AutomationRun::new(auto_id.clone()));
             let project_id = project_id_for_def(&def);
             let run_payload = run_to_mcode_run(&run, &project_id);
-            // Push the run snapshot to subscribed connections as a `run-upserted`
-            // lifecycle event on the `automation` channel. `trigger_with_delay`
-            // awaits `execute_run` synchronously — so by the time it returns,
-            // the run is in its terminal state (succeeded/failed) and this
-            // broadcast captures the lifecycle transition (T6c-21).
+            // Push the final run snapshot as a `run-upserted` lifecycle event
+            // on the `automation` channel. The live `run-completed` event
+            // (PUSH-1) carries only status + exit code; this `run-upserted`
+            // carries the full MCode-shaped run the UI projects from. Both
+            // coexist on the channel (T6c-21 backward compat).
             push_automation_run_upserted(state, &run_payload);
             JsonRpcResponse::success(id, serde_json::json!({ "run": run_payload }))
         }
@@ -6717,13 +6746,13 @@ fn handle_provider_read_plugin(id: Value, params: &Value) -> JsonRpcResponse {
     let path = Path::new(raw_path);
     let canonical = match path.canonicalize_unchecked().canonicalize() {
         Ok(c) => c,
-        Err(_) => return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null })),
+        Err(_) => {
+            return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null }));
+        }
     };
     // Basic traversal guard: require the canonical path to contain a `.plugins`
     // component, and reject non-`.json` extensions.
-    let in_plugins = canonical
-        .components()
-        .any(|c| c.as_os_str() == ".plugins");
+    let in_plugins = canonical.components().any(|c| c.as_os_str() == ".plugins");
     let is_json = canonical.extension().and_then(|e| e.to_str()) == Some("json");
     if !in_plugins || !is_json {
         return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null }));
@@ -6850,11 +6879,7 @@ fn resolve_skills_dir(params: &Value) -> Option<PathBuf> {
         .map(|cwd| Path::new(cwd).join(".skills"))
         .or_else(|| std::env::var_os("SYNCODE_SKILLS_DIR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(".skills"));
-    if dir.is_dir() {
-        Some(dir)
-    } else {
-        None
-    }
+    if dir.is_dir() { Some(dir) } else { None }
 }
 
 /// Parse a YAML-ish frontmatter block (`---\n...\n---`) from a markdown skill
@@ -7054,11 +7079,7 @@ fn resolve_plugins_dir(params: &Value) -> Option<PathBuf> {
         .map(|cwd| Path::new(cwd).join(".plugins"))
         .or_else(|| std::env::var_os("SYNCODE_PLUGINS_DIR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(".plugins"));
-    if dir.is_dir() {
-        Some(dir)
-    } else {
-        None
-    }
+    if dir.is_dir() { Some(dir) } else { None }
 }
 
 /// Scan the resolved plugins directory for `*.json` files and build a
@@ -7112,10 +7133,7 @@ fn read_plugin_descriptor(path: &Path) -> Option<Value> {
         return None;
     }
     let abs_path = path.canonicalize_unchecked().to_string_lossy().into_owned();
-    let enabled = obj
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let enabled = obj.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
     let install_policy = obj
         .get("installPolicy")
         .and_then(|v| v.as_str())
@@ -7162,9 +7180,7 @@ fn handle_provider_read_skill(id: Value, params: &Value) -> JsonRpcResponse {
         Ok(c) => c,
         Err(_) => return JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null })),
     };
-    let in_skills = canonical
-        .components()
-        .any(|c| c.as_os_str() == ".skills");
+    let in_skills = canonical.components().any(|c| c.as_os_str() == ".skills");
     let is_md = canonical.extension().and_then(|e| e.to_str()) == Some("md");
     if !in_skills || !is_md {
         return JsonRpcResponse::success(id, serde_json::json!({ "skill": Value::Null }));
@@ -7210,12 +7226,7 @@ async fn handle_provider_compact_thread(
 ) -> JsonRpcResponse {
     let thread_id = match params.get("threadId").and_then(|v| v.as_str()) {
         Some(t) if !t.is_empty() => t.to_string(),
-        _ => {
-            return param_error(
-                id,
-                "provider.compactThread requires a non-empty 'threadId'",
-            )
-        }
+        _ => return param_error(id, "provider.compactThread requires a non-empty 'threadId'"),
     };
 
     // Gather the thread's messages from the read model.
@@ -7242,10 +7253,7 @@ async fn handle_provider_compact_thread(
             id,
             serde_json::json!({ "ok": true, "compactedSummary": summary }),
         ),
-        Err(e) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "ok": false, "error": e }),
-        ),
+        Err(e) => JsonRpcResponse::success(id, serde_json::json!({ "ok": false, "error": e })),
     }
 }
 
@@ -7401,11 +7409,7 @@ async fn thread_history_text(state: &WsState, thread_id: &str) -> String {
 ///      GitPanel may already have it in hand).
 ///   2. `params.cwd` + optional `scope`/`oldRef`/`newRef` — fetch the working
 ///      tree diff via syncode-git (reuses `handle_git_diff`'s logic).
-async fn handle_git_summarize_diff(
-    state: &WsState,
-    id: Value,
-    params: &Value,
-) -> JsonRpcResponse {
+async fn handle_git_summarize_diff(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
     // 1. Caller-supplied diff text wins.
     let diff = params
         .get("diff")
@@ -7434,8 +7438,7 @@ async fn handle_git_summarize_diff(
                         // `handle_git_diff`).
                         let mut patch = String::new();
                         for entry in &entries {
-                            let path =
-                                entry.old_path.as_deref().unwrap_or(&entry.new_path);
+                            let path = entry.old_path.as_deref().unwrap_or(&entry.new_path);
                             patch.push_str(&format!(
                                 "diff --git a/{path} b/{new}\nstatus: {status:?}\n",
                                 new = entry.new_path,
@@ -7458,17 +7461,12 @@ async fn handle_git_summarize_diff(
     };
 
     let system = "You are a code reviewer. Summarize the following git diff in 2-4 sentences for a developer. Focus on the intent of the change, the files touched, and any notable risks. Output only the summary.";
-    let prompt = format!(
-        "Summarize this diff:\n\n```diff\n{diff}\n```"
-    );
+    let prompt = format!("Summarize this diff:\n\n```diff\n{diff}\n```");
     let provider = resolve_provider_param(params);
     let model = resolve_model_param(params);
     match invoke(state, &provider, model.as_deref(), system, &prompt).await {
         Ok(summary) => JsonRpcResponse::success(id, serde_json::json!({ "summary": summary })),
-        Err(e) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "summary": "", "error": e }),
-        ),
+        Err(e) => JsonRpcResponse::success(id, serde_json::json!({ "summary": "", "error": e })),
     }
 }
 
@@ -7488,7 +7486,7 @@ async fn handle_server_generate_thread_recap(
             return param_error(
                 id,
                 "server.generateThreadRecap requires a non-empty 'threadId'",
-            )
+            );
         }
     };
 
@@ -7508,10 +7506,7 @@ async fn handle_server_generate_thread_recap(
     let model = resolve_model_param(params);
     match invoke(state, &provider, model.as_deref(), system, &prompt).await {
         Ok(recap) => JsonRpcResponse::success(id, serde_json::json!({ "recap": recap })),
-        Err(e) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "recap": "", "error": e }),
-        ),
+        Err(e) => JsonRpcResponse::success(id, serde_json::json!({ "recap": "", "error": e })),
     }
 }
 
@@ -7550,11 +7545,7 @@ fn resolve_cwd_or_dot(params: &Value) -> String {
 /// any failure (binary missing, non-zero exit, IO error). The error message is
 /// crafted to surface to the UI (e.g. "gh auth required" / "not a GitHub
 /// repo" / "PR not found") rather than a raw stack trace.
-async fn run_cli_capture(
-    bin: &str,
-    cwd: &str,
-    args: &[&str],
-) -> Result<String, String> {
+async fn run_cli_capture(bin: &str, cwd: &str, args: &[&str]) -> Result<String, String> {
     // Validate the binary is on PATH before spawning (a spawn() failure would
     // otherwise surface as a generic IO error). `which` is a sync std call —
     // cheap, runs once per RPC.
@@ -7608,26 +7599,24 @@ async fn handle_git_github_repository(id: Value, params: &Value) -> JsonRpcRespo
         Err(_) => {
             // No `origin` remote (or not a git repo) → not a GitHub repo. The
             // MCode shape uses `null` for this case, not an error.
-            return JsonRpcResponse::success(
-                id,
-                serde_json::json!({ "repository": null }),
-            );
+            return JsonRpcResponse::success(id, serde_json::json!({ "repository": null }));
         }
     };
     let Some((owner, name)) = gh_parse::parse_github_remote(&remote_url) else {
         // origin exists but isn't a GitHub URL → null.
-        return JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "repository": null }),
-        );
+        return JsonRpcResponse::success(id, serde_json::json!({ "repository": null }));
     };
 
     // Step 2: enrich via gh (graceful on failure).
     let slug = format!("{owner}/{name}");
     let mut name_with_owner = slug.clone();
     let mut url = format!("https://github.com/{slug}");
-    if let Ok(json) =
-        run_cli_capture("gh", &cwd, &["repo", "view", &slug, "--json", "nameWithOwner,url"]).await
+    if let Ok(json) = run_cli_capture(
+        "gh",
+        &cwd,
+        &["repo", "view", &slug, "--json", "nameWithOwner,url"],
+    )
+    .await
         && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json)
     {
         if let Some(s) = parsed.get("nameWithOwner").and_then(|v| v.as_str()) {
@@ -7700,10 +7689,7 @@ async fn handle_git_resolve_pull_request(id: Value, params: &Value) -> JsonRpcRe
     };
 
     match gh_parse::parse_pr_view(&json) {
-        Ok(pr) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "pullRequest": pr }),
-        ),
+        Ok(pr) => JsonRpcResponse::success(id, serde_json::json!({ "pullRequest": pr })),
         Err(e) => JsonRpcResponse::error(
             Some(id),
             crate::error_codes::INTERNAL_ERROR,
@@ -7796,10 +7782,7 @@ async fn handle_git_handoff_thread(id: Value, params: &Value) -> JsonRpcResponse
             .find(|l| !l.trim().is_empty())
             .unwrap_or("gh pr create failed (non-zero exit)")
             .to_string();
-        return JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "ok": false, "reason": reason }),
-        );
+        return JsonRpcResponse::success(id, serde_json::json!({ "ok": false, "reason": reason }));
     }
 
     // gh pr create prints the PR URL on stdout.
@@ -7851,7 +7834,7 @@ async fn handle_git_prepare_pull_request_thread(id: Value, _params: &Value) -> J
 /// so the mappings can be unit-tested with canned fixtures (no `gh` subprocess
 /// required). The handlers above call these after capturing `gh`'s stdout.
 mod gh_parse {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     /// Parse a GitHub owner/repo pair from a git remote URL. Accepts:
     ///   - `git@github.com:owner/repo.git`
@@ -7944,10 +7927,7 @@ mod gh_parse {
             .and_then(|b| b.as_str())
             .unwrap_or("")
             .to_string();
-        let state_raw = v
-            .get("state")
-            .and_then(|s| s.as_str())
-            .unwrap_or("open");
+        let state_raw = v.get("state").and_then(|s| s.as_str()).unwrap_or("open");
         let state = match state_raw.to_ascii_lowercase().as_str() {
             "open" | "opened" => "open",
             "closed" | "close" => "closed",
@@ -7964,8 +7944,6 @@ mod gh_parse {
         }))
     }
 }
-
-
 
 /// `stats.getProfileStats` — return an empty `ProfileStats`. Syncode has no
 /// stats aggregation subsystem (no prompt/turn/token accumulator, no daily
@@ -8060,14 +8038,16 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
 
     // Top provider = largest total_tokens share. Provider list is already
     // sorted by provider_id (stable aggregate output); pick max by tokens.
-    let top_provider_agg: Option<&crate::usage::ProviderUsageAggregate> = aggregates
-        .iter()
-        .max_by_key(|a| a.total_tokens);
+    let top_provider_agg: Option<&crate::usage::ProviderUsageAggregate> =
+        aggregates.iter().max_by_key(|a| a.total_tokens);
     let (top_provider, top_provider_percent): (Value, Value) = match top_provider_agg {
         Some(agg) if grand_total_tokens > 0 => {
             let pct = (agg.total_tokens as f64 / grand_total_tokens as f64) * 100.0;
             let pct = (pct * 100.0).round() / 100.0;
-            (Value::String(agg.provider_id.clone()), serde_json::json!(pct))
+            (
+                Value::String(agg.provider_id.clone()),
+                serde_json::json!(pct),
+            )
         }
         _ => (Value::Null, Value::Null),
     };
@@ -8334,7 +8314,9 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "project/create",
             "params": { "name": "Shell Project", "rootPath": "/tmp/shell" }
         });
-        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp = handle_rpc(&state, 1, &create_proj.to_string())
+            .await
+            .unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         let project_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -8342,9 +8324,15 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "thread/create",
             "params": { "projectId": project_id, "providerId": "codex", "model": "gpt-5" }
         });
-        let resp = handle_rpc(&state, 1, &create_thread.to_string()).await.unwrap();
+        let resp = handle_rpc(&state, 1, &create_thread.to_string())
+            .await
+            .unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
-        assert!(resp.error.is_none(), "thread/create failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "thread/create failed: {:?}",
+            resp.error
+        );
 
         // shell/getSnapshot — the slash form the transports send.
         let req = serde_json::json!({
@@ -8355,7 +8343,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         // Top-level OrchestrationShellSnapshot shape.
-        assert!(result.get("snapshotSequence").is_some(), "missing snapshotSequence");
+        assert!(
+            result.get("snapshotSequence").is_some(),
+            "missing snapshotSequence"
+        );
         assert!(result.get("updatedAt").is_some(), "missing updatedAt");
         let projects = result["projects"].as_array().unwrap();
         let threads = result["threads"].as_array().unwrap();
@@ -8374,7 +8365,10 @@ mod tests {
         assert_eq!(thread["modelSelection"]["model"], "gpt-5");
         assert!(thread.get("session").is_some(), "missing session envelope");
         assert!(thread.get("runtimeMode").is_some(), "missing runtimeMode");
-        assert!(thread.get("interactionMode").is_some(), "missing interactionMode");
+        assert!(
+            thread.get("interactionMode").is_some(),
+            "missing interactionMode"
+        );
     }
 
     #[tokio::test]
@@ -8790,7 +8784,10 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["hasWorkingTreeChanges"], true);
         let files = result["workingTree"]["files"].as_array().unwrap();
-        assert!(!files.is_empty(), "expected at least one file in working tree");
+        assert!(
+            !files.is_empty(),
+            "expected at least one file in working tree"
+        );
         // Each file carries the MCode GitStatusFile fields.
         assert!(files[0].get("path").is_some());
         assert!(files[0].get("insertions").is_some());
@@ -8835,7 +8832,11 @@ mod tests {
             let result = resp.result.unwrap();
             // MCode GitListBranchesResult fields.
             let branches = result["branches"].as_array().unwrap();
-            assert!(!branches.is_empty(), "{}: expected at least one branch", method);
+            assert!(
+                !branches.is_empty(),
+                "{}: expected at least one branch",
+                method
+            );
             // The `main` branch exists and is current.
             let main = branches
                 .iter()
@@ -8869,7 +8870,10 @@ mod tests {
         let result = resp.result.unwrap();
         // MCode GitReadWorkingTreeDiffResult: { patch: string }.
         let patch = result["patch"].as_str().unwrap();
-        assert!(patch.contains("README.md"), "patch should reference changed file");
+        assert!(
+            patch.contains("README.md"),
+            "patch should reference changed file"
+        );
     }
 
     #[tokio::test]
@@ -9190,7 +9194,10 @@ mod tests {
         assert_eq!(stashes[0]["index"], 0);
         assert_eq!(stashes[0]["stashRef"], "stash@{0}");
         assert!(
-            stashes[0]["message"].as_str().unwrap_or("").contains("T6c9 stash"),
+            stashes[0]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("T6c9 stash"),
             "stash message should carry the create message: {:?}",
             stashes[0]["message"]
         );
@@ -9209,7 +9216,10 @@ mod tests {
             serde_json::Value::String(repo.to_string_lossy().to_string())
         );
         assert!(
-            result["message"].as_str().unwrap_or("").contains("T6c9 stash"),
+            result["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("T6c9 stash"),
             "stashInfo message: {:?}",
             result["message"]
         );
@@ -9394,8 +9404,7 @@ mod tests {
                 .map(str::trim)
                 .unwrap_or(&git_ptr);
             let worktree_head = std::path::Path::new(admin_dir).join("HEAD");
-            let head_content =
-                std::fs::read_to_string(&worktree_head).unwrap_or_default();
+            let head_content = std::fs::read_to_string(&worktree_head).unwrap_or_default();
             assert!(
                 !head_content.starts_with("ref: refs/heads/"),
                 "{method}: detached worktree HEAD should be an OID, got: {head_content}"
@@ -9531,7 +9540,10 @@ mod tests {
         // subscribeActionProgress is also a stub (no repo open).
         let stub_methods = [
             ("git.stashAndCheckout", "git/stash-and-checkout"),
-            ("git.subscribeActionProgress", "git/subscribe-action-progress"),
+            (
+                "git.subscribeActionProgress",
+                "git/subscribe-action-progress",
+            ),
         ];
         for (dot, slash) in stub_methods {
             for method in [dot, slash] {
@@ -9651,24 +9663,47 @@ mod tests {
             let result = resp.result.unwrap();
             // MCode ServerConfig required top-level fields (non-empty strings
             // for the TrimmedNonEmptyString schema fields; arrays present).
-            assert!(!result["cwd"].as_str().unwrap_or("").trim().is_empty(), "{}: cwd empty", method);
             assert!(
-                !result["worktreesDir"].as_str().unwrap_or("").trim().is_empty(),
-                "{}: worktreesDir empty", method
+                !result["cwd"].as_str().unwrap_or("").trim().is_empty(),
+                "{}: cwd empty",
+                method
             );
             assert!(
-                !result["keybindingsConfigPath"].as_str().unwrap_or("").trim().is_empty(),
-                "{}: keybindingsConfigPath empty", method
+                !result["worktreesDir"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty(),
+                "{}: worktreesDir empty",
+                method
             );
-            assert!(result["keybindings"].is_array(), "{}: keybindings missing", method);
+            assert!(
+                !result["keybindingsConfigPath"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty(),
+                "{}: keybindingsConfigPath empty",
+                method
+            );
+            assert!(
+                result["keybindings"].is_array(),
+                "{}: keybindings missing",
+                method
+            );
             assert!(result["keybindings"].as_array().unwrap().is_empty());
             assert!(result["issues"].as_array().unwrap().is_empty());
             assert!(result["providers"].as_array().unwrap().is_empty());
             assert!(result["availableEditors"].as_array().unwrap().is_empty());
             // authMode surfaced from WsAuthConfig (kebab-case string).
             assert!(
-                ["unsafe-no-auth", "desktop-managed-local", "loopback-browser", "remote-reachable"]
-                    .contains(&result["authMode"].as_str().unwrap_or("")),
+                [
+                    "unsafe-no-auth",
+                    "desktop-managed-local",
+                    "loopback-browser",
+                    "remote-reachable"
+                ]
+                .contains(&result["authMode"].as_str().unwrap_or("")),
                 "{}: authMode not a valid kebab literal: {:?}",
                 method,
                 result["authMode"]
@@ -9684,7 +9719,10 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         // No bootstrap → authz rejects (Read permission required in remote mode).
         // This confirms the authz gate treats server/getConfig as protected.
-        assert!(resp.error.is_some(), "expected authz rejection in remote mode");
+        assert!(
+            resp.error.is_some(),
+            "expected authz rejection in remote mode"
+        );
         assert_eq!(
             resp.error.unwrap().code,
             crate::auth::auth_error_codes::UNAUTHORIZED
@@ -9699,7 +9737,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         // MCode DEFAULT_SERVER_SETTINGS top-level fields.
-        assert_eq!(result["enableAssistantStreaming"], serde_json::Value::Bool(false));
+        assert_eq!(
+            result["enableAssistantStreaming"],
+            serde_json::Value::Bool(false)
+        );
         assert_eq!(result["defaultThreadEnvMode"], "local");
         assert!(result.get("addProjectBaseDirectory").is_some());
         assert_eq!(result["textGenerationModelSelection"]["provider"], "codex");
@@ -9714,13 +9755,28 @@ mod tests {
         assert_eq!(providers["opencode"]["binaryPath"], "opencode");
         assert_eq!(providers["pi"]["binaryPath"], "pi");
         // Each provider is enabled with an empty customModels array.
-        for key in ["codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi"] {
+        for key in [
+            "codex",
+            "claudeAgent",
+            "cursor",
+            "gemini",
+            "grok",
+            "kilo",
+            "opencode",
+            "pi",
+        ] {
             assert_eq!(
                 providers[key]["enabled"],
                 serde_json::Value::Bool(true),
-                "{} not enabled", key
+                "{} not enabled",
+                key
             );
-            assert!(providers[key]["customModels"].as_array().unwrap().is_empty());
+            assert!(
+                providers[key]["customModels"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
         }
         assert!(result["skills"]["disabled"].as_array().unwrap().is_empty());
     }
@@ -9728,20 +9784,28 @@ mod tests {
     #[tokio::test]
     async fn server_get_environment_maps_os_and_arch() {
         let state = WsState::new_in_memory(16);
-        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server/getEnvironment" });
+        let req =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server/getEnvironment" });
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         // ExecutionEnvironmentDescriptor top-level fields.
         assert!(
-            result["environmentId"].as_str().unwrap_or("").starts_with("syncode-"),
+            result["environmentId"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("syncode-"),
             "environmentId should be prefixed: {:?}",
             result["environmentId"]
         );
         assert!(!result["label"].as_str().unwrap_or("").is_empty());
         let os = result["platform"]["os"].as_str().unwrap();
         let arch = result["platform"]["arch"].as_str().unwrap();
-        assert!(["darwin", "linux", "windows", "unknown"].contains(&os), "os: {}", os);
+        assert!(
+            ["darwin", "linux", "windows", "unknown"].contains(&os),
+            "os: {}",
+            os
+        );
         assert!(["arm64", "x64", "other"].contains(&arch), "arch: {}", arch);
         assert!(!result["serverVersion"].as_str().unwrap_or("").is_empty());
         // T6c-phase-26: repositoryIdentity is now REAL — derived from a git2
@@ -9750,7 +9814,11 @@ mod tests {
         // probe failed silently (degrade-to-false) — assert it's a bool
         // either way and prefer true.
         let repo_identity = &result["capabilities"]["repositoryIdentity"];
-        assert!(repo_identity.is_boolean(), "repositoryIdentity must be bool: {:?}", repo_identity);
+        assert!(
+            repo_identity.is_boolean(),
+            "repositoryIdentity must be bool: {:?}",
+            repo_identity
+        );
     }
 
     #[tokio::test]
@@ -9763,7 +9831,8 @@ mod tests {
         });
         let _ = rpc(&state, 1, &create).await;
 
-        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "server.getDiagnostics" });
+        let req =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "server.getDiagnostics" });
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
@@ -9775,7 +9844,11 @@ mod tests {
         // still be in the same second, so accept 0 too, but the field must
         // be present as a non-null u64).
         let uptime = result["process"]["uptimeSeconds"].as_u64();
-        assert!(uptime.is_some(), "uptimeSeconds must be u64: {:?}", result["process"]["uptimeSeconds"]);
+        assert!(
+            uptime.is_some(),
+            "uptimeSeconds must be u64: {:?}",
+            result["process"]["uptimeSeconds"]
+        );
         // memory is an object; on Linux rssBytes reflects /proc VmRSS.
         assert!(result["process"]["memory"].is_object());
         assert!(result["childProcesses"].is_array());
@@ -9825,8 +9898,14 @@ mod tests {
         // register on the matching server.*Updated push channel. lifecycle
         // remains a stub. All four return success with `subscribed: true`.
         for (method, channel) in [
-            ("server.subscribeConfig", crate::channels::CHANNEL_SERVER_CONFIG_UPDATED),
-            ("server.subscribeSettings", crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED),
+            (
+                "server.subscribeConfig",
+                crate::channels::CHANNEL_SERVER_CONFIG_UPDATED,
+            ),
+            (
+                "server.subscribeSettings",
+                crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED,
+            ),
             (
                 "server.subscribeProviderStatuses",
                 crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
@@ -9837,7 +9916,12 @@ mod tests {
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            assert_eq!(result["subscribed"], serde_json::Value::Bool(true), "{}", method);
+            assert_eq!(
+                result["subscribed"],
+                serde_json::Value::Bool(true),
+                "{}",
+                method
+            );
             assert_eq!(result["channel"], channel, "{}", method);
         }
     }
@@ -9901,13 +9985,27 @@ mod tests {
             let result = resp.result.unwrap();
             // The stored config is the params verbatim (full overwrite).
             assert_eq!(result["cwd"], "/tmp/x", "{}: cwd", method);
-            assert!(result["providers"].as_array().unwrap().is_empty(), "{}: providers", method);
-            assert!(result["issues"].as_array().unwrap().is_empty(), "{}: issues", method);
+            assert!(
+                result["providers"].as_array().unwrap().is_empty(),
+                "{}: providers",
+                method
+            );
+            assert!(
+                result["issues"].as_array().unwrap().is_empty(),
+                "{}: issues",
+                method
+            );
 
             // Read back via getConfig confirms persistence.
-            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "server.getConfig" });
+            let req =
+                serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "server.getConfig" });
             let resp = rpc(&state, 1, &req).await;
-            assert_eq!(resp.result.unwrap()["cwd"], "/tmp/x", "{}: read-back cwd", method);
+            assert_eq!(
+                resp.result.unwrap()["cwd"],
+                "/tmp/x",
+                "{}: read-back cwd",
+                method
+            );
         }
     }
 
@@ -9932,9 +10030,17 @@ mod tests {
                 method
             );
             // Untouched default keys preserved (deep-merge).
-            assert_eq!(result["defaultThreadEnvMode"], "local", "{}: env mode", method);
+            assert_eq!(
+                result["defaultThreadEnvMode"], "local",
+                "{}: env mode",
+                method
+            );
             let providers = &result["providers"];
-            assert_eq!(providers["codex"]["binaryPath"], "codex", "{}: codex", method);
+            assert_eq!(
+                providers["codex"]["binaryPath"], "codex",
+                "{}: codex",
+                method
+            );
             assert_eq!(providers["pi"]["binaryPath"], "pi", "{}: pi", method);
         }
     }
@@ -9948,8 +10054,16 @@ mod tests {
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
             // ServerProviderStatusesUpdatedPayload: { providers: [] }.
-            assert!(result["providers"].is_array(), "{}: providers missing", method);
-            assert!(result["providers"].as_array().unwrap().is_empty(), "{}: not empty", method);
+            assert!(
+                result["providers"].is_array(),
+                "{}: providers missing",
+                method
+            );
+            assert!(
+                result["providers"].as_array().unwrap().is_empty(),
+                "{}: not empty",
+                method
+            );
         }
     }
 
@@ -9966,7 +10080,11 @@ mod tests {
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            assert!(result["providers"].as_array().unwrap().is_empty(), "{}: not empty", method);
+            assert!(
+                result["providers"].as_array().unwrap().is_empty(),
+                "{}: not empty",
+                method
+            );
         }
 
         // Validation: missing `provider` → InvalidParams (-32602).
@@ -10010,9 +10128,17 @@ mod tests {
             // The keybindings array contains the upserted rule (REAL — no
             // longer empty). Both iterations append (no `id` to dedupe on).
             let kbs = result["keybindings"].as_array().unwrap();
-            assert!(!kbs.is_empty(), "{}: keybindings must reflect the upsert", method);
+            assert!(
+                !kbs.is_empty(),
+                "{}: keybindings must reflect the upsert",
+                method
+            );
             assert_eq!(kbs.len(), i + 1, "{}: appended once per call", method);
-            assert!(result["issues"].as_array().unwrap().is_empty(), "{}: issues", method);
+            assert!(
+                result["issues"].as_array().unwrap().is_empty(),
+                "{}: issues",
+                method
+            );
         }
 
         // Validation: params null → InvalidParams (-32602).
@@ -10055,25 +10181,53 @@ mod tests {
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
             // Empty text + not-configured error string (no crash).
-            assert_eq!(result["text"], serde_json::Value::String("".into()), "{}: text", method);
+            assert_eq!(
+                result["text"],
+                serde_json::Value::String("".into()),
+                "{}: text",
+                method
+            );
             let err = result["error"].as_str().unwrap_or("");
-            assert!(!err.trim().is_empty(), "{}: error should be non-empty", method);
-            assert!(err.contains("STT not configured"), "{}: error mentions STT not configured (got {})", method, err);
+            assert!(
+                !err.trim().is_empty(),
+                "{}: error should be non-empty",
+                method
+            );
+            assert!(
+                err.contains("STT not configured"),
+                "{}: error mentions STT not configured (got {})",
+                method,
+                err
+            );
         }
     }
 
     #[tokio::test]
     async fn server_voice_start_returns_not_listening() {
         let state = WsState::new_in_memory(16);
-        for method in ["server.voiceStart", "server/voice-start", "server/voiceStart"] {
+        for method in [
+            "server.voiceStart",
+            "server/voice-start",
+            "server/voiceStart",
+        ] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method, "params": {}
             });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            assert_eq!(result["ok"], serde_json::Value::Bool(false), "{}: ok", method);
-            assert_eq!(result["listening"], serde_json::Value::Bool(false), "{}: listening", method);
+            assert_eq!(
+                result["ok"],
+                serde_json::Value::Bool(false),
+                "{}: ok",
+                method
+            );
+            assert_eq!(
+                result["listening"],
+                serde_json::Value::Bool(false),
+                "{}: listening",
+                method
+            );
             assert_eq!(
                 result["reason"].as_str().unwrap_or(""),
                 "STT not configured",
@@ -10093,8 +10247,18 @@ mod tests {
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            assert_eq!(result["ok"], serde_json::Value::Bool(true), "{}: ok", method);
-            assert_eq!(result["listening"], serde_json::Value::Bool(false), "{}: listening", method);
+            assert_eq!(
+                result["ok"],
+                serde_json::Value::Bool(true),
+                "{}: ok",
+                method
+            );
+            assert_eq!(
+                result["listening"],
+                serde_json::Value::Bool(false),
+                "{}: listening",
+                method
+            );
         }
     }
 
@@ -10105,7 +10269,11 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         let methods = resp.result.unwrap()["methods"].as_array().unwrap().clone();
         let method_strs: Vec<&str> = methods.iter().filter_map(|v| v.as_str()).collect();
-        for expected in ["server/transcribe-voice", "server/voice-start", "server/voice-stop"] {
+        for expected in [
+            "server/transcribe-voice",
+            "server/voice-start",
+            "server/voice-stop",
+        ] {
             assert!(
                 method_strs.contains(&expected),
                 "rpc/listMethods missing {}",
@@ -10262,7 +10430,11 @@ mod tests {
             }
         });
         let resp = term_rpc(&state, &req).await;
-        assert!(resp.error.is_none(), "terminal.open failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "terminal.open failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         // MCode TerminalSessionSnapshot top-level fields.
         assert_eq!(result["terminalId"], "term-test-1");
@@ -10475,10 +10647,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods"
         });
         let resp = auto_rpc(&state, &req).await;
-        let methods = resp.result.unwrap()["methods"]
-            .as_array()
-            .unwrap()
-            .clone();
+        let methods = resp.result.unwrap()["methods"].as_array().unwrap().clone();
         let method_strs: Vec<String> = methods
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
@@ -10810,7 +10979,10 @@ mod tests {
             "params": {}
         });
         let resp = auto_rpc(&state, &req).await;
-        assert!(resp.error.is_some(), "missing runId should be INVALID_PARAMS");
+        assert!(
+            resp.error.is_some(),
+            "missing runId should be INVALID_PARAMS"
+        );
     }
 
     #[tokio::test]
@@ -10832,12 +11004,14 @@ mod tests {
             assert_eq!(result["channel"], "automation");
         }
         // The connection is now registered on the automation channel.
-        assert!(state
-            .subscriptions
-            .read()
-            .await
-            .subscribers_for(crate::channels::CHANNEL_AUTOMATION)
-            .contains(&1));
+        assert!(
+            state
+                .subscriptions
+                .read()
+                .await
+                .subscribers_for(crate::channels::CHANNEL_AUTOMATION)
+                .contains(&1)
+        );
     }
 
     #[tokio::test]
@@ -10861,12 +11035,14 @@ mod tests {
             assert_eq!(result["subscribed"], false);
             assert_eq!(result["channel"], "automation");
         }
-        assert!(!state
-            .subscriptions
-            .read()
-            .await
-            .subscribers_for(crate::channels::CHANNEL_AUTOMATION)
-            .contains(&1));
+        assert!(
+            !state
+                .subscriptions
+                .read()
+                .await
+                .subscribers_for(crate::channels::CHANNEL_AUTOMATION)
+                .contains(&1)
+        );
     }
 
     /// T6c-21 keystone proof: subscribe to the `automation` channel → run an
@@ -10911,27 +11087,31 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Drain pending pushes and find the automation channel event.
-        // (The broadcast bus may carry other events — e.g. orchestration
-        // domain events; filter for the automation channel.)
+        // Drain pending pushes and find the `run-upserted` among the automation
+        // channel events. (PUSH-1 added live `run-started` / `run-progress` /
+        // `run-completed` events that arrive DURING the run — before the final
+        // run-upserted. So the first automation frame may now be a run-started,
+        // not a run-upserted; we scan the stream for the run-upserted frame.)
+        // The broadcast bus may also carry other events (e.g. orchestration
+        // domain events); filter for the automation channel.
         let mut saw_run_upserted = false;
-        for _ in 0..32 {
+        for _ in 0..64 {
             match rx.try_recv() {
                 Ok((channel, payload)) if channel == "automation" => {
-                    assert_eq!(
-                        payload["type"], "run-upserted",
-                        "automation push event must be a run-upserted (got {payload})"
-                    );
-                    assert_eq!(
-                        payload["run"]["id"], run_id,
-                        "pushed run id must match the runNow result"
-                    );
-                    assert_eq!(
-                        payload["run"]["automationId"], auto_id,
-                        "pushed automationId must match the def"
-                    );
-                    saw_run_upserted = true;
-                    break;
+                    if payload["type"] == "run-upserted" {
+                        assert_eq!(
+                            payload["run"]["id"], run_id,
+                            "pushed run id must match the runNow result"
+                        );
+                        assert_eq!(
+                            payload["run"]["automationId"], auto_id,
+                            "pushed automationId must match the def"
+                        );
+                        saw_run_upserted = true;
+                        break;
+                    }
+                    // Otherwise it's a live run-started/progress/completed
+                    // frame (PUSH-1) — expected, keep scanning.
                 }
                 Ok(_) => continue,
                 Err(_) => break,
@@ -10941,6 +11121,91 @@ mod tests {
             saw_run_upserted,
             "automation.runNow must push a run-upserted event on the `automation` channel"
         );
+    }
+
+    /// PUSH-1 keystone: a subscriber on the `automation` channel receives the
+    /// full live lifecycle sequence — `run-started`, `run-progress`,
+    /// `run-completed` — *during* a runNow, plus the final `run-upserted`.
+    /// This is the automation equivalent of the terminal reader-task: events
+    /// stream while the subprocess runs, not just after.
+    #[tokio::test]
+    async fn automation_run_now_pushes_live_started_progress_completed() {
+        let state = WsState::new_in_memory(16);
+        // Subscribe BEFORE triggering so we see every live event.
+        let mut rx = state.push_tx.subscribe();
+
+        // Create an automation whose command prints output (drives ≥1
+        // run-progress event). Multiple echo lines so we exercise the
+        // incremental stdout reader.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "automation.create",
+            "params": {
+                "name": "Live progress",
+                "prompt": "echo line-one; echo line-two",
+                "schedule": { "type": "manual" },
+                "projectId": "proj-push-1"
+            }
+        });
+        let resp = auto_rpc(&state, &create).await;
+        assert!(resp.error.is_none(), "create: {:?}", resp.error);
+        let auto_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // runNow → triggers the live-push path (trigger_with_events).
+        let run_now = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "automation.runNow",
+            "params": { "id": auto_id }
+        });
+        let resp = auto_rpc(&state, &run_now).await;
+        assert!(resp.error.is_none(), "runNow: {:?}", resp.error);
+        let run_id = resp.result.unwrap()["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Drain pending pushes; collect every automation-channel frame's type.
+        let mut types: Vec<String> = Vec::new();
+        for _ in 0..64 {
+            match rx.try_recv() {
+                Ok((channel, payload)) if channel == "automation" => {
+                    if let Some(t) = payload["type"].as_str() {
+                        types.push(t.to_string());
+                    }
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+
+        // All three live event types must arrive, plus the final run-upserted
+        // (backward-compat with T6c-21).
+        assert!(
+            types.iter().any(|t| t == "run-started"),
+            "subscriber must receive run-started (got {types:?})"
+        );
+        assert!(
+            types.iter().any(|t| t == "run-progress"),
+            "subscriber must receive ≥1 run-progress (got {types:?})"
+        );
+        assert!(
+            types.iter().any(|t| t == "run-completed"),
+            "subscriber must receive run-completed (got {types:?})"
+        );
+        // Order: started before progress, progress before completed.
+        let started_idx = types.iter().position(|t| t == "run-started").unwrap();
+        let progress_idx = types.iter().position(|t| t == "run-progress").unwrap();
+        let completed_idx = types.iter().position(|t| t == "run-completed").unwrap();
+        assert!(
+            started_idx < progress_idx && progress_idx < completed_idx,
+            "events must arrive started→progress→completed (got {types:?})"
+        );
+        // The final run-upserted still arrives (backward compat).
+        assert!(
+            types.iter().any(|t| t == "run-upserted"),
+            "subscriber must still receive the final run-upserted (got {types:?})"
+        );
+        // The run + automation ids are referenced for clarity; the existing
+        // keystone test covers the run-upserted payload shape in depth.
+        let _ = (run_id, auto_id);
     }
 
     /// Cancellation also broadcasts a `run-upserted` lifecycle event (the
@@ -10966,8 +11231,11 @@ mod tests {
             "params": { "id": auto_id }
         });
         let run_now_resp = auto_rpc(&state, &run_now).await;
-        // Drain the runNow push so the cancel push is unambiguous.
-        let _ = rx.try_recv();
+        // Drain ALL runNow pushes so the cancel push is unambiguous. PUSH-1
+        // added live run-started/progress/completed events that arrive before
+        // the final run-upserted — drain them all (plus the run-upserted)
+        // before cancelling.
+        while rx.try_recv().is_ok() {}
         let run_id = run_now_resp.result.unwrap()["run"]["id"]
             .as_str()
             .unwrap()
@@ -10982,14 +11250,17 @@ mod tests {
         assert!(resp.error.is_none(), "cancelRun: {:?}", resp.error);
 
         // The cancel handler must have pushed a run-upserted on automation.
+        // (Filter for the run-upserted type in case any leftover live event
+        // from the prior runNow is still in flight.)
         let mut saw_cancel_push = false;
         for _ in 0..32 {
             match rx.try_recv() {
                 Ok((channel, payload)) if channel == "automation" => {
-                    assert_eq!(payload["type"], "run-upserted");
-                    assert_eq!(payload["run"]["id"], run_id);
-                    saw_cancel_push = true;
-                    break;
+                    if payload["type"] == "run-upserted" {
+                        assert_eq!(payload["run"]["id"], run_id);
+                        saw_cancel_push = true;
+                        break;
+                    }
                 }
                 Ok(_) => continue,
                 Err(_) => break,
@@ -11041,20 +11312,17 @@ mod tests {
                 // compactThread requires a non-empty threadId (T6c-13 made it
                 // provider-backed); pass one so the no-op-empty-history path
                 // resolves successfully. Other methods take no params.
-                let params = if method.ends_with("compactThread") || method.contains("compact-thread") {
-                    serde_json::json!({ "threadId": "thr_resolve_test" })
-                } else {
-                    serde_json::json!({})
-                };
+                let params =
+                    if method.ends_with("compactThread") || method.contains("compact-thread") {
+                        serde_json::json!({ "threadId": "thr_resolve_test" })
+                    } else {
+                        serde_json::json!({})
+                    };
                 let req = serde_json::json!({
                     "jsonrpc": "2.0", "id": 1, "method": method, "params": params
                 });
                 let resp = provider_rpc(&state, &req).await;
-                assert!(
-                    resp.error.is_none(),
-                    "{method} failed: {:?}",
-                    resp.error
-                );
+                assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
                 assert!(resp.result.is_some(), "{method} returned null result");
             }
         }
@@ -11114,12 +11382,12 @@ mod tests {
         // 8 MCode-valid providers (claude/cursor/gemini/grok/kilo/opencode/pi +
         // codex); anthropic + openai filtered out.
         assert_eq!(models.len(), 8, "expected 8 MCode-valid provider models");
-        let slugs: Vec<&str> = models
-            .iter()
-            .map(|m| m["slug"].as_str().unwrap())
-            .collect();
+        let slugs: Vec<&str> = models.iter().map(|m| m["slug"].as_str().unwrap()).collect();
         // The claude → claudeAgent rename must be applied.
-        assert!(slugs.contains(&"claudeAgent"), "claude should map to claudeAgent");
+        assert!(
+            slugs.contains(&"claudeAgent"),
+            "claude should map to claudeAgent"
+        );
         assert!(
             !slugs.contains(&"anthropic"),
             "anthropic is not a MCode ProviderKind"
@@ -11200,11 +11468,18 @@ mod tests {
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
         let options = result["options"].as_array().unwrap();
-        assert_eq!(options.len(), 1, "codex should expose one option descriptor");
+        assert_eq!(
+            options.len(),
+            1,
+            "codex should expose one option descriptor"
+        );
         assert_eq!(options[0]["id"], "reasoningEffort");
         assert_eq!(options[0]["type"], "select");
         let choices = options[0]["options"].as_array().unwrap();
-        assert!(choices.len() >= 3, "codex reasoningEffort has multiple levels");
+        assert!(
+            choices.len() >= 3,
+            "codex reasoningEffort has multiple levels"
+        );
         // "medium" is the default for the gpt-5.5 codex model.
         let medium = choices
             .iter()
@@ -11218,7 +11493,10 @@ mod tests {
             "params": { "pluginId": "x" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert!(result["plugin"].is_null(), "readPlugin should return null plugin");
+        assert!(
+            result["plugin"].is_null(),
+            "readPlugin should return null plugin"
+        );
 
         // readSkill → { skill: null }
         let req = serde_json::json!({
@@ -11226,7 +11504,10 @@ mod tests {
             "params": { "name": "x" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert!(result["skill"].is_null(), "readSkill should return null skill");
+        assert!(
+            result["skill"].is_null(),
+            "readSkill should return null skill"
+        );
     }
 
     /// listPlugins must return the full ProviderListPluginsResult shape with
@@ -11468,7 +11749,10 @@ mod tests {
             "params": { "path": outside }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert!(result["plugin"].is_null(), "plugin outside .plugins must be null");
+        assert!(
+            result["plugin"].is_null(),
+            "plugin outside .plugins must be null"
+        );
     }
 
     /// getComposerCapabilities must echo the requested `provider` and return
@@ -11598,10 +11882,9 @@ mod tests {
     /// resolution finds it.
     async fn register_mock_provider(state: &WsState, canned: &str) {
         use crate::llm::SharedAdapter;
-        let mock: SharedAdapter =
-            std::sync::Arc::new(tokio::sync::RwLock::new(
-                crate::llm::MockLlmAdapter::new(canned),
-            ));
+        let mock: SharedAdapter = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::llm::MockLlmAdapter::new(canned),
+        ));
         let mut registry = state.provider_registry.write().await;
         registry.register_shared("claude".to_string(), mock);
     }
@@ -11712,10 +11995,7 @@ mod tests {
         let state = WsState::new_in_memory(16);
         register_mock_provider(&state, "ok").await;
         let thread_id = seed_thread_with_history(&state).await;
-        for method in [
-            "server.generateThreadRecap",
-            "server/generate-thread-recap",
-        ] {
+        for method in ["server.generateThreadRecap", "server/generate-thread-recap"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
                 "params": { "threadId": &thread_id }
@@ -11730,8 +12010,7 @@ mod tests {
     #[tokio::test]
     async fn llm_rpcs_listed_in_list_methods() {
         let state = WsState::new_in_memory(16);
-        let req =
-            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
         let methods = provider_rpc(&state, &req).await.result.unwrap()["methods"]
             .as_array()
             .expect("methods is an array")
@@ -11773,14 +12052,25 @@ mod tests {
             "params": { "message": "run tests every hour" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["isAutomation"], true, "must be flagged as automation");
+        assert_eq!(
+            result["isAutomation"], true,
+            "must be flagged as automation"
+        );
         assert_eq!(result["name"], "hourly-tests", "name must be parsed");
-        assert_eq!(result["taskPrompt"], "cargo test", "command must map to taskPrompt");
+        assert_eq!(
+            result["taskPrompt"], "cargo test",
+            "command must map to taskPrompt"
+        );
         assert_eq!(result["schedule"], "0 * * * *", "schedule must be parsed");
         assert_eq!(result["mode"], "scheduled", "mode must be parsed");
         assert_eq!(result["confidence"], 0.9, "confidence must flow through");
-        let missing = result["missingFields"].as_array().expect("missingFields array");
-        assert!(missing.is_empty(), "no missing fields when all present: {missing:?}");
+        let missing = result["missingFields"]
+            .as_array()
+            .expect("missingFields array");
+        assert!(
+            missing.is_empty(),
+            "no missing fields when all present: {missing:?}"
+        );
         assert_eq!(result["needsConfirmation"], true);
     }
 
@@ -11814,7 +12104,10 @@ mod tests {
             "params": { "message": "deploy nightly" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["isAutomation"], false, "no provider → not automation");
+        assert_eq!(
+            result["isAutomation"], false,
+            "no provider → not automation"
+        );
         let reason = result["reason"].as_str().expect("reason present");
         assert!(
             reason.contains("no provider registered"),
@@ -11873,7 +12166,11 @@ mod tests {
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
-            assert_eq!(result["defaultThreadEnvMode"], "local", "{}: env mode", method);
+            assert_eq!(
+                result["defaultThreadEnvMode"], "local",
+                "{}: env mode",
+                method
+            );
             // The patch IS applied (REAL semantics — not the stub echo).
             assert_eq!(
                 result["enableAssistantStreaming"],
@@ -12369,12 +12666,9 @@ mod tests {
         }
 
         // stop each under BOTH method-name forms.
-        for (i, method) in [
-            "server.stopLocalServer",
-            "server/stop-local-server",
-        ]
-        .iter()
-        .enumerate()
+        for (i, method) in ["server.stopLocalServer", "server/stop-local-server"]
+            .iter()
+            .enumerate()
         {
             let srv_id = &started_ids[i];
             let req = serde_json::json!({
@@ -12383,12 +12677,20 @@ mod tests {
             });
             let resp = rpc(&state, 1, &req).await;
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
-            assert_eq!(resp.result.unwrap()["ok"], true, "{}: ok must be true", method);
+            assert_eq!(
+                resp.result.unwrap()["ok"],
+                true,
+                "{}: ok must be true",
+                method
+            );
         }
 
         // No longer tracked.
         let mgr = state.local_servers.read().await;
-        assert!(mgr.list().is_empty(), "all servers must be removed after stop");
+        assert!(
+            mgr.list().is_empty(),
+            "all servers must be removed after stop"
+        );
     }
 
     /// startLocalServer validates: missing command -> INVALID_PARAMS.
@@ -12423,8 +12725,7 @@ mod tests {
     #[tokio::test]
     async fn server_niche_rpcs_listed_in_list_methods() {
         let state = WsState::new_in_memory(16);
-        let req =
-            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
         let methods = provider_rpc(&state, &req).await.result.unwrap()["methods"]
             .as_array()
             .expect("methods is an array")
@@ -12626,10 +12927,7 @@ mod tests {
         });
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_some(), "missing ref must be rejected");
-        assert_eq!(
-            resp.error.unwrap().code,
-            crate::error_codes::INVALID_PARAMS
-        );
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
     }
 
     /// `git.githubRepository` on a non-repo path returns `{ repository: null }`
@@ -12643,7 +12941,11 @@ mod tests {
             "params": { "cwd": "/tmp" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "non-repo must not error: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "non-repo must not error: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert!(
             result["repository"].is_null(),
@@ -12686,8 +12988,7 @@ mod tests {
     #[tokio::test]
     async fn github_api_rpcs_listed_in_list_methods() {
         let state = WsState::new_in_memory(16);
-        let req =
-            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
         let methods = rpc(&state, 1, &req).await.result.unwrap()["methods"]
             .as_array()
             .expect("methods is an array")
@@ -12722,7 +13023,11 @@ mod tests {
             "params": { "cwd": cwd }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "live resolve errored: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "live resolve errored: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         let repo = &result["repository"];
         // If the worktree's origin isn't a GitHub repo, repository is null —
@@ -12761,7 +13066,6 @@ mod tests {
         );
     }
 
-
     // ─── Profile stats RPC tests (T6c-8) ──────────────────────────────
 
     /// Both `stats.*` RPCs must resolve (no MethodNotFound) under BOTH the
@@ -12780,14 +13084,9 @@ mod tests {
         ];
         for (dot, slash) in cases {
             for method in [*dot, *slash] {
-                let req =
-                    serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+                let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
                 let resp = provider_rpc(&state, &req).await;
-                assert!(
-                    resp.error.is_none(),
-                    "{method} failed: {:?}",
-                    resp.error
-                );
+                assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
                 assert!(resp.result.is_some(), "{method} returned null result");
             }
         }
@@ -12798,8 +13097,7 @@ mod tests {
     #[tokio::test]
     async fn stats_rpcs_listed_in_list_methods() {
         let state = WsState::new_in_memory(16);
-        let req =
-            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "rpc/listMethods" });
         let resp = provider_rpc(&state, &req).await;
         let methods = resp.result.unwrap()["methods"]
             .as_array()
@@ -12809,10 +13107,7 @@ mod tests {
             .into_iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
-        for expected in [
-            "stats/get-profile-stats",
-            "stats/get-profile-token-stats",
-        ] {
+        for expected in ["stats/get-profile-stats", "stats/get-profile-token-stats"] {
             assert!(
                 listed.contains(expected),
                 "rpc/listMethods missing {expected}"
@@ -12921,8 +13216,7 @@ mod tests {
         let mut frames = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
         while std::time::Instant::now() < deadline {
-            let remaining =
-                deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok((channel, data))) if channel == crate::channels::CHANNEL_TERMINAL => {
                     frames.push(data);
@@ -13039,7 +13333,10 @@ mod tests {
             .await
             .get_subscription(1)
             .is_some_and(|s| s.is_subscribed(crate::channels::CHANNEL_TERMINAL));
-        assert!(subscribed, "subscribeEvents must record a real subscription");
+        assert!(
+            subscribed,
+            "subscribeEvents must record a real subscription"
+        );
     }
 
     /// `terminal.unsubscribeEvents` drops the subscription (T6c-11).
@@ -13093,7 +13390,11 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
 
         // Reader registered.
-        let registered = state.terminal_readers.lock().await.contains_key("term-close-test");
+        let registered = state
+            .terminal_readers
+            .lock()
+            .await
+            .contains_key("term-close-test");
         assert!(registered, "reader handle should be registered after open");
 
         // Close.
@@ -13189,8 +13490,12 @@ mod tests {
     #[tokio::test]
     async fn set_config_rejects_non_object() {
         let state = WsState::new_in_memory(16);
-        let resp =
-            rpc_success(&state, "server.setConfig", serde_json::json!("not-an-object")).await;
+        let resp = rpc_success(
+            &state,
+            "server.setConfig",
+            serde_json::json!("not-an-object"),
+        )
+        .await;
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
     }
@@ -13206,12 +13511,19 @@ mod tests {
             "providers": { "codex": { "enabled": false } },
         });
         let resp = rpc_success(&state, "server.updateSettings", patch).await;
-        assert!(resp.error.is_none(), "update_settings failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "update_settings failed: {:?}",
+            resp.error
+        );
         let returned = resp.result.unwrap();
         // Patched scalar.
         assert_eq!(returned["enableAssistantStreaming"], true);
         // Patched nested field, untouched sibling preserved (deep merge).
-        assert_eq!(returned["textGenerationModelSelection"]["model"], "claude-4-opus");
+        assert_eq!(
+            returned["textGenerationModelSelection"]["model"],
+            "claude-4-opus"
+        );
         assert_eq!(
             returned["textGenerationModelSelection"]["provider"],
             "codex"
@@ -13265,8 +13577,7 @@ mod tests {
         assert_eq!(returned["keybindings"].as_array().unwrap().len(), 2);
 
         // Replace kb1 by id.
-        let rule_a_v2 =
-            serde_json::json!({ "id": "kb1", "key": "cmd+shift+a", "command": "A2" });
+        let rule_a_v2 = serde_json::json!({ "id": "kb1", "key": "cmd+shift+a", "command": "A2" });
         let resp = rpc_success(&state, "server.upsertKeybinding", rule_a_v2).await;
         let returned = resp.result.unwrap();
         let kbs = returned["keybindings"].as_array().unwrap();
@@ -13283,8 +13594,12 @@ mod tests {
     #[tokio::test]
     async fn upsert_keybinding_rejects_non_object() {
         let state = WsState::new_in_memory(16);
-        let resp =
-            rpc_success(&state, "server.upsertKeybinding", serde_json::json!([1, 2, 3])).await;
+        let resp = rpc_success(
+            &state,
+            "server.upsertKeybinding",
+            serde_json::json!([1, 2, 3]),
+        )
+        .await;
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
     }
@@ -13334,10 +13649,11 @@ mod tests {
             "providers": [], "availableEditors": [], "authMode": "unsafe-no-auth",
         });
         let _ = rpc_success(&state, "server.setConfig", new_config).await;
-        let (channel, data) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
-            .await
-            .expect("configUpdated push should arrive")
-            .unwrap();
+        let (channel, data) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                .await
+                .expect("configUpdated push should arrive")
+                .unwrap();
         assert_eq!(channel, crate::channels::CHANNEL_SERVER_CONFIG_UPDATED);
         assert!(data["issues"].is_array());
         assert!(data["providers"].is_array());
@@ -13349,10 +13665,11 @@ mod tests {
         let mut rx = state.push_tx.subscribe();
         let patch = serde_json::json!({ "enableAssistantStreaming": true });
         let _ = rpc_success(&state, "server.updateSettings", patch).await;
-        let (channel, data) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
-            .await
-            .expect("settingsUpdated push should arrive")
-            .unwrap();
+        let (channel, data) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                .await
+                .expect("settingsUpdated push should arrive")
+                .unwrap();
         assert_eq!(channel, crate::channels::CHANNEL_SERVER_SETTINGS_UPDATED);
         assert_eq!(data["settings"]["enableAssistantStreaming"], true);
     }
@@ -13382,16 +13699,14 @@ mod tests {
         // that exist at send time. Mirrors the e2e test in server.rs.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let resp = rpc_success(
-            &state,
-            "server.subscribeConfig",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = rpc_success(&state, "server.subscribeConfig", serde_json::json!({})).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         assert_eq!(result["subscribed"], true);
-        assert_eq!(result["channel"], crate::channels::CHANNEL_SERVER_CONFIG_UPDATED);
+        assert_eq!(
+            result["channel"],
+            crate::channels::CHANNEL_SERVER_CONFIG_UPDATED
+        );
         assert_eq!(result["snapshotEmitted"], true);
 
         // Snapshot frame should arrive on the connection tx.
@@ -13429,12 +13744,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         state.register(1, tx).await;
 
-        let resp = rpc_success(
-            &state,
-            "server.subscribeSettings",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = rpc_success(&state, "server.subscribeSettings", serde_json::json!({})).await;
         assert!(resp.error.is_none());
         assert_eq!(resp.result.unwrap()["snapshotEmitted"], true);
 
@@ -13456,7 +13766,10 @@ mod tests {
         )
         .await;
         assert!(resp.error.is_none());
-        assert_eq!(resp.result.unwrap()["channel"], crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED);
+        assert_eq!(
+            resp.result.unwrap()["channel"],
+            crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED
+        );
 
         let msg = rx.recv().await.unwrap();
         assert!(msg.contains("push/server.providerStatusesUpdated"));
@@ -13485,12 +13798,7 @@ mod tests {
         // if the per-connection delivery path races.
         let mut bcast_rx = state.push_tx.subscribe();
 
-        let resp = rpc_success(
-            &state,
-            "server.subscribeLifecycle",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = rpc_success(&state, "server.subscribeLifecycle", serde_json::json!({})).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         assert_eq!(result["subscribed"], true);
@@ -13505,10 +13813,11 @@ mod tests {
         assert!(result["welcome"]["mode"].is_string());
 
         // The broadcast bus carries the welcome event on the lifecycle channel.
-        let (channel, data) = tokio::time::timeout(std::time::Duration::from_millis(500), bcast_rx.recv())
-            .await
-            .expect("lifecycle welcome push should arrive on push_tx")
-            .unwrap();
+        let (channel, data) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), bcast_rx.recv())
+                .await
+                .expect("lifecycle welcome push should arrive on push_tx")
+                .unwrap();
         assert_eq!(channel, crate::channels::CHANNEL_SERVER_LIFECYCLE);
         assert_eq!(data["eventType"], "welcome");
         // The welcome payload data mirrors server.welcome.
@@ -13664,10 +13973,8 @@ mod tests {
 
     #[test]
     fn test_list_skills_scans_markdown_files() {
-        let tmp = std::env::temp_dir().join(format!(
-            "syncode-ws-skills-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("syncode-ws-skills-test-{}", std::process::id()));
         let skills_dir = tmp.join(".skills");
         std::fs::create_dir_all(&skills_dir).unwrap();
         // skill with frontmatter description
@@ -13685,17 +13992,18 @@ mod tests {
         let resp = handle_provider_list_skills(Value::from(1), &params);
         let result = resp.result.unwrap();
         let skills = result["skills"].as_array().unwrap();
-        assert_eq!(skills.len(), 2, "expected 2 markdown skills, got {skills:?}");
+        assert_eq!(
+            skills.len(),
+            2,
+            "expected 2 markdown skills, got {skills:?}"
+        );
         // sorted alphabetically by name
         assert_eq!(skills[0]["name"], "explore");
         assert_eq!(skills[1]["name"], "review");
         assert_eq!(skills[1]["description"], "Code review specialist.");
         assert_eq!(skills[1]["enabled"], true);
         assert!(
-            skills[1]["path"]
-                .as_str()
-                .unwrap()
-                .ends_with("review.md"),
+            skills[1]["path"].as_str().unwrap().ends_with("review.md"),
             "path should be absolute and end with review.md"
         );
         assert!(
@@ -13708,8 +14016,7 @@ mod tests {
 
     #[test]
     fn test_list_skills_missing_dir_is_empty() {
-        let params =
-            serde_json::json!({ "cwd": "/nonexistent-syncode-skills-test-path-12345" });
+        let params = serde_json::json!({ "cwd": "/nonexistent-syncode-skills-test-path-12345" });
         let resp = handle_provider_list_skills(Value::from(1), &params);
         let result = resp.result.unwrap();
         assert_eq!(result["skills"].as_array().unwrap().len(), 0);
@@ -13717,10 +14024,8 @@ mod tests {
 
     #[test]
     fn test_read_skill_reads_file() {
-        let tmp = std::env::temp_dir().join(format!(
-            "syncode-ws-readskill-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("syncode-ws-readskill-test-{}", std::process::id()));
         let skills_dir = tmp.join(".skills");
         std::fs::create_dir_all(&skills_dir).unwrap();
         let body = "---\ndescription: hello world\n---\n# Greet\nbody text";
@@ -13752,7 +14057,10 @@ mod tests {
         let params = serde_json::json!({ "path": abs.to_string_lossy() });
         let resp = handle_provider_read_skill(Value::from(1), &params);
         let result = resp.result.unwrap();
-        assert!(result["skill"].is_null(), "path outside .skills must return null");
+        assert!(
+            result["skill"].is_null(),
+            "path outside .skills must return null"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -13772,7 +14080,10 @@ mod tests {
             parse_skill_frontmatter_description(content),
             Some("A skill.".to_string())
         );
-        assert_eq!(parse_skill_frontmatter_description("# no frontmatter"), None);
+        assert_eq!(
+            parse_skill_frontmatter_description("# no frontmatter"),
+            None
+        );
         assert_eq!(
             parse_skill_frontmatter_description("---\nname: foo\n---\nbody"),
             None
