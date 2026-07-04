@@ -355,6 +355,36 @@ async fn dispatch_method(
         // dispatch block below (line ~998) via the 3-arg variant that also
         // supports optional `aggregateId` scoping.
 
+        // ─── Orchestration subscribe handlers (ORCH-4 — REAL) ───────────
+        //
+        // `orchestration.subscribeShell` / `subscribeEvents` register the
+        // originating connection on the `orchestration` push channel
+        // (`CHANNEL_ORCHESTRATION`) so the delivery loop forwards future
+        // `push/orchestration` frames (domain events published via the
+        // `WsDomainEventPublisher` after every command append+project).
+        //
+        // Snapshot-then-stream: each subscribe also emits an initial
+        // `ShellSnapshot` (the `push/orchestration` snapshot baseline) so a
+        // freshly-subscribed client sees current read-model state before any
+        // live delta. The push is best-effort — a missing connection
+        // (unregistered mid-flight) silently yields `snapshotEmitted: false`.
+        //
+        // Both methods map to the same `orchestration` channel:
+        //   - `subscribeShell`   — the sidebar / shell scope subscribe.
+        //   - `subscribeEvents`  — the per-session domain-event stream. The
+        //     orchestration channel already fans every projected event out via
+        //     the `WsDomainEventPublisher`; there is no separate per-session
+        //     reader task (unlike the terminal PTY), so this mirrors the shell
+        //     subscribe + emits the same initial snapshot.
+        "orchestration.subscribeShell" | "orchestration/subscribeShell" => {
+            handle_orchestration_subscribe_shell(state, conn_id, id).await
+        }
+        "orchestration.subscribeEvents"
+        | "orchestration/subscribeEvents"
+        | "orchestration/subscribe-events" => {
+            handle_orchestration_subscribe_events(state, conn_id, id).await
+        }
+
         // ─── Git Methods (syncode-git-backed) ─────────────────────
         // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
         // `git.readWorkingTreeDiff`, `git.listBranches`, …). We reuse the
@@ -1015,9 +1045,9 @@ async fn dispatch_method(
         "orchestration.dispatchCommand" | "orchestration/dispatch-command" => {
             handle_orchestration_dispatch_command(state, id, &request.params).await
         }
-        "orchestration.subscribeShell" | "orchestration/subscribe-shell" => {
-            handle_orchestration_subscribe_shell(state, conn_id, id).await
-        }
+        // `orchestration.subscribeShell` + `subscribeEvents` are handled earlier
+        // in the dispatch (ORCH-4 block) which registers on the orchestration
+        // push channel and emits the initial ShellSnapshot via `emit_snapshot`.
         "orchestration.getTurnDiff" | "orchestration/get-turn-diff" => {
             handle_orchestration_get_turn_diff(state, id, &request.params).await
         }
@@ -1263,50 +1293,11 @@ async fn handle_orchestration_dispatch_command(
     }
 }
 
-/// `orchestration.subscribeShell` — register the connection on the
-/// `orchestration` push channel (so the delivery loop forwards future
-/// lifecycle broadcasts) and emit an initial shell snapshot so a freshly-
-/// subscribed client has a baseline. Mirrors the snapshot-then-stream pattern
-/// of `server.subscribeConfig`.
-async fn handle_orchestration_subscribe_shell(
-    state: &WsState,
-    conn_id: ConnectionId,
-    id: Value,
-) -> JsonRpcResponse {
-    let added = state
-        .subscriptions
-        .write()
-        .await
-        .subscribe(conn_id, crate::channels::CHANNEL_ORCHESTRATION);
-
-    // Build + emit the initial shell snapshot via the push channel so the
-    // delivery loop routes it to this connection (and any other subscribers).
-    let snapshot = handle_shell_get_snapshot(state, Value::Null).await;
-    let snapshot_data = match snapshot {
-        JsonRpcResponse {
-            result: Some(v), ..
-        } => v,
-        _ => Value::Null,
-    };
-    let _ = state.push_tx.send((
-        crate::channels::CHANNEL_ORCHESTRATION.to_string(),
-        serde_json::json!({
-            "eventType": "snapshot",
-            "aggregateId": Value::Null,
-            "data": snapshot_data,
-        }),
-    ));
-
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "subscribed": true,
-            "channel": crate::channels::CHANNEL_ORCHESTRATION,
-            "added": added,
-            "snapshotEmitted": true,
-        }),
-    )
-}
+// NOTE: `handle_orchestration_subscribe_shell` (and `subscribe_events`) are
+// defined further below in the ORCH-4 subscribe-handlers block, which
+// supersedes the earlier T6c-29 stub: it routes the snapshot emit through the
+// canonical `push::emit_snapshot` helper, adds `subscribeEvents`, and returns
+// a `method` field so the caller can tell which wire-name was served.
 
 /// `orchestration.getTurnDiff` — return the git diff captured by a turn's
 /// checkpoint. Reads `threadId`, optional `turnId` (defaults to the latest
@@ -2705,6 +2696,89 @@ async fn handle_orchestration_get_latest_turn(
         .cloned()
         .map(|t| serde_json::to_value(&t).unwrap_or(Value::Null));
     JsonRpcResponse::success(id, latest.unwrap_or(Value::Null))
+}
+
+// ─── Orchestration subscribe handlers (ORCH-4 — REAL) ───────────────
+//
+// `orchestration.subscribeShell` and `orchestration.subscribeEvents` register
+// the calling connection on the `orchestration` push channel
+// (`CHANNEL_ORCHESTRATION`) and emit an initial `ShellSnapshot` as the
+// snapshot baseline (the same `push/orchestration` snapshot frame
+// `push/subscribe` builds for the `orchestration` channel via `emit_snapshot`).
+//
+// After the snapshot, the live push delivery loop (`run_push_delivery` in
+// `server.rs`) forwards every `push/orchestration` frame the
+// `WsDomainEventPublisher` broadcasts after each orchestration command's
+// append+project cycle to subscribed connections — so both methods deliver the
+// same live event stream. They differ only in the MCode wire-name they
+// respond to: `subscribeShell` is the sidebar/shell scope; `subscribeEvents`
+// is the per-session domain-event stream (the orchestration channel is global,
+// not per-session — every event fans out to every subscriber, and the UI
+// filters by aggregate id client-side).
+//
+// The subscribe-then-snapshot ordering is race-free: any event projected after
+// the snapshot read is guaranteed to be delivered live (the subscription was
+// already recorded when the event was published). This mirrors the
+// `server.subscribeConfig` / `push/subscribe` snapshot-then-stream pattern.
+
+/// `orchestration.subscribeShell` — register the calling connection on the
+/// `orchestration` push channel and emit the initial `ShellSnapshot`. After
+/// this call the connection receives `push/orchestration` frames for every
+/// domain event the orchestrator projects.
+async fn handle_orchestration_subscribe_shell(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    orchestration_subscribe(state, conn_id, id, "subscribeShell").await
+}
+
+/// `orchestration.subscribeEvents` — register the calling connection on the
+/// `orchestration` push channel and emit the initial `ShellSnapshot`. Mirrors
+/// `subscribeShell` (the orchestration channel carries both shell-scoped and
+/// domain-event frames); kept as a distinct handler so the wire-name resolves
+/// independently and the response's `method` field is unambiguous.
+async fn handle_orchestration_subscribe_events(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+) -> JsonRpcResponse {
+    orchestration_subscribe(state, conn_id, id, "subscribeEvents").await
+}
+
+/// Shared subscribe body for `subscribeShell` / `subscribeEvents`.
+///
+/// 1. Register the connection on `CHANNEL_ORCHESTRATION`.
+/// 2. Emit the initial `ShellSnapshot` via `emit_snapshot` (best-effort).
+/// 3. Return `{ subscribed, channel, added, snapshotEmitted, method }`.
+async fn orchestration_subscribe(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+    method: &str,
+) -> JsonRpcResponse {
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_ORCHESTRATION);
+    // Snapshot-then-stream: emit the current read-model snapshot as a
+    // best-effort `push/orchestration` notification so a freshly-subscribed
+    // client has the baseline before any live delta. A missing connection
+    // (unregistered mid-flight) silently yields `snapshotEmitted: false`.
+    let snapshot_emitted =
+        crate::push::emit_snapshot(state, conn_id, crate::channels::CHANNEL_ORCHESTRATION, None)
+            .await;
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": crate::channels::CHANNEL_ORCHESTRATION,
+            "added": added,
+            "snapshotEmitted": snapshot_emitted,
+            "method": method,
+        }),
+    )
 }
 
 // ─── Server config / settings / lifecycle Handlers (T6c-4) ───────
@@ -9156,6 +9230,108 @@ mod tests {
                 .unwrap()
                 .is_subscribed("orchestration")
         );
+    }
+
+    // ─── Orchestration subscribe tests (ORCH-4) ──────────────────
+
+    /// `orchestration.subscribeShell` registers the connection on the
+    /// `orchestration` channel and emits an initial `ShellSnapshot` push frame
+    /// so a freshly-subscribed client has the read-model baseline.
+    #[tokio::test]
+    async fn test_orchestration_subscribe_shell_records_and_emits_snapshot() {
+        let state = WsState::new_in_memory(16);
+        // Seed a project so the snapshot has real content to assert against.
+        let create_proj = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "ShellSub", "rootPath": "/tmp/shellsub" }
+        });
+        let _ = handle_rpc(&state, 1, &create_proj.to_string()).await;
+        // Register connection 1 + open a receiver to observe the push frame.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.subscribeShell"
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // Response confirms the subscription + channel + snapshot emission.
+        assert_eq!(result["subscribed"], true);
+        assert_eq!(result["channel"], "orchestration");
+        assert_eq!(result["added"], true);
+        assert_eq!(result["snapshotEmitted"], true);
+        assert_eq!(result["method"], "subscribeShell");
+
+        // The registry records conn 1 on the orchestration channel.
+        {
+            let subs = state.subscriptions.read().await;
+            assert!(
+                subs.get_subscription(1)
+                    .unwrap()
+                    .is_subscribed("orchestration")
+            );
+        }
+
+        // The initial ShellSnapshot was delivered as a push/orchestration frame
+        // carrying the seeded project name (the snapshot baseline).
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("snapshot push should be delivered")
+            .unwrap();
+        assert!(msg.contains("push/orchestration"), "msg: {msg}");
+        assert!(msg.contains("\"snapshot\""), "msg: {msg}");
+        assert!(msg.contains("ShellSub"), "msg: {msg}");
+    }
+
+    /// `orchestration.subscribeEvents` mirrors the shell subscribe: it registers
+    /// on the `orchestration` channel and emits the same initial snapshot (the
+    /// orchestration channel carries both shell-scoped and domain-event frames;
+    /// there is no separate per-session reader task, so the snapshot baseline is
+    /// the read-store state).
+    #[tokio::test]
+    async fn test_orchestration_subscribe_events_records_and_emits_snapshot() {
+        let state = WsState::new_in_memory(16);
+        let create_proj = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "EventSub", "rootPath": "/tmp/eventsub" }
+        });
+        let _ = handle_rpc(&state, 1, &create_proj.to_string()).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.register(1, tx).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.subscribeEvents"
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["subscribed"], true);
+        assert_eq!(result["channel"], "orchestration");
+        assert_eq!(result["added"], true);
+        assert_eq!(result["snapshotEmitted"], true);
+        assert_eq!(result["method"], "subscribeEvents");
+
+        // The subscription is recorded on the orchestration channel.
+        {
+            let subs = state.subscriptions.read().await;
+            assert!(
+                subs.get_subscription(1)
+                    .unwrap()
+                    .is_subscribed("orchestration")
+            );
+        }
+
+        // An initial ShellSnapshot frame is emitted.
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("snapshot push should be delivered")
+            .unwrap();
+        assert!(msg.contains("push/orchestration"), "msg: {msg}");
+        assert!(msg.contains("\"snapshot\""), "msg: {msg}");
+        assert!(msg.contains("EventSub"), "msg: {msg}");
     }
 
     // ─── Auth integration tests ──────────────────────────────────

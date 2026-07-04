@@ -663,6 +663,23 @@ export const SERVED_RPC = {
     result: null as unknown as { readonly replayed: number; readonly seeded: number },
   },
 
+  // ─── Orchestration subscribe (ORCH-4 — REAL) ─────────────────────────
+  // `orchestration.subscribeShell` + `subscribeEvents` register the calling
+  // connection on the `orchestration` push channel and emit an initial
+  // ShellSnapshot as the snapshot baseline (the live delivery loop then
+  // forwards `push/orchestration` frames for every projected domain event).
+  // The transport remaps the MCode dot-strings onto these slash keys (see
+  // MCODE_TO_SERVED in wsTransport.ts). The result shape mirrors
+  // `terminal/subscribe-events` (`{ subscribed, channel, added? }`).
+  "orchestration/subscribeShell": {
+    request: null as unknown as null,
+    result: null as unknown as TerminalSubscribeResult,
+  },
+  "orchestration/subscribeEvents": {
+    request: null as unknown as null,
+    result: null as unknown as TerminalSubscribeResult,
+  },
+
   // ─── Git (syncode-git-backed, T6c-3) ────────────────────────────────
   // The cloned MCode GitPanel calls `git.*` RPCs. The transport remaps the
   // MCode dot-strings (`git.status`, `git.readWorkingTreeDiff`,
@@ -1422,11 +1439,13 @@ export const UNSERVED_RPC = [
 
   // ─── Orchestration extras (beyond served thread/turn set) ────────────
   // ORCH-2: `orchestration.replayEvents` is NOW SERVED (mapped to slash form,
-  // returns `{ replayed, seeded }`). The remaining ops below are still unserved.
+  // returns `{ replayed, seeded }`). ORCH-4: `orchestration.subscribeShell`
+  // + `orchestration.subscribeEvents` are NOW SERVED (register on the
+  // `orchestration` push channel + emit an initial ShellSnapshot — see
+  // SERVED_RPC + MCODE_TO_SERVED). The remaining ops below are still unserved.
   "orchestration.dispatchCommand",
   "orchestration.getFullThreadDiff",
   "orchestration.getTurnDiff",
-  "orchestration.subscribeEvents",
   "orchestration.repairReadModel",
 
   // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing RPCs served; these are not) ─────

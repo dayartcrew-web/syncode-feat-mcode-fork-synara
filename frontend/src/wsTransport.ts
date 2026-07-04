@@ -146,6 +146,16 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "orchestration.replayEvents": "orchestration/replay-events",
   "orchestration.repairState": "orchestration/repair-state",
 
+  // Orchestration subscribe (ORCH-4): `wsNativeApi.ts` calls these dot-strings
+  // (`subscribeShell` / `subscribeEvents`) to register on the `orchestration`
+  // push channel + receive the initial ShellSnapshot. They map to the served
+  // `orchestration/subscribeShell` / `orchestration/subscribeEvents` handlers,
+  // which register the connection and emit the snapshot baseline. Without this
+  // remap the calls would fall through to the `null` branch and the UI would
+  // never receive live orchestration push frames.
+  "orchestration.subscribeShell": "orchestration/subscribeShell",
+  "orchestration.subscribeEvents": "orchestration/subscribeEvents",
+
   // Git RPCs (T6c-3): the cloned MCode GitPanel calls `git.*` dot-strings
   // (`git.status`, `git.readWorkingTreeDiff`, `git.listBranches`, …). The
   // syncode-ws backend now serves these via `syncode-git` handlers — map
