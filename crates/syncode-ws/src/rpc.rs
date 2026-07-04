@@ -198,6 +198,10 @@ async fn dispatch_method(
                     "server/get-provider-usage-snapshot",
                     "server/start-local-server",
                     "server/stop-local-server",
+                    // SRV-6: list-only server RPCs.
+                    "server/list-local-servers",
+                    "server/list-local-server-processes",
+                    "server/list-worktrees",
                     // T6c-29: orchestration.* RPCs — generic dispatch + replay.
                     "orchestration.dispatchCommand",
                     "orchestration/dispatch-command",
@@ -1032,6 +1036,33 @@ async fn dispatch_method(
         "server.stopLocalServer" | "server/stop-local-server" => {
             handle_server_stop_local_server(state, id, &request.params).await
         }
+        // SRV-6 REAL: snapshot of all tracked local-server processes, drawn
+        // from `LocalServerManager::list()`. Returns the MCode
+        // `ServerLocalServerProcess[]` shape (camelCase fields). Empty when
+        // no servers are running.
+        "server.listLocalServers"
+        | "server/list-local-servers"
+        | "server/listLocalServers" => {
+            handle_server_list_local_servers(state, id).await
+        }
+        // SRV-6 REAL: a more detailed per-process view of tracked local
+        // servers. `LocalServerManager` does not track per-process metrics
+        // (CPU/RSS) — syncode's manager is a lifecycle tracker, not a
+        // resource monitor — so this carries the same `LocalServerProcess`
+        // fields plus a stable `status:"running"` marker so the UI can
+        // distinguish it from `listLocalServers` semantically.
+        "server.listLocalServerProcesses"
+        | "server/list-local-server-processes"
+        | "server/listLocalServerProcesses" => {
+            handle_server_list_local_server_processes(state, id).await
+        }
+        // SRV-6 REAL: list git worktrees for the current project. Delegates
+        // to the existing `handle_git_worktree_list` handler (same git2
+        // listing). Accepts an optional `cwd`/`projectPath` param (defaults
+        // to "." — same as the git.* form). Returns `{ worktrees: [...] }`.
+        "server.listWorktrees"
+        | "server/list-worktrees"
+        | "server/listWorktrees" => handle_git_worktree_list(id, &request.params),
 
         // ─── Server legacy aliases (SRV-5 — thin dispatch to served equivalents) ──
         //
@@ -4136,6 +4167,50 @@ async fn handle_server_stop_local_server(
         }
         Err(msg) => JsonRpcResponse::error(Some(id), crate::error_codes::INVALID_PARAMS, msg),
     }
+}
+
+/// `server.listLocalServers` — snapshot of all tracked local-server processes.
+///
+/// Backed by `LocalServerManager::list()` (a best-effort pid capture of every
+/// tracked child). Returns the MCode `ServerLocalServerProcess[]` shape:
+///   `[{ id, pid, command, displayName, args, ports, addresses, isStoppable,
+///     startedAt }]`
+/// Empty array when no servers are running. Read-only — takes the read lock
+/// only. `listLocalServerProcesses` is a richer alias (see below).
+async fn handle_server_list_local_servers(state: &WsState, id: Value) -> JsonRpcResponse {
+    let mgr = state.local_servers.read().await;
+    let list = mgr.list();
+    let result = serde_json::to_value(&list).unwrap_or(serde_json::json!([]));
+    JsonRpcResponse::success(id, result)
+}
+
+/// `server.listLocalServerProcesses` — detailed per-process view of tracked
+/// local servers.
+///
+/// `LocalServerManager` is a lifecycle tracker, not a resource monitor — it
+/// does NOT sample CPU/RSS per child (no `/proc/<pid>/stat` polling on Linux,
+/// no `task_info` on macOS, no `NtQueryInformationProcess` on Windows). So the
+/// "processes" view carries the same `LocalServerProcess` fields as
+/// `listLocalServers` plus a stable `status:"running"` marker the UI can key
+/// on to distinguish a live process from a stale entry (the manager removes
+/// stopped servers immediately, so every entry here is live by construction).
+/// Returns `{ processes: [...] }`; empty array when nothing is running.
+async fn handle_server_list_local_server_processes(state: &WsState, id: Value) -> JsonRpcResponse {
+    let mgr = state.local_servers.read().await;
+    let list = mgr.list();
+    // Augment each entry with a `status` field. Keep it cheap — serialize the
+    // already-derived `LocalServerProcess` view, then splice in the marker.
+    let processes: Vec<Value> = list
+        .into_iter()
+        .filter_map(|p| {
+            let mut v = serde_json::to_value(&p).ok()?;
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("status".to_string(), serde_json::json!("running"));
+            }
+            Some(v)
+        })
+        .collect();
+    JsonRpcResponse::success(id, serde_json::json!({ "processes": processes }))
 }
 
 // ─── Git Handlers (syncode-git-backed) ────────────────────────────
@@ -15035,6 +15110,165 @@ mod tests {
         assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
     }
 
+    // ─── SRV-6: list-only server RPCs ───────────────────────────────────
+    //
+    // `server.listLocalServers` + `server.listLocalServerProcesses` snapshot
+    // the `LocalServerManager` (real entries via `list()`); `server.listWorktrees`
+    // delegates to `git.worktreeList`. Both forms (dot + slash) verified.
+
+    /// listLocalServers returns an empty array before anything is started, then
+    /// real entries after `startLocalServer` — under BOTH method-name forms.
+    #[tokio::test]
+    async fn server_list_local_servers_returns_real_entries() {
+        let state = WsState::new_in_memory(16);
+
+        // Empty before any start (both forms).
+        for method in [
+            "server.listLocalServers",
+            "server/list-local-servers",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let arr = resp.result.unwrap();
+            let arr = arr.as_array().expect("result is an array");
+            assert!(arr.is_empty(), "{method}: empty before any start");
+        }
+
+        // Start two real sleepers the manager will track.
+        for srv_id in ["list-a", "list-b"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "server.startLocalServer",
+                "params": {
+                    "id": srv_id,
+                    "name": "sleeper",
+                    "command": "sleep",
+                    "args": ["30"],
+                    "ports": [9090],
+                }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "start failed: {:?}", resp.error);
+        }
+
+        // Now the list must carry both entries with real pids.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.listLocalServers"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let arr = resp.result.unwrap();
+        let arr = arr.as_array().expect("result is an array");
+        assert_eq!(arr.len(), 2, "list must contain both started servers");
+        let ids: std::collections::HashSet<&str> = arr
+            .iter()
+            .map(|v| v["id"].as_str().expect("id is a string"))
+            .collect();
+        assert!(ids.contains("list-a") && ids.contains("list-b"));
+        // Each entry must carry a real positive pid + camelCase fields.
+        for entry in arr {
+            let pid = entry["pid"].as_u64().expect("pid present") as i32;
+            assert!(pid > 0, "pid must be positive");
+            assert_eq!(entry["command"], "sleep");
+            assert_eq!(entry["ports"][0], 9090);
+            assert_eq!(entry["isStoppable"], true);
+            assert_eq!(entry["displayName"], "sleeper");
+        }
+
+        // Cleanup: stop both so the sleepers don't outlive the test.
+        for srv_id in ["list-a", "list-b"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "server.stopLocalServer",
+                "params": { "id": srv_id }
+            });
+            let _ = rpc(&state, 1, &req).await;
+        }
+    }
+
+    /// listLocalServerProcesses wraps the list with a `{ processes: [...] }`
+    /// envelope + a per-entry `status:"running"` marker — under BOTH forms.
+    /// listWorktrees delegates to the git worktree listing (returns a
+    /// `{ worktrees: [...] }` envelope with at least the main worktree).
+    #[tokio::test]
+    async fn server_list_local_server_processes_and_worktrees() {
+        let state = WsState::new_in_memory(16);
+
+        // Start one real sleeper so the processes view is non-empty.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.startLocalServer",
+            "params": {
+                "id": "proc-1",
+                "name": "sleeper",
+                "command": "sleep",
+                "args": ["30"],
+                "ports": [7070],
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "start failed: {:?}", resp.error);
+
+        // listLocalServerProcesses under BOTH forms.
+        for method in [
+            "server.listLocalServerProcesses",
+            "server/list-local-server-processes",
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+            let result = resp.result.unwrap();
+            let procs = result["processes"]
+                .as_array()
+                .expect("{method}: processes is an array");
+            assert_eq!(
+                procs.len(),
+                1,
+                "{method}: exactly one tracked process"
+            );
+            let entry = &procs[0];
+            assert_eq!(entry["id"], "proc-1");
+            assert_eq!(entry["command"], "sleep");
+            assert_eq!(entry["status"], "running", "{method}: status marker");
+            let pid = entry["pid"].as_u64().expect("pid present") as i32;
+            assert!(pid > 0, "{method}: pid must be positive");
+        }
+
+        // Cleanup the sleeper.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server.stopLocalServer",
+            "params": { "id": "proc-1" }
+        });
+        let _ = rpc(&state, 1, &req).await;
+
+        // listWorktrees delegates to git.worktreeList — both forms. This test
+        // runs inside the repo (cargo runs from the crate dir, a git repo), so
+        // the listing must include at least the main worktree entry.
+        for method in ["server.listWorktrees", "server/list-worktrees"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "cwd": env!("CARGO_MANIFEST_DIR") }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(
+                resp.error.is_none(),
+                "{method} failed: {:?}",
+                resp.error
+            );
+            let result = resp.result.unwrap();
+            let worktrees = result["worktrees"]
+                .as_array()
+                .expect("{method}: worktrees is an array");
+            assert!(
+                !worktrees.is_empty(),
+                "{method}: main worktree must be present"
+            );
+            // The first entry is the main worktree (is_main == true).
+            assert_eq!(worktrees[0]["is_main"], true, "{method}: main flagged");
+        }
+    }
+
     /// rpc/listMethods must advertise all 6 newly-served niche RPCs.
     #[tokio::test]
     async fn server_niche_rpcs_listed_in_list_methods() {
@@ -15055,6 +15289,10 @@ mod tests {
             "server/get-provider-usage-snapshot",
             "server/start-local-server",
             "server/stop-local-server",
+            // SRV-6: list-only server RPCs.
+            "server/list-local-servers",
+            "server/list-local-server-processes",
+            "server/list-worktrees",
         ] {
             assert!(
                 listed.contains(expected),
