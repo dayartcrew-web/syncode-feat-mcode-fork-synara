@@ -1,4 +1,9 @@
 # syncode-automation
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Now has ProcessRunExecutor (executes automations via sh -c), AutomationRun extended (unread/archived_at fields), Scheduler wired into WS with event-push (run-upserted lifecycle events). ~78 tests.
+
 > Scheduler engine for scheduled agent runs — schedules, retry/misfire/completion policies, run lifecycle, **execution engine**. **L1** · 2292 LOC · 67 tests
 - **Depends on (internal):** `core` (ports: `AutomationRepository`, `RunExecutor`).
 - **External:** tokio, serde, chrono, uuid, thiserror, tracing, **cron 0.15**, async-trait.

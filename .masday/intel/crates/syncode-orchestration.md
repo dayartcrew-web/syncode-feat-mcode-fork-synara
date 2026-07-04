@@ -1,4 +1,9 @@
 # syncode-orchestration
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** ProviderCommandReactor now WIRED in the standalone server (Orchestrator::with_reactor_and_adapter — turns invoke providers → chat functional). ThreadSessionView exported. ~175 tests.
+
 > CQRS/Event-Sourcing engine — Decider, Orchestrator pipeline, Projector, Reactors, ApplicationService. **L2** · 10121 LOC · 179 tests
 - **Depends on (internal):** `core`, `provider`.
 - **External:** tokio, serde, thiserror, async-trait, tracing.

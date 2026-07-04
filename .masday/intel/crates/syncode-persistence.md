@@ -1,4 +1,9 @@
 # syncode-persistence
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Unchanged. 25 tests, 7 projections. SqliteEventRepository used by standalone server.
+
 > SQLite event store + read-model projections + snapshots (concrete CQRS write/read side). **L1** · 2476 LOC · 25 tests
 - **Depends on (internal):** `core`.
 - **External:** sqlx 0.8 (sqlite), tokio, serde, async-trait, thiserror.

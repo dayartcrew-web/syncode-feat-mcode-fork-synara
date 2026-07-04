@@ -1,4 +1,9 @@
 # syncode-http
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Still a stub (12 LOC, 0 tests).
+
 > HTTP REST API alongside the WebSocket transport. **L1** · 12 LOC · 0 tests · **STUB**
 - **Depends on (internal):** `core`.
 - **External:** axum 0.8, tower 0.5, tower-http 0.6, tokio, serde, thiserror, tracing (declared, unused).

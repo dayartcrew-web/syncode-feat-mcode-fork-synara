@@ -1,4 +1,9 @@
 # syncode-ws
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Now has standalone server bin (src/bin/server.rs), 113 served RPCs across all MCode domains, llm.rs (LLM via provider CLI), usage.rs (token tracking), settings.rs (persisted settings + push), local_server.rs (process mgmt), terminal live-push reader tasks, ~7000 LOC, 227 tests.
+
 > WebSocket JSON-RPC 2.0 server — the primary runtime API into the CQRS engine. **L3** · 3007 LOC · 47 tests
 - **Depends on (internal):** `core`, `contracts`, `orchestration`, `persistence`, `auth`.
 - **External:** axum 0.8 (ws), tokio, tokio-tungstenite, serde, futures-util.

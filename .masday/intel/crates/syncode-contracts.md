@@ -1,4 +1,9 @@
 # syncode-contracts
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Now has RPC DTO module (rpc.rs, 23 request/result structs), events.rs (DomainEventDto 44-variant union + From projection), ~1100 LOC, 96 tests. Tier-3 contract symbols (139) in frontend/src/contracts/tier3/.
+
 > Shared DTOs with ts-rs TypeScript codegen (Rust↔frontend bridge). **L0** · 571 LOC · 34 tests · `lib.rs` + `snapshots.rs`
 - **Depends on (internal):** none.
 - **External:** serde, serde_json, ts-rs 10, uuid, chrono.

@@ -1,4 +1,9 @@
 # syncode-auth
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Wired into WS (opt-in via WsAuthConfig). AuthMode surfaced in server.getConfig/welcome/getDiagnostics. 39 tests.
+
 > Authentication & authorization — credential mgmt, auth policies, secret storage, principals, sessions, authenticators. **L1** · 1203 LOC · 39 tests
 - **Depends on (internal):** `core`.
 - **External:** tokio, serde, serde_json, thiserror, tracing, chrono, async-trait.

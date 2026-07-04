@@ -1,4 +1,9 @@
 # syncode-provider
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** ALL_PROVIDERS static used for listModels/listAgents WS RPCs. ProviderRegistry in WsState. extract_usage_from_response helper in syncode-ws. 276 tests.
+
 > Multi-LLM-provider abstraction — `ProviderAdapter` trait, 10 adapters, SessionManager, Registry. **L1** · 13525 LOC · 276 tests (largest crate)
 - **Depends on (internal):** `core`.
 - **External:** tokio, serde, reqwest (HTTP adapters), async-trait, thiserror, tracing, futures.

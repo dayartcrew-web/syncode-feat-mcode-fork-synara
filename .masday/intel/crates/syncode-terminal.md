@@ -1,4 +1,9 @@
 # syncode-terminal
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Structurally unchanged; live output push wired in syncode-ws (per-session reader task → push_tx). PtyHandle reader uses std::Mutex (was tokio). 20 tests.
+
 > PTY process management via portable-pty — spawn, resize, write, ack-buffered output, session lifecycle. **L1** · 699 LOC · 20 tests
 - **Depends on (internal):** `core`.
 - **External:** portable-pty 0.9, tokio, serde, thiserror, tracing, chrono, uuid.

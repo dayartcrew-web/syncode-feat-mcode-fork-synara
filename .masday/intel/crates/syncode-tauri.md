@@ -1,4 +1,9 @@
 # syncode-tauri
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Now builds (GTK/webkit -dev libs installed), 28 IPC commands wired (generate_handler!), shell_commands.rs (shell_open_editor), RGBA icon.png fix, 29 tests.
+
 > Tauri v2 desktop shell — native window, tray, auto-updater, IPC commands. **L4** · 1224 LOC · 0 workspace tests (excluded, build issues) · has `main.rs` (the binary)
 - **Depends on (internal):** `core`, `git`, `terminal`, `ws`.
 - **External:** tauri 2, serde, tokio, chrono, uuid, tracing-subscriber.

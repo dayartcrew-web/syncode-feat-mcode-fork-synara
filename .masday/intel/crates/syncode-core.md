@@ -1,4 +1,9 @@
 # syncode-core
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** Unchanged. 45 tests, 44 DomainEvents, 7 port traits. DomainEventDto mirror in syncode-contracts.
+
 > Shared domain kernel — entities, domain events, port traits. **L0** · 2165 LOC · 45 tests · `lib.rs` + `domain/` + `application/` + `ports/`
 - **Depends on (internal):** none — the universal dependency every other crate builds on.
 - **External:** thiserror, serde, chrono, uuid, async-trait, serde_json.

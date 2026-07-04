@@ -1,4 +1,9 @@
 # syncode-git
+
+> ⚠️ **PRE-CLONE SNAPSHOT (2026-07-02).** This intel is from before the clone+rewire arc (PR #6–#47, 48 PRs total). For the current authoritative state see [`docs/STATUS.md`](../../../docs/STATUS.md).
+>
+> **Key changes since this snapshot:** StackedPipeline/StackedAction used by WS (runStackedAction). create_pull_request exists. WS git handlers bypass syncode-git worktree helpers (bugs). 40 tests.
+
 > Git integration via git2 + CLI shelling-out — status, diff, branch, commit, checkpoints, worktrees, stacked actions, push/pull/CreatePR. **L1** · 1958 LOC · 40 tests
 - **Depends on (internal):** `core`.
 - **External:** git2 0.20, tokio, serde, thiserror, tracing, which 7, tempfile 3.
