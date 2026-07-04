@@ -1280,9 +1280,16 @@ export const SERVED_RPC = {
     request: null as unknown as Record<string, unknown>,
     result: null as unknown as Record<string, unknown>,
   },
+  // ORCH-6: `orchestration.getTurnDiff` loads two `CheckpointView`s for a
+  // turn from the read model's `checkpoints` map and computes the diff via
+  // `syncode_git::diff::compute_diff`. The turn's `checkpoint_ref` is the
+  // `from` (before-state); the next turn's checkpoint (or HEAD when this is
+  // the latest) is the `to` (after-state). Returns the MCode `TurnDiffResult`
+  // shape `{ diff: string }` with an optional `note` on graceful fallbacks
+  // (no checkpoint / git unavailable) — never an error.
   "orchestration/get-turn-diff": {
     request: null as unknown as Record<string, unknown>,
-    result: null as unknown as Record<string, unknown>,
+    result: null as unknown as { readonly diff: string; readonly note?: string },
   },
   "orchestration/get-full-thread-diff": {
     request: null as unknown as Record<string, unknown>,
@@ -1442,10 +1449,12 @@ export const UNSERVED_RPC = [
   // returns `{ replayed, seeded }`). ORCH-4: `orchestration.subscribeShell`
   // + `orchestration.subscribeEvents` are NOW SERVED (register on the
   // `orchestration` push channel + emit an initial ShellSnapshot — see
-  // SERVED_RPC + MCODE_TO_SERVED). The remaining ops below are still unserved.
+  // SERVED_RPC + MCODE_TO_SERVED). ORCH-6: `orchestration.getTurnDiff` is NOW
+  // SERVED (loads two `CheckpointView`s, computes diff via
+  // `syncode_git::diff::compute_diff`, returns `{ diff, note }`). The
+  // remaining ops below are still unserved.
   "orchestration.dispatchCommand",
   "orchestration.getFullThreadDiff",
-  "orchestration.getTurnDiff",
   "orchestration.repairReadModel",
 
   // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing RPCs served; these are not) ─────

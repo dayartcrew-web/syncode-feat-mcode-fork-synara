@@ -23,5 +23,7 @@ pub use reactors::{
     CommandReaction, CommandReactorError, IngestionResult, ProviderCommandReactor,
     ingest_provider_event,
 };
-pub use read_model::{ActivityView, MessageView, ProjectView, ThreadSessionView, ThreadView, TurnView};
+pub use read_model::{
+    ActivityView, CheckpointView, MessageView, ProjectView, ThreadSessionView, ThreadView, TurnView,
+};
 pub use use_cases::{ApplicationService, ProjectDashboard, ThreadDetail};

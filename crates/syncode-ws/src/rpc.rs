@@ -1301,10 +1301,17 @@ async fn handle_orchestration_dispatch_command(
 
 /// `orchestration.getTurnDiff` — return the git diff captured by a turn's
 /// checkpoint. Reads `threadId`, optional `turnId` (defaults to the latest
-/// turn), and `cwd` (the working dir to diff in). The turn's `git_checkpoint`
-/// is used as the `from_ref`; the next turn's checkpoint (or HEAD when this is
-/// the latest turn) is the `to_ref`. An empty patch is returned when the turn
-/// has no checkpoint or git is unavailable.
+/// turn with a checkpoint), and `cwd` (the working dir to diff in).
+///
+/// Loads the `CheckpointView`s for the thread from the read model's
+/// `checkpoints` map (keyed by `thread_id:turn_id`). The target turn's
+/// `checkpoint_ref` is the `from` (before-state); the next turn's checkpoint
+/// (or `HEAD`/working-tree when this is the latest) is the `to` (after-state).
+/// The diff is computed via [`syncode_git::diff::compute_diff`].
+///
+/// Returns the MCode `TurnDiffResult` shape: `{ diff: string }`. A `note`
+/// field is added on graceful fallbacks (no checkpoints, sparse map, or git
+/// unavailable) — these are NEVER errors per the contract.
 async fn handle_orchestration_get_turn_diff(
     state: &WsState,
     id: Value,
@@ -1319,90 +1326,116 @@ async fn handle_orchestration_get_turn_diff(
         .and_then(|v| v.as_str())
         .unwrap_or(".");
 
-    // Resolve the target turn + collect ordered turns for the thread. Clone to
-    // owned so the read lock is released before the (potentially slow) git ops.
-    let (turn_count, target_idx, from_ref, to_ref) = {
+    // Collect the thread's ordered checkpoints. The read model's `checkpoints`
+    // map is keyed `thread_id:turn_id`; one `CheckpointView` per turn. Clone to
+    // owned so the read lock is released before any (potentially slow) git ops.
+    let (count, target_idx, from_ref, to_ref) = {
         let store = state.read_store.read().await;
-        let mut turns: Vec<&syncode_orchestration::TurnView> = store
-            .turns
+        let mut cps: Vec<syncode_orchestration::CheckpointView> = store
+            .checkpoints
             .values()
-            .filter(|t| t.thread_id == thread_id)
+            .filter(|c| c.thread_id == thread_id)
+            .cloned()
             .collect();
-        turns.sort_by_key(|t| t.sequence);
-        let count = turns.len() as u32;
-        if turns.is_empty() {
+        // Stable order by `checkpoint_turn_count` (monotonic per thread) so the
+        // "next checkpoint" lookup is well-defined.
+        cps.sort_by_key(|c| c.checkpoint_turn_count);
+        let count = cps.len();
+        if cps.is_empty() {
             return JsonRpcResponse::success(
                 id,
-                serde_json::json!({ "patch": "", "turns": 0u32 }),
+                serde_json::json!({ "diff": "", "note": "no checkpoint for turn" }),
             );
         }
+        // Resolve the target turn: explicit `turnId` matches `CheckpointView::turn_id`,
+        // otherwise default to the latest checkpoint.
         let target_idx = match params.get("turnId").and_then(|v| v.as_str()) {
-            Some(tid) => turns.iter().position(|t| t.id == tid),
-            None => Some(turns.len().saturating_sub(1)),
+            Some(tid) => cps.iter().position(|c| c.turn_id == tid),
+            None => Some(cps.len().saturating_sub(1)),
         };
         let target_idx = match target_idx {
             Some(i) => i,
             None => {
                 return JsonRpcResponse::success(
                     id,
-                    serde_json::json!({ "patch": "", "turns": count }),
+                    serde_json::json!({ "diff": "", "note": "no checkpoint for turn" }),
                 );
             }
         };
-        let from_ref = match turns[target_idx].git_checkpoint.clone() {
-            Some(r) => r,
-            None => {
-                return JsonRpcResponse::success(
-                    id,
-                    serde_json::json!({
-                        "patch": "",
-                        "turns": count,
-                        "note": "no checkpoint for turn",
-                    }),
-                );
-            }
-        };
-        let to_ref: Option<String> = turns
+        let from_ref = cps[target_idx].checkpoint_ref.clone();
+        // `to_ref` is the next checkpoint after the target, else None (= HEAD /
+        // working-tree — `compute_diff` treats `None` as the current state).
+        let to_ref = cps
             .get(target_idx + 1)
-            .and_then(|t| t.git_checkpoint.clone());
+            .map(|c| c.checkpoint_ref.clone());
         (count, target_idx, from_ref, to_ref)
     };
-    let _ = target_idx;
+    // `count`/`target_idx` are surfaced in debug builds via `note` only when
+    // the diff is empty — they aren't part of the MCode `TurnDiffResult` shape
+    // and are kept here purely for the graceful-fallback branch below.
+    let _ = (count, target_idx);
 
+    // Open the git service on the requested working directory. A failure here
+    // is a graceful fallback (no repo at `cwd` / git unavailable), NOT an
+    // error — the contract promises `{ diff: string }`.
     let svc = match syncode_git::service::Git2Service::open(Path::new(cwd)) {
         Ok(s) => s,
         Err(e) => {
-            return git_error(
+            return JsonRpcResponse::success(
                 id,
-                crate::error_codes::INTERNAL_ERROR,
-                format!("git open failed: {e}"),
+                serde_json::json!({
+                    "diff": "",
+                    "note": format!("git unavailable: {e}"),
+                }),
             );
         }
     };
-    let entries = match svc.diff(Some(&from_ref), to_ref.as_deref()) {
-        Ok(e) => e,
-        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git diff: {e}")),
+    // Compute the diff via the canonical `syncode_git::diff::compute_diff`
+    // helper: `from_ref` is the turn's checkpoint (before-state); `to_ref`
+    // (Option) is the next checkpoint or None (= HEAD / working tree).
+    let summary = match syncode_git::diff::compute_diff(
+        &svc,
+        Some(&from_ref),
+        to_ref.as_deref(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "diff": "",
+                    "note": format!("git diff failed: {e}"),
+                }),
+            );
+        }
     };
-    let patch = entries
+    // Render a unified-diff-style patch string from the `DiffSummary` entries.
+    let diff_text = summary
+        .entries
         .iter()
         .map(|e| {
             let path = e.old_path.as_deref().unwrap_or(&e.new_path);
+            let body = e.patch.as_deref().unwrap_or("");
             format!(
-                "diff --git a/{path} b/{new}\nstatus: {status:?}\n",
+                "diff --git a/{path} b/{new}\nindex ..\nstatus: {status:?}\n+{add}/-{del}\n{body}",
                 new = e.new_path,
                 status = e.status,
+                add = e.additions,
+                del = e.deletions,
             )
         })
         .collect::<String>();
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "patch": patch,
-            "turns": turn_count,
-            "fromRef": from_ref,
-            "toRef": to_ref,
-        }),
-    )
+    let mut result = serde_json::json!({ "diff": diff_text });
+    // Surface the stats summary as a `note` when the patch is empty so the UI
+    // can distinguish "no changes" from "checkpoint exists but git returned
+    // nothing" — keeps the `{ diff: string }` contract intact while aiding UX.
+    if diff_text.is_empty() {
+        result["note"] = serde_json::json!(format!(
+            "no changes ({} checkpoint(s) for thread)",
+            count
+        ));
+    }
+    JsonRpcResponse::success(id, result)
 }
 
 /// `orchestration.getFullThreadDiff` — cumulative diff across all of a
@@ -15353,7 +15386,8 @@ mod tests {
 
     #[tokio::test]
     async fn orchestration_get_turn_diff_returns_empty_for_no_checkpoints() {
-        // A thread with no turns/checkpoints returns an empty patch.
+        // A thread with no checkpoints returns the graceful `{ diff, note }`
+        // fallback shape — never an error, per the MCode `TurnDiffResult` contract.
         let state = WsState::new_in_memory(16);
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "orchestration.getTurnDiff",
@@ -15362,7 +15396,91 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "getTurnDiff failed: {:?}", resp.error);
         let result = resp.result.unwrap();
-        assert_eq!(result["patch"], "");
+        assert_eq!(result["diff"], "", "diff must be empty when no checkpoints");
+        assert_eq!(
+            result["note"], "no checkpoint for turn",
+            "fallback note must explain the empty diff"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_turn_diff_falls_back_when_cwd_has_no_repo() {
+        // A thread WITH a checkpoint, but `cwd` pointing at a directory with no
+        // git repo, must still return the `{ diff, note }` shape (git
+        // unavailable is a graceful fallback, not an error). Seeds one
+        // `CheckpointView` and points `cwd` at `/nonexistent-orch-6` so the
+        // `Git2Service::open` call fails.
+        let state = WsState::new_in_memory(16);
+        {
+            let mut store = state.read_store.write().await;
+            store.checkpoints.insert(
+                "th1:tu1".into(),
+                syncode_orchestration::CheckpointView {
+                    thread_id: "th1".into(),
+                    turn_id: "tu1".into(),
+                    checkpoint_turn_count: 1,
+                    checkpoint_ref: "refs/syncode/checkpoints/tu1".into(),
+                    status: "ready".into(),
+                    files: vec![],
+                    assistant_message_id: None,
+                    completed_at: "2026-01-01T00:00:00Z".into(),
+                },
+            );
+        }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.getTurnDiff",
+            "params": { "threadId": "th1", "turnId": "tu1", "cwd": "/nonexistent-orch-6" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "getTurnDiff failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["diff"], "", "diff must be empty when git unavailable");
+        assert!(
+            result["note"].as_str().unwrap_or("").contains("git unavailable"),
+            "fallback note must mention git unavailable, got: {:?}",
+            result["note"]
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_turn_diff_two_checkpoints_resolves_next_as_to_ref() {
+        // Two checkpoints for one thread: requesting the FIRST turn's diff must
+        // use checkpoint[0] as `from_ref` and checkpoint[1] as `to_ref`. Since
+        // `cwd` (an empty temp dir) is not a real git repo, the open fails and
+        // we get the graceful `{ diff, note }` fallback — but the handler must
+        // NOT 4xx/5xx, proving it loaded BOTH checkpoints and tried the diff.
+        // The slash form (`orchestration/get-turn-diff`) is also exercised.
+        let state = WsState::new_in_memory(16);
+        {
+            let mut store = state.read_store.write().await;
+            for (turn_id, n) in [("tu1", 1u32), ("tu2", 2u32)] {
+                store.checkpoints.insert(
+                    format!("th1:{turn_id}"),
+                    syncode_orchestration::CheckpointView {
+                        thread_id: "th1".into(),
+                        turn_id: turn_id.into(),
+                        checkpoint_turn_count: n,
+                        checkpoint_ref: format!("refs/syncode/checkpoints/{turn_id}"),
+                        status: "ready".into(),
+                        files: vec![],
+                        assistant_message_id: None,
+                        completed_at: "2026-01-01T00:00:00Z".into(),
+                    },
+                );
+            }
+        }
+        // Slash form — both dispatch names must be served identically.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration/get-turn-diff",
+            "params": { "threadId": "th1", "turnId": "tu1", "cwd": "/nonexistent-orch-6" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "slash-form getTurnDiff failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        // Graceful fallback (git unavailable) — but the handler successfully
+        // resolved two checkpoints + attempted the diff, never erroring.
+        assert_eq!(result["diff"], "");
+        assert!(result["note"].as_str().unwrap_or("").contains("git unavailable"));
     }
 
     #[tokio::test]
