@@ -3,6 +3,10 @@
 //! WebSocket JSON-RPC server, method dispatch, push bus,
 //! channel management, and connection state machine.
 
+// The `rpc/listMethods` payload uses a large `serde_json::json!` array literal
+// (>120 entries); raise the recursion limit so the macro can expand it.
+#![recursion_limit = "512"]
+
 pub mod auth;
 pub mod channels;
 pub mod local_server;

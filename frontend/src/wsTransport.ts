@@ -131,6 +131,17 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "orchestration.getShellSnapshot": "shell/getSnapshot",
   "orchestration.getSnapshot": "snapshot/get",
 
+  // T6c-29: orchestration generic RPCs. The cloned MCode UI drives the
+  // orchestration engine through these dot-strings (dispatchCommand,
+  // subscribeShell, getTurnDiff, getFullThreadDiff, replayEvents,
+  // repairState). Map each onto the served slash dispatch key.
+  "orchestration.dispatchCommand": "orchestration/dispatch-command",
+  "orchestration.subscribeShell": "orchestration/subscribe-shell",
+  "orchestration.getTurnDiff": "orchestration/get-turn-diff",
+  "orchestration.getFullThreadDiff": "orchestration/get-full-thread-diff",
+  "orchestration.replayEvents": "orchestration/replay-events",
+  "orchestration.repairState": "orchestration/repair-state",
+
   // Git RPCs (T6c-3): the cloned MCode GitPanel calls `git.*` dot-strings
   // (`git.status`, `git.readWorkingTreeDiff`, `git.listBranches`, …). The
   // syncode-ws backend now serves these via `syncode-git` handlers — map
