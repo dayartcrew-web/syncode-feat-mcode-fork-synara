@@ -274,6 +274,133 @@ pub struct HealthCheckResult {
 }
 
 // ---------------------------------------------------------------------------
+// Per-provider option descriptors (model list + capability flags)
+// ---------------------------------------------------------------------------
+
+/// Per-provider option descriptor surfaced by `provider.listOptions`. Carries
+/// the real model list + capability flags read from each provider's adapter
+/// (constructed un-spawned — `new()` is cheap and side-effect-free). Defaults
+/// are surfaced for fields a provider does not natively expose so the shape is
+/// invariant across all entries (the UI's `.supportsTemperature` etc. reads
+/// must never crash on a missing field).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderOptionInfo {
+    /// Provider identifier (e.g. `"codex"`, `"claude"`).
+    pub provider: String,
+    /// Models the provider accepts (informational; sourced from the adapter's
+    /// `available_models()`).
+    pub models: Vec<String>,
+    /// Whether the provider accepts a sampling-temperature parameter. All
+    /// current adapters front LLM endpoints that accept temperature, so this is
+    /// `true` for every known provider.
+    pub supports_temperature: bool,
+    /// Whether the provider accepts a system prompt / custom instructions.
+    /// Derived from the adapter's `ProviderCapability::SystemPrompt` flag.
+    pub supports_system_prompt: bool,
+    /// Whether the provider accepts a tool/function-calling configuration.
+    /// Derived from `ProviderCapability::ToolUse`.
+    pub supports_tool_use: bool,
+    /// Whether the provider can stream token-by-token responses.
+    /// Derived from `ProviderCapability::Streaming`.
+    pub supports_streaming: bool,
+    /// Whether the provider can handle image inputs.
+    /// Derived from `ProviderCapability::Vision`.
+    pub supports_vision: bool,
+    /// Default maximum tokens for a single response. Sourced from the adapter's
+    /// default config (`4096` for all current adapters); `0` when unknown.
+    pub max_tokens: u32,
+    /// Raw capability identifiers (snake_case serialization of
+    /// [`ProviderCapability`]), surfaced for forward compatibility.
+    pub capabilities: Vec<String>,
+}
+
+impl ProviderOptionInfo {
+    /// Build a descriptor for a single provider by reading its (un-spawned)
+    /// adapter's live `capabilities()` + `available_models()`. Returns `None`
+    /// for provider ids that have no adapter constructor (defensive — every id
+    /// in [`ALL_PROVIDERS`] is covered).
+    fn from_provider_id(provider_id: &str) -> Option<Self> {
+        use crate::adapters::{anthropic, claude, codex, cursor, gemini, grok, kilo, openai, opencode, pi};
+        use crate::trait_def::ProviderAdapter;
+
+        // The capability flags + model list are read from a freshly-constructed
+        // (un-spawned) adapter. `new()` only allocates a broadcast channel and
+        // atomic state — no I/O, no subprocess — so this is safe to call from a
+        // request handler. Each branch returns the adapter's real data.
+        let (caps, models, max_tokens): (Vec<ProviderCapability>, Vec<String>, u32) = match provider_id {
+            PROVIDER_CODEX => {
+                let a = codex::CodexAdapter::new();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_CLAUDE => {
+                let a = claude::ClaudeAdapter::new();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_CURSOR => {
+                let a = cursor::create();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_GEMINI => {
+                let a = gemini::create();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_GROK => {
+                let a = grok::create();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_KILO => {
+                let a = kilo::KiloAdapter::new();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_OPENCODE => {
+                let a = opencode::OpenCodeAdapter::new();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_PI => {
+                let a = pi::PiAdapter::new();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_ANTHROPIC => {
+                let a = anthropic::AnthropicAdapter::new();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            PROVIDER_OPENAI => {
+                let a = openai::OpenAIAdapter::new();
+                (a.capabilities(), a.available_models(), 4096)
+            }
+            _ => return None,
+        };
+
+        Some(Self {
+            provider: provider_id.to_string(),
+            supports_temperature: true,
+            supports_system_prompt: caps.contains(&ProviderCapability::SystemPrompt),
+            supports_tool_use: caps.contains(&ProviderCapability::ToolUse),
+            supports_streaming: caps.contains(&ProviderCapability::Streaming),
+            supports_vision: caps.contains(&ProviderCapability::Vision),
+            max_tokens,
+            capabilities: caps
+                .iter()
+                .filter_map(|c| serde_json::to_value(c).ok())
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+            models,
+        })
+    }
+}
+
+/// Build the per-provider option descriptor list — one [`ProviderOptionInfo`]
+/// per id in [`ALL_PROVIDERS`], each carrying real model + capability data read
+/// from its adapter. Entries appear in [`ALL_PROVIDERS`] order. Unknown ids
+/// (none currently) are skipped defensively.
+pub fn all_provider_option_infos() -> Vec<ProviderOptionInfo> {
+    ALL_PROVIDERS
+        .iter()
+        .filter_map(|id| ProviderOptionInfo::from_provider_id(id))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -548,5 +675,98 @@ mod tests {
         let deserialized: ProviderStatusEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.provider_id, "test");
         assert!(deserialized.is_default);
+    }
+
+    // --- Per-provider option descriptors ------------------------------------
+
+    #[test]
+    fn all_provider_option_infos_covers_every_known_provider() {
+        let infos = all_provider_option_infos();
+        // Every id in ALL_PROVIDERS has an adapter constructor, so none are
+        // dropped.
+        assert_eq!(
+            infos.len(),
+            ALL_PROVIDERS.len(),
+            "every ALL_PROVIDERS id must yield a ProviderOptionInfo"
+        );
+        let ids: Vec<&str> = infos.iter().map(|i| i.provider.as_str()).collect();
+        for id in ALL_PROVIDERS {
+            assert!(ids.contains(id), "missing option info for provider {id}");
+        }
+    }
+
+    #[test]
+    fn provider_option_info_carries_real_models_and_capability_flags() {
+        let infos = all_provider_option_infos();
+        let codex = infos
+            .iter()
+            .find(|i| i.provider == PROVIDER_CODEX)
+            .expect("codex option info");
+        // Codex's adapter advertises a multi-model list (gpt-5.1 family).
+        assert!(
+            !codex.models.is_empty(),
+            "codex must surface a real model list"
+        );
+        assert!(
+            codex.models.iter().any(|m| m.contains("gpt")),
+            "codex models should include gpt-family entries, got {:?}",
+            codex.models
+        );
+        // Capability flags derived from Codex's ProviderCapability set.
+        assert!(codex.supports_streaming, "codex supports streaming");
+        assert!(codex.supports_tool_use, "codex supports tool use");
+        assert!(
+            codex.supports_system_prompt,
+            "codex supports system prompts"
+        );
+        assert!(
+            !codex.supports_vision,
+            "codex does not advertise vision"
+        );
+        // Temperature is universally supported by the LLM endpoints we front.
+        assert!(codex.supports_temperature);
+        // max_tokens defaults to 4096 for every current adapter.
+        assert_eq!(codex.max_tokens, 4096);
+        // Raw capability identifiers are surfaced (snake_case).
+        assert!(codex.capabilities.contains(&"streaming".to_string()));
+        assert!(codex.capabilities.contains(&"tool_use".to_string()));
+    }
+
+    #[test]
+    fn provider_option_info_serializes_invariant_shape() {
+        // Every descriptor must surface all fields (no provider should omit
+        // capability flags or models) so the UI's reads never crash.
+        let infos = all_provider_option_infos();
+        for info in &infos {
+            let json = serde_json::to_string(info).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert!(parsed["provider"].is_string(), "missing provider field");
+            assert!(parsed["models"].is_array(), "missing models field");
+            assert!(
+                parsed["supports_temperature"].is_boolean(),
+                "missing supportsTemperature"
+            );
+            assert!(
+                parsed["supports_system_prompt"].is_boolean(),
+                "missing supportsSystemPrompt"
+            );
+            assert!(
+                parsed["supports_tool_use"].is_boolean(),
+                "missing supportsToolUse"
+            );
+            assert!(
+                parsed["supports_streaming"].is_boolean(),
+                "missing supportsStreaming"
+            );
+            assert!(
+                parsed["supports_vision"].is_boolean(),
+                "missing supportsVision"
+            );
+            assert!(parsed["max_tokens"].is_number(), "missing maxTokens");
+            assert!(
+                parsed["capabilities"].is_array(),
+                "missing capabilities field"
+            );
+        }
     }
 }
