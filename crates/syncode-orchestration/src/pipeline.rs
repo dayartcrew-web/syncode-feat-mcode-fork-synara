@@ -16,6 +16,7 @@ use syncode_core::{
     DomainEvent, EntityId, Envelope,
     ports::{DomainEventPublisher, EventRepository, PortError},
 };
+use syncode_provider::ProviderEvent;
 use tracing::{info, instrument};
 
 use crate::decider::{Command, Decider, DeciderError};
@@ -607,8 +608,9 @@ impl Orchestrator {
     /// turn back into domain events and append + project just like stream-sourced
     /// events. All events are correlated to the given `turn_id`.
     ///
-    /// Returns the resulting envelopes (may be empty — `Started`/`Token`/
-    /// `StatusChanged` produce no domain event).
+    /// Returns the resulting envelopes (may be empty — `Started`/
+    /// `StatusChanged` produce no domain event; `Token` produces a
+    /// `MessageDeltaAppended`).
     pub async fn ingest_provider_events_batch(
         &self,
         provider_events: Vec<syncode_provider::ProviderEvent>,
@@ -1009,10 +1011,23 @@ pub(crate) async fn thread_id_for_turn(
         .and_then(|t| EntityId::parse(&t.thread_id).ok())
 }
 
+/// Maximum number of token chunks to accumulate before flushing a batched
+/// `MessageDeltaAppended`, even if the time window hasn't elapsed. Caps the
+/// latency of any single flush and bounds the buffer size.
+const TOKEN_BATCH_MAX_COUNT: usize = 64;
+
 /// Drive a provider event stream to completion, ingesting each event into the
 /// pipeline (append + project) under the given turn. A stream error or an append
 /// error stops the consumer (logged). A free function so it is unit-testable
 /// with a synthetic stream, independent of `tokio::spawn`.
+///
+/// Token batching: incoming `ProviderEvent::Token` chunks are accumulated into a
+/// buffer and flushed as a single `MessageDeltaAppended` every ~100ms (or when
+/// `TOKEN_BATCH_MAX_COUNT` chunks accumulate, whichever comes first). This
+/// avoids flooding the event store + WS push channel with one event per token
+/// while still delivering streamed output to subscribed clients in real time.
+/// Non-token events flush any pending token buffer first so ordering is
+/// preserved (all tokens emitted before a ToolCall/Completed arrive before it).
 pub(crate) async fn consume_provider_stream(
     mut stream: syncode_provider::ProviderStream,
     event_repo: Arc<dyn EventRepository>,
@@ -1022,41 +1037,158 @@ pub(crate) async fn consume_provider_stream(
     session_id: String,
 ) {
     use tokio_stream::StreamExt;
+    use tokio::time::{Duration, interval};
 
     // Resolve the turn's owning thread once; every event on this stream shares
     // it (StartTurn emits TurnStarted before the consumer spawns, so the turn is
     // normally already projected). None if not yet projected.
     let thread_id = thread_id_for_turn(&read_model, turn_id).await;
 
-    // Capture the turn's wall-clock start so TurnCompleted carries a real
-    // elapsed duration rather than the token-count heuristic.
-    let started_at = syncode_core::Timestamp::now();
+    // Bundle the immutable pipeline handles so the batching helpers stay
+    // under clippy's argument-count limit and the call sites stay readable.
+    let ctx = StreamCtx {
+        turn_id,
+        thread_id,
+        started_at: syncode_core::Timestamp::now(),
+        event_repo: &event_repo,
+        read_model: &read_model,
+        event_publisher: event_publisher.as_ref(),
+        session_id: &session_id,
+    };
+
+    // Token batching state: accumulated text + chunk count since the last flush.
+    let mut token_buf = String::new();
+    let mut token_count: usize = 0;
+
+    // 100ms flush window. The first tick completes immediately (tokio's interval
+    // contract), so we skip it; subsequent ticks fire ~every 100ms and flush any
+    // buffered tokens.
+    let mut flush_timer = interval(Duration::from_millis(100));
+    flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Discard the immediate first tick so we don't flush an empty buffer right away.
+    flush_timer.tick().await;
+
     tracing::info!(%session_id, "provider stream consumer started");
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(provider_event) => {
-                let ingestion =
-                    ingest_provider_event(provider_event, turn_id, thread_id, Some(started_at));
-                if let Err(e) = append_and_project(
-                    &event_repo,
-                    &read_model,
-                    event_publisher.as_ref(),
-                    turn_id,
-                    ingestion.events,
-                )
-                .await
-                {
-                    tracing::error!(%session_id, error = %e, "stream consumer ingest failed; stopping");
-                    return;
+
+    loop {
+        tokio::select! {
+            // Flush the token buffer when the time window elapses, regardless of
+            // stream activity, so a slow tail of tokens still reaches clients.
+            _ = flush_timer.tick() => {
+                if !token_buf.is_empty() {
+                    let batch = std::mem::take(&mut token_buf);
+                    token_count = 0;
+                    ctx.flush_token_batch(batch).await;
                 }
             }
-            Err(e) => {
-                tracing::warn!(%session_id, error = %e, "provider stream error; stopping consumer");
-                return;
+            next = stream.next() => {
+                match next {
+                    None => break,
+                    Some(Err(e)) => {
+                        tracing::warn!(%session_id, error = %e, "provider stream error; stopping consumer");
+                        return;
+                    }
+                    Some(Ok(provider_event)) => {
+                        // Tokens are accumulated into the batch buffer; everything
+                        // else flushes the buffer first (ordering), then is ingested
+                        // directly.
+                        if let ProviderEvent::Token { content, .. } = &provider_event {
+                            token_buf.push_str(content);
+                            token_count += 1;
+                            if token_count >= TOKEN_BATCH_MAX_COUNT {
+                                let batch = std::mem::take(&mut token_buf);
+                                token_count = 0;
+                                ctx.flush_token_batch(batch).await;
+                            }
+                            continue;
+                        }
+
+                        // Non-token event: flush pending tokens first to preserve
+                        // ordering (all tokens before this event reach the client
+                        // before the event's own domain event does).
+                        if !token_buf.is_empty() {
+                            let batch = std::mem::take(&mut token_buf);
+                            token_count = 0;
+                            ctx.flush_token_batch(batch).await;
+                        }
+
+                        let ingestion = ingest_provider_event(
+                            provider_event,
+                            ctx.turn_id,
+                            ctx.thread_id,
+                            Some(ctx.started_at),
+                        );
+                        if let Err(e) = append_and_project(
+                            ctx.event_repo,
+                            ctx.read_model,
+                            ctx.event_publisher,
+                            ctx.turn_id,
+                            ingestion.events,
+                        )
+                        .await
+                        {
+                            tracing::error!(%session_id, error = %e, "stream consumer ingest failed; stopping");
+                            return;
+                        }
+                    }
+                }
             }
         }
     }
+
+    // Stream ended: flush any remaining buffered tokens so the final tail of the
+    // response is not lost.
+    if !token_buf.is_empty() {
+        ctx.flush_token_batch(token_buf).await;
+    }
     tracing::info!(%session_id, "provider stream consumer ended");
+}
+
+/// Immutable handles the batching loop needs, bundled so the flush helper stays
+/// under clippy's argument-count limit. Borrows the caller-owned `Arc`s for the
+/// lifetime of one `consume_provider_stream` invocation.
+struct StreamCtx<'a> {
+    turn_id: EntityId,
+    thread_id: Option<EntityId>,
+    started_at: syncode_core::Timestamp,
+    event_repo: &'a Arc<dyn EventRepository>,
+    read_model: &'a Arc<tokio::sync::RwLock<ReadModelStore>>,
+    event_publisher: Option<&'a Arc<dyn DomainEventPublisher>>,
+    session_id: &'a str,
+}
+
+impl<'a> StreamCtx<'a> {
+    /// Flush a batch of accumulated token text as a single `MessageDeltaAppended`
+    /// domain event (append + project + publish). Append errors are logged and do
+    /// not stop the consumer (the next batch can still succeed); the caller owns
+    /// the decision to terminate on stream-level errors.
+    async fn flush_token_batch(&self, batch: String) {
+        let provider_event = ProviderEvent::Token {
+            session_id: self.session_id.to_string(),
+            content: batch,
+        };
+        let ingestion = ingest_provider_event(
+            provider_event,
+            self.turn_id,
+            self.thread_id,
+            Some(self.started_at),
+        );
+        if let Err(e) = append_and_project(
+            self.event_repo,
+            self.read_model,
+            self.event_publisher,
+            self.turn_id,
+            ingestion.events,
+        )
+        .await
+        {
+            tracing::error!(
+                session_id = self.session_id,
+                error = %e,
+                "token-batch flush failed; dropping this batch",
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1984,6 +2116,291 @@ mod tests {
             calls.iter().all(|(ch, _, _, _)| ch == "orchestration"),
             "all stream events push on the orchestration channel"
         );
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_tokens_become_message_delta() {
+        // P0-2: Token ProviderEvents must produce MessageDeltaAppended domain
+        // events (no longer silently consumed). A short stream of tokens flushed
+        // at stream end yields ONE MessageDeltaAppended whose delta is the
+        // concatenation of all token text. The streamed assistant message is
+        // keyed by the turn id and materialized in the read model.
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let turn_id = EntityId::new();
+
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
+            Ok(syncode_provider::ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "Hello ".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "world".into(),
+            }),
+        ]));
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            None,
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        // Exactly ONE MessageDeltaAppended appended to the turn stream (the two
+        // tokens were batched and flushed once at stream end).
+        let envelopes = repo.replay_events(turn_id).await.expect("replay");
+        assert_eq!(envelopes.len(), 1, "batched tokens flush as one event");
+        match &envelopes[0].event {
+            DomainEvent::MessageDeltaAppended { id, turn_id: tid, delta, .. } => {
+                assert_eq!(*id, turn_id, "message id is the turn id");
+                assert_eq!(*tid, turn_id);
+                assert_eq!(delta, "Hello world", "token text is concatenated");
+            }
+            other => panic!("expected MessageDeltaAppended, got {other:?}"),
+        }
+
+        // The streamed assistant message is materialized in the read model,
+        // keyed by the turn id, marked as still-streaming.
+        let rm = read_model.read().await;
+        let msg = rm
+            .messages
+            .get(&turn_id.as_str())
+            .expect("streamed assistant message projected");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "Hello world");
+        assert!(msg.is_streaming, "message remains streaming until finalized");
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_tokens_pushed_to_publisher() {
+        // P0-2: batched token deltas are pushed to subscribed WS clients via the
+        // event publisher in real time. Each flushed batch produces exactly one
+        // MessageDeltaAppended push on the orchestration channel.
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let recorder = Arc::new(RecordingPublisher::new());
+        let publisher: Arc<dyn DomainEventPublisher> = recorder.clone();
+        let turn_id = EntityId::new();
+
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
+            Ok(syncode_provider::ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "chunk-".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "1".into(),
+            }),
+        ]));
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            Some(publisher),
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one batched delta is pushed");
+        assert_eq!(calls[0].0, "orchestration", "pushed on orchestration channel");
+        assert_eq!(calls[0].1, "MessageDeltaAppended", "pushed as MessageDeltaAppended");
+        assert_eq!(calls[0].2, turn_id.to_string(), "aggregate id is the turn id");
+        // The pushed payload carries the concatenated delta.
+        let delta = calls[0].3["data"]["delta"]
+            .as_str()
+            .expect("delta present in pushed payload");
+        assert_eq!(delta, "chunk-1");
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_count_threshold_flushes_early() {
+        // P0-2: when TOKEN_BATCH_MAX_COUNT token chunks accumulate before the
+        // 100ms window elapses, the buffer is flushed early (count threshold).
+        // We feed TOKEN_BATCH_MAX_COUNT + 2 tokens with no delay and expect at
+        // least TWO MessageDeltaAppended events (one at the count threshold,
+        // one at stream end), proving the count-based flush fires.
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let turn_id = EntityId::new();
+
+        let total = TOKEN_BATCH_MAX_COUNT + 2;
+        let events: Vec<Result<syncode_provider::ProviderEvent, syncode_provider::ProviderAdapterError>> =
+            (0..total)
+                .map(|i| {
+                    Ok(syncode_provider::ProviderEvent::Token {
+                        session_id: "s1".into(),
+                        content: format!("t{i} "),
+                    })
+                })
+                .collect();
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(events));
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            None,
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        let envelopes = repo.replay_events(turn_id).await.expect("replay");
+        // At least two flushes: one triggered by the count threshold, one at
+        // stream end (the remaining tokens). All events are MessageDeltaAppended.
+        assert!(
+            envelopes.len() >= 2,
+            "count threshold should trigger at least one early flush, got {} events",
+            envelopes.len()
+        );
+        assert!(envelopes.iter().all(|env| matches!(
+            env.event,
+            DomainEvent::MessageDeltaAppended { .. }
+        )));
+
+        // No token text is lost: concatenating every flushed delta reproduces
+        // the full original stream content in order.
+        let mut reconstructed = String::new();
+        for env in &envelopes {
+            if let DomainEvent::MessageDeltaAppended { delta, .. } = &env.event {
+                reconstructed.push_str(delta);
+            }
+        }
+        let expected: String = (0..total).map(|i| format!("t{i} ")).collect();
+        assert_eq!(reconstructed, expected, "no token text lost across batches");
+
+        // The read model reflects the full concatenated content.
+        let rm = read_model.read().await;
+        let msg = rm.messages.get(&turn_id.as_str()).expect("message projected");
+        assert_eq!(msg.content, expected);
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_time_window_flushes_mid_stream() {
+        // P0-2: the 100ms time window flushes buffered tokens even while the
+        // stream is still open. We interleave token chunks with 120ms sleeps so
+        // the timer fires between them, producing TWO batched deltas (one per
+        // window) rather than one at stream end.
+        use std::time::Duration;
+        use tokio_stream::StreamExt;
+
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+
+        let turn_id = EntityId::new();
+
+        // Build a stream that emits a token, sleeps 120ms, emits another token,
+        // then ends. The first token should be flushed by the 100ms tick before
+        // the second arrives.
+        let stream: syncode_provider::ProviderStream = {
+            let s = tokio_stream::iter(vec![
+                Ok(syncode_provider::ProviderEvent::Token {
+                    session_id: "s1".into(),
+                    content: "first ".into(),
+                }),
+                Ok(syncode_provider::ProviderEvent::Token {
+                    session_id: "s1".into(),
+                    content: "second".into(),
+                }),
+            ]);
+            // Interleave a 120ms delay after the first item using then.
+            let delayed = s.then(|item| async move {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                item
+            });
+            Box::pin(delayed)
+        };
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            None,
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        let envelopes = repo.replay_events(turn_id).await.expect("replay");
+        // Two separate flushes: the 100ms window fired between the two tokens.
+        assert_eq!(
+            envelopes.len(),
+            2,
+            "time window should flush the first token before the second arrives"
+        );
+        assert!(envelopes.iter().all(|env| matches!(
+            env.event,
+            DomainEvent::MessageDeltaAppended { .. }
+        )));
+        // Ordering preserved: first delta precedes second.
+        let deltas: Vec<String> = envelopes
+            .iter()
+            .map(|env| match &env.event {
+                DomainEvent::MessageDeltaAppended { delta, .. } => delta.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(deltas[0], "first ");
+        assert_eq!(deltas[1], "second");
+    }
+
+    #[tokio::test]
+    async fn consume_provider_stream_flushes_tokens_before_non_token_event() {
+        // P0-2: ordering — a non-token event (Completed) flushes any pending
+        // token buffer first, so the streamed delta reaches clients BEFORE the
+        // TurnCompleted. Two tokens then a Completed -> [delta, TurnCompleted].
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let turn_id = EntityId::new();
+
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
+            Ok(syncode_provider::ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "al".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "pha".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::Completed {
+                session_id: "s1".into(),
+                output: "alpha".into(),
+                usage: None,
+            }),
+        ]));
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            None,
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        let envelopes = repo.replay_events(turn_id).await.expect("replay");
+        assert_eq!(envelopes.len(), 2, "delta flush + TurnCompleted");
+        assert!(matches!(
+            envelopes[0].event,
+            DomainEvent::MessageDeltaAppended { .. }
+        ));
+        assert!(matches!(
+            envelopes[1].event,
+            DomainEvent::TurnCompleted { .. }
+        ));
     }
 
     #[tokio::test]

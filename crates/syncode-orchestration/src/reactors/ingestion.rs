@@ -4,7 +4,7 @@
 //! (`DomainEvent`) that flow through the CQRS pipeline.
 //!
 //! This is the "read side" of the provider bridge:
-//! - Provider emits Token → we produce no domain event (internal)
+//! - Provider emits Token → we produce a `MessageDeltaAppended` (streamed delta)
 //! - Provider emits Completed → we produce TurnCompleted
 //! - Provider emits ToolCall → we produce ActivityLogged
 //! - Provider emits Error → we produce TurnFailed
@@ -27,7 +27,12 @@ pub struct IngestionResult {
 ///
 /// Rules:
 /// - `ProviderEvent::Started` → no domain event (session is internal)
-/// - `ProviderEvent::Token` → no domain event (streaming, aggregated at completion)
+/// - `ProviderEvent::Token` → `DomainEvent::MessageDeltaAppended` (a streamed
+///   assistant-message delta). The turn id doubles as the streamed assistant
+///   message id: `MessageDeltaAppended` is upsert-style on the message id, so
+///   the first delta creates the message and subsequent deltas append to it.
+///   The consumer in `pipeline` batches tokens (100ms window) before calling
+///   this, so one event covers many tokens.
 /// - `ProviderEvent::ToolCall` → `DomainEvent::ActivityLogged`
 /// - `ProviderEvent::ToolResult` → `DomainEvent::ActivityLogged`
 /// - `ProviderEvent::Completed` → `DomainEvent::TurnCompleted`
@@ -54,8 +59,17 @@ pub fn ingest_provider_event(
             consumed: true,
         },
 
-        ProviderEvent::Token { .. } => IngestionResult {
-            events: vec![],
+        // A token chunk becomes a streamed assistant-message delta. The turn id
+        // is the message id (MessageDeltaAppended is id-upsertible), so the
+        // first Token creates the message and later Tokens append to it. The
+        // consumer batches many tokens into one delta to avoid WS flooding.
+        ProviderEvent::Token { content, .. } => IngestionResult {
+            events: vec![DomainEvent::MessageDeltaAppended {
+                id: turn_id,
+                turn_id,
+                delta: content,
+                created_at: now,
+            }],
             consumed: true,
         },
 
@@ -174,13 +188,57 @@ mod tests {
     }
 
     #[test]
-    fn ingest_token_produces_no_events() {
+    fn ingest_token_produces_message_delta() {
+        // Tokens are no longer silently consumed — each Token becomes a
+        // MessageDeltaAppended carrying the token text, keyed by the turn id
+        // (the streamed assistant message id). The consumer batches tokens
+        // before calling this, so one event typically covers many tokens.
+        let turn_id = make_turn_id();
         let event = ProviderEvent::Token {
             session_id: "s1".to_string(),
             content: "hello".to_string(),
         };
-        let result = ingest_provider_event(event, make_turn_id(), None, None);
-        assert!(result.events.is_empty());
+        let result = ingest_provider_event(event, turn_id, None, None);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            DomainEvent::MessageDeltaAppended { id, turn_id: tid, delta, .. } => {
+                assert_eq!(*id, turn_id, "message id is the turn id");
+                assert_eq!(*tid, turn_id);
+                assert_eq!(delta, "hello");
+            }
+            other => panic!("expected MessageDeltaAppended, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ingest_token_appends_to_same_message_id() {
+        // Two consecutive Token events for the same turn reuse the turn id as
+        // the streamed message id, so the projector appends rather than creating
+        // two messages.
+        let turn_id = make_turn_id();
+        let first = ingest_provider_event(
+            ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "foo ".into(),
+            },
+            turn_id,
+            None,
+            None,
+        );
+        let second = ingest_provider_event(
+            ProviderEvent::Token {
+                session_id: "s1".into(),
+                content: "bar".into(),
+            },
+            turn_id,
+            None,
+            None,
+        );
+        let id_of = |ev: &DomainEvent| match ev {
+            DomainEvent::MessageDeltaAppended { id, .. } => *id,
+            _ => panic!("expected MessageDeltaAppended"),
+        };
+        assert_eq!(id_of(&first.events[0]), id_of(&second.events[0]));
     }
 
     #[test]
