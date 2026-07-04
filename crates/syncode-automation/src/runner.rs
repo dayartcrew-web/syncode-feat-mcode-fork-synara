@@ -284,7 +284,10 @@ mod tests {
     fn automation_run_new_defaults_unread_and_archived_at() {
         let run = AutomationRun::new("auto-1".to_string());
         assert!(run.unread, "new runs default to unread=true");
-        assert!(run.archived_at.is_none(), "new runs default to archived_at=None");
+        assert!(
+            run.archived_at.is_none(),
+            "new runs default to archived_at=None"
+        );
     }
 
     #[test]
@@ -303,10 +306,16 @@ mod tests {
         let mut run = AutomationRun::new("auto-1".to_string());
         assert!(run.archived_at.is_none());
         run.archive("2026-07-04T12:00:00+00:00".to_string());
-        assert_eq!(run.archived_at.as_deref(), Some("2026-07-04T12:00:00+00:00"));
+        assert_eq!(
+            run.archived_at.as_deref(),
+            Some("2026-07-04T12:00:00+00:00")
+        );
         // Idempotent overwrite.
         run.archive("2026-07-04T13:00:00+00:00".to_string());
-        assert_eq!(run.archived_at.as_deref(), Some("2026-07-04T13:00:00+00:00"));
+        assert_eq!(
+            run.archived_at.as_deref(),
+            Some("2026-07-04T13:00:00+00:00")
+        );
     }
 
     #[test]
@@ -317,7 +326,10 @@ mod tests {
         let json = serde_json::to_string(&run).unwrap();
         let back: AutomationRun = serde_json::from_str(&json).unwrap();
         assert!(!back.unread);
-        assert_eq!(back.archived_at.as_deref(), Some("2026-07-04T12:00:00+00:00"));
+        assert_eq!(
+            back.archived_at.as_deref(),
+            Some("2026-07-04T12:00:00+00:00")
+        );
     }
 
     #[test]

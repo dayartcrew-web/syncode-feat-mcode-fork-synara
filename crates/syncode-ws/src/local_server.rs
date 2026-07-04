@@ -109,9 +109,9 @@ impl LocalServerManager {
         // exact child, not siblings. tokio's default already does this on Unix.
         cmd.kill_on_drop(false);
 
-        let child = cmd.spawn().map_err(|e| {
-            format!("failed to spawn '{command}': {e}")
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
         let pid = child
             .id()
             .ok_or_else(|| "spawned child has no pid (already exited?)".to_string())?;
@@ -276,8 +276,11 @@ mod tests {
         mgr.stop("killme").await.expect("stop succeeds");
         assert!(!mgr.processes.contains_key("killme"));
         // The process must actually be dead.
-        let still_alive =
-            tokio::process::Command::new("kill").arg("-0").arg(pid.to_string()).status().await;
+        let still_alive = tokio::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .await;
         if let Ok(status) = still_alive {
             // `kill -0 <pid>` exits 0 if the pid is signalable. We spawned
             // our own child, so it should be gone; tolerate the rare race
@@ -336,8 +339,7 @@ mod tests {
         .unwrap();
         let list = mgr.list();
         assert_eq!(list.len(), 2);
-        let ids: std::collections::HashSet<&str> =
-            list.iter().map(|p| p.id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = list.iter().map(|p| p.id.as_str()).collect();
         assert!(ids.contains("a") && ids.contains("b"));
     }
 }

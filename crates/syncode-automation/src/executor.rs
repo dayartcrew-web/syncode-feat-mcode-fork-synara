@@ -15,11 +15,13 @@
 //! backoffs.
 
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use syncode_core::ports::{AutomationRepository, DispatchRequest, RunExecutor};
 
 use crate::definition::AutomationDef;
+use crate::events::{RunContext, RunEventSink, with_run_context};
 use crate::policies::{CompletionPolicy, RetryPolicy};
 use crate::runner::{AutomationRun, RunStatus};
 use crate::schedule;
@@ -130,6 +132,116 @@ pub async fn execute_run(
 
     loop {
         match executor.dispatch_turn(req.clone()).await {
+            Ok(outcome) => {
+                // Success signal: a dispatched turn maps to "exit code 0".
+                let exit_code = 0;
+                run.mark_completed(
+                    exit_code,
+                    format!("turn {}", outcome.turn_id),
+                    String::new(),
+                );
+
+                // If the completion policy rejects (e.g. AllowedExitCodes), mark failed.
+                if !completion.is_success(exit_code) {
+                    run.status = RunStatus::Failed;
+                    run.error = Some(format!(
+                        "completion policy rejected exit code {}",
+                        exit_code
+                    ));
+                }
+                persist_run(repo, &run).await;
+                advance_schedule(repo, def, &run.status, now).await;
+                return RunOutcome {
+                    final_status: run.status.clone(),
+                    attempts: attempt + 1,
+                };
+            }
+            Err(err) => {
+                // Consult the retry policy for the next delay.
+                match policy.delay_for_attempt(attempt) {
+                    Some(backoff) if !policy.exhausted(attempt) => {
+                        run.mark_retrying(attempt + 1);
+                        persist_run(repo, &run).await;
+                        delay.wait(backoff).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    _ => {
+                        // Retries exhausted (or policy is None) → fail permanently.
+                        run.mark_failed(format!(
+                            "dispatch failed after {} attempt(s): {}",
+                            attempt + 1,
+                            err
+                        ));
+                        persist_run(repo, &run).await;
+                        advance_schedule(repo, def, &run.status, now).await;
+                        return RunOutcome {
+                            final_status: RunStatus::Failed,
+                            attempts: attempt + 1,
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Execute a single automation run **with live event push** (PUSH-1).
+///
+/// This is the live-push variant of [`execute_run`]: it accepts a
+/// [`RunEventSink`] and installs a [`RunContext`] on the current task for the
+/// duration of each `dispatch_turn` call, so a participating executor (e.g.
+/// [`crate::process_executor::ProcessRunExecutor`]) can emit `run-started` /
+/// `run-progress` / `run-completed` events *during* execution — mirroring the
+/// terminal reader-task pattern (`spawn_terminal_reader` in
+/// `syncode-ws/src/rpc.rs`).
+///
+/// ## Behavior parity
+///
+/// The retry loop, run-record lifecycle, and schedule advance are identical
+/// to [`execute_run`]. The only addition is the run-context scope around the
+/// dispatch call: when `sink` is a [`NoopRunEventSink`] (or the executor
+/// doesn't read the context), behavior is indistinguishable from
+/// [`execute_run`].
+///
+/// ## Why a sink argument (not a stored field)
+///
+/// The sink is per-run, not per-executor: the WS layer supplies a sink wired
+/// to `push_tx` for the run triggered by `automation.runNow`, while the
+/// synchronous scheduler tick path (which doesn't need live push) calls
+/// [`execute_run`] directly. Keeping the sink out of `ProcessRunExecutor`'s
+/// fields means a single executor instance serves both paths.
+pub async fn execute_run_with_events(
+    def: &AutomationDef,
+    executor: &dyn RunExecutor,
+    repo: &dyn AutomationRepository,
+    completion: &CompletionPolicy,
+    delay: Delay,
+    now: DateTime<Utc>,
+    sink: Arc<dyn RunEventSink>,
+) -> RunOutcome {
+    let policy = retry_policy_for(def);
+    let mut attempt: u32 = 0;
+    let req = dispatch_request_for(def);
+
+    // Create + persist the initial run record.
+    let mut run = AutomationRun::new(def.id.as_str().to_string());
+    run.attempt = attempt;
+    run.mark_started();
+    persist_run(repo, &run).await;
+
+    loop {
+        // PUSH-1: scope the run context around this dispatch_turn so the
+        // executor can emit live events. The sink + run id are stable across
+        // retries (the same run record is retried, not replaced).
+        let ctx = RunContext {
+            run_id: run.id.clone(),
+            automation_id: run.automation_id.clone(),
+            sink: sink.clone(),
+        };
+        let outcome_res = with_run_context(ctx, executor.dispatch_turn(req.clone())).await;
+
+        match outcome_res {
             Ok(outcome) => {
                 // Success signal: a dispatched turn maps to "exit code 0".
                 let exit_code = 0;
@@ -509,5 +621,166 @@ mod tests {
         assert_eq!(outcome.final_status, RunStatus::Failed);
         assert_eq!(outcome.attempts, 1);
         assert_eq!(executor.requests().len(), 1); // no retry
+    }
+
+    // ─── execute_run_with_events tests (PUSH-1) ───────────────────────
+    //
+    // Verifies the live-push variant has the same retry/outcome behavior as
+    // execute_run AND that the run context is installed during dispatch.
+
+    use crate::events::{NoopRunEventSink, RunEventSink};
+
+    /// A sink that records events + counts how many were emitted *during* the
+    /// dispatch_turn call (i.e. while the context was active).
+    struct RecordingSink {
+        events: Mutex<Vec<crate::events::RunEvent>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl RunEventSink for RecordingSink {
+        fn emit(
+            &self,
+            event: crate::events::RunEvent,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                self.events.lock().unwrap().push(event);
+            })
+        }
+    }
+
+    /// An executor that asserts the run context is active when it's called.
+    struct ContextCheckingExecutor {
+        saw_context: Mutex<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl RunExecutor for ContextCheckingExecutor {
+        async fn dispatch_turn(&self, _req: DispatchRequest) -> Result<DispatchOutcome, PortError> {
+            // The whole point of execute_run_with_events: a context must be
+            // installed for the duration of dispatch_turn.
+            if crate::events::current_run_context().is_some() {
+                *self.saw_context.lock().unwrap() = true;
+            }
+            ok_outcome()
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_run_with_events_succeeds_and_installs_context() {
+        let repo = repo();
+        let executor = ContextCheckingExecutor {
+            saw_context: Mutex::new(false),
+        };
+        let def = def_with_retries(3, 1);
+
+        let sink: Arc<dyn RunEventSink> = RecordingSink::new();
+        let outcome = execute_run_with_events(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            sink,
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        assert_eq!(outcome.attempts, 1);
+        assert!(
+            *executor.saw_context.lock().unwrap(),
+            "execute_run_with_events must install a RunContext during dispatch_turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_run_with_events_retries_then_succeeds_with_context_each_attempt() {
+        let repo = repo();
+        // Fail twice, then succeed — and record whether the context was live
+        // on each attempt.
+        let attempts_with_ctx = Arc::new(Mutex::new(Vec::<bool>::new()));
+        struct RetryExecutor {
+            outcomes: Mutex<std::collections::VecDeque<Result<DispatchOutcome, PortError>>>,
+            log: Arc<Mutex<Vec<bool>>>,
+        }
+        #[async_trait::async_trait]
+        impl RunExecutor for RetryExecutor {
+            async fn dispatch_turn(
+                &self,
+                _req: DispatchRequest,
+            ) -> Result<DispatchOutcome, PortError> {
+                let has_ctx = crate::events::current_run_context().is_some();
+                self.log.lock().unwrap().push(has_ctx);
+                match self.outcomes.lock().unwrap().pop_front() {
+                    Some(o) => o,
+                    None => ok_outcome(),
+                }
+            }
+        }
+        let executor = RetryExecutor {
+            outcomes: Mutex::new(
+                vec![
+                    Err(PortError::Internal("boom".into())),
+                    Err(PortError::Internal("boom".into())),
+                    ok_outcome(),
+                ]
+                .into(),
+            ),
+            log: attempts_with_ctx.clone(),
+        };
+
+        let def = def_with_retries(5, 1);
+        let sink: Arc<dyn RunEventSink> = RecordingSink::new();
+        let outcome = execute_run_with_events(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            sink,
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        assert_eq!(outcome.attempts, 3);
+        // Every attempt saw a context (retry re-scopes per dispatch_turn).
+        let log = attempts_with_ctx.lock().unwrap();
+        assert_eq!(log.len(), 3, "one dispatch per attempt");
+        assert!(
+            log.iter().all(|&x| x),
+            "context must be live on every attempt: {log:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_run_with_events_with_noop_sink_matches_execute_run_behavior() {
+        let repo = repo();
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let def = def_with_retries(3, 1);
+
+        let sink: Arc<dyn RunEventSink> = Arc::new(NoopRunEventSink);
+        let outcome = execute_run_with_events(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            sink,
+        )
+        .await;
+
+        // With a no-op sink, behavior is indistinguishable from execute_run.
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        assert_eq!(outcome.attempts, 1);
+        assert_eq!(executor.requests().len(), 1);
     }
 }

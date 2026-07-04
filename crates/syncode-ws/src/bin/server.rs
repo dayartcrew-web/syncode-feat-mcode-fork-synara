@@ -130,8 +130,8 @@ async fn build_state() -> WsState {
 /// [`Orchestrator::with_event_publisher`], so provider-stream-sourced domain
 /// events (tokens, tool calls, completion) are pushed to subscribed clients.
 fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
-    let default_provider = std::env::var("SYNCODE_DEFAULT_PROVIDER")
-        .unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
+    let default_provider =
+        std::env::var("SYNCODE_DEFAULT_PROVIDER").unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
 
     let reactor = Arc::new(syncode_orchestration::ProviderCommandReactor::new(
         syncode_provider::SessionManager::new(),

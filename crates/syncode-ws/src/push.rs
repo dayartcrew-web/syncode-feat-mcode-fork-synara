@@ -167,6 +167,82 @@ impl SubscriptionRegistry {
 // `server.rs`, which subscribes to `push_tx` and forwards only the channels a
 // connection has opted into. There is no central dispatcher.
 
+// ─── Automation live event push (PUSH-1) ───────────────────────────────
+//
+// `automation.runNow` historically called `scheduler.trigger_with_delay`,
+// which awaits `execute_run` synchronously — so the only push a subscriber
+// received was the final `run-upserted` (broadcast by the RPC handler after
+// the run finished). PUSH-1 adds live in-flight events (`run-started` /
+// `run-progress` / `run-completed`) on `CHANNEL_AUTOMATION`, mirroring the
+// terminal reader-task pattern.
+//
+// `AutomationPushSink` is the bridge: it implements
+// `syncode_automation::RunEventSink` and forwards each `RunEvent` onto
+// `push_tx` as a JSON-RPC-style push frame. The handler constructs one per
+// `runNow` call (cheap — a `broadcast::Sender` clone) and passes it to
+// `scheduler.trigger_with_events`, which threads it through the run context
+// into `ProcessRunExecutor::dispatch_turn_live`.
+
+/// A [`syncode_automation::RunEventSink`] that forwards automation run-events
+/// onto the WebSocket push bus (PUSH-1).
+///
+/// Each event is broadcast on `push_tx` as `(CHANNEL_AUTOMATION, <payload>)`,
+/// where `<payload>` carries the wire `type` (`run-started` / `run-progress` /
+/// `run-completed`) plus the run id + automation id + the kind-specific
+/// fields. Subscribers on the `automation` channel receive them via the
+/// standard push delivery loop.
+///
+/// Best-effort like all push: `broadcast::send` errors when there are no
+/// receivers (normal before any client subscribes) — swallowed, never
+/// propagated. A run must never fail because nobody is listening.
+#[derive(Clone)]
+pub struct AutomationPushSink {
+    push_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
+}
+
+impl AutomationPushSink {
+    /// Wrap a push-bus broadcast sender as an automation [`RunEventSink`].
+    pub fn new(push_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>) -> Self {
+        Self { push_tx }
+    }
+}
+
+impl syncode_automation::RunEventSink for AutomationPushSink {
+    fn emit(
+        &self,
+        event: syncode_automation::RunEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let tx = self.push_tx.clone();
+        Box::pin(async move {
+            use syncode_automation::RunEventKind;
+            let payload = match &event.kind {
+                RunEventKind::Started { started_at } => serde_json::json!({
+                    "type": event.type_name(),
+                    "runId": event.run_id,
+                    "automationId": event.automation_id,
+                    "startedAt": started_at,
+                }),
+                RunEventKind::Progress { progress, message } => serde_json::json!({
+                    "type": event.type_name(),
+                    "runId": event.run_id,
+                    "automationId": event.automation_id,
+                    "progress": progress,
+                    "message": message,
+                }),
+                RunEventKind::Completed { status, exit_code } => serde_json::json!({
+                    "type": event.type_name(),
+                    "runId": event.run_id,
+                    "automationId": event.automation_id,
+                    "status": status,
+                    "exitCode": exit_code,
+                }),
+            };
+            // No receivers is normal — not a failure.
+            let _ = tx.send((crate::channels::CHANNEL_AUTOMATION.to_string(), payload));
+        })
+    }
+}
+
 // ─── Snapshot-then-stream ─────────────────────────────────────────────
 //
 // When a client subscribes to a channel (or reconnects and re-subscribes),

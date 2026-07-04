@@ -2,9 +2,15 @@
 //!
 //! Gating: `SYNICODE_AUTOMATION_E2E=1`.
 
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
-use syncode_core::{EntityId, ports::{DispatchOutcome, DispatchRequest, PortError, RunExecutor}};
 use async_trait::async_trait;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use syncode_core::{
+    EntityId,
+    ports::{DispatchOutcome, DispatchRequest, PortError, RunExecutor},
+};
 
 fn e2e_enabled() -> bool {
     std::env::var("SYNICODE_AUTOMATION_E2E").ok().as_deref() == Some("1")
@@ -24,7 +30,11 @@ impl RunExecutor for CountingExecutor {
         let current = self.count.fetch_add(1, Ordering::SeqCst);
 
         if current < fails {
-            Err(PortError::Internal(format!("simulated failure {}/{}", current + 1, fails)))
+            Err(PortError::Internal(format!(
+                "simulated failure {}/{}",
+                current + 1,
+                fails
+            )))
         } else {
             Ok(DispatchOutcome {
                 thread_id: EntityId::new(),
@@ -36,7 +46,10 @@ impl RunExecutor for CountingExecutor {
 
 #[tokio::test]
 async fn automation_e2e_manual_trigger_and_complete() {
-    if !e2e_enabled() { eprintln!("[skip] automation e2e: set SYNICODE_AUTOMATION_E2E=1"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] automation e2e: set SYNICODE_AUTOMATION_E2E=1");
+        return;
+    }
 
     let repo = Arc::new(syncode_automation::in_memory_repo::InMemoryAutomationRepository::new());
     let executor = CountingExecutor {
@@ -65,7 +78,10 @@ async fn automation_e2e_manual_trigger_and_complete() {
 
 #[tokio::test]
 async fn automation_e2e_scheduler_tick_due_evaluation() {
-    if !e2e_enabled() { eprintln!("[skip] automation e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] automation e2e");
+        return;
+    }
 
     let repo = Arc::new(syncode_automation::in_memory_repo::InMemoryAutomationRepository::new());
     let executor = CountingExecutor {
@@ -80,7 +96,8 @@ async fn automation_e2e_scheduler_tick_due_evaluation() {
         "e2e-interval".into(),
         "echo tick".into(),
         syncode_automation::ScheduleType::Interval(1), // every 1 second
-    ).with_working_dir("/tmp");
+    )
+    .with_working_dir("/tmp");
 
     // Manually set next_run_at to the past so tick picks it up
     let mut def = def;

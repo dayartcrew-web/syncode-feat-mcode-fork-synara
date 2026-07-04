@@ -155,8 +155,9 @@ impl UsageStore {
         }
         let mut by_provider: HashMap<String, Acc> = HashMap::new();
         for entry in self.entries.iter().filter(|e| predicate(e)) {
-            let acc = by_provider.entry(entry.provider_id.clone()).or_insert_with(
-                || Acc {
+            let acc = by_provider
+                .entry(entry.provider_id.clone())
+                .or_insert_with(|| Acc {
                     total_input: 0,
                     total_output: 0,
                     total_tokens: 0,
@@ -164,8 +165,7 @@ impl UsageStore {
                     model: entry.model.clone(),
                     // Initialize to this entry's timestamp; updated below.
                     last_used_at: entry.timestamp,
-                },
-            );
+                });
             acc.total_input += entry.input_tokens as u64;
             acc.total_output += entry.output_tokens as u64;
             acc.total_tokens += entry.total_tokens as u64;

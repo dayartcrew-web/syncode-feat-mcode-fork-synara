@@ -5,8 +5,8 @@
 
 pub mod auth;
 pub mod channels;
-pub mod local_server;
 pub mod llm;
+pub mod local_server;
 pub mod push;
 pub mod rpc;
 pub mod server;
@@ -115,8 +115,7 @@ pub struct WsState {
     /// abort the reader — otherwise the blocking `read` would outlive the
     /// session and leak a thread. Keyed by session id (the same key the
     /// `terminal_manager` uses).
-    pub terminal_readers:
-        Arc<tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    pub terminal_readers: Arc<tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// Automation scheduler (T6c-6). Backs the `automation.*` RPC handlers
     /// (list/create/get/update/delete/runNow/cancelRun) — manages automation
     /// definition + run-record lifecycle (mirrors the terminal_manager wiring).
@@ -210,9 +209,9 @@ impl WsState {
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "unsafe-no-auth".to_string());
-        let settings = Arc::new(RwLock::new(
-            crate::settings::ServerSettingsState::new(auth_mode),
-        ));
+        let settings = Arc::new(RwLock::new(crate::settings::ServerSettingsState::new(
+            auth_mode,
+        )));
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             push_tx,
@@ -222,9 +221,7 @@ impl WsState {
             subscriptions: Arc::new(RwLock::new(crate::push::SubscriptionRegistry::new())),
             auth_config,
             conn_auth: crate::auth::SharedConnectionAuth::new(),
-            terminal_manager: Arc::new(RwLock::new(
-                syncode_terminal::SessionManager::new(),
-            )),
+            terminal_manager: Arc::new(RwLock::new(syncode_terminal::SessionManager::new())),
             terminal_readers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             automation_scheduler: Arc::new(syncode_automation::Scheduler::new_with_deps(
                 Arc::new(syncode_automation::InMemoryAutomationRepository::new()),
@@ -235,9 +232,7 @@ impl WsState {
             )),
             settings,
             usage: Arc::new(RwLock::new(crate::usage::UsageStore::new())),
-            local_servers: Arc::new(RwLock::new(
-                crate::local_server::LocalServerManager::new(),
-            )),
+            local_servers: Arc::new(RwLock::new(crate::local_server::LocalServerManager::new())),
             started_at: std::time::Instant::now(),
         }
     }

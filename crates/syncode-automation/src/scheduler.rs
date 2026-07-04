@@ -201,6 +201,60 @@ impl Scheduler {
         Ok(run_id)
     }
 
+    /// Trigger a run **with live event push** (PUSH-1).
+    ///
+    /// This is the live-push variant of [`Scheduler::trigger_with_delay`]: it
+    /// delegates to [`executor::execute_run_with_events`], which installs a
+    /// [`crate::events::RunContext`] around each `dispatch_turn` so a
+    /// participating executor ([`crate::process_executor::ProcessRunExecutor`])
+    /// can emit `run-started` / `run-progress` / `run-completed` events
+    /// *during* execution — mirroring the terminal reader-task pattern.
+    ///
+    /// The synchronous trigger path ([`Scheduler::trigger`] /
+    /// [`Scheduler::trigger_with_delay`]) is unchanged: it never sets a run
+    /// context, so the executor falls back to capture-all-then-return and no
+    /// live events are emitted. This preserves the existing contract and all
+    /// automation tests.
+    ///
+    /// `sink` receives one event per lifecycle transition. A no-op sink
+    /// ([`crate::events::NoopRunEventSink`]) makes this equivalent to
+    /// [`trigger_with_delay`]. Returns the run id (same contract as
+    /// [`trigger_with_delay`]).
+    pub async fn trigger_with_events(
+        &self,
+        automation_id: &str,
+        delay: Delay,
+        sink: std::sync::Arc<dyn crate::events::RunEventSink>,
+    ) -> Result<String, SchedulerError> {
+        let def = self
+            .get(automation_id)
+            .await
+            .ok_or_else(|| SchedulerError::NotFound(automation_id.to_string()))?;
+
+        let now = Utc::now();
+        let outcome = executor::execute_run_with_events(
+            &def,
+            self.executor.as_ref(),
+            self.repo.as_ref(),
+            &self.default_completion,
+            delay,
+            now,
+            sink,
+        )
+        .await;
+
+        let runs = self.repo.list_runs(automation_id).await.map_err(repo_err)?;
+        let run_id = runs
+            .last()
+            .and_then(|r| r.get("id").and_then(|v| v.as_str()).map(String::from))
+            .unwrap_or_else(|| format!("run-{}", uuid::Uuid::new_v4().hyphenated()));
+
+        if matches!(outcome.final_status, crate::runner::RunStatus::Failed) {
+            tracing::warn!(run_id = %run_id, attempts = outcome.attempts, "automation run failed");
+        }
+        Ok(run_id)
+    }
+
     /// The single due-evaluation + dispatch pass a host would call in a loop
     /// (mirrors MCode's `runDueOnce`). Returns the ids of automations dispatched.
     ///
@@ -617,10 +671,7 @@ mod tests {
     #[tokio::test]
     async fn scheduler_mark_run_read_missing_returns_not_found() {
         let scheduler = Scheduler::new();
-        let err = scheduler
-            .mark_run_read("does-not-exist")
-            .await
-            .unwrap_err();
+        let err = scheduler.mark_run_read("does-not-exist").await.unwrap_err();
         assert!(matches!(err, SchedulerError::NotFound(_)));
     }
 
@@ -648,10 +699,7 @@ mod tests {
     #[tokio::test]
     async fn scheduler_archive_run_missing_returns_not_found() {
         let scheduler = Scheduler::new();
-        let err = scheduler
-            .archive_run("does-not-exist")
-            .await
-            .unwrap_err();
+        let err = scheduler.archive_run("does-not-exist").await.unwrap_err();
         assert!(matches!(err, SchedulerError::NotFound(_)));
     }
 

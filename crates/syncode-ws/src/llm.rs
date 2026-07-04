@@ -33,11 +33,11 @@
 use std::sync::Arc;
 
 use syncode_core::EntityId;
+use syncode_provider::{PROVIDER_CLAUDE, PROVIDER_CODEX};
 use syncode_provider::{
     ProviderAdapter, ProviderAdapterError, ProviderCapability, ProviderConfig, ProviderEvent,
     ProviderRequest, ProviderResponse, ProviderStatus, ProviderStream, SessionContext, UsageInfo,
 };
-use syncode_provider::{PROVIDER_CLAUDE, PROVIDER_CODEX};
 use tokio::sync::RwLock;
 
 /// A shared adapter handle (mirrors `syncode_provider::registry::SharedAdapter`).
@@ -175,9 +175,10 @@ async fn run_session(
     // 2. start_session
     let session_id = {
         let mut guard = adapter.write().await;
-        guard.start_session(ctx).await.map_err(|e| {
-            format!("provider start_session failed: {e}")
-        })?
+        guard
+            .start_session(ctx)
+            .await
+            .map_err(|e| format!("provider start_session failed: {e}"))?
     };
 
     // 3. send_request — method/params follow the ACP `session/prompt` shape
@@ -192,9 +193,10 @@ async fn run_session(
     );
     let response = {
         let guard = adapter.read().await;
-        guard.send_request(request).await.map_err(|e| {
-            format!("provider send_request failed: {e}")
-        })?
+        guard
+            .send_request(request)
+            .await
+            .map_err(|e| format!("provider send_request failed: {e}"))?
     };
 
     // Extract reply text first (surfaces rpc/empty errors as before). Then
@@ -658,7 +660,10 @@ mod tests {
             .await
             .expect("oneshot should succeed");
         let usage = outcome.usage.expect("usage should be parsed");
-        assert_eq!((usage.input_tokens, usage.output_tokens, usage.total_tokens), (120, 30, 150));
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (120, 30, 150)
+        );
         assert_eq!(outcome.model, "sonnet", "model token echoes back");
     }
 
@@ -674,7 +679,10 @@ mod tests {
             error: None,
         };
         let u = extract_usage_from_response(&camel).expect("camel usage");
-        assert_eq!((u.input_tokens, u.output_tokens, u.total_tokens), (10, 5, 15));
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (10, 5, 15)
+        );
 
         let snake = ProviderResponse {
             jsonrpc: "2.0".into(),
@@ -768,7 +776,10 @@ mod tests {
             async fn interrupt(&self, _: &str) -> Result<(), ProviderAdapterError> {
                 Ok(())
             }
-            async fn start_session(&mut self, _: SessionContext) -> Result<String, ProviderAdapterError> {
+            async fn start_session(
+                &mut self,
+                _: SessionContext,
+            ) -> Result<String, ProviderAdapterError> {
                 unreachable!()
             }
             async fn resume_session(&mut self, _: &str) -> Result<(), ProviderAdapterError> {
@@ -777,7 +788,10 @@ mod tests {
             async fn stop_session(&mut self, _: &str) -> Result<(), ProviderAdapterError> {
                 Ok(())
             }
-            async fn send_request(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderAdapterError> {
+            async fn send_request(
+                &self,
+                _: ProviderRequest,
+            ) -> Result<ProviderResponse, ProviderAdapterError> {
                 unreachable!()
             }
             fn event_stream(&self, _: &str) -> Result<ProviderStream, ProviderAdapterError> {
