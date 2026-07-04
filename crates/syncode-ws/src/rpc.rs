@@ -223,13 +223,16 @@ async fn dispatch_method(
                     // optional replay overwrite).
                     "orchestration.repairReadModel",
                     "orchestration/repair-read-model",
-                    // PROJ-1: project filesystem primitives (skeleton handlers;
-                    // full wiring lands in PROJ-2/3/4).
+                    // PROJ-1/PROJ-2: project filesystem primitives (skeleton
+                    // handlers in PROJ-1; full MCode-shape wiring in PROJ-2).
                     "project/list-files",
                     "project/read-file",
                     "project/write-file",
                     "project/list-directories",
                     "project/search-files",
+                    // PROJ-2: MCode UI file-search surface.
+                    "project/search-entries",
+                    "project/search-local-entries",
                 ]
             }),
         ),
@@ -261,17 +264,35 @@ async fn dispatch_method(
         "project/list-files" | "project/listFiles" => {
             handle_project_list_files(state, id, &request.params).await
         }
-        "project/read-file" | "project/readFile" => {
+        "project/read-file" | "project/readFile" | "project.read-file" | "project.readFile" => {
             handle_project_read_file(state, id, &request.params).await
         }
-        "project/write-file" | "project/writeFile" => {
+        "project/write-file" | "project/writeFile" | "project.write-file" | "project.writeFile" => {
             handle_project_write_file(state, id, &request.params).await
         }
-        "project/list-directories" | "project/listDirectories" => {
+        "project/list-directories"
+        | "project/listDirectories"
+        | "project.list-directories"
+        | "project.listDirectories" => {
             handle_project_list_directories(state, id, &request.params).await
         }
         "project/search-files" | "project/searchFiles" => {
             handle_project_search_files(state, id, &request.params).await
+        }
+        // PROJ-2: MCode UI file-search surface. The UI sends the dot/camelCase
+        // form (`project.searchEntries`, `project.searchLocalEntries`); the
+        // transport remap (MCODE_TO_SERVED) also routes them here via the slash
+        // keys below. Both forms are accepted so dispatch is robust whether the
+        // caller used the slash key directly or the dot-string.
+        "project/search-entries"
+        | "project/searchEntries"
+        | "project.searchEntries" => {
+            handle_project_search_entries(state, id, &request.params).await
+        }
+        "project/search-local-entries"
+        | "project/searchLocalEntries"
+        | "project.searchLocalEntries" => {
+            handle_project_search_local_entries(state, id, &request.params).await
         }
 
         // ─── Thread Methods ───────────────────────────────────────
@@ -2750,8 +2771,14 @@ async fn handle_project_list_files(
     }
 }
 
-/// `project/read-file` (PROJ-1 skeleton). Returns `{ content: <string> }`.
-/// PROJ-3 will add encoding detection (utf-8 vs base64 for binaries).
+/// `project/read-file` (PROJ-2). Returns the MCode Tier-3
+/// `ProjectReadFileResult` shape: `{ relativePath, contents, truncated }`.
+///
+/// `contents` is the file decoded as utf-8 (lossy). Binary files are surfaced
+/// with replacement chars — PROJ-3 will add base64 encoding for non-text leaves.
+/// `truncated` is `false` here (PROJ-1 primitives read the whole file; PROJ-4
+/// may add size limits). Accepts both `path` (legacy) and `relativePath`
+/// (MCode Tier-3) param keys — `relativePath` wins when both are present.
 async fn handle_project_read_file(
     _state: &WsState,
     id: Value,
@@ -2767,28 +2794,46 @@ async fn handle_project_read_file(
             );
         }
     };
-    let relative = match params.get("path").and_then(|v| v.as_str()) {
+    // Accept both `path` (legacy) and `relativePath` (MCode). The UI sends
+    // `relativePath`; tests/legacy callers may send `path`.
+    let relative = params
+        .get("relativePath")
+        .or_else(|| params.get("path"))
+        .and_then(|v| v.as_str());
+    let relative = match relative {
         Some(p) if !p.is_empty() => p,
         _ => {
             return JsonRpcResponse::error(
                 Some(id),
                 crate::error_codes::INVALID_PARAMS,
-                "Missing 'path' parameter",
+                "Missing 'relativePath' parameter",
             );
         }
     };
     match crate::project_fs::read_file(Path::new(cwd), relative).await {
         Ok(bytes) => {
-            // Skeleton: assume utf-8. PROJ-3 will detect encoding.
-            let content = String::from_utf8_lossy(&bytes).into_owned();
-            JsonRpcResponse::success(id, serde_json::json!({ "content": content }))
+            let contents = String::from_utf8_lossy(&bytes).into_owned();
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "relativePath": relative,
+                    "contents": contents,
+                    "truncated": false,
+                }),
+            )
         }
         Err(e) => project_fs_error_response(id, e),
     }
 }
 
-/// `project/write-file` (PROJ-1 skeleton). Writes `content` (utf-8 string)
-/// to `cwd / path`. Returns `{ written: <bytes> }`.
+/// `project/write-file` (PROJ-2). Writes `contents` (utf-8 string) to
+/// `cwd / relativePath`. Returns the MCode `ProjectWriteFileResult` shape:
+/// `{ relativePath }`.
+///
+/// Accepts both `path` (legacy) and `relativePath` (MCode) for the target, and
+/// both `content` (legacy) and `contents` (MCode) for the body. The MCode form
+/// wins in each pair when both are present. Traversal is blocked by the
+/// `project_fs::write_file` guard (inherited from [`resolve_for_write`]).
 async fn handle_project_write_file(
     _state: &WsState,
     id: Value,
@@ -2804,36 +2849,57 @@ async fn handle_project_write_file(
             );
         }
     };
-    let relative = match params.get("path").and_then(|v| v.as_str()) {
+    let relative = params
+        .get("relativePath")
+        .or_else(|| params.get("path"))
+        .and_then(|v| v.as_str());
+    let relative = match relative {
         Some(p) if !p.is_empty() => p,
         _ => {
             return JsonRpcResponse::error(
                 Some(id),
                 crate::error_codes::INVALID_PARAMS,
-                "Missing 'path' parameter",
+                "Missing 'relativePath' parameter",
             );
         }
     };
-    let content = match params.get("content").and_then(|v| v.as_str()) {
+    let body = params
+        .get("contents")
+        .or_else(|| params.get("content"))
+        .and_then(|v| v.as_str());
+    let content = match body {
         Some(c) => c.as_bytes().to_vec(),
         None => {
             return JsonRpcResponse::error(
                 Some(id),
                 crate::error_codes::INVALID_PARAMS,
-                "Missing 'content' parameter",
+                "Missing 'contents' parameter",
             );
         }
     };
     match crate::project_fs::write_file(Path::new(cwd), relative, &content).await {
-        Ok(()) => {
-            JsonRpcResponse::success(id, serde_json::json!({ "written": content.len() }))
-        }
+        Ok(()) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "relativePath": relative }),
+        ),
         Err(e) => project_fs_error_response(id, e),
     }
 }
 
-/// `project/list-directories` (PROJ-1 skeleton). Returns just the directory
-/// entries under `cwd / path`. PROJ-2 will add recursive depth + ignore globs.
+/// `project/list-directories` (PROJ-2). Returns the MCode Tier-3
+/// `ProjectListDirectoriesResult` shape:
+/// `{ entries: [{ path, name, kind, hasChildren }] }`.
+///
+/// - `path`: the entry's path relative to `cwd` (`/`-separated).
+/// - `name`: the leaf file/dir name.
+/// - `kind`: `"file"` or `"directory"`.
+/// - `hasChildren`: `true` for directories that contain ≥1 entry (false for
+///   empty dirs and files). Computed via a stat of the child — cheap on the
+///   skeleton; PROJ-4 may batch.
+///
+/// Accepts `relativePath` (MCode) or `path` (legacy) for the subdirectory to
+/// list (defaults to the cwd root). `includeFiles` (default `true`) controls
+/// whether file entries are returned alongside directories.
 async fn handle_project_list_directories(
     _state: &WsState,
     id: Value,
@@ -2849,17 +2915,60 @@ async fn handle_project_list_directories(
             );
         }
     };
-    let relative = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let relative = params
+        .get("relativePath")
+        .or_else(|| params.get("path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let include_files = params
+        .get("includeFiles")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     match crate::project_fs::list_directory(Path::new(cwd), relative).await {
         Ok(entries) => {
-            let dirs: Vec<Value> = entries
-                .into_iter()
-                .filter(|e| e.is_dir)
-                .map(|e| serde_json::json!({ "name": e.name }))
-                .collect();
-            JsonRpcResponse::success(id, serde_json::json!({ "directories": dirs }))
+            let mut out: Vec<Value> = Vec::with_capacity(entries.len());
+            for e in entries {
+                if !include_files && !e.is_dir {
+                    continue;
+                }
+                // Compute hasChildren for directories (cheap one-shot read_dir).
+                let has_children = if e.is_dir {
+                    let full = if relative.is_empty() {
+                        PathBuf::from(e.name.as_str())
+                    } else {
+                        PathBuf::from(relative).join(&e.name)
+                    };
+                    has_dir_children(Path::new(cwd), &full).await
+                } else {
+                    false
+                };
+                let rel_path = if relative.is_empty() {
+                    e.name.clone()
+                } else {
+                    format!("{relative}/{}", e.name)
+                };
+                out.push(serde_json::json!({
+                    "path": rel_path,
+                    "name": e.name,
+                    "kind": if e.is_dir { "directory" } else { "file" },
+                    "hasChildren": has_children,
+                }));
+            }
+            JsonRpcResponse::success(id, serde_json::json!({ "entries": out }))
         }
         Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// Cheap "does this directory under `root / rel` have ≥1 child?" probe.
+/// Used to populate `hasChildren` on directory entries in
+/// [`handle_project_list_directories`]. Returns `false` on any I/O error
+/// (treat as no children — the UI shows a twisty only when true).
+async fn has_dir_children(root: &Path, rel: &Path) -> bool {
+    let full = root.join(rel);
+    match tokio::fs::read_dir(&full).await {
+        Ok(mut rd) => rd.next_entry().await.ok().flatten().is_some(),
+        Err(_) => false,
     }
 }
 
@@ -2899,6 +3008,158 @@ async fn handle_project_search_files(
         Err(e) => project_fs_error_response(id, e),
     }
 }
+
+/// `project/search-entries` (PROJ-2). Searches `cwd` for files whose path
+/// contains `query` (substring, case-sensitive; delegated to
+/// [`crate::project_fs::search_files`]). Returns the MCode Tier-3
+/// `ProjectSearchEntriesResult` shape: `{ entries, truncated }`, where each
+/// entry is `{ path, kind }`.
+///
+/// - `path`: the match's path relative to `cwd` (`/`-separated).
+/// - `kind`: `"file"` for now (PROJ-1 primitives match files only; PROJ-4
+///   may add directory matching + content search).
+/// - `truncated`: `true` when `limit` cuts the result list short.
+///
+/// Optional `limit` (default [`DEFAULT_SEARCH_LIMIT`]) caps the result count.
+/// Optional `kind` filter (`"file"`/`"directory"`) is accepted but currently
+/// only `"file"` produces matches (the underlying primitive is file-name
+/// based); a non-`"file"` filter yields an empty list rather than an error.
+async fn handle_project_search_entries(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let query = match params.get("query").and_then(|v| v.as_str()) {
+        Some(q) if !q.is_empty() => q,
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'query' parameter",
+            );
+        }
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_SEARCH_LIMIT);
+    // `kind` filter: PROJ-1 primitives are file-name-based; honor a "file"
+    // filter, and treat any other kind as "no matches" (don't fabricate dir
+    // entries the primitive can't produce).
+    let kind_filter = params.get("kind").and_then(|v| v.as_str());
+    match crate::project_fs::search_files(Path::new(cwd), query).await {
+        Ok(matches) => {
+            let truncated = matches.len() > limit;
+            let entries: Vec<Value> = matches
+                .into_iter()
+                .take(limit)
+                .filter(|_| kind_filter.is_none() || kind_filter == Some("file"))
+                .map(|p| {
+                    serde_json::json!({ "path": p, "kind": "file" })
+                })
+                .collect();
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "entries": entries, "truncated": truncated }),
+            )
+        }
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// `project/search-local-entries` (PROJ-2). A scoped variant of
+/// [`handle_project_search_entries`]: the MCode UI sends `rootPath` (the
+/// directory to search) instead of `cwd`, plus optional `includeFiles`. Since
+/// the PROJ-1 search primitive is file-name-based, `includeFiles: false` yields
+/// an empty list (no directory matching yet); the default (`true`) matches the
+/// `searchEntries` behavior.
+///
+/// Returns the MCode Tier-3 `ProjectSearchLocalEntriesResult` shape:
+/// `{ entries, truncated }`, where each entry is `{ path, name, kind }`.
+async fn handle_project_search_local_entries(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    // `rootPath` (MCode) or `cwd` (fallback) — rootPath wins.
+    let root = params
+        .get("rootPath")
+        .or_else(|| params.get("cwd"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let root = match root {
+        Some(r) => r,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'rootPath' parameter",
+            );
+        }
+    };
+    let query = match params.get("query").and_then(|v| v.as_str()) {
+        Some(q) if !q.is_empty() => q,
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'query' parameter",
+            );
+        }
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_SEARCH_LIMIT);
+    let include_files = params
+        .get("includeFiles")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    // PROJ-1 primitive matches files only; if the caller asked for dirs-only,
+    // we can't produce those matches yet — return empty rather than fabricate.
+    if !include_files {
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "entries": [], "truncated": false }),
+        );
+    }
+    match crate::project_fs::search_files(Path::new(root), query).await {
+        Ok(matches) => {
+            let truncated = matches.len() > limit;
+            let entries: Vec<Value> = matches
+                .into_iter()
+                .take(limit)
+                .map(|p| {
+                    // Derive `name` = last path segment.
+                    let name = p.rsplit('/').next().unwrap_or(&p);
+                    serde_json::json!({ "path": p, "name": name, "kind": "file" })
+                })
+                .collect();
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "entries": entries, "truncated": truncated }),
+            )
+        }
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// Default cap on `searchEntries` / `searchLocalEntries` result counts. Matches
+/// the UI's `DEFAULT_SEARCH_ENTRIES_LIMIT` (80) so the skeleton never returns a
+/// list large enough to stall the autocomplete dropdown.
+const DEFAULT_SEARCH_LIMIT: usize = 80;
 
 // ─── Thread Handlers ───────────────────────────────────────────────────
 
@@ -18625,12 +18886,185 @@ mod tests {
             "project/write-file",
             "project/list-directories",
             "project/search-files",
+            // PROJ-2: MCode UI file-search surface.
+            "project/search-entries",
+            "project/search-local-entries",
         ] {
             assert!(
                 methods.contains(&expected.to_string()),
                 "rpc/listMethods missing {expected}"
             );
         }
+    }
+
+    // ─── PROJ-2: project file RPCs (MCode-shape wiring) ─────────────────
+
+    /// Helper: dispatch a project RPC over the WS layer with the given method
+    /// string + params object, returning the parsed `JsonRpcResponse`.
+    async fn proj_rpc(method: &str, params: Value) -> JsonRpcResponse {
+        let state = WsState::new_in_memory(16);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": method,
+            "params": params,
+        });
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
+        serde_json::from_str(&response.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn project_read_file_returns_mcode_shape() {
+        // AC: readFile returns `{ relativePath, contents, truncated }`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+        tokio::fs::write(dir.path().join("note.md"), b"hello world")
+            .await
+            .unwrap();
+
+        let resp = proj_rpc(
+            "project/read-file",
+            serde_json::json!({ "cwd": cwd, "relativePath": "note.md" }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["relativePath"], "note.md");
+        assert_eq!(result["contents"], "hello world");
+        assert_eq!(result["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn project_write_file_returns_mcode_shape() {
+        // AC: writeFile returns `{ relativePath }` and writes the contents.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+
+        let resp = proj_rpc(
+            "project/writeFile",
+            serde_json::json!({
+                "cwd": cwd,
+                "relativePath": "out.txt",
+                "contents": "wrote this",
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["relativePath"], "out.txt");
+        // Verify the file landed.
+        let on_disk = tokio::fs::read_to_string(dir.path().join("out.txt"))
+            .await
+            .unwrap();
+        assert_eq!(on_disk, "wrote this");
+    }
+
+    #[tokio::test]
+    async fn project_list_directories_returns_mcode_entries() {
+        // AC: listDirectories returns `{ entries: [{ path, name, kind, hasChildren }] }`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+        tokio::fs::write(dir.path().join("file.txt"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(dir.path().join("subdir"))
+            .await
+            .unwrap();
+
+        let resp = proj_rpc(
+            "project/listDirectories",
+            serde_json::json!({ "cwd": cwd }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let entries = resp.result.unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .clone();
+        // Two entries: file.txt + subdir (sorted by name).
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "file.txt");
+        assert_eq!(entries[0]["kind"], "file");
+        assert_eq!(entries[0]["hasChildren"], false);
+        assert_eq!(entries[1]["name"], "subdir");
+        assert_eq!(entries[1]["kind"], "directory");
+        assert_eq!(entries[1]["hasChildren"], false, "empty dir → false");
+        assert_eq!(entries[1]["path"], "subdir");
+    }
+
+    #[tokio::test]
+    async fn project_search_entries_returns_mcode_shape() {
+        // AC: searchEntries returns `{ entries: [{ path, kind }], truncated }`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+        tokio::fs::write(dir.path().join("foo.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("bar.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("README.md"), b"")
+            .await
+            .unwrap();
+
+        let resp = proj_rpc(
+            "project/search-entries",
+            serde_json::json!({ "cwd": cwd, "query": ".rs" }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let entries = result["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "two .rs files: {entries:?}");
+        assert!(entries.iter().all(|e| e["kind"] == "file"));
+        assert_eq!(result["truncated"], false);
+        let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"foo.rs"));
+        assert!(paths.contains(&"bar.rs"));
+    }
+
+    #[tokio::test]
+    async fn project_search_local_entries_returns_mcode_shape() {
+        // AC: searchLocalEntries returns `{ entries: [{ path, name, kind }], truncated }`
+        // and scopes the search to `rootPath`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root_path = dir.path().to_string_lossy().to_string();
+        tokio::fs::write(dir.path().join("match.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("nomatch.md"), b"")
+            .await
+            .unwrap();
+
+        let resp = proj_rpc(
+            "project/searchLocalEntries",
+            serde_json::json!({ "rootPath": root_path, "query": ".rs" }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let entries = result["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "one .rs match: {entries:?}");
+        assert_eq!(entries[0]["path"], "match.rs");
+        assert_eq!(entries[0]["name"], "match.rs");
+        assert_eq!(entries[0]["kind"], "file");
+        assert_eq!(result["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn project_read_file_traversal_blocked_at_rpc_layer() {
+        // AC (traversal guard): a `..` escape through readFile must surface
+        // the -32001 security error, proving the guard fires end-to-end
+        // through the RPC dispatch (not just at the primitive layer).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+
+        let resp = proj_rpc(
+            "project/read-file",
+            serde_json::json!({ "cwd": cwd, "relativePath": "../secret.txt" }),
+        )
+        .await;
+        let err = resp.error.expect("traversal must error");
+        assert_eq!(err.code, -32001, "traversal → -32001; got {err:?}");
     }
 
     // ─── T6c-23: provider skills/commands/capabilities discovery ────────

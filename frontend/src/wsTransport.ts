@@ -414,6 +414,24 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "server.getProviderAuthStatus": "server/get-provider-auth-status",
   "server.getUsage": "server/get-usage",
   "server.getRecap": "server/get-recap",
+
+  // PROJ-2: project file-op RPCs. The cloned MCode UI's file browser / search /
+  // read-write surface calls these `project.*` dot-strings
+  // (`tauriNativeApi.ts` → `callTransport("project/readFile", …)`,
+  // `project/writeFile`, `project/listDirectories`, `project/searchEntries`,
+  // `project/searchLocalEntries`). The syncode-ws backend now serves them via
+  // `crate::project_fs` primitives (sandboxed read/write/list/search with a
+  // path-traversal guard) — map every MCode dot-name to the served slash
+  // dispatch key so the calls reach the backend instead of being
+  // client-stubbed with MethodNotFound (which would leave the file browser
+  // inert). The backend dispatch also accepts the dot-name directly (arms
+  // cover both forms) so this remap is belt-and-braces robustness. Entries
+  // appended at the END to ease parallel-merge conflict resolution.
+  "project.readFile": "project/read-file",
+  "project.writeFile": "project/write-file",
+  "project.listDirectories": "project/list-directories",
+  "project.searchEntries": "project/search-entries",
+  "project.searchLocalEntries": "project/search-local-entries",
 };
 
 /**

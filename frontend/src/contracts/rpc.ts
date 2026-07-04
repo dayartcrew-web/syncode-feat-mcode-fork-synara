@@ -171,10 +171,63 @@ import type {
   ProfileTokenStats,
   StatsGetProfileStatsInput,
 } from "./tier3/stats";
+// PROJ-2: project file-op RPCs (readFile/writeFile/listDirectories/
+// searchEntries/searchLocalEntries). The backend `crates/syncode-ws/src/rpc.rs`
+// `handle_project_*` handlers delegate to `crate::project_fs` primitives and
+// shape results into these MCode Tier-3 types — see `./tier3/project.ts` for
+// the canonical entry/.directory/search/read shapes.
+import type {
+  ProjectListDirectoriesResult,
+  ProjectReadFileResult,
+  ProjectSearchEntriesResult,
+  ProjectSearchLocalEntriesResult,
+} from "./tier3/project";
 
 // Minimal git input shapes for the served slash dispatch keys. The MCode UI
 // sends params under these camelCase keys (`cwd`, `branch`, `paths`,
 // `message`); the backend reads them verbatim (see `handle_git_*`).
+
+// ─── Project file-op input/result shapes (PROJ-2) ──────────────────────
+//
+// The backend `handle_project_*` handlers read these camelCase param keys
+// (the UI sends `cwd` + `relativePath`/`query`/`rootPath`). `includeFiles` and
+// `limit`/`kind` are optional (defaults documented in the handlers). Result
+// types reuse the Tier-3 `Project*Result` shapes directly; the writeFile
+// result is `{ relativePath }` (declared in `shell.ts` as
+// `ProjectWriteFileResult` and re-declared here as a local interface to keep
+// the served registry self-contained, mirroring the git pattern above).
+
+interface ProjectReadFileRpcInput {
+  cwd: string;
+  relativePath: string;
+}
+interface ProjectWriteFileRpcInput {
+  cwd: string;
+  relativePath: string;
+  contents: string;
+}
+interface ProjectWriteFileRpcResult {
+  relativePath: string;
+}
+interface ProjectListDirectoriesRpcInput {
+  cwd: string;
+  relativePath?: string;
+  includeFiles?: boolean;
+}
+interface ProjectSearchEntriesRpcInput {
+  cwd: string;
+  query: string;
+  limit?: number;
+  kind?: "file" | "directory";
+}
+interface ProjectSearchLocalEntriesRpcInput {
+  rootPath: string;
+  query: string;
+  limit?: number;
+  includeFiles?: boolean;
+}
+
+// ─── Git input shapes (minimal local interfaces) ───────────────────────
 interface GitCwdInput {
   cwd: string;
 }
@@ -607,6 +660,42 @@ export const SERVED_RPC = {
   "project/create": {
     request: null as unknown as ProjectCreateParams,
     result: null as unknown as ProjectSummary,
+  },
+
+  // ─── Project file ops (PROJ-2 — syncode-ws project_fs-backed) ─────────
+  // The cloned MCode UI's file browser / search / read-write surface calls
+  // these `project.*` dot-strings (`tauriNativeApi.ts` →
+  // `callTransport("project/readFile", …)`, `project/writeFile`,
+  // `project/listDirectories`, `project/searchEntries`,
+  // `project/searchLocalEntries`). The transport remaps the MCode dot-strings
+  // onto these slash keys (see MCODE_TO_SERVED in `wsTransport.ts`). The
+  // backend `crates/syncode-ws/src/rpc.rs` `handle_project_*` handlers
+  // delegate to `crate::project_fs` primitives (sandboxed read/write/list/
+  // search with a path-traversal guard) and shape results into the MCode
+  // Tier-3 types (`ProjectReadFileResult`, `ProjectListDirectoriesResult`,
+  // `ProjectSearchEntriesResult`, `ProjectSearchLocalEntriesResult` from
+  // `./tier3/project`). `ProjectWriteFileResult` is `{ relativePath }`
+  // (declared in `shell.ts`). The backend dispatch accepts both the slash and
+  // dot forms (arms cover both), so the remap is belt-and-braces robustness.
+  "project/read-file": {
+    request: null as unknown as ProjectReadFileRpcInput,
+    result: null as unknown as ProjectReadFileResult,
+  },
+  "project/write-file": {
+    request: null as unknown as ProjectWriteFileRpcInput,
+    result: null as unknown as ProjectWriteFileRpcResult,
+  },
+  "project/list-directories": {
+    request: null as unknown as ProjectListDirectoriesRpcInput,
+    result: null as unknown as ProjectListDirectoriesResult,
+  },
+  "project/search-entries": {
+    request: null as unknown as ProjectSearchEntriesRpcInput,
+    result: null as unknown as ProjectSearchEntriesResult,
+  },
+  "project/search-local-entries": {
+    request: null as unknown as ProjectSearchLocalEntriesRpcInput,
+    result: null as unknown as ProjectSearchLocalEntriesResult,
   },
 
   // ─── Thread ──────────────────────────────────────────────────────────
@@ -1489,12 +1578,15 @@ export const UNSERVED_RPC = [
   // `{subscribed:true}`). `automation.runNow`/`markRunRead`/`archiveRun` are
   // also served (markRunRead/archiveRun are no-op stubs).
 
-  // ─── Project file ops (CRUD served, file ops not) — ~10 ─────────────
-  "project.readFile",
-  "project.writeFile",
-  "project.listDirectories",
-  "project.searchEntries",
-  "project.searchLocalEntries",
+  // ─── Project file ops — 5 file RPCs SERVED in PROJ-2; rest still unserved ──
+  // PROJ-2: `project.readFile`, `project.writeFile`, `project.listDirectories`,
+  // `project.searchEntries`, and `project.searchLocalEntries` are NOW SERVED
+  // (mapped via MCODE_TO_SERVED to `project/read-file`, `project/write-file`,
+  // `project/list-directories`, `project/search-entries`,
+  // `project/search-local-entries`). The backend delegates to
+  // `crate::project_fs` primitives (sandboxed read/write/list/search with a
+  // path-traversal guard). The remaining project file ops below are still
+  // unserved (MethodNotFound):
   "project.discoverScripts",
   "project.runScript",
   "project.listDevServers",
