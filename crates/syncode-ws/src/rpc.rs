@@ -219,6 +219,10 @@ async fn dispatch_method(
                     "orchestration/replay-events",
                     "orchestration.repairState",
                     "orchestration/repair-state",
+                    // ORCH-3: MCode alias for repairState (drift detection +
+                    // optional replay overwrite).
+                    "orchestration.repairReadModel",
+                    "orchestration/repair-read-model",
                     // PROJ-1: project filesystem primitives (skeleton handlers;
                     // full wiring lands in PROJ-2/3/4).
                     "project/list-files",
@@ -1138,8 +1142,11 @@ async fn dispatch_method(
         "orchestration.replayEvents" | "orchestration/replay-events" | "orchestration/replayEvents" => {
             handle_orchestration_replay_events(state, id, &request.params).await
         }
-        "orchestration.repairState" | "orchestration/repair-state" => {
-            handle_orchestration_repair_state(state, id).await
+        "orchestration.repairState"
+        | "orchestration/repair-state"
+        | "orchestration.repairReadModel"
+        | "orchestration/repair-read-model" => {
+            handle_orchestration_repair_state(state, id, &request.params).await
         }
 
         // ─── Push Subscription Methods ───────────────────────────
@@ -1676,26 +1683,153 @@ async fn handle_orchestration_replay_events(
     }
 }
 
-/// `orchestration.repairState` — rebuild the read model from the event store
-/// (full replay) and report the count. Equivalent to `replayEvents` with no
-/// `aggregateId` but presented under a distinct method name so the UI's
-/// "repair" affordance is unambiguous.
-async fn handle_orchestration_repair_state(state: &WsState, id: Value) -> JsonRpcResponse {
-    match state.orchestrator.replay_read_model().await {
-        Ok((replayed, seeded)) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({
-                "repaired": true,
-                "eventsReplayed": replayed,
-                "seeded": seeded,
-            }),
-        ),
-        Err(e) => JsonRpcResponse::error(
-            Some(id),
-            crate::error_codes::INTERNAL_ERROR,
-            format!("repair failed: {e}"),
-        ),
+/// `orchestration.repairState` — detect read-model drift and optionally
+/// repair it by replaying the event store.
+///
+/// Computes the diff between the current in-memory `ReadModelStore` and a
+/// fresh replay from the event repository. Returns:
+/// ```jsonc
+/// {
+///   "driftDetected": bool,   // did any projection count change?
+///   "repairedCount": n,      // events replayed from the store
+///   "seeded": n,             // aggregate snapshots used to seed the replay
+///   "repaired": bool,        // was the store overwritten? (repair:true)
+///   "details": {
+///     "before": { "projects", "threads", "turns", "messages", "checkpoints" },
+///     "after":  { "projects", "threads", "turns", "messages", "checkpoints" }
+///   }
+/// }
+/// ```
+///
+/// `repair` (optional, default `true`): when `true`, the fresh replay
+/// overwrites the live read model (the store is repaired in place). When
+/// `false`, the original store is restored after the diff so callers can
+/// perform a dry-run drift check without mutation. The replay itself always
+/// rebuilds a fresh projection (the store is cleared first so the projection
+/// is derived solely from the event log); the flag only governs whether that
+/// fresh projection is kept or discarded.
+///
+/// Dispatch accepts both `orchestration.repairState` /
+/// `orchestration/repair-state` (the UI's canonical forms) and the MCode
+/// `orchestration.repairReadModel` alias.
+async fn handle_orchestration_repair_state(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    // `repair` defaults to true — the method's namesake affordance is "repair".
+    // Pass `false` explicitly for a dry-run drift check that leaves the store
+    // untouched.
+    let repair = params
+        .get("repair")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // Snapshot the current read-model counts BEFORE the replay. When `repair`
+    // is false we also clone the full store so we can restore it afterwards
+    // (the replay overwrites the shared store in place).
+    let (before_counts, snapshot) = {
+        let store = state.read_store.read().await;
+        (
+            projection_counts(&store),
+            if !repair { Some(store.clone()) } else { None },
+        )
+    };
+
+    // Clear the store so `replay_read_model` projects into an empty slate,
+    // producing a true fresh projection derived solely from the event log.
+    // Without this, orphaned entries (from a prior projection bug or manual
+    // mutation) would survive the replay and drift would be invisible. The
+    // orchestrator's `replay_read_model` seeds from snapshots + projects the
+    // tail into whatever store state it finds, so clearing first is what makes
+    // the result authoritative.
+    {
+        let mut store = state.read_store.write().await;
+        *store = syncode_orchestration::ReadModelStore::new();
     }
+
+    // Replay projects the event log (seeded by snapshots) into the now-empty
+    // store. This is the "repair" action itself.
+    let (replayed, seeded) = match state.orchestrator.replay_read_model().await {
+        Ok(t) => t,
+        Err(e) => {
+            // Best-effort restore on failure so a botched repair doesn't leave
+            // the store wiped when the caller asked for a dry-run.
+            if let Some(original) = snapshot {
+                let mut store = state.read_store.write().await;
+                *store = original;
+            }
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INTERNAL_ERROR,
+                format!("repair failed: {e}"),
+            );
+        }
+    };
+
+    // Snapshot the after-counts from the freshly replayed store. If this is a
+    // dry-run (repair:false), restore the original store so the caller's view
+    // is unchanged.
+    let after_counts = if let Some(original) = snapshot {
+        let mut store = state.read_store.write().await;
+        let counts = projection_counts(&store);
+        *store = original;
+        counts
+    } else {
+        let store = state.read_store.read().await;
+        projection_counts(&store)
+    };
+
+    let drift_detected = before_counts != after_counts;
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "driftDetected": drift_detected,
+            "repairedCount": replayed,
+            "seeded": seeded,
+            "repaired": repair,
+            "details": {
+                "before": counts_to_json(&before_counts),
+                "after": counts_to_json(&after_counts),
+            },
+        }),
+    )
+}
+
+/// Count the projection sizes of a `ReadModelStore` for drift comparison.
+/// Only the high-cardinality aggregate maps are compared (projects, threads,
+/// turns, messages, checkpoints) — these are the projections whose counts
+/// change when an event is appended or a projection bug drops/dupe an entry.
+fn projection_counts(store: &syncode_orchestration::ReadModelStore) -> ProjectionCounts {
+    ProjectionCounts {
+        projects: store.projects.len(),
+        threads: store.threads.len(),
+        turns: store.turns.len(),
+        messages: store.messages.len(),
+        checkpoints: store.checkpoints.len(),
+    }
+}
+
+/// Render `ProjectionCounts` as a JSON object for the `details` payload.
+fn counts_to_json(c: &ProjectionCounts) -> serde_json::Value {
+    serde_json::json!({
+        "projects": c.projects,
+        "threads": c.threads,
+        "turns": c.turns,
+        "messages": c.messages,
+        "checkpoints": c.checkpoints,
+    })
+}
+
+/// Projection sizes snapshot used for read-model drift detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionCounts {
+    projects: usize,
+    threads: usize,
+    turns: usize,
+    messages: usize,
+    checkpoints: usize,
 }
 
 // ─── Push Subscription Handlers ───────────────────────────────────
@@ -18238,10 +18372,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orchestration_repair_state_returns_events_replayed() {
-        // repairState rebuilds the read model from events. After creating a
-        // project, replay should report at least 1 event replayed and the read
-        // model should still contain the project.
+    async fn orchestration_repair_state_consistent_store_reports_no_drift() {
+        // ORCH-3: when the in-memory read model matches a fresh replay, the
+        // handler reports driftDetected=false. The store already reflects the
+        // single CreateProject event, so a replay reproduces the same counts.
         let state = WsState::new_in_memory(16);
         let create = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
@@ -18250,17 +18384,146 @@ mod tests {
         rpc(&state, 1, &create).await;
 
         let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.repairState",
+            "params": { "repair": true }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "repairState failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        // New ORCH-3 return shape.
+        assert_eq!(result["driftDetected"], false, "no drift on a consistent store");
+        assert_eq!(result["repaired"], true, "repair:true keeps the replay");
+        let replayed = result["repairedCount"].as_u64().unwrap_or(0);
+        assert!(replayed >= 1, "expected at least 1 event replayed, got {replayed}");
+        // details.before == details.after when there's no drift.
+        assert_eq!(result["details"]["before"], result["details"]["after"]);
+        assert_eq!(result["details"]["after"]["projects"], 1);
+        // Read model still reflects the project after the repair.
+        let store = state.read_store.read().await;
+        assert_eq!(store.projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn orchestration_repair_state_detects_injected_drift_dry_run() {
+        // ORCH-3: inject drift (a bogus extra project) into the read model,
+        // then call repairState with repair:false (dry-run). The handler must
+        // report driftDetected=true AND leave the store untouched (the bogus
+        // entry remains because we declined to overwrite).
+        let state = WsState::new_in_memory(16);
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "CreateProject", "name": "real", "rootPath": "/tmp/real" }
+        });
+        rpc(&state, 1, &create).await;
+
+        // Inject a bogus project that has NO backing event → drift.
+        {
+            let mut store = state.read_store.write().await;
+            store.projects.insert(
+                "bogus-drift".to_string(),
+                syncode_orchestration::read_model::ProjectView {
+                    id: "bogus-drift".to_string(),
+                    name: "bogus".to_string(),
+                    root_path: "/tmp/bogus".to_string(),
+                    provider_id: None,
+                    default_model: None,
+                    created_at: "1970-01-01T00:00:00Z".to_string(),
+                    updated_at: "1970-01-01T00:00:00Z".to_string(),
+                    thread_count: 0,
+                },
+            );
+        }
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.repairState",
+            "params": { "repair": false }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "repairState failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["driftDetected"], true, "drift must be detected");
+        assert_eq!(result["repaired"], false, "dry-run must not overwrite");
+        // before has the injected bogus entry (2 projects); after is the fresh
+        // replay (1 project). The diff is what flags the drift.
+        assert_eq!(result["details"]["before"]["projects"], 2);
+        assert_eq!(result["details"]["after"]["projects"], 1);
+        // Dry-run: the store is restored, so the bogus entry survives.
+        let store = state.read_store.read().await;
+        assert_eq!(
+            store.projects.len(),
+            2,
+            "dry-run must leave the original (drifting) store in place"
+        );
+        assert!(store.projects.contains_key("bogus-drift"));
+    }
+
+    #[tokio::test]
+    async fn orchestration_repair_state_repair_overwrite_clears_drift() {
+        // ORCH-3: with repair:true (the default), the handler overwrites the
+        // drifting store with the fresh replay, dropping the bogus entry.
+        let state = WsState::new_in_memory(16);
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "CreateProject", "name": "real", "rootPath": "/tmp/real" }
+        });
+        rpc(&state, 1, &create).await;
+
+        // Inject the same bogus drift.
+        {
+            let mut store = state.read_store.write().await;
+            store.projects.insert(
+                "bogus-drift".to_string(),
+                syncode_orchestration::read_model::ProjectView {
+                    id: "bogus-drift".to_string(),
+                    name: "bogus".to_string(),
+                    root_path: "/tmp/bogus".to_string(),
+                    provider_id: None,
+                    default_model: None,
+                    created_at: "1970-01-01T00:00:00Z".to_string(),
+                    updated_at: "1970-01-01T00:00:00Z".to_string(),
+                    thread_count: 0,
+                },
+            );
+        }
+
+        // repair defaults to true — omit the param to exercise the default.
+        let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "orchestration.repairState"
         });
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "repairState failed: {:?}", resp.error);
         let result = resp.result.unwrap();
-        assert_eq!(result["repaired"], true);
-        let count = result["eventsReplayed"].as_u64().unwrap_or(0);
-        assert!(count >= 1, "expected at least 1 event replayed, got {count}");
-        // Read model still reflects the project.
+        assert_eq!(result["driftDetected"], true, "drift was present before replay");
+        assert_eq!(result["repaired"], true, "default is repair:true");
+        assert_eq!(result["details"]["before"]["projects"], 2);
+        assert_eq!(result["details"]["after"]["projects"], 1);
+        // The store is now the fresh replay: bogus entry gone.
         let store = state.read_store.read().await;
         assert_eq!(store.projects.len(), 1);
+        assert!(!store.projects.contains_key("bogus-drift"));
+        assert!(store.projects.values().any(|p| p.name == "real"));
+    }
+
+    #[tokio::test]
+    async fn orchestration_repair_read_model_alias_dispatches_to_repair_state() {
+        // ORCH-3: the MCode alias `orchestration.repairReadModel` dispatches to
+        // the same handler (drift detection + optional repair). Both forms must
+        // resolve and return the new ORCH-3 shape.
+        let state = WsState::new_in_memory(16);
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "CreateProject", "name": "p", "rootPath": "/tmp/p" }
+        });
+        rpc(&state, 1, &create).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.repairReadModel"
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "repairReadModel failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["driftDetected"], false);
+        assert!(result["repairedCount"].as_u64().unwrap_or(0) >= 1);
     }
 
     #[tokio::test]
@@ -18447,6 +18710,9 @@ mod tests {
             "orchestration/replay-events",
             "orchestration.repairState",
             "orchestration/repair-state",
+            // ORCH-3: MCode alias for repairState.
+            "orchestration.repairReadModel",
+            "orchestration/repair-read-model",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
