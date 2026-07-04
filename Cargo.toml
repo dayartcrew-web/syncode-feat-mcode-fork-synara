@@ -9,6 +9,7 @@ members = [
     "crates/syncode-terminal",
     "crates/syncode-automation",
     "crates/syncode-persistence",
+    "crates/syncode-memory",
     "crates/syncode-auth",
     "crates/syncode-ws",
     "crates/syncode-http",
@@ -90,6 +91,7 @@ syncode-git = { path = "crates/syncode-git" }
 syncode-terminal = { path = "crates/syncode-terminal" }
 syncode-automation = { path = "crates/syncode-automation" }
 syncode-persistence = { path = "crates/syncode-persistence" }
+syncode-memory = { path = "crates/syncode-memory" }
 syncode-auth = { path = "crates/syncode-auth" }
 syncode-ws = { path = "crates/syncode-ws" }
 syncode-http = { path = "crates/syncode-http" }
