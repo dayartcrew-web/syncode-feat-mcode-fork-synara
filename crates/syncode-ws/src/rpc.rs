@@ -794,9 +794,10 @@ async fn dispatch_method(
         //     distinctly).
         //   - worktree reuses `syncode_git::worktree::{list,add,remove}_worktree`.
         //
-        // `git.stashAndCheckout` is STUBBED (`{ ok:false }` with a `reason`) —
-        // it is a two-phase op (stash then checkout) the UI can compose itself
-        // via `stashCreate` + `checkout`. Documented below.
+// `git.stashAndCheckout` is REAL (GIT-1): it composes a `stash_save2` then a
+// `checkout_tree` on a single git2 handle, with a best-effort `stash_apply`
+// rollback if the checkout fails after a real stash. See
+// `handle_git_stash_and_checkout` below.
         //
         // Deferred / unserved (still in `UNSERVED_RPC`): `git.runStackedAction`
         // (LLM-backed multi-phase commit/push/PR — would need provider wiring),
@@ -4442,7 +4443,8 @@ fn handle_git_commit(id: Value, params: &Value) -> JsonRpcResponse {
 //
 // These back the `git.*` arms appended at the END of `dispatch_method`. They
 // cover the GitPanel RPCs the core phase-3 surface does not:
-//   - Stash: list/create/apply/drop/info (git2 direct) + stashAndCheckout stub
+//   - Stash: list/create/apply/drop/info (git2 direct) + stashAndCheckout
+//     (real two-phase stash+checkout with rollback — GIT-1)
 //   - Network: fetch (git2 direct), pull/push (syncode-git Git2Service)
 //   - Worktree: list/create/remove (syncode_git::worktree free functions)
 //   - Misc: init (`Repository::init`), removeIndexLock (delete `.git/index.lock`)
@@ -4753,17 +4755,139 @@ fn handle_git_stash_info(id: Value, params: &Value) -> JsonRpcResponse {
     )
 }
 
-/// `git.stashAndCheckout` — STUB. Two-phase op (stash working tree then
-/// checkout a branch) the UI can compose itself via `stashCreate` +
-/// `checkout`. Returning `{ ok:false, reason }` so the UI can surface a clear
-/// "not supported, use stash + checkout" message rather than a generic
-/// MethodNotFound. Documented gap.
-fn handle_git_stash_and_checkout(id: Value, _params: &Value) -> JsonRpcResponse {
+/// `git.stashAndCheckout` — REAL two-phase op (GIT-1). Stashes the current
+/// working tree (untracked files included) then checks out the target branch.
+/// If the checkout fails after a real stash was created, the handler attempts
+/// a best-effort rollback by applying the just-created stash (`stash@{0}`) so
+/// the user's working state is restored.
+///
+/// Composes the same primitives as `handle_git_stash_create` (phase 1) and
+/// `handle_git_checkout` / `Git2Service::checkout` (phase 2), keeping a
+/// single `git2::Repository` handle across both phases so the freshly-created
+/// stash is visible to the rollback apply. UI sends `{ cwd, branch, message?
+/// }`. Returns `{ ok: true, stashed: <bool>, checkedOut: <branch> }` on
+/// success where `stashed` is `false` when the tree was clean (nothing to
+/// stash) — the checkout still proceeds because a clean tree can always
+/// switch branches. On checkout failure the response is an `INTERNAL_ERROR`
+/// envelope; if the rollback apply also failed, the error message notes both
+/// failures and points the user at `stash@{0}` for manual recovery.
+fn handle_git_stash_and_checkout(id: Value, params: &Value) -> JsonRpcResponse {
+    let mut repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let branch = match params
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("ref").and_then(|v| v.as_str()))
+        .or_else(|| params.get("refName").and_then(|v| v.as_str()))
+    {
+        Some(b) => b.to_string(),
+        None => {
+            return git_error(
+                id,
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'branch' parameter",
+            );
+        }
+    };
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("stashMessage").and_then(|v| v.as_str()));
+
+    // ── Phase 1: stash ───────────────────────────────────────────────
+    // Mirror handle_git_stash_create: prefer the repo's configured signature,
+    // fall back to a generic "syncode" identity. INCLUDE_UNTRACKED matches
+    // stashCreate's behavior (the UI expects untracked files to be swept into
+    // the stash).
+    let sig = match repo.signature() {
+        Ok(s) => s,
+        Err(_) => match git2::Signature::now("syncode", "syncode@local") {
+            Ok(s) => s,
+            Err(e) => {
+                return git_error(
+                    id,
+                    crate::error_codes::INTERNAL_ERROR,
+                    format!("git stash signature: {e}"),
+                );
+            }
+        },
+    };
+    // Normalize the stash result to "did we actually create a stash?". libgit2
+    // returns a Stash/NotFound error ("nothing to stash") when the tree is
+    // clean; older versions return the zero oid. Both become stashed=false so
+    // phase 2 proceeds on a clean tree.
+    let stashed: bool = match repo.stash_save2(&sig, message, Some(git2::StashFlags::INCLUDE_UNTRACKED))
+    {
+        Ok(oid) => !oid.is_zero(),
+        Err(e) => {
+            if e.class() == git2::ErrorClass::Stash && e.code() == git2::ErrorCode::NotFound {
+                false
+            } else {
+                return git_error(
+                    id,
+                    crate::error_codes::INTERNAL_ERROR,
+                    format!("git stash_save: {e}"),
+                );
+            }
+        }
+    };
+
+    // ── Phase 2: checkout ────────────────────────────────────────────
+    // Mirror Git2Service::checkout (revparse → checkout_tree → set_head) so
+    // the behavior matches `git.branchCheckout`. We keep the git2 handle from
+    // phase 1 (no repo reopen) so the stash we just created is visible to the
+    // rollback apply below. `set_head` requires a fully-qualified refname
+    // (refs/heads/<branch>) — libgit2 rejects bare short names with
+    // InvalidSpec on newer versions, so resolve the full ref before set_head.
+    let checkout_result = (|| -> Result<(), git2::Error> {
+        let (obj, reference) = repo.revparse_ext(&branch)?;
+        repo.checkout_tree(&obj, None)?;
+        // Prefer the resolved reference's full name (works for branch refs,
+        // tags, and remote-tracking refs); fall back to the raw input for
+        // detached-HEAD / OID checkouts where revparse yields no reference.
+        let head_target = reference
+            .as_ref()
+            .and_then(|r| r.name().map(String::from))
+            .unwrap_or_else(|| branch.clone());
+        repo.set_head(&head_target)?;
+        Ok(())
+    })();
+    if let Err(e) = checkout_result {
+        // Best-effort rollback: if we created a real stash, try to reapply it
+        // so the user's working tree is restored. If the apply also fails,
+        // surface both errors so the user can recover manually (the stash is
+        // still in the stash reflog at stash@{0}).
+        if stashed
+            && let Err(apply_err) = repo.stash_apply(0, None)
+        {
+            return git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!(
+                    "git checkout failed: {e}; rollback stash_apply also failed: {apply_err} \
+                     (the stash is preserved at stash@{{0}} — recover manually)"
+                ),
+            );
+        }
+        return git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            if stashed {
+                format!("git checkout failed: {e} (stashed changes were restored via stash_apply)")
+            } else {
+                format!("git checkout: {e}")
+            },
+        );
+    }
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "ok": false,
-            "reason": "stashAndCheckout is not implemented as a single op; use stashCreate then checkout",
+            "ok": true,
+            "stashed": stashed,
+            "checkedOut": branch,
         }),
     )
 }
@@ -10363,19 +10487,167 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_stash_and_checkout_stub_returns_ok_false() {
-        // The documented stub: stashAndCheckout is not a single op.
+    async fn git_stash_and_checkout_happy_path_stashes_and_checks_out() {
+        // Two-phase: stash dirty tree → checkout another branch →
+        // { ok:true, stashed:true, checkedOut:<branch> }. Verifies BOTH
+        // dispatch forms resolve and that the working file is gone on the
+        // new branch (its tree was clean before the untracked file appeared).
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Create a second branch pointing at HEAD, then return to main and
+        // dirty the tree with an untracked file.
+        std::process::Command::new("git")
+            .args(["branch", "feature"])
+            .current_dir(&repo)
+            .output()
+            .expect("git branch feature");
+        std::fs::write(repo.join("dirty.txt"), "uncommitted\n").expect("write");
+
+        let state = WsState::new_in_memory(16);
+        for method in ["git.stashAndCheckout", "git/stash-and-checkout"] {
+            // Re-dirty before each iteration so the stash has something to sweep.
+            std::fs::write(repo.join("dirty.txt"), "uncommitted\n").expect("write");
+            // Ensure we start on main each iteration (previous iteration may
+            // have moved HEAD to feature).
+            std::process::Command::new("git")
+                .args(["checkout", "main"])
+                .current_dir(&repo)
+                .output()
+                .expect("git checkout main");
+
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": { "cwd": repo.to_string_lossy(), "branch": "feature" }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
+            let result = resp.result.unwrap();
+            assert_eq!(result["ok"], true, "{}: {result}", method);
+            assert_eq!(result["stashed"], true, "{}: {result}", method);
+            assert_eq!(result["checkedOut"], "feature", "{}: {result}", method);
+
+            // The dirty file should be gone from the working tree on feature
+            // (it was stashed away). A stash entry should exist.
+            assert!(
+                !repo.join("dirty.txt").exists(),
+                "{}: dirty file should be stashed away", method
+            );
+            let stash_list = std::process::Command::new("git")
+                .args(["stash", "list"])
+                .current_dir(&repo)
+                .output()
+                .expect("git stash list");
+            assert!(
+                !String::from_utf8_lossy(&stash_list.stdout).trim().is_empty(),
+                "{}: expected at least one stash entry", method
+            );
+            // Clear the stash so the next iteration starts clean.
+            std::process::Command::new("git")
+                .args(["stash", "drop"])
+                .current_dir(&repo)
+                .output()
+                .expect("git stash drop");
+        }
+    }
+
+    #[tokio::test]
+    async fn git_stash_and_checkout_no_changes_stashes_false_but_checks_out() {
+        // Clean tree: nothing to stash, but checkout still succeeds.
+        // stashed must be false and checkedOut must equal the target branch.
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        std::process::Command::new("git")
+            .args(["branch", "feature"])
+            .current_dir(&repo)
+            .output()
+            .expect("git branch feature");
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.stashAndCheckout",
+            "params": { "cwd": repo.to_string_lossy(), "branch": "feature" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["stashed"], false, "{result}");
+        assert_eq!(result["checkedOut"], "feature", "{result}");
+
+        // No stash entry should have been created.
+        let stash_list = std::process::Command::new("git")
+            .args(["stash", "list"])
+            .current_dir(&repo)
+            .output()
+            .expect("git stash list");
+        assert!(
+            String::from_utf8_lossy(&stash_list.stdout).trim().is_empty(),
+            "expected no stash entries on a clean tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_stash_and_checkout_checkout_fails_after_stash_restores_tree() {
+        // Phase 2 fails (nonexistent branch) AFTER phase 1 created a real
+        // stash. The handler must surface an INTERNAL_ERROR envelope AND
+        // best-effort reapply the stash so the dirty file is restored.
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        std::fs::write(repo.join("dirty.txt"), "uncommitted\n").expect("write");
+
         let state = WsState::new_in_memory(16);
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "git/stash-and-checkout",
-            "params": { "cwd": "/tmp/anywhere", "branch": "x" }
+            // A branch that does not exist → revparse fails → checkout fails.
+            "params": { "cwd": repo.to_string_lossy(), "branch": "definitely-not-a-branch-xyz" }
         });
         let resp = rpc(&state, 1, &req).await;
-        // Note: stub returns success envelope with ok:false (NOT an RPC error).
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let result = resp.result.unwrap();
-        assert_eq!(result["ok"], false);
-        assert!(result["reason"].is_string());
+        // Checkout failure is an RPC error envelope (INTERNAL_ERROR).
+        assert!(resp.error.is_some(), "expected error envelope");
+        let err = resp.error.unwrap();
+        assert_eq!(
+            err.code,
+            crate::error_codes::INTERNAL_ERROR,
+            "expected INTERNAL_ERROR, got {}: {}",
+            err.code,
+            err.message
+        );
+        // Best-effort rollback: the dirty file should be back in the tree
+        // (stash_apply restored it). This is the core safety guarantee.
+        assert!(
+            repo.join("dirty.txt").exists(),
+            "rollback failed: dirty file should be restored after checkout failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_stash_and_checkout_missing_branch_param_is_invalid_params() {
+        // Param validation runs before any git operation — missing 'branch'
+        // yields INVALID_PARAMS (no stash created).
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.stashAndCheckout",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let err = resp.error.unwrap_or_else(|| {
+            panic!("expected INVALID_PARAMS, got success: {:?}", resp.result)
+        });
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
     }
 
     #[tokio::test]
@@ -10613,15 +10885,13 @@ mod tests {
         let state = WsState::new_in_memory(16);
         // Use a nonexistent path so handlers short-circuit at open_git2_repo;
         // the assertion is on error CODE (INTERNAL_ERROR) vs METHOD_NOT_FOUND.
-        // stashAndCheckout is a stub that never opens a repo — assert ok:false.
-        // subscribeActionProgress is also a stub (no repo open).
-        let stub_methods = [
-            ("git.stashAndCheckout", "git/stash-and-checkout"),
-            (
-                "git.subscribeActionProgress",
-                "git/subscribe-action-progress",
-            ),
-        ];
+        // GIT-1: stashAndCheckout is now REAL — it opens the repo first (before
+        // the `branch` param check), so a bad path yields INTERNAL_ERROR.
+        // subscribeActionProgress is still a stub (no repo open).
+        let stub_methods = [(
+            "git.subscribeActionProgress",
+            "git/subscribe-action-progress",
+        )];
         for (dot, slash) in stub_methods {
             for method in [dot, slash] {
                 let req = serde_json::json!({
@@ -10647,6 +10917,8 @@ mod tests {
             ("git.stashApply", "git/stash-apply"),
             ("git.stashDrop", "git/stash-drop"),
             ("git.stashInfo", "git/stash-info"),
+            // GIT-1: stashAndCheckout now opens the repo (no longer a stub).
+            ("git.stashAndCheckout", "git/stash-and-checkout"),
             ("git.fetch", "git/fetch"),
             ("git.pull", "git/pull"),
             ("git.push", "git/push"),
