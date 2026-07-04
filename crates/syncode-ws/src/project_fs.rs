@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use syncode_core::util::path as core_path;
 use thiserror::Error;
 
 /// Error returned by the project filesystem primitives.
@@ -68,8 +69,9 @@ pub struct DirEntry {
 /// inside the root, so `../newfile` under a root whose parent is outside is
 /// still blocked.
 pub fn resolve_within_root(root: &Path, relative: &str) -> Result<PathBuf, ProjectFsError> {
-    let canonical_root = root
-        .canonicalize()
+    // Delegate the canonicalize step to syncode-core (uses dunce on Windows to
+    // avoid \\?\ prefix pollution; passthrough on Unix).
+    let canonical_root = core_path::canonicalize_existing(root)
         .map_err(|_| ProjectFsError::InvalidRoot)?;
 
     // Empty relative → the root itself.
@@ -80,42 +82,26 @@ pub fn resolve_within_root(root: &Path, relative: &str) -> Result<PathBuf, Proje
     let rel_path = Path::new(relative);
 
     // Reject absolute paths outright (Windows `C:\…` and Unix `/…`).
-    // Joining an absolute path to a base in Rust *replaces* the base, so this
-    // must be blocked before the join — otherwise `/etc/passwd` would resolve
-    // to itself regardless of `root`.
     if rel_path.is_absolute() {
         return Err(ProjectFsError::PathTraversal);
     }
 
-    // ─── Defense layer 1: lexical pre-check ───────────────────────
-    //
-    // Lexically normalize the relative path (resolving `.` and `..` against
-    // the root) BEFORE touching the filesystem. If the normalized result
-    // tries to climb above the root, block immediately — independent of
-    // whether the target exists. This closes the TOCTOU gap and handles
-    // escapes to non-existent paths (e.g. `../../../etc/passwd` on a machine
-    // where `/etc/passwd` doesn't exist, or absolute Windows paths the test
-    // env can't canonicalize).
-    if relative_goes_above_root(rel_path) {
+    // ─── Defense layer 1: lexical pre-check (delegated to core) ──
+    if core_path::relative_goes_above_root(relative) {
         return Err(ProjectFsError::PathTraversal);
     }
 
     let candidate = canonical_root.join(rel_path);
 
     // ─── Defense layer 2: canonicalize + containment ──────────────
-    //
-    // Canonicalize. If the leaf doesn't exist (write-a-new-file), canonicalize
-    // the parent and re-append the file name — but require the parent to be
-    // inside the root first.
-    let canonical = match candidate.canonicalize() {
+    let canonical = match core_path::canonicalize_existing(&candidate) {
         Ok(c) => c,
         Err(_) => {
             let parent = match candidate.parent() {
                 Some(p) if !p.as_os_str().is_empty() => p,
                 _ => return Err(ProjectFsError::PathTraversal),
             };
-            let canonical_parent = parent
-                .canonicalize()
+            let canonical_parent = core_path::canonicalize_existing(parent)
                 .map_err(|_| ProjectFsError::NotFound)?;
             if !canonical_parent.starts_with(&canonical_root) {
                 return Err(ProjectFsError::PathTraversal);
@@ -127,75 +113,44 @@ pub fn resolve_within_root(root: &Path, relative: &str) -> Result<PathBuf, Proje
         }
     };
 
-    // Final containment check (catches symlink escapes — canonicalize follows
-    // the link, so a link pointing outside the root resolves outside it).
     if !canonical.starts_with(&canonical_root) {
         return Err(ProjectFsError::PathTraversal);
     }
     Ok(canonical)
 }
 
-/// Lexically determine whether a relative path climbs above its base — i.e.
-/// at any point during a left-to-right scan of its components, the running
-/// depth goes negative. `..` decrements, `.` and `` (empty from `//`) are
-/// no-ops, anything else increments. This is the same logic the std
-/// `Path::components()` CurDir/ParentDir handling performs, but expressed as
-/// an early-reject so escapes never reach the filesystem.
-///
-/// Example: `a/../b` → depth 0 → ok. `../b` → depth -1 → escapes. `a/../../b`
-/// → depth -1 → escapes. `a/b/../../c` → depth 0 → ok (stays at root).
-fn relative_goes_above_root(rel: &Path) -> bool {
-    let mut depth: i32 = 0;
-    for comp in rel.components() {
-        use std::path::Component;
-        match comp {
-            Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
-                    return true;
-                }
-            }
-            Component::CurDir | Component::Normal(_) => {
-                // CurDir (`.`) is a no-op; Normal increments depth. RootDir
-                // and Prefix cannot occur in a non-absolute path (already
-                // rejected above), but treat them defensively as escapes.
-                if matches!(comp, Component::Normal(_)) {
-                    depth += 1;
-                }
-            }
-            Component::RootDir | Component::Prefix(_) => return true,
-        }
-    }
-    false
-}
+// Note: `relative_goes_above_root` and `canonicalize_longest_existing_ancestor`
+// were extracted to `syncode_core::util::path` (canonicalize_lexical /
+// canonicalize_hybrid / relative_goes_above_root / is_within_root). Call sites
+// in this module now use the core implementations directly.
 
 #[cfg(test)]
 mod lexical_tests {
-    use super::relative_goes_above_root;
-    use std::path::Path;
+    // Tests exercise the shared core implementation directly.
+    use syncode_core::util::path::relative_goes_above_root;
 
     #[test]
     fn empty_path_does_not_escape() {
-        assert!(!relative_goes_above_root(Path::new("")));
+        assert!(!relative_goes_above_root(""));
     }
     #[test]
     fn simple_relative_does_not_escape() {
-        assert!(!relative_goes_above_root(Path::new("a/b/c")));
+        assert!(!relative_goes_above_root("a/b/c"));
     }
     #[test]
     fn dotdot_at_start_escapes() {
-        assert!(relative_goes_above_root(Path::new("../b")));
+        assert!(relative_goes_above_root("../b"));
     }
     #[test]
     fn dotdot_chain_escapes() {
-        assert!(relative_goes_above_root(Path::new("../../etc/passwd")));
-        assert!(relative_goes_above_root(Path::new("a/../../../b")));
+        assert!(relative_goes_above_root("../../etc/passwd"));
+        assert!(relative_goes_above_root("a/../../../b"));
     }
     #[test]
     fn balanced_dotdot_stays_at_root() {
         // `a/..` → depth 0; ok.
-        assert!(!relative_goes_above_root(Path::new("a/../b")));
-        assert!(!relative_goes_above_root(Path::new("a/b/../../c")));
+        assert!(!relative_goes_above_root("a/../b"));
+        assert!(!relative_goes_above_root("a/b/../../c"));
     }
 }
 
@@ -268,92 +223,26 @@ pub async fn write_file(root: &Path, relative: &str, content: &[u8]) -> Result<(
 /// components are then re-appended lexically; since they don't exist they
 /// cannot themselves be symlinks yet.
 fn resolve_for_write(root: &Path, relative: &str) -> Result<PathBuf, ProjectFsError> {
-    let canonical_root = root
-        .canonicalize()
+    let canonical_root = core_path::canonicalize_existing(root)
         .map_err(|_| ProjectFsError::InvalidRoot)?;
     if relative.is_empty() {
-        // Writing to "" means writing to the root directory itself — not a
-        // file. Surface [`ProjectFsError::NotAFile`] here so the caller gets a
-        // precise error rather than an opaque IO failure from `tokio::fs::write`.
         return Err(ProjectFsError::NotAFile);
     }
     let rel_path = Path::new(relative);
     if rel_path.is_absolute() {
         return Err(ProjectFsError::PathTraversal);
     }
-    if relative_goes_above_root(rel_path) {
+    if core_path::relative_goes_above_root(relative) {
         return Err(ProjectFsError::PathTraversal);
     }
     let candidate = canonical_root.join(rel_path);
-    // Canonicalize the longest existing ancestor of `candidate`. This follows
-    // any symlinks among the *existing* components — a symlinked directory
-    // inside the root pointing outside is therefore resolved and rejected by
-    // the containment check below.
-    let canonical = canonicalize_longest_existing_ancestor(&candidate)?;
+    // Canonicalize the longest existing ancestor (delegated to syncode-core).
+    // This follows any symlinks among the *existing* components.
+    let canonical = core_path::canonicalize_hybrid(&candidate)?;
     if !canonical.starts_with(&canonical_root) {
         return Err(ProjectFsError::PathTraversal);
     }
     Ok(canonical)
-}
-
-/// Canonicalize the longest prefix of `path` that already exists on disk, then
-/// re-append the non-existent trailing components lexically. The root itself
-/// (`/`) is always assumed to exist. Returns [`ProjectFsError::NotFound`] only
-/// if even the root cannot be canonicalized (which in practice means an
-/// invalid filesystem state, not a missing leaf).
-///
-/// This is the symlink-safe core of the write path: because canonicalize
-/// follows symlinks, a symlinked directory anywhere along the existing prefix
-/// is dereferenced before the containment check sees it.
-fn canonicalize_longest_existing_ancestor(path: &Path) -> Result<PathBuf, ProjectFsError> {
-    // Fast path: the whole thing already exists — canonicalize it directly.
-    if let Ok(c) = path.canonicalize() {
-        return Ok(c);
-    }
-    // Walk up collecting non-existent trailing components until an ancestor
-    // canonicalizes. We must stop at the filesystem root; treat an empty
-    // parent (the root) as canonicalizing to itself.
-    let mut missing: Vec<std::ffi::OsString> = Vec::new();
-    let mut current = PathBuf::from(path);
-    loop {
-        // `current` doesn't exist (or the fast path above would have hit).
-        match current.parent() {
-            None => {
-                // Reached the filesystem root without a canonicalizable
-                // ancestor — shouldn't happen for a real path, but defend.
-                return Ok(path.to_path_buf());
-            }
-            Some(parent) if parent.as_os_str().is_empty() => {
-                // Relative root; shouldn't occur because callers pass absolute
-                // candidates. Return as-is defensively.
-                return Ok(path.to_path_buf());
-            }
-            Some(parent) => {
-                if let Ok(canonical_parent) = parent.canonicalize() {
-                    // Found the longest existing ancestor. `current` is itself
-                    // non-existent at this point (we only descend into the loop
-                    // body when the fast path / prior climbs failed), so its own
-                    // file name is the first missing trailing component — record
-                    // it before re-appending the rest in reverse order.
-                    if let Some(name) = current.file_name() {
-                        missing.push(name.to_os_string());
-                    }
-                    let mut result = canonical_parent;
-                    // `missing` was pushed deepest-first; reverse to re-append
-                    // shallowest-first (current's name) then deeper components.
-                    for name in missing.into_iter().rev() {
-                        result.push(name);
-                    }
-                    return Ok(result);
-                }
-                // Parent also doesn't exist; record current's name and climb.
-                if let Some(name) = current.file_name() {
-                    missing.push(name.to_os_string());
-                }
-                current = PathBuf::from(parent);
-            }
-        }
-    }
 }
 
 /// Recursively search `root` for files whose name contains `query`
@@ -740,8 +629,12 @@ mod tests {
         let root = temp_root();
         let root_path = root.path();
         let resolved = resolve_within_root(root_path, "").expect("empty ok");
-        // Should equal the canonicalized root.
-        let canonical = root_path.canonicalize().unwrap();
+        // Should equal the canonicalized root. Use the same canonicalize path
+        // as resolve_within_root (dunce on Windows, std on Unix) so the
+        // comparison is consistent across platforms — std::fs::canonicalize
+        // returns \\?\-prefixed paths on Windows which would never compare
+        // equal to the dunce-stripped result.
+        let canonical = syncode_core::util::path::canonicalize_existing(root_path).unwrap();
         assert_eq!(resolved, canonical);
     }
 }

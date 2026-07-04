@@ -9,6 +9,7 @@
 pub mod application;
 pub mod domain;
 pub mod ports;
+pub mod util;
 
 // Re-export domain primitives (EntityId, Timestamp, TrimmedString, etc.)
 // Note: DomainEvent trait is NOT re-exported here to avoid name collision
