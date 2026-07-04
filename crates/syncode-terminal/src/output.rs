@@ -51,8 +51,26 @@ impl OutputBuffer {
         let mut flushed = Vec::new();
 
         while self.pending.len() >= self.max_chunk_size {
-            let chunk_data = self.pending[..self.max_chunk_size].to_string();
-            self.pending = self.pending[self.max_chunk_size..].to_string();
+            // Back up to the nearest char boundary at or before the target so
+            // we never slice inside a multi-byte UTF-8 sequence. `max_chunk_size`
+            // is a byte budget, not a hard contract, so emitting a slightly
+            // smaller chunk is safe (and keeps restore/replay UTF-8-safe — the
+            // scrollback persistence path routes large restores through here).
+            let mut end = self.max_chunk_size;
+            while end > 0 && !self.pending.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == 0 {
+                // The very first byte is a continuation byte — shouldn't happen
+                // for valid UTF-8 input, but guard against an infinite loop by
+                // flushing at the next boundary >= 1.
+                end = 1;
+                while end < self.pending.len() && !self.pending.is_char_boundary(end) {
+                    end += 1;
+                }
+            }
+            let chunk_data = self.pending[..end].to_string();
+            self.pending = self.pending[end..].to_string();
             flushed.push(self.flush_chunk(chunk_data));
         }
 
@@ -126,6 +144,44 @@ impl OutputBuffer {
         self.next_seq = 0;
         self.ack_seq = None;
     }
+
+    /// Concatenate the buffered output into a single scrollback string.
+    ///
+    /// Walks the ring in insertion order (oldest → newest) and joins every
+    /// chunk's `data`, then appends any pending (un-flushed) bytes. The
+    /// result is a faithful replay of the terminal's output stream and is
+    /// what [`crate::persistence::ScrollbackStore::save`] writes to disk.
+    pub fn scrollback(&self) -> String {
+        let mut out = String::with_capacity(self.buffered_bytes());
+        for chunk in &self.chunks {
+            out.push_str(&chunk.data);
+        }
+        out.push_str(&self.pending);
+        out
+    }
+
+    /// Restore previously-persisted scrollback into this buffer.
+    ///
+    /// Used on session open to replay a saved tail: the restored text is
+    /// written through the normal [`OutputBuffer::write`] path so it occupies
+    /// the ring and is served to clients via the same ack/delivery protocol
+    /// as live output. The sequence counter continues from its current value
+    /// (call this before any live output so restored bytes get the lowest
+    /// seq numbers). Any pre-existing pending data is flushed first so the
+    /// restored text is not interleaved with partial in-flight output.
+    pub fn restore(&mut self, scrollback: &str) {
+        if scrollback.is_empty() {
+            return;
+        }
+        // Flush anything in-flight so order is preserved (oldest first).
+        self.flush();
+        // write() only auto-flushes once it crosses max_chunk_size; for a
+        // large restore we want every chunk materialized in the ring (not
+        // left dangling in `pending`), so we pass the whole string and then
+        // flush the remainder.
+        let _ = self.write(scrollback);
+        self.flush();
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +208,29 @@ mod tests {
         assert_eq!(chunks[1].data, "fghij");
         assert_eq!(chunks[0].seq, 0);
         assert_eq!(chunks[1].seq, 1);
+    }
+
+    #[test]
+    fn output_buffer_auto_flush_respects_multibyte_boundary() {
+        // 'é' is 2 bytes (0xC3 0xA9). A chunk size of 5 would naively slice
+        // 0xC3 0xA9 0x71 0xC3 0xA9 → but byte 5 lands mid-char. The buffer
+        // must back up to byte 4 ("éq") so it never splits a multi-byte char.
+        let mut buf = OutputBuffer::new(100, 5);
+        // "éqéqéq" = 6 bytes: [é,q,é,q,é,q] = [0,2,3,5,6,8] in bytes... use
+        // enough that the cut lands inside a char.
+        let input = "ééééé"; // 10 bytes
+        let chunks = buf.write(input);
+        // Every emitted chunk must be valid UTF-8 and end on a char boundary.
+        for c in &chunks {
+            assert!(std::str::from_utf8(c.data.as_bytes()).is_ok());
+        }
+        // Reassembling the chunks (+ any pending) must equal the input.
+        let mut reassembled = String::new();
+        for c in &chunks {
+            reassembled.push_str(&c.data);
+        }
+        reassembled.push_str(&buf.pending);
+        assert_eq!(reassembled, input);
     }
 
     #[test]
