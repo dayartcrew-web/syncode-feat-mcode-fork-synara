@@ -1809,21 +1809,10 @@ async fn handle_orchestration_get_turn_diff(
         }
     };
     // Render a unified-diff-style patch string from the `DiffSummary` entries.
-    let diff_text = summary
-        .entries
-        .iter()
-        .map(|e| {
-            let path = e.old_path.as_deref().unwrap_or(&e.new_path);
-            let body = e.patch.as_deref().unwrap_or("");
-            format!(
-                "diff --git a/{path} b/{new}\nindex ..\nstatus: {status:?}\n+{add}/-{del}\n{body}",
-                new = e.new_path,
-                status = e.status,
-                add = e.additions,
-                del = e.deletions,
-            )
-        })
-        .collect::<String>();
+    // Uses the shared `render_diff_summary` helper (also used by ORCH-7's
+    // `handle_orchestration_get_full_thread_diff`) so both RPCs emit
+    // byte-identical per-turn patches.
+    let diff_text = render_diff_summary(&summary);
     let mut result = serde_json::json!({ "diff": diff_text });
     // Surface the stats summary as a `note` when the patch is empty so the UI
     // can distinguish "no changes" from "checkpoint exists but git returned
@@ -1837,10 +1826,30 @@ async fn handle_orchestration_get_turn_diff(
     JsonRpcResponse::success(id, result)
 }
 
-/// `orchestration.getFullThreadDiff` — cumulative diff across all of a
-/// thread's turns (first turn's checkpoint → latest turn's checkpoint, or HEAD
-/// when the latest turn has no checkpoint). Returns an empty patch when the
-/// thread has no checkpoints or git is unavailable.
+/// `orchestration.getFullThreadDiff` — aggregate the per-turn diffs across an
+/// entire thread by reusing ORCH-6's diff primitive.
+///
+/// For every turn in the thread (ordered by `sequence`), the handler loads the
+/// matching `CheckpointView` from the read model's `checkpoints` map and invokes
+/// `syncode_git::diff::compute_diff` with the same `(from_ref, to_ref)`
+/// resolution as `handle_orchestration_get_turn_diff`:
+///   - `from_ref` = the turn's own `checkpoint_ref` (before-state).
+///   - `to_ref`   = the *next* turn's `checkpoint_ref` (after-state), or `None`
+///     (= HEAD / working tree) when this is the latest turn.
+///
+/// Return shape:
+/// ```jsonc
+/// {
+///   "threadId": "...",
+///   "turns": [{ "turnId": "...", "sequence": 1, "diff": "..." }, ...],
+///   "totalDiff": "..." // concatenation of every per-turn patch
+/// }
+/// ```
+///
+/// Graceful fallbacks (never an error):
+///   - No turns / no checkpoints → `{ turns: [], totalDiff: "" }`.
+///   - Git unavailable at `cwd` → each turn's `diff` is `""` with a `note`
+///     explaining the failure; `totalDiff` is still the concatenation.
 async fn handle_orchestration_get_full_thread_diff(
     state: &WsState,
     id: Value,
@@ -1855,74 +1864,138 @@ async fn handle_orchestration_get_full_thread_diff(
         .and_then(|v| v.as_str())
         .unwrap_or(".");
 
-    // Read the thread's ordered turns under a short-lived lock, then compute
-    // the cumulative diff range. The earliest checkpoint is the `from_ref`;
-    // `to_ref` is HEAD (None) so the diff reflects the working state since the
-    // first checkpoint.
-    let (turn_count, from_ref) = {
+    // Collect the thread's ordered checkpoints under a short-lived read lock.
+    // The map is keyed `thread_id:turn_id`; one `CheckpointView` per turn. Sort
+    // by `checkpoint_turn_count` (monotonic per thread) so the "next checkpoint"
+    // lookup (used to pick `to_ref`) is well-defined. Clone to owned so the lock
+    // is released before any (potentially slow) git operations.
+    let cps: Vec<syncode_orchestration::CheckpointView> = {
         let store = state.read_store.read().await;
-        let mut turns: Vec<&syncode_orchestration::TurnView> = store
-            .turns
+        let mut cps: Vec<syncode_orchestration::CheckpointView> = store
+            .checkpoints
             .values()
-            .filter(|t| t.thread_id == thread_id)
+            .filter(|c| c.thread_id == thread_id)
+            .cloned()
             .collect();
-        turns.sort_by_key(|t| t.sequence);
-        let count = turns.len() as u32;
-        // Use the earliest checkpoint as `from_ref` so the diff spans the full
-        // thread. (If no checkpoint exists, returns None → empty patch.)
-        let from = turns.iter().find_map(|t| t.git_checkpoint.clone());
-        (count, from)
+        cps.sort_by_key(|c| c.checkpoint_turn_count);
+        cps
     };
 
-    let from_ref = match from_ref {
-        Some(r) => r,
-        None => {
+    // Graceful fallback: no checkpoints for the thread → empty result.
+    if cps.is_empty() {
+        return JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "threadId": thread_id,
+                "turns": [],
+                "totalDiff": "",
+                "note": "no checkpoints for thread",
+            }),
+        );
+    }
+
+    // Open the git service once for every per-turn diff. A failure here is a
+    // graceful fallback (no repo at `cwd` / git unavailable), NOT an error —
+    // every per-turn `diff` is reported as empty with a `note`.
+    let svc = match syncode_git::service::Git2Service::open(Path::new(cwd)) {
+        Ok(s) => s,
+        Err(e) => {
+            let note = format!("git unavailable: {e}");
+            let turns: Vec<Value> = cps
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "turnId": c.turn_id,
+                        "sequence": c.checkpoint_turn_count,
+                        "diff": "",
+                        "note": note,
+                    })
+                })
+                .collect();
             return JsonRpcResponse::success(
                 id,
                 serde_json::json!({
-                    "patch": "",
-                    "turns": turn_count,
-                    "note": "no checkpoints for thread",
+                    "threadId": thread_id,
+                    "turns": turns,
+                    "totalDiff": "",
+                    "note": note,
                 }),
             );
         }
     };
 
-    let svc = match syncode_git::service::Git2Service::open(Path::new(cwd)) {
-        Ok(s) => s,
-        Err(e) => {
-            return git_error(
-                id,
-                crate::error_codes::INTERNAL_ERROR,
-                format!("git open failed: {e}"),
-            );
+    // Aggregate per-turn diffs. Each turn reuses ORCH-6's exact primitive:
+    // `from_ref` = this checkpoint, `to_ref` = next checkpoint (or None → HEAD).
+    let mut turn_diffs: Vec<Value> = Vec::with_capacity(cps.len());
+    let mut total_diff = String::new();
+    for (idx, cp) in cps.iter().enumerate() {
+        let from_ref = cp.checkpoint_ref.clone();
+        // The "next" turn's checkpoint (if any) is the after-state; else HEAD.
+        let to_ref = cps.get(idx + 1).map(|n| n.checkpoint_ref.clone());
+        let (diff_text, note) = match syncode_git::diff::compute_diff(
+            &svc,
+            Some(&from_ref),
+            to_ref.as_deref(),
+        ) {
+            Ok(summary) => {
+                // Render the `DiffSummary` entries with the SAME format used by
+                // ORCH-6's `handle_orchestration_get_turn_diff` so the two RPCs
+                // produce byte-identical per-turn patches.
+                let patch = render_diff_summary(&summary);
+                let note = if patch.is_empty() {
+                    Some("no changes".to_string())
+                } else {
+                    None
+                };
+                (patch, note)
+            }
+            Err(e) => (
+                String::new(),
+                Some(format!("git diff failed: {e}")),
+            ),
+        };
+        total_diff.push_str(&diff_text);
+        let mut entry = serde_json::json!({
+            "turnId": cp.turn_id,
+            "sequence": cp.checkpoint_turn_count,
+            "diff": diff_text,
+        });
+        if let Some(n) = note {
+            entry["note"] = serde_json::Value::String(n);
         }
-    };
-    // `to_ref = None` → HEAD: from the earliest checkpoint to current working state.
-    let entries = match svc.diff(Some(&from_ref), None) {
-        Ok(e) => e,
-        Err(e) => return git_error(id, crate::error_codes::INTERNAL_ERROR, format!("git diff: {e}")),
-    };
-    let patch = entries
-        .iter()
-        .map(|e| {
-            let path = e.old_path.as_deref().unwrap_or(&e.new_path);
-            format!(
-                "diff --git a/{path} b/{new}\nstatus: {status:?}\n",
-                new = e.new_path,
-                status = e.status,
-            )
-        })
-        .collect::<String>();
+        turn_diffs.push(entry);
+    }
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "patch": patch,
-            "turns": turn_count,
-            "fromRef": from_ref,
-            "toRef": Value::Null,
+            "threadId": thread_id,
+            "turns": turn_diffs,
+            "totalDiff": total_diff,
         }),
     )
+}
+
+/// Render a `syncode_git::diff::DiffSummary` as a unified-diff-style patch
+/// string. Shared by `handle_orchestration_get_turn_diff` (ORCH-6) and the
+/// per-turn aggregation in `handle_orchestration_get_full_thread_diff` (ORCH-7)
+/// so both RPCs emit byte-identical per-turn patches.
+fn render_diff_summary(summary: &syncode_git::diff::DiffSummary) -> String {
+    summary
+        .entries
+        .iter()
+        .map(|e| {
+            let path = e.old_path.as_deref().unwrap_or(&e.new_path);
+            let body = e.patch.as_deref().unwrap_or("");
+            format!(
+                "diff --git a/{path} b/{new}\nindex ..\nstatus: {status:?}\n+{add}/-{del}\n{body}",
+                new = e.new_path,
+                status = e.status,
+                add = e.additions,
+                del = e.deletions,
+            )
+        })
+        .collect::<String>()
 }
 
 /// `orchestration.replayEvents` — re-project the read model from the event
@@ -19964,6 +20037,9 @@ mod tests {
 
     #[tokio::test]
     async fn orchestration_get_full_thread_diff_returns_empty_for_no_checkpoints() {
+        // A thread with no checkpoints must return the graceful empty shape —
+        // `{ turns: [], totalDiff: "" }` — and never an error. Verifies the
+        // "no turns / no checkpoints" graceful fallback branch.
         let state = WsState::new_in_memory(16);
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "orchestration.getFullThreadDiff",
@@ -19972,7 +20048,184 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "getFullThreadDiff failed: {:?}", resp.error);
         let result = resp.result.unwrap();
-        assert_eq!(result["patch"], "");
+        assert_eq!(result["threadId"], "no-such-thread");
+        assert_eq!(result["turns"].as_array().unwrap().len(), 0, "turns must be empty");
+        assert_eq!(result["totalDiff"], "", "totalDiff must be empty");
+        assert_eq!(
+            result["note"], "no checkpoints for thread",
+            "fallback note must explain the empty result"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_full_thread_diff_falls_back_when_cwd_has_no_repo() {
+        // A thread WITH checkpoints, but `cwd` pointing at a directory with no
+        // git repo, must still return the aggregate `{ threadId, turns, totalDiff }`
+        // shape (git unavailable is a graceful fallback, not an error). Each
+        // per-turn entry's `diff` is "" with a `note` mentioning git unavailable.
+        let state = WsState::new_in_memory(16);
+        {
+            let mut store = state.read_store.write().await;
+            for (turn_id, n) in [("tu1", 1u32), ("tu2", 2u32)] {
+                store.checkpoints.insert(
+                    format!("th1:{turn_id}"),
+                    syncode_orchestration::CheckpointView {
+                        thread_id: "th1".into(),
+                        turn_id: turn_id.into(),
+                        checkpoint_turn_count: n,
+                        checkpoint_ref: format!("refs/syncode/checkpoints/{turn_id}"),
+                        status: "ready".into(),
+                        files: vec![],
+                        assistant_message_id: None,
+                        completed_at: "2026-01-01T00:00:00Z".into(),
+                    },
+                );
+            }
+        }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.getFullThreadDiff",
+            "params": { "threadId": "th1", "cwd": "/nonexistent-orch-7" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "getFullThreadDiff failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["threadId"], "th1");
+        let turns = result["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 2, "must aggregate both turns");
+        // Each turn's diff is "" with a "git unavailable" note.
+        for t in turns {
+            assert_eq!(t["diff"], "", "per-turn diff must be empty when git unavailable");
+            assert!(
+                t["note"].as_str().unwrap_or("").contains("git unavailable"),
+                "per-turn note must mention git unavailable, got: {:?}",
+                t["note"]
+            );
+        }
+        assert_eq!(result["totalDiff"], "", "totalDiff must be empty");
+        assert!(
+            result["note"].as_str().unwrap_or("").contains("git unavailable"),
+            "top-level note must mention git unavailable, got: {:?}",
+            result["note"]
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_full_thread_diff_aggregates_per_turn_in_sequence() {
+        // Three checkpoints for one thread must produce THREE per-turn entries,
+        // ordered by `checkpoint_turn_count`, with each entry carrying its
+        // `turnId` + `sequence`. Since `cwd` (empty temp dir) is not a real git
+        // repo, the diffs come back empty — but the structure proves the handler
+        // loaded every checkpoint, resolved the per-turn `(from_ref, to_ref)`
+        // pairs, and aggregated. The slash form
+        // (`orchestration/get-full-thread-diff`) is also exercised.
+        let state = WsState::new_in_memory(16);
+        {
+            let mut store = state.read_store.write().await;
+            // Insert in non-sorted order to prove the handler sorts by sequence.
+            for (turn_id, n) in [("tu3", 3u32), ("tu1", 1u32), ("tu2", 2u32)] {
+                store.checkpoints.insert(
+                    format!("th1:{turn_id}"),
+                    syncode_orchestration::CheckpointView {
+                        thread_id: "th1".into(),
+                        turn_id: turn_id.into(),
+                        checkpoint_turn_count: n,
+                        checkpoint_ref: format!("refs/syncode/checkpoints/{turn_id}"),
+                        status: "ready".into(),
+                        files: vec![],
+                        assistant_message_id: None,
+                        completed_at: "2026-01-01T00:00:00Z".into(),
+                    },
+                );
+            }
+        }
+        // Slash form — both dispatch names must be served identically.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration/get-full-thread-diff",
+            "params": { "threadId": "th1", "cwd": "/nonexistent-orch-7" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "slash-form getFullThreadDiff failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["threadId"], "th1");
+        let turns = result["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 3, "must aggregate all three turns");
+        // Verify the entries are sorted by `sequence` (1, 2, 3) — the handler
+        // sorts by `checkpoint_turn_count` before computing per-turn diffs.
+        let seqs: Vec<u64> = turns
+            .iter()
+            .map(|t| t["sequence"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3], "turns must be ordered by sequence");
+        // Verify the per-turn `turnId` matches the sorted sequence.
+        assert_eq!(turns[0]["turnId"], "tu1");
+        assert_eq!(turns[1]["turnId"], "tu2");
+        assert_eq!(turns[2]["turnId"], "tu3");
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_full_thread_diff_filters_by_thread_id() {
+        // Checkpoints from OTHER threads must NOT leak into the aggregate.
+        // Seeds two threads (th1 with 2 checkpoints, th2 with 1) and verifies
+        // that requesting th1 returns exactly 2 per-turn entries.
+        let state = WsState::new_in_memory(16);
+        {
+            let mut store = state.read_store.write().await;
+            for (turn_id, n) in [("tu1", 1u32), ("tu2", 2u32)] {
+                store.checkpoints.insert(
+                    format!("th1:{turn_id}"),
+                    syncode_orchestration::CheckpointView {
+                        thread_id: "th1".into(),
+                        turn_id: turn_id.into(),
+                        checkpoint_turn_count: n,
+                        checkpoint_ref: format!("refs/syncode/checkpoints/{turn_id}"),
+                        status: "ready".into(),
+                        files: vec![],
+                        assistant_message_id: None,
+                        completed_at: "2026-01-01T00:00:00Z".into(),
+                    },
+                );
+            }
+            store.checkpoints.insert(
+                "th2:other".into(),
+                syncode_orchestration::CheckpointView {
+                    thread_id: "th2".into(),
+                    turn_id: "other".into(),
+                    checkpoint_turn_count: 1,
+                    checkpoint_ref: "refs/syncode/checkpoints/other".into(),
+                    status: "ready".into(),
+                    files: vec![],
+                    assistant_message_id: None,
+                    completed_at: "2026-01-01T00:00:00Z".into(),
+                },
+            );
+        }
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.getFullThreadDiff",
+            "params": { "threadId": "th1", "cwd": "/nonexistent-orch-7" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "getFullThreadDiff failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        let turns = result["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 2, "must not leak th2's checkpoint");
+        for t in turns {
+            assert!(t["turnId"].as_str().unwrap().starts_with("tu"));
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestration_get_full_thread_diff_requires_thread_id_param() {
+        // Missing `threadId` must return an INVALID_PARAMS error — the only
+        // error path in the handler.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.getFullThreadDiff",
+            "params": { "cwd": "/tmp" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.result.is_none(), "must not return a result on missing param");
+        let err = resp.error.expect("missing threadId must error");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
     }
 
     #[tokio::test]
