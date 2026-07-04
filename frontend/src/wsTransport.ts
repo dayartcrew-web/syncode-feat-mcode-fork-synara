@@ -130,6 +130,10 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   // client-stubbed with MethodNotFound — the shell would never load real data.
   "orchestration.getShellSnapshot": "shell/getSnapshot",
   "orchestration.getSnapshot": "snapshot/get",
+  // ORCH-2: read-model rebuild. Maps the MCode dot-string to the served
+  // `orchestration/replayEvents` slash handler, which delegates to
+  // `Orchestrator::replay_read_model` and returns `{ replayed, seeded }`.
+  "orchestration.replayEvents": "orchestration/replayEvents",
 
   // T6c-29: orchestration generic RPCs. The cloned MCode UI drives the
   // orchestration engine through these dot-strings (dispatchCommand,

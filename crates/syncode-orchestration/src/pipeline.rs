@@ -687,10 +687,16 @@ impl Orchestrator {
     /// Correctness: a snapshot at version `V` is exactly the projection of the
     /// aggregate's first `V` events (it is captured right after projecting the
     /// `V`-th), so `seed + tail == full replay`.
-    pub async fn replay_read_model(&self) -> Result<u32, OrchestrationError> {
+    ///
+    /// Returns `(replayed, seeded)` where `replayed` is the total number of
+    /// events read from the repository and `seeded` is the number of aggregate
+    /// snapshots used to seed the projection (0 when no snapshots exist — a
+    /// plain full replay).
+    pub async fn replay_read_model(&self) -> Result<(u32, usize), OrchestrationError> {
         let snapshots = self.event_repo.load_all_snapshots().await?;
         let envelopes = self.event_repo.replay_all_events(None, 10_000).await?;
         let count = envelopes.len() as u32;
+        let seeded = snapshots.len();
 
         // Per-aggregate skip counters: a snapshot at `version` already reflects
         // the aggregate's first `version` events, so skip those and project only
@@ -728,10 +734,10 @@ impl Orchestrator {
 
         info!(
             count,
-            seeded = snapshots.len(),
+            seeded,
             "Read model replayed (snapshot-seeded + tail)"
         );
-        Ok(count)
+        Ok((count, seeded))
     }
 
     // ─── Private helpers ────────────────────────────────────────────
@@ -2118,7 +2124,7 @@ mod tests {
         assert_eq!(snap.projects.len(), 0);
 
         // Replay
-        let count = orch.replay_read_model().await.expect("replay");
+        let (count, _seeded) = orch.replay_read_model().await.expect("replay");
         assert!(count > 0);
 
         // Read model should be populated
