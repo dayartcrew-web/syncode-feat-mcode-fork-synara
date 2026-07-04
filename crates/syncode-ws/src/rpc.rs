@@ -233,6 +233,11 @@ async fn dispatch_method(
                     // PROJ-2: MCode UI file-search surface.
                     "project/search-entries",
                     "project/search-local-entries",
+                    // PROJ-3: script discovery + execution.
+                    "project.discover-scripts",
+                    "project.discoverScripts",
+                    "project.run-script",
+                    "project.runScript",
                 ]
             }),
         ),
@@ -293,6 +298,22 @@ async fn dispatch_method(
         | "project/searchLocalEntries"
         | "project.searchLocalEntries" => {
             handle_project_search_local_entries(state, id, &request.params).await
+        }
+
+        // ─── PROJ-3: project script discovery + execution ─────────────
+        //
+        // `project.discoverScripts` / `project.discover-scripts` returns the
+        // union of `package.json` scripts + Makefile targets (delegates to
+        // `project_fs::discover_scripts`). `project.runScript` /
+        // `project.run-script` shells out via `tokio::process::Command` and
+        // returns `{ stdout, stderr, exitCode }` (delegates to
+        // `project_fs::run_script`). Both apply the traversal guard to `cwd`
+        // via `project_fs`.
+        "project.discover-scripts" | "project.discoverScripts" => {
+            handle_project_discover_scripts(state, id, &request.params).await
+        }
+        "project.run-script" | "project.runScript" => {
+            handle_project_run_script(state, id, &request.params).await
         }
 
         // ─── Thread Methods ───────────────────────────────────────
@@ -3156,10 +3177,103 @@ async fn handle_project_search_local_entries(
     }
 }
 
+/// `project.discover-scripts` (PROJ-3). Returns `{ scripts: [{name, command,
+/// source}] }` — the union of `package.json` scripts + Makefile targets under
+/// `cwd / path`. Delegates to [`crate::project_fs::discover_scripts`].
+async fn handle_project_discover_scripts(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let relative = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::project_fs::discover_scripts(Path::new(cwd), relative).await {
+        Ok(scripts) => {
+            let arr: Vec<Value> = scripts
+                .into_iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "command": s.command,
+                        "source": s.source.as_str(),
+                    })
+                })
+                .collect();
+            JsonRpcResponse::success(id, serde_json::json!({ "scripts": arr }))
+        }
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
+/// `project.run-script` (PROJ-3). Runs a script/target identified by `name`
+/// (and optionally `source` + `command`) under `cwd / path`. Returns
+/// `{ stdout, stderr, exitCode }`. Delegates to
+/// [`crate::project_fs::run_script`].
+///
+/// Params:
+/// - `cwd` (required) — project root.
+/// - `path` (optional) — sub-directory under the root (traversal-guarded).
+/// - `name` (required) — script/target name (or raw command if `source`
+///   is absent).
+/// - `source` (optional) — `"package.json"` → `npm run <name>`;
+///   `"Makefile"` → `make <name>`; anything else / absent → run `command`
+///   (or `name` if `command` absent) verbatim through the shell.
+/// - `command` (optional) — raw command string for the "direct" path.
+async fn handle_project_run_script(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing or empty 'cwd' parameter",
+            );
+        }
+    };
+    let relative = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let name = match params.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(n) => n,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'name' parameter",
+            );
+        }
+    };
+    let source = params.get("source").and_then(|v| v.as_str());
+    let command = params.get("command").and_then(|v| v.as_str());
+    match crate::project_fs::run_script(Path::new(cwd), relative, name, source, command).await {
+        Ok(result) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exitCode": result.exit_code,
+            }),
+        ),
+        Err(e) => project_fs_error_response(id, e),
+    }
+}
+
 /// Default cap on `searchEntries` / `searchLocalEntries` result counts. Matches
 /// the UI's `DEFAULT_SEARCH_ENTRIES_LIMIT` (80) so the skeleton never returns a
 /// list large enough to stall the autocomplete dropdown.
 const DEFAULT_SEARCH_LIMIT: usize = 80;
+
 
 // ─── Thread Handlers ───────────────────────────────────────────────────
 
@@ -18912,6 +19026,48 @@ mod tests {
         serde_json::from_str(&response.unwrap()).unwrap()
     }
 
+    // ─── PROJ-3: project.discoverScripts / project.runScript ─────────────
+
+    /// Helper: dispatch a `project.discover-scripts` request over the WS layer.
+    async fn proj_discover_scripts(cwd: &str, path: Option<&str>) -> JsonRpcResponse {
+        let state = WsState::new_in_memory(16);
+        let mut params = serde_json::json!({ "cwd": cwd });
+        if let Some(p) = path {
+            params["path"] = serde_json::Value::String(p.to_string());
+        }
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "project.discover-scripts",
+            "params": params,
+        });
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
+        serde_json::from_str(&response.unwrap()).unwrap()
+    }
+
+    /// Helper: dispatch a `project.run-script` request over the WS layer.
+    async fn proj_run_script(
+        cwd: &str,
+        name: &str,
+        source: Option<&str>,
+        command: Option<&str>,
+    ) -> JsonRpcResponse {
+        let state = WsState::new_in_memory(16);
+        let mut params = serde_json::json!({ "cwd": cwd, "name": name });
+        if let Some(s) = source {
+            params["source"] = serde_json::Value::String(s.to_string());
+        }
+        if let Some(c) = command {
+            params["command"] = serde_json::Value::String(c.to_string());
+        }
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "project.run-script",
+            "params": params,
+        });
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
+        serde_json::from_str(&response.unwrap()).unwrap()
+    }
+
     #[tokio::test]
     async fn project_read_file_returns_mcode_shape() {
         // AC: readFile returns `{ relativePath, contents, truncated }`.
@@ -19063,6 +19219,91 @@ mod tests {
             serde_json::json!({ "cwd": cwd, "relativePath": "../secret.txt" }),
         )
         .await;
+        let err = resp.error.expect("traversal must error");
+        assert_eq!(err.code, -32001, "traversal → -32001; got {err:?}");
+    }
+
+    // ─── PROJ-3: project.discoverScripts / project.runScript tests ───────
+
+    #[tokio::test]
+    async fn project_discover_scripts_dispatches_and_returns_scripts() {
+        // AC: discoverScripts returns union of package.json scripts + Makefile
+        // targets via the RPC dispatch arm. Seed both files and verify the
+        // response shape.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+        tokio::fs::write(
+            dir.path().join("package.json"),
+            br#"{"scripts": {"build": "tsc", "test": "vitest run"}}"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            dir.path().join("Makefile"),
+            b"lint:\n\tcargo clippy\n",
+        )
+        .await
+        .unwrap();
+
+        let resp = proj_discover_scripts(&cwd, None).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let scripts = resp.result.unwrap()["scripts"]
+            .as_array()
+            .unwrap()
+            .clone();
+        // 2 package.json + 1 Makefile = 3.
+        assert_eq!(scripts.len(), 3, "got {scripts:?}");
+        // Each entry must carry name + command + source.
+        for s in &scripts {
+            assert!(s["name"].is_string(), "missing name: {s:?}");
+            assert!(s["command"].is_string(), "missing command: {s:?}");
+            assert!(s["source"].is_string(), "missing source: {s:?}");
+        }
+        // Spot-check: the Makefile "lint" target is present.
+        assert!(
+            scripts
+                .iter()
+                .any(|s| s["name"] == "lint" && s["source"] == "Makefile"),
+            "Makefile 'lint' missing: {scripts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_run_script_dispatches_and_returns_output() {
+        // AC: runScript shells out and returns stdout/stderr/exit-code via
+        // the RPC dispatch arm. Use the "direct" path (no source) with a
+        // cross-platform echo.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+
+        let resp = proj_run_script(&cwd, "echo proj3-works", None, Some("echo proj3-works")).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["exitCode"], 0, "stderr={}", result["stderr"]);
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("proj3-works"),
+            "stdout was: {}",
+            result["stdout"]
+        );
+    }
+
+    #[tokio::test]
+    async fn project_run_script_blocks_traversal_at_rpc_layer() {
+        // AC: traversal guard fires through the full RPC dispatch path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().to_string_lossy().to_string();
+
+        let state = WsState::new_in_memory(16);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "project.run-script",
+            "params": { "cwd": cwd, "path": "..", "name": "echo hi", "command": "echo hi" },
+        });
+        let response = handle_rpc(&state, 1, &request.to_string()).await;
+        let resp: JsonRpcResponse = serde_json::from_str(&response.unwrap()).unwrap();
         let err = resp.error.expect("traversal must error");
         assert_eq!(err.code, -32001, "traversal → -32001; got {err:?}");
     }

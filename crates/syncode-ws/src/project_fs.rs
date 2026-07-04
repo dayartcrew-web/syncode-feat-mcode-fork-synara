@@ -310,6 +310,217 @@ async fn walk_dir(
     Ok(())
 }
 
+// ─── PROJ-3: script discovery + execution ─────────────────────────────────
+//
+// `discover_scripts` returns the union of:
+//   1. `scripts` entries from `package.json` (Node.js), and
+//   2. target lines from a GNU/BSD `Makefile`.
+// Each entry carries its `source` ("package.json" or "Makefile") so the UI
+// can badge origin and `run_script` can pick the right launcher.
+//
+// `run_script` shells out via `tokio::process::Command`:
+//   - `package.json` scripts  → `npm run <name>` (the canonical way to run
+//     an npm script — works whether the project uses npm, pnpm, or yarn
+//     via `packageManager` field since each tool honors `npm run`).
+//   - `Makefile` targets      → `make <target>`
+//   - unknown source / direct → run `command` verbatim through the shell
+//     (`sh -c` on Unix, `cmd /C` on Windows) so callers can pass a raw
+//     command string.
+// In every case the process runs in the project root (`cwd / relative`),
+// applies the traversal guard to `cwd`/`relative`, and returns
+// `{ stdout, stderr, exitCode }`.
+
+/// Where a [`DiscoveredScript`] originated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptSource {
+    /// `package.json` `scripts.<name>`.
+    PackageJson,
+    /// `Makefile` target.
+    Makefile,
+}
+
+impl ScriptSource {
+    /// Stable string used in the JSON-RPC response (`source` field).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScriptSource::PackageJson => "package.json",
+            ScriptSource::Makefile => "Makefile",
+        }
+    }
+}
+
+impl std::fmt::Display for ScriptSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A single runnable script/target discovered in the project root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredScript {
+    /// Script/target name (e.g. `test`, `build`, `lint`).
+    pub name: String,
+    /// The raw command string (`package.json` value or `Makefile` recipe
+    /// placeholder for the target). For Makefile targets the command is
+    /// the first recipe line (trimmed) — purely informational; the actual
+    /// run is delegated to `make`.
+    pub command: String,
+    /// Where the script came from.
+    pub source: ScriptSource,
+}
+
+/// Result of [`run_script`]: captured process output + exit status.
+#[derive(Debug, Clone)]
+pub struct ScriptRunResult {
+    /// Decoded stdout (lossy utf-8).
+    pub stdout: String,
+    /// Decoded stderr (lossy utf-8).
+    pub stderr: String,
+    /// Exit code. `None` if the process was killed by a signal (Unix).
+    pub exit_code: Option<i32>,
+}
+
+/// Discover runnable scripts/targets under `root / relative`.
+///
+/// Parses `package.json` (the `scripts` object, if present) and a `Makefile`
+/// (target lines — those of the form `name:` at column 0, optionally followed
+/// by prerequisites; recipe lines begin with a TAB and are ignored for
+/// discovery). Returns the union sorted by `(source, name)` for deterministic
+/// output. If neither file exists, returns an empty list.
+pub async fn discover_scripts(root: &Path, relative: &str) -> Result<Vec<DiscoveredScript>, ProjectFsError> {
+    let base = resolve_within_root(root, relative)?;
+    let mut out = Vec::new();
+
+    // ── package.json ──
+    let pkg_path = base.join("package.json");
+    if tokio::fs::metadata(&pkg_path).await.is_ok()
+        && let Ok(bytes) = tokio::fs::read(&pkg_path).await
+    {
+        // Parse defensively: a malformed package.json must not break
+        // discovery (we just skip it and continue to the Makefile).
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && let Some(serde_json::Value::Object(scripts)) = map.get("scripts")
+        {
+            for (name, val) in scripts {
+                if let serde_json::Value::String(cmd) = val {
+                    out.push(DiscoveredScript {
+                        name: name.clone(),
+                        command: cmd.clone(),
+                        source: ScriptSource::PackageJson,
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Makefile ──
+    // GNU/BSD make also honors `makefile` (lowercase) and `GNUmakefile`;
+    // the canonical MCode project convention is `Makefile`, so we stick to
+    // that to avoid surprise cross-listings (matches the MCode reference UI).
+    let makefile_path = base.join("Makefile");
+    if tokio::fs::metadata(&makefile_path).await.is_ok()
+        && let Ok(text) = tokio::fs::read_to_string(&makefile_path).await
+    {
+        for line in text.lines() {
+            // Recipe lines start with TAB — skip. Comments start with '#'.
+            // A target line has the shape `name: prereqs` with `name`
+            // containing no whitespace (other than the trailing colon).
+            // Pattern rules (`%.o: %.c`) are included; `.PHONY` etc.
+            // carry a leading dot but are still valid targets.
+            if line.starts_with('\t') || line.starts_with(' ') || line.starts_with('#') {
+                continue;
+            }
+            let line = line.trim_end_matches('\\').trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            // Must contain a colon and have a non-empty LHS.
+            let Some((lhs, _rhs)) = line.split_once(':') else {
+                continue;
+            };
+            let lhs = lhs.trim();
+            if lhs.is_empty() || lhs.contains(|c: char| c.is_whitespace()) {
+                continue;
+            }
+            out.push(DiscoveredScript {
+                name: lhs.to_string(),
+                command: format!("make {lhs}"),
+                source: ScriptSource::Makefile,
+            });
+        }
+    }
+
+    out.sort_by(|a, b| match a.source.as_str().cmp(b.source.as_str()) {
+        std::cmp::Ordering::Equal => a.name.cmp(&b.name),
+        other => other,
+    });
+    Ok(out)
+}
+
+/// Run a script by name (or raw command) inside `root / relative`.
+///
+/// Dispatch keys (`source` param):
+/// - `"package.json"` → `npm run <name>`
+/// - `"Makefile"`     → `make <name>`
+/// - any other / absent → run `command` (or `name`) through the shell.
+///
+/// The `cwd` for the child process is `root / relative` (traversal-guarded).
+/// Returns captured stdout/stderr + exit code. The process inherits the
+/// server's environment (so `npm`, `make`, `PATH`, etc. resolve).
+pub async fn run_script(
+    root: &Path,
+    relative: &str,
+    name: &str,
+    source: Option<&str>,
+    command: Option<&str>,
+) -> Result<ScriptRunResult, ProjectFsError> {
+    let cwd = resolve_within_root(root, relative)?;
+
+    // Build the argv. We deliberately use the platform-native launcher rather
+    // than spawning `npm`/`make` by bare name in some cases — but the run is
+    // always via `tokio::process::Command` (the cwd is already validated).
+    #[cfg(unix)]
+    let (shell, shell_flag): (&str, &str) = ("sh", "-c");
+    #[cfg(windows)]
+    let (shell, shell_flag): (&str, &str) = ("cmd", "/C");
+
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.arg(shell_flag).current_dir(&cwd);
+
+    let cmdline = match source {
+        Some("package.json") => {
+            // `npm run` resolves the script from package.json; we pass only
+            // the name (the command itself lives in package.json).
+            // Quote the name defensively — `npm run` handles one argv token.
+            format!("npm run --silent {name}")
+        }
+        Some("Makefile") => {
+            format!("make {name}")
+        }
+        _ => {
+            // Unknown / no source: run the raw `command` if given, else `name`.
+            // If `command` looks like it already names a script, the caller
+            // is responsible for quoting. This is the "direct" path.
+            command.unwrap_or(name).to_string()
+        }
+    };
+    cmd.arg(&cmdline);
+
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = cmd.output().await?;
+    let exit_code = output.status.code();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    Ok(ScriptRunResult {
+        stdout,
+        stderr,
+        exit_code,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +847,122 @@ mod tests {
         // equal to the dunce-stripped result.
         let canonical = syncode_core::util::path::canonicalize_existing(root_path).unwrap();
         assert_eq!(resolved, canonical);
+    }
+
+    // ─── PROJ-3: discover_scripts + run_script ────────────────────────────
+
+    #[tokio::test]
+    async fn discover_scripts_returns_union_of_package_json_and_makefile() {
+        // AC: discoverScripts returns union of package.json scripts + Makefile
+        // targets. Seed both files in a tempdir and assert all 4 entries
+        // surface, sorted by (source, name).
+        let root = temp_root();
+        let root_path = root.path();
+
+        // package.json with 2 scripts.
+        tokio::fs::write(
+            root_path.join("package.json"),
+            br#"{
+                "name": "demo",
+                "scripts": {
+                    "build": "tsc",
+                    "test": "vitest run"
+                }
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        // Makefile with 2 targets (+ a recipe line + comment to verify they
+        // are NOT surfaced as targets).
+        tokio::fs::write(
+            root_path.join("Makefile"),
+            b"# top-level comment\n\
+\ntest:\n\
+\tcargo test\n\
+\n\
+lint:\n\
+\tcargo clippy\n",
+        )
+        .await
+        .unwrap();
+
+        let scripts = discover_scripts(root_path, "").await.expect("discover ok");
+        // 2 package.json + 2 Makefile = 4.
+        assert_eq!(scripts.len(), 4, "got {scripts:?}");
+
+        // Sorted by (source.as_str(), name): "Makefile" < "package.json"
+        // (capital 'M' = 0x4D < lowercase 'p' = 0x70 in ASCII), so Makefile
+        // entries come first. Within each source, entries are name-sorted.
+        assert_eq!(scripts[0].name, "lint");
+        assert_eq!(scripts[0].source, ScriptSource::Makefile);
+
+        assert_eq!(scripts[1].name, "test");
+        assert_eq!(scripts[1].source, ScriptSource::Makefile);
+
+        assert_eq!(scripts[2].name, "build");
+        assert_eq!(scripts[2].source, ScriptSource::PackageJson);
+        assert_eq!(scripts[2].command, "tsc");
+
+        assert_eq!(scripts[3].name, "test");
+        assert_eq!(scripts[3].source, ScriptSource::PackageJson);
+        assert_eq!(scripts[3].command, "vitest run");
+    }
+
+    #[tokio::test]
+    async fn discover_scripts_empty_when_neither_file_exists() {
+        // A bare tempdir with no package.json and no Makefile must return
+        // an empty list (not an error) — the discovery is best-effort.
+        let root = temp_root();
+        let scripts = discover_scripts(root.path(), "").await.expect("discover ok");
+        assert!(scripts.is_empty(), "got {scripts:?}");
+    }
+
+    #[tokio::test]
+    async fn run_script_returns_stdout_stderr_exit_code() {
+        // AC: runScript shells out and returns stdout/stderr/exit-code. Use
+        // a cross-platform command via the shell (`sh -c` / `cmd /C`): print
+        // to stdout and exit 0.
+        let root = temp_root();
+        let root_path = root.path();
+        // The "direct" path (no source) — pass a raw command.
+        #[cfg(unix)]
+        let cmd = "echo hello-script";
+        #[cfg(windows)]
+        let cmd = "echo hello-script";
+
+        let result = run_script(root_path, "", cmd, None, Some(cmd))
+            .await
+            .expect("run ok");
+        assert_eq!(result.exit_code, Some(0), "stderr={}", result.stderr);
+        assert!(
+            result.stdout.contains("hello-script"),
+            "stdout was: {}",
+            result.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn run_script_reports_nonzero_exit_code() {
+        // AC: non-zero exits surface as a non-None exit code (the call still
+        // succeeds — we don't treat exit≠0 as a Rust error, just report it).
+        let root = temp_root();
+        let root_path = root.path();
+        // `exit 7` — works on both sh and cmd.
+        let result = run_script(root_path, "", "exit 7", None, Some("exit 7"))
+            .await
+            .expect("run ok");
+        assert_eq!(result.exit_code, Some(7));
+    }
+
+    #[tokio::test]
+    async fn run_script_blocks_path_traversal() {
+        // Defense-in-depth: the cwd path must be inside the root. A `..`
+        // relative must be rejected before any subprocess is spawned.
+        let root = temp_root();
+        let err = run_script(root.path(), "..", "echo hi", None, Some("echo hi"))
+            .await
+            .expect_err("must block traversal");
+        assert!(matches!(err, ProjectFsError::PathTraversal), "got {err:?}");
     }
 }

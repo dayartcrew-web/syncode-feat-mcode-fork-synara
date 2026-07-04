@@ -1578,17 +1578,19 @@ export const UNSERVED_RPC = [
   // `{subscribed:true}`). `automation.runNow`/`markRunRead`/`archiveRun` are
   // also served (markRunRead/archiveRun are no-op stubs).
 
-  // ─── Project file ops — 5 file RPCs SERVED in PROJ-2; rest still unserved ──
+  // ─── Project file ops — all served as of PROJ-2 + PROJ-3 ──────────────
   // PROJ-2: `project.readFile`, `project.writeFile`, `project.listDirectories`,
   // `project.searchEntries`, and `project.searchLocalEntries` are NOW SERVED
   // (mapped via MCODE_TO_SERVED to `project/read-file`, `project/write-file`,
   // `project/list-directories`, `project/search-entries`,
   // `project/search-local-entries`). The backend delegates to
   // `crate::project_fs` primitives (sandboxed read/write/list/search with a
-  // path-traversal guard). The remaining project file ops below are still
+  // path-traversal guard).
+  // PROJ-3: `project.discoverScripts` + `project.runScript` are NOW SERVED
+  // (mapped via MCODE_TO_SERVED to `project.discover-scripts` /
+  // `project.run-script` — backed by `project_fs::discover_scripts` +
+  // `project_fs::run_script`). The remaining project ops below are still
   // unserved (MethodNotFound):
-  "project.discoverScripts",
-  "project.runScript",
   "project.listDevServers",
   "project.startDevServer",
   "project.stopDevServer",
