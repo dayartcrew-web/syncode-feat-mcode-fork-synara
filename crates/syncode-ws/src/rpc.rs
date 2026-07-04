@@ -92,6 +92,9 @@ async fn dispatch_method(
                     "auth/bootstrap",
                     "auth/status",
                     "auth/logout",
+                    "auth/createPairingCredential",
+                    "auth/revokePairingLink",
+                    "auth/listPairingLinks",
                     "project/list",
                     "project/get",
                     "project/create",
@@ -986,6 +989,32 @@ async fn dispatch_method(
         "auth/status" => handle_auth_status(state, conn_id, id).await,
         "auth/logout" => handle_auth_logout(state, conn_id, id).await,
 
+        // ─── Pairing-link management (AUTH-1) ─────────────────────────────
+        //
+        // Three privileged RPCs (all gated by Write permission — see
+        // `required_permission`) that let an authenticated Owner mint,
+        // revoke, and list short-TTL pairing credentials. A joining client
+        // then presents the credential to `auth/bootstrap` to obtain a
+        // session. The store is `state.pairing_links` (in-memory by default;
+        // operators wire a SQLite-backed store via `WsState::with_pairing_links`
+        // for cross-restart persistence).
+        //
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form for
+        // robustness (matches the convention used by the git.*/server.* RPCs).
+        "auth.createPairingCredential"
+        | "auth/create-pairing-credential"
+        | "auth/createPairingCredential" => {
+            handle_auth_create_pairing_credential(state, id, &request.params).await
+        }
+        "auth.revokePairingLink"
+        | "auth/revoke-pairing-link"
+        | "auth/revokePairingLink" => {
+            handle_auth_revoke_pairing_link(state, id, &request.params).await
+        }
+        "auth.listPairingLinks"
+        | "auth/list-pairing-links"
+        | "auth/listPairingLinks" => handle_auth_list_pairing_links(state, id).await,
+
         // ─── Unknown ────────────────────────────────────────────
         method => {
             tracing::warn!(method, "Unknown RPC method");
@@ -1650,6 +1679,154 @@ async fn handle_auth_logout(state: &WsState, conn_id: ConnectionId, id: Value) -
         id,
         serde_json::json!({ "loggedOut": true, "hadSession": cleared }),
     )
+}
+
+// ─── Pairing-link Handlers (AUTH-1) ──────────────────────────────────
+//
+// Three privileged RPCs (all require Write — see `required_permission`) that
+// manage short-TTL pairing credentials. `create` mints a new credential +
+// returns it (the only time the credential string is surfaced); `revoke`
+// invalidates one by id; `list` enumerates the live ones. The joining client
+// later presents the credential to `auth/bootstrap`.
+//
+// The handlers are thin: the pairing-link store (`state.pairing_links`) owns
+// the persistence semantics (in-memory by default; SQLite when wired via
+// `WsState::with_pairing_links`). Role + TTL come from the request; sensible
+// defaults apply when omitted (`role=owner`, `ttl=15min`).
+
+/// `auth.createPairingCredential` — mint a short-TTL pairing credential.
+///
+/// Params (all optional):
+/// - `role` (`"owner" | "client"`, default `"owner"`) — the role a successful
+///   bootstrap with this credential grants.
+/// - `ttlMinutes` (number, default `15`) — time-to-live in minutes. Capped to
+///   a 24-hour maximum so a forgotten link can't outlive a day.
+///
+/// Returns the new link's `id`, `credential`, `expiresAt`, and `role`. The
+/// `credential` is the secret the joining client must present to
+/// `auth/bootstrap`; it is NOT retrievable after this call (the store matches
+/// it opaquely during bootstrap).
+async fn handle_auth_create_pairing_credential(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    use syncode_auth::pairing::DEFAULT_PAIRING_TTL;
+    use syncode_auth::principal::Role;
+
+    // role: default to Owner (pairing is typically used to onboard a new
+    // owner device). Reject unknown values explicitly so a typo doesn't
+    // silently downgrade to Client.
+    let role = match params.get("role").and_then(|v| v.as_str()) {
+        None => Role::Owner,
+        Some("owner") => Role::Owner,
+        Some("client") => Role::Client,
+        Some(other) => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                format!("Unknown 'role': {} (expected 'owner' | 'client')", other),
+            );
+        }
+    };
+
+    // ttlMinutes: default to the standard pairing TTL. Clamp to [1, 1440].
+    let ttl = match params.get("ttlMinutes").and_then(|v| v.as_f64()) {
+        None => DEFAULT_PAIRING_TTL,
+        Some(m) if !(1.0..=1440.0).contains(&m) => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "ttlMinutes must be between 1 and 1440 (minutes)",
+            );
+        }
+        Some(m) => chrono::Duration::minutes(m as i64),
+    };
+
+    match state.pairing_links.create_with_ttl(role, ttl).await {
+        Ok(link) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "id": link.id,
+                "credential": link.credential,
+                "expiresAt": link.expires_at,
+                "role": link.role,
+            }),
+        ),
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            format!("Failed to create pairing link: {e}"),
+        ),
+    }
+}
+
+/// `auth.revokePairingLink` — invalidate a pairing link by id. Idempotent.
+///
+/// Params: `id` (string, required) — the link id returned by `create`.
+///
+/// Returns `{ "revoked": bool, "hadLink": bool }`. `hadLink=false` means the
+/// id was already absent (or expired-and-purged); the call is still considered
+/// successful because the end state ("no such link exists") is achieved.
+async fn handle_auth_revoke_pairing_link(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let link_id = match params.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'id' parameter",
+            );
+        }
+    };
+    // The dyn PairingLinkStore trait object exposes `revoke` via its vtable;
+    // no trait import is required to call it.
+    match state.pairing_links.revoke(link_id).await {
+        Ok(removed) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "revoked": true, "hadLink": removed }),
+        ),
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            format!("Failed to revoke pairing link: {e}"),
+        ),
+    }
+}
+
+/// `auth.listPairingLinks` — enumerate all live (non-expired) pairing links.
+///
+/// No params. Returns `{ "links": [ {id, expiresAt, role}, … ] }` ordered by
+/// expiry ascending. The `credential` field is INTENTIONALLY OMITTED — once
+/// minted, credentials are write-only from the management surface (they're
+/// matched opaquely during bootstrap); surfacing them here would let a
+/// shoulder-surfer harvest active credentials.
+async fn handle_auth_list_pairing_links(state: &WsState, id: Value) -> JsonRpcResponse {
+    let now = chrono::Utc::now();
+    match state.pairing_links.list(now).await {
+        Ok(links) => {
+            let view: Vec<_> = links
+                .into_iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "id": l.id,
+                        "expiresAt": l.expires_at,
+                        "role": l.role,
+                    })
+                })
+                .collect();
+            JsonRpcResponse::success(id, serde_json::json!({ "links": view }))
+        }
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            format!("Failed to list pairing links: {e}"),
+        ),
+    }
 }
 
 // ─── Project Handlers ────────────────────────────────────────────
@@ -8683,6 +8860,200 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none());
         assert_eq!(resp.result.unwrap()["authenticated"], true);
+    }
+
+    // ─── AUTH-1 pairing-link RPC tests ──────────────────────────────────
+    //
+    // Covers the three new privileged RPCs end-to-end through `handle_rpc`
+    // (authz gate → dispatch → handler → store), in BOTH auth modes:
+    //   - no-auth (UnsafeNoAuth): the authz gate is bypassed; the store is
+    //     the single source of truth. Backward-compat: opt-in like the rest
+    //     of syncode-auth.
+    //   - remote (RemoteReachable): the gate is enforced — unauthenticated
+    //     calls are UNAUTHORIZED, authenticated Client calls are FORBIDDEN,
+    //     authenticated Owner calls succeed.
+    //
+    // The three create/revoke/list behaviors are exercised against the
+    // in-memory store (the default wired by `WsState::new_with_auth`). The
+    // SQLite store has its own dedicated persistence tests in
+    // `syncode-auth::pairing::tests`.
+
+    #[tokio::test]
+    async fn pairing_create_returns_credential_and_lists_in_no_auth_mode() {
+        // No-auth: the authz gate is bypassed, so create/list work directly.
+        let state = WsState::new_in_memory(16);
+
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth.createPairingCredential",
+            "params": { "role": "owner", "ttlMinutes": 30 }
+        });
+        let resp = rpc(&state, 1, &create).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert!(!result["id"].as_str().unwrap().is_empty());
+        let credential = result["credential"].as_str().unwrap();
+        assert!(!credential.is_empty(), "credential must be surfaced once");
+        assert_eq!(result["role"], "owner");
+        assert!(result["expiresAt"].as_str().is_some(), "expiresAt present");
+
+        // list surfaces the link — but MUST NOT include the credential
+        // (write-only surface; shoulder-surfing protection).
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth.listPairingLinks"
+        });
+        let resp = rpc(&state, 1, &list).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let links = resp.result.unwrap()["links"].as_array().unwrap().clone();
+        assert_eq!(links.len(), 1);
+        assert!(links[0].get("credential").is_none(), "credential must be redacted from list");
+        assert!(links[0].get("id").is_some());
+        assert_eq!(links[0]["role"], "owner");
+    }
+
+    #[tokio::test]
+    async fn pairing_revoke_removes_link_and_is_idempotent() {
+        let state = WsState::new_in_memory(16);
+
+        // Mint one.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth.createPairingCredential"
+        });
+        let id = rpc(&state, 1, &create).await.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Revoke it.
+        let revoke = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth.revokePairingLink",
+            "params": { "id": id }
+        });
+        let resp = rpc(&state, 1, &revoke).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["hadLink"], true);
+
+        // Second revoke: hadLink=false (idempotent end state).
+        let resp = rpc(&state, 1, &revoke).await;
+        assert_eq!(resp.result.unwrap()["hadLink"], false);
+
+        // list now empty.
+        let list = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "auth.listPairingLinks" });
+        let resp = rpc(&state, 1, &list).await;
+        assert_eq!(resp.result.unwrap()["links"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn pairing_create_rejects_bad_role_and_out_of_range_ttl() {
+        let state = WsState::new_in_memory(16);
+
+        // Unknown role → INVALID_PARAMS.
+        let bad = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth.createPairingCredential",
+            "params": { "role": "superuser" }
+        });
+        let resp = rpc(&state, 1, &bad).await;
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+
+        // ttlMinutes=0 → INVALID_PARAMS (a 0-TTL link is dead on arrival).
+        let bad = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "auth.createPairingCredential",
+            "params": { "ttlMinutes": 0 }
+        });
+        let resp = rpc(&state, 1, &bad).await;
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+
+        // ttlMinutes over the 1440 cap → INVALID_PARAMS.
+        let bad = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "auth.createPairingCredential",
+            "params": { "ttlMinutes": 100000 }
+        });
+        let resp = rpc(&state, 1, &bad).await;
+        assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn pairing_rpc_dot_name_and_slash_form_both_dispatch() {
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form. Verify
+        // the slash form resolves identically (the dot form is covered by the
+        // tests above).
+        let state = WsState::new_in_memory(16);
+        let slash = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth/create-pairing-credential"
+        });
+        let resp = rpc(&state, 1, &slash).await;
+        assert!(resp.error.is_none(), "slash form should dispatch: {:?}", resp.error);
+        assert!(
+            resp.result.unwrap()["credential"].as_str().is_some(),
+            "slash form returns a credential"
+        );
+
+        // list slash form
+        let list = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "auth/list-pairing-links" });
+        let resp = rpc(&state, 1, &list).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+    }
+
+    #[tokio::test]
+    async fn pairing_rpc_unauthenticated_in_remote_mode_is_unauthorized() {
+        // In RemoteReachable mode, the 3 RPCs require Write → an
+        // unauthenticated connection gets UNAUTHORIZED (not FORBIDDEN).
+        let state = make_remote_state();
+        for method in [
+            "auth.createPairingCredential",
+            "auth.revokePairingLink",
+            "auth.listPairingLinks",
+        ] {
+            let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            let resp = rpc(&state, 1, &req).await;
+            assert_eq!(
+                resp.error.unwrap().code,
+                crate::auth::auth_error_codes::UNAUTHORIZED,
+                "{method} should be UNAUTHORIZED pre-auth"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pairing_rpc_client_role_is_forbidden_owner_role_allowed() {
+        // In RemoteReachable mode, the 3 RPCs require Write.
+        //  - Client (read-only) → FORBIDDEN.
+        //  - Owner (full)       → allowed.
+        let state = make_remote_state();
+
+        // Bootstrap as Client via a separate connection (conn 2). The shared-
+        // secret authenticator only mints Owner, so simulate a Client principal
+        // by binding it directly (matches the ws/auth.rs client-role test).
+        state
+            .conn_auth
+            .set(
+                2,
+                syncode_auth::principal::Principal::new_never_expiring(
+                    "carol",
+                    syncode_auth::principal::Role::Client,
+                ),
+            )
+            .await;
+
+        let list = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "auth.listPairingLinks" });
+        let resp = rpc(&state, 2, &list).await;
+        assert_eq!(
+            resp.error.unwrap().code,
+            crate::auth::auth_error_codes::FORBIDDEN,
+            "Client should be FORBIDDEN from listing pairing links"
+        );
+
+        // Bootstrap as Owner on conn 1 (the shared secret) → allowed.
+        rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "auth/bootstrap",
+                "params": { "credential": "sk-owner-secret" }
+            }),
+        )
+        .await;
+        let resp = rpc(&state, 1, &list).await;
+        assert!(resp.error.is_none(), "Owner should list: {:?}", resp.error);
     }
 
     // ─── Git RPC tests ─────────────────────────────────────────────────

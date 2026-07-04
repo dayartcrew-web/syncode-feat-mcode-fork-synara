@@ -107,6 +107,15 @@ pub struct WsState {
     /// Per-connection authenticated principals. Populated by `auth/bootstrap`,
     /// consulted by the authz gate on every protected method call.
     pub conn_auth: crate::auth::SharedConnectionAuth,
+    /// Pairing-link store (AUTH-1). Backs the `auth.createPairingCredential` /
+    /// `auth.revokePairingLink` / `auth.listPairingLinks` RPCs. Defaults to an
+    /// in-memory store (mirrors the `UnsafeNoAuth` opt-in posture — pairing is
+    /// only persisted across restarts when the operator wires a SQLite store
+    /// via [`WsState::with_pairing_links`]). All three RPCs require Write
+    /// permission; in non-requiring modes the authz gate is bypassed, so this
+    /// store is the single source of truth for who may bootstrap via a pairing
+    /// credential regardless of auth mode.
+    pub pairing_links: std::sync::Arc<dyn syncode_auth::pairing::PairingLinkStore>,
     /// Terminal PTY session manager (T6c-5). Owns the lifecycle of all
     /// terminal sessions created via `terminal.open`/`terminal.new`. Sessions
     /// are keyed by the caller-provided `terminalId` (MCode convention) so the
@@ -229,6 +238,12 @@ impl WsState {
             subscriptions: Arc::new(RwLock::new(crate::push::SubscriptionRegistry::new())),
             auth_config,
             conn_auth: crate::auth::SharedConnectionAuth::new(),
+            // Pairing links default to in-memory (no persistence across
+            // restarts). Operators wanting survival across a restart call
+            // `with_pairing_links` with a `SqlitePairingLinkStore`.
+            pairing_links: std::sync::Arc::new(
+                syncode_auth::pairing::InMemoryPairingLinkStore::new(),
+            ),
             terminal_manager: Arc::new(RwLock::new(syncode_terminal::SessionManager::new())),
             terminal_readers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             automation_scheduler: Arc::new(syncode_automation::Scheduler::new_with_deps(
@@ -243,6 +258,21 @@ impl WsState {
             local_servers: Arc::new(RwLock::new(crate::local_server::LocalServerManager::new())),
             started_at: std::time::Instant::now(),
         }
+    }
+
+    /// Override the pairing-link store (AUTH-1).
+    ///
+    /// The default (set by [`WsState::new_with_auth`]) is an in-memory store
+    /// that does NOT survive a restart. Operators wanting pairing links to
+    /// persist across restarts construct a
+    /// [`syncode_auth::pairing::SqlitePairingLinkStore`] from the server's
+    /// SQLite pool and pass it here.
+    pub fn with_pairing_links(
+        mut self,
+        store: std::sync::Arc<dyn syncode_auth::pairing::PairingLinkStore>,
+    ) -> Self {
+        self.pairing_links = store;
+        self
     }
 
     /// Create a simple state without persistence (in-memory only, for tests).

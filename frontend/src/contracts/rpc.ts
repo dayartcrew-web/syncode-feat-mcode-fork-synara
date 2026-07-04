@@ -574,7 +574,7 @@ interface ProviderCompactThreadResult {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 102 entries (latest: T6c-16 git stacked/detached-worktree/progress +3) ──
+// ─── SERVED_RPC — 105 entries (latest: AUTH-1 pairing-link RPCs +3) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -853,6 +853,24 @@ export const SERVED_RPC = {
   },
   "auth/status": { request: null as unknown as null, result: null as unknown as AuthStatusResult },
   "auth/logout": { request: null as unknown as null, result: null as unknown as AuthLogoutResult },
+  // AUTH-1 pairing-link management. All three require Write permission on the
+  // backend (see `required_permission` in `ws/auth.rs`). `create` mints a
+  // short-TTL credential + returns it once; `revoke` invalidates by id;
+  // `list` enumerates live links (credential omitted — write-only surface).
+  // DTOs kept as `Record<string, unknown>` for now; the Rust-side shapes are
+  // the source of truth (`handle_auth_create_pairing_credential` et al.).
+  "auth/createPairingCredential": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "auth/revokePairingLink": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "auth/listPairingLinks": {
+    request: null as unknown as null,
+    result: null as unknown as Record<string, unknown>,
+  },
 
   // ─── Push subscription ───────────────────────────────────────────────
   "push/subscribe": {
@@ -1401,10 +1419,9 @@ export const UNSERVED_RPC = [
   "orchestration.repairReadModel",
   "orchestration.getLatestTurn",
 
-  // ─── Auth extras (bootstrap/status/logout served; these are not) ─────
-  "auth.createPairingCredential",
-  "auth.revokePairingLink",
-  "auth.listPairingLinks",
+  // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing RPCs served; these are not) ─────
+  // AUTH-1: `auth.createPairingCredential`, `auth.revokePairingLink`, and
+  // `auth.listPairingLinks` are now SERVED (Write-gated) — see SERVED_RPC.
   "auth.listClientSessions",
   "auth.revokeClientSession",
   "auth.getWebSocketToken",

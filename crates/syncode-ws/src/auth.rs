@@ -74,6 +74,28 @@ pub fn required_permission(method: &str) -> Option<Permission> {
         }
         "turn/start" | "turn/complete" => Some(Permission::Write),
 
+        // ─── Pairing-link management (AUTH-1) ────────────────────────────
+        //
+        // Creating / revoking / listing pairing credentials is privileged: a
+        // pairing credential grants a NEW principal the configured role on
+        // bootstrap, so only an authenticated principal with Write (i.e. an
+        // Owner; Clients default to Read-only) may mint or revoke them. Even
+        // `list` requires Write — the credential strings are sensitive and
+        // must not surface to read-only consumers.
+        //
+        // Both the MCode dot-name AND the slash form resolve here so the
+        // authz gate behaves identically regardless of which form the client
+        // sends (the dispatcher accepts both; see `dispatch_method`).
+        "auth.createPairingCredential"
+        | "auth/create-pairing-credential"
+        | "auth/createPairingCredential" => Some(Permission::Write),
+        "auth.revokePairingLink"
+        | "auth/revoke-pairing-link"
+        | "auth/revokePairingLink" => Some(Permission::Write),
+        "auth.listPairingLinks"
+        | "auth/list-pairing-links"
+        | "auth/listPairingLinks" => Some(Permission::Write),
+
         // Unknown method → no permission gate here; the dispatcher will
         // return METHOD_NOT_FOUND downstream. We don't pre-reject so the
         // error path stays uniform regardless of auth state.
@@ -335,6 +357,15 @@ mod tests {
             "thread/cancel",
             "turn/start",
             "turn/complete",
+            // AUTH-1 pairing-link management — all three gated by Write
+            // (minting/revoking credentials is privileged; listing surfaces
+            // sensitive credential strings).
+            "auth.createPairingCredential",
+            "auth/create-pairing-credential",
+            "auth.revokePairingLink",
+            "auth/revoke-pairing-link",
+            "auth.listPairingLinks",
+            "auth/list-pairing-links",
         ] {
             assert_eq!(required_permission(m), Some(Permission::Write), "{}", m);
         }
