@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use syncode_git::service::GitService;
-use syncode_orchestration::Command;
+use syncode_orchestration::{ApplicationService, Command};
 
 /// Handle an incoming JSON-RPC message.
 ///
@@ -1243,23 +1243,36 @@ async fn dispatch_method(
 
 /// `orchestration.dispatchCommand` — accept an MCode orchestration command
 /// shape `{ type, ...payload }` (or `{ command: "Type", ...payload }`) and
-/// route it through `Orchestrator::handle_command`. The CQRS pipeline runs in
-/// full: Decider → Events → EventRepository persist → Projector → ReadModelStore.
+/// route it through the matching [`syncode_orchestration::ApplicationService`]
+/// method. The CQRS pipeline runs in full: Decider → Events → EventRepository
+/// persist → Projector → ReadModelStore, including any application-layer
+/// precondition guards (e.g. `create_thread` rejects when the parent project
+/// is missing; `delete_project` rejects when the project is unknown).
+///
+/// Routing through `ApplicationService` (rather than `Orchestrator` directly)
+/// applies the same precondition checks the typed `project.*` / `thread.*` /
+/// `turn.*` handlers rely on, so the generic dispatcher cannot be used to
+/// bypass them (e.g. create an orphan thread or delete a phantom project).
+///
 /// The supported command types mirror the typed handlers
-/// (`CreateProject`, `CreateThread`, `StartTurn`, `PauseThread`, `ResumeThread`,
-/// `CancelThread`, `CompleteThread`, `SetThreadTitle`, `DeleteThread`,
-/// `DeleteProject`). Unknown command types return INVALID_PARAMS.
+/// (`CreateProject`, `DeleteProject`, `CreateThread`, `PauseThread`,
+/// `ResumeThread`, `CancelThread`, `CompleteThread`, `ArchiveThread`,
+/// `SetThreadTitle`, `DeleteThread`, `StartTurn`, `CompleteTurn`,
+/// `FailTurn`, `CancelTurn`, `InterruptTurn`). Unknown command types return
+/// INVALID_PARAMS. Errors carry a JSON-RPC error code derived from the
+/// [`syncode_orchestration::OrchestrationError`] variant (see
+/// [`dispatch_error_response`]).
 async fn handle_orchestration_dispatch_command(
     state: &WsState,
     id: Value,
     params: &Value,
 ) -> JsonRpcResponse {
     // The command type may arrive under `type` (MCode wire) or `command`.
-    let cmd_type = params
+    let cmd_type = match params
         .get("type")
         .and_then(|v| v.as_str())
-        .or_else(|| params.get("command").and_then(|v| v.as_str()));
-    let cmd_type = match cmd_type {
+        .or_else(|| params.get("command").and_then(|v| v.as_str()))
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -1270,152 +1283,387 @@ async fn handle_orchestration_dispatch_command(
         }
     };
 
-    let opt_str = |key: &str| params.get(key).and_then(|v| v.as_str()).map(String::from);
-    // Try multiple param keys in order, returning the first parsed EntityId.
-    // Boxed to keep the closure return small (avoids clippy::result_large_err).
-    let parse_id_any = |keys: &[&str]| -> Result<syncode_core::EntityId, Box<JsonRpcResponse>> {
+    // Per-call parsing context: borrows `id` + `params` for the param helpers.
+    let pctx = DispatchParams::new(id.clone(), params);
+
+    let service = ApplicationService::new(state.orchestrator.clone());
+
+    // Resolve params → call the matching ApplicationService method.
+    let outcome: Result<syncode_orchestration::CommandResult, syncode_orchestration::OrchestrationError> =
+        match cmd_type {
+            // ── Project lifecycle ────────────────────────────────────────
+            "CreateProject" => {
+                let name = match pctx.require_str("name", "CreateProject") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                let root_path = match pctx.require_str_any(
+                    &["rootPath", "root_path"],
+                    "CreateProject",
+                ) {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                service.create_project(name, root_path).await
+            }
+            "DeleteProject" => {
+                let project_id =
+                    match pctx.require_id_any(&["id", "projectId"], "DeleteProject") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                service.delete_project(project_id).await
+            }
+            "UpdateProjectConfig" => {
+                let project_id = match pctx
+                    .require_id_any(&["id", "projectId"], "UpdateProjectConfig")
+                {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                let provider_id = pctx.optional_str_any(&["providerId", "provider_id"]);
+                let default_model = pctx.optional_str_any(&["defaultModel", "default_model"]);
+                service
+                    .update_project_config(project_id, provider_id, default_model)
+                    .await
+            }
+
+            // ── Thread lifecycle ─────────────────────────────────────────
+            "CreateThread" => {
+                let project_id = match pctx.require_id_any(
+                    &["projectId", "project_id"],
+                    "CreateThread",
+                ) {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                let provider_id = match pctx.require_str_any(
+                    &["providerId", "provider_id"],
+                    "CreateThread",
+                ) {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                let model = match pctx.require_str("model", "CreateThread") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                service
+                    .create_thread(project_id, provider_id, model)
+                    .await
+            }
+            "PauseThread" => {
+                let thread_id =
+                    match pctx.require_id_any(&["id", "threadId"], "PauseThread") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                service.pause_thread(thread_id).await
+            }
+            "ResumeThread" => {
+                let thread_id =
+                    match pctx.require_id_any(&["id", "threadId"], "ResumeThread") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                service.resume_thread(thread_id).await
+            }
+            "CancelThread" => {
+                let thread_id =
+                    match pctx.require_id_any(&["id", "threadId"], "CancelThread") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                service.cancel_thread(thread_id).await
+            }
+            "CompleteThread" => {
+                let thread_id = match pctx.require_id_any(
+                    &["id", "threadId"],
+                    "CompleteThread",
+                ) {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                service.complete_thread(thread_id).await
+            }
+            "ArchiveThread" => {
+                let thread_id =
+                    match pctx.require_id_any(&["id", "threadId"], "ArchiveThread") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                service.archive_thread(thread_id).await
+            }
+            "SetThreadTitle" => {
+                let thread_id =
+                    match pctx.require_id_any(&["id", "threadId"], "SetThreadTitle") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                let title = match pctx.require_str("title", "SetThreadTitle") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                service.set_thread_title(thread_id, title).await
+            }
+            "DeleteThread" => {
+                let thread_id =
+                    match pctx.require_id_any(&["id", "threadId"], "DeleteThread") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                service.delete_thread(thread_id).await
+            }
+
+            // ── Turn lifecycle ───────────────────────────────────────────
+            "StartTurn" => {
+                let thread_id =
+                    match pctx.require_id_any(&["threadId", "thread_id"], "StartTurn") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                let sequence = pctx
+                    .params
+                    .get("sequence")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let user_input = match pctx.require_str_any(
+                    &["userInput", "user_input"],
+                    "StartTurn",
+                ) {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                service
+                    .start_turn(thread_id, sequence, user_input)
+                    .await
+            }
+            "CompleteTurn" => {
+                let turn_id =
+                    match pctx.require_id_any(&["id", "turnId"], "CompleteTurn") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                let assistant_output = match pctx.require_str_any(
+                    &["assistantOutput", "assistant_output"],
+                    "CompleteTurn",
+                ) {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                let duration_ms = pctx
+                    .params
+                    .get("durationMs")
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| pctx.params.get("duration_ms").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                service
+                    .complete_turn(turn_id, assistant_output, duration_ms)
+                    .await
+            }
+            "FailTurn" => {
+                let turn_id = match pctx.require_id_any(&["id", "turnId"], "FailTurn") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                let error = match pctx.require_str_any(&["error"], "FailTurn") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                service.fail_turn(turn_id, error).await
+            }
+            "CancelTurn" => {
+                let turn_id = match pctx.require_id_any(&["id", "turnId"], "CancelTurn") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+                service.cancel_turn(turn_id).await
+            }
+            "InterruptTurn" => {
+                let turn_id =
+                    match pctx.require_id_any(&["id", "turnId"], "InterruptTurn") {
+                        Ok(v) => v,
+                        Err(r) => return *r,
+                    };
+                service.interrupt_turn(turn_id).await
+            }
+            other => {
+                return JsonRpcResponse::error(
+                    Some(id),
+                    crate::error_codes::INVALID_PARAMS,
+                    format!("Unsupported command type: {other}"),
+                );
+            }
+        };
+
+    match outcome {
+        Ok(result) => Ok(result).dispatch_success(id),
+        Err(e) => dispatch_error_response(id, &e),
+    }
+}
+
+// ─── dispatchCommand helpers ───────────────────────────────────────────
+//
+// Small parsing + error-mapping helpers dedicated to
+// `orchestration.dispatchCommand`. Kept local to the handler so the generic
+// dispatcher's param-shape vocabulary stays in one place and doesn't leak
+// into the typed `project.*` / `thread.*` / `turn.*` handlers (which each
+// define their own inline parsing).
+
+/// Borrowed parsing context for one dispatchCommand call. Wraps the request
+/// `id` (for error responses) and the JSON `params` object so the per-variant
+/// match arms can call `require_str` / `require_id_any` without repeating the
+/// `INVALID_PARAMS` boilerplate. Not general-purpose: lives only as long as
+/// the handler stack frame that owns `id` + `params`.
+struct DispatchParams<'a> {
+    id: Value,
+    params: &'a Value,
+}
+
+impl<'a> DispatchParams<'a> {
+    fn new(id: Value, params: &'a Value) -> Self {
+        Self { id, params }
+    }
+
+    /// Read a required string under `key`. Returns the value or an
+    /// `INVALID_PARAMS` error mentioning `cmd` for context. The `Err` variant
+    /// is boxed to satisfy `clippy::result_large_err` (`JsonRpcResponse` is
+    /// ~152 bytes); callers dereference with `*`.
+    fn require_str(&self, key: &str, cmd: &str) -> Result<String, Box<JsonRpcResponse>> {
+        match self.params.get(key).and_then(|v| v.as_str()).map(String::from) {
+            Some(v) => Ok(v),
+            None => Err(Box::new(param_error(
+                self.id.clone(),
+                format!("{cmd} requires '{key}'"),
+            ))),
+        }
+    }
+
+    /// Read a required string, trying multiple key spellings (camelCase first
+    /// to match the MCode wire shape, then snake_case for ergonomic callers).
+    fn require_str_any(&self, keys: &[&str], cmd: &str) -> Result<String, Box<JsonRpcResponse>> {
         for &k in keys {
-            if let Some(s) = params.get(k).and_then(|v| v.as_str())
+            if let Some(s) = self.params.get(k).and_then(|v| v.as_str()) {
+                return Ok(s.to_string());
+            }
+        }
+        Err(Box::new(param_error(
+            self.id.clone(),
+            format!("{cmd} requires '{}' (tried: {})", keys[0], keys.join(", ")),
+        )))
+    }
+
+    /// Read an optional string, trying multiple key spellings.
+    fn optional_str_any(&self, keys: &[&str]) -> Option<String> {
+        for &k in keys {
+            if let Some(s) = self.params.get(k).and_then(|v| v.as_str()) {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
+    /// Read + parse a required [`syncode_core::EntityId`], trying multiple key
+    /// spellings. Returns `INVALID_PARAMS` if no key resolves to a parseable id.
+    fn require_id_any(
+        &self,
+        keys: &[&str],
+        cmd: &str,
+    ) -> Result<syncode_core::EntityId, Box<JsonRpcResponse>> {
+        for &k in keys {
+            if let Some(s) = self.params.get(k).and_then(|v| v.as_str())
                 && let Ok(e) = syncode_core::EntityId::parse(s)
             {
                 return Ok(e);
             }
         }
-        Err(Box::new(JsonRpcResponse::error(
-            Some(id.clone()),
-            crate::error_codes::INVALID_PARAMS,
-            format!("Missing/invalid id parameter (tried: {})", keys.join(", ")),
+        Err(Box::new(param_error(
+            self.id.clone(),
+            format!(
+                "{cmd} requires '{}' (tried: {})",
+                keys[0],
+                keys.join(", ")
+            ),
         )))
+    }
+}
+
+/// Map an [`syncode_orchestration::OrchestrationError`] to a JSON-RPC error
+/// response. Surfaces the error variant via the `data.kind` field so clients
+/// can distinguish not-found from conflict from reactor failures without
+/// parsing the human-readable message.
+fn dispatch_error_response(
+    id: Value,
+    err: &syncode_orchestration::OrchestrationError,
+) -> JsonRpcResponse {
+    use syncode_orchestration::OrchestrationError as E;
+
+    // JSON-RPC code: business-rule violations → INVALID_PARAMS (the decider
+    // rejected the command, e.g. wrong state for Pause); missing aggregate →
+    // a not-found-shaped -32001 (client-side actionable); persistence /
+    // reactor failures → INTERNAL_ERROR.
+    let code = match err {
+        E::Decider(_) | E::NoState(_) | E::ProjectNotFound(_) | E::ThreadNotFound(_) => {
+            crate::error_codes::INVALID_PARAMS
+        }
+        E::ConcurrencyConflictRetried { .. }
+        | E::EventRepository(_)
+        | E::CommandReactor(_) => crate::error_codes::INTERNAL_ERROR,
     };
 
-    // Map the wire command type → syncode `Command`. Mirrors the typed handlers.
-    let cmd = match cmd_type {
-        "CreateProject" => {
-            let name = match opt_str("name") {
-                Some(n) => n,
-                None => return param_error(id, "CreateProject requires 'name'"),
-            };
-            let root_path = match opt_str("rootPath").or_else(|| opt_str("root_path")) {
-                Some(r) => r,
-                None => return param_error(id, "CreateProject requires 'rootPath'"),
-            };
-            Command::CreateProject { name, root_path }
-        }
-        "DeleteProject" => {
-            let id_e = match parse_id_any(&["id", "projectId"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            };
-            Command::DeleteProject { id: id_e }
-        }
-        "CreateThread" => {
-            let project_id = match parse_id_any(&["projectId", "project_id"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            };
-            let provider_id = match opt_str("providerId").or_else(|| opt_str("provider_id")) {
-                Some(p) => p,
-                None => return param_error(id, "CreateThread requires 'providerId'"),
-            };
-            let model = match opt_str("model") {
-                Some(m) => m,
-                None => return param_error(id, "CreateThread requires 'model'"),
-            };
-            Command::CreateThread {
-                project_id,
-                provider_id,
-                model,
-            }
-        }
-        "PauseThread" => Command::PauseThread {
-            id: match parse_id_any(&["id", "threadId"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            },
-        },
-        "ResumeThread" => Command::ResumeThread {
-            id: match parse_id_any(&["id", "threadId"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            },
-        },
-        "CancelThread" => Command::CancelThread {
-            id: match parse_id_any(&["id", "threadId"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            },
-        },
-        "SetThreadTitle" => {
-            let thread_id = match parse_id_any(&["id", "threadId"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            };
-            let title = match opt_str("title") {
-                Some(t) => t,
-                None => return param_error(id, "SetThreadTitle requires 'title'"),
-            };
-            Command::SetThreadTitle {
-                id: thread_id,
-                title,
-            }
-        }
-        "DeleteThread" => Command::DeleteThread {
-            id: match parse_id_any(&["id", "threadId"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            },
-        },
-        "StartTurn" => {
-            let thread_id = match parse_id_any(&["threadId", "thread_id"]) {
-                Ok(e) => e,
-                Err(r) => return *r,
-            };
-            let sequence = params.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let user_input = match opt_str("userInput").or_else(|| opt_str("user_input")) {
-                Some(u) => u,
-                None => return param_error(id, "StartTurn requires 'userInput'"),
-            };
-            Command::StartTurn {
-                thread_id,
-                sequence,
-                user_input,
-            }
-        }
-        other => {
-            return JsonRpcResponse::error(
-                Some(id),
-                crate::error_codes::INVALID_PARAMS,
-                format!("Unsupported command type: {other}"),
-            );
-        }
+    // Stable discriminant string for programmatic branching.
+    let kind = match err {
+        E::Decider(_) => "decider_error",
+        E::EventRepository(_) => "event_repository_error",
+        E::CommandReactor(_) => "command_reactor_error",
+        E::NoState(_) => "no_state",
+        E::ProjectNotFound(_) => "project_not_found",
+        E::ThreadNotFound(_) => "thread_not_found",
+        E::ConcurrencyConflictRetried { .. } => "concurrency_conflict",
     };
 
-    // Run the full CQRS pipeline.
-    match state.orchestrator.handle_command(cmd).await {
-        Ok(result) => {
-            // Build a result envelope: aggregate id (first event), event count,
-            // and event types — the UI's optimistic update converges from these.
-            let aggregate_id = result.events.first().map(|e| e.event.aggregate_id());
-            let event_types: Vec<String> = result
-                .events
-                .iter()
-                .map(|e| format!("{:?}", e.event))
-                .collect();
-            JsonRpcResponse::success(
-                id,
-                serde_json::json!({
-                    "dispatched": true,
-                    "aggregateId": aggregate_id.unwrap_or_default(),
-                    "eventsAppended": result.events.len(),
-                    "eventTypes": event_types,
-                }),
-            )
+    let mut resp = JsonRpcResponse::error(Some(id), code, err.to_string());
+    if let Some(error) = resp.error.as_mut() {
+        error.data = Some(serde_json::json!({ "kind": kind }));
+    }
+    resp
+}
+
+/// Build the success envelope for a dispatched command. The result shape is
+/// stable across all command types: `{ dispatched, aggregateId, eventsAppended,
+/// eventTypes }` — the UI's optimistic update converges from these fields
+/// without needing command-type-specific shapes.
+fn dispatch_success_envelope(id: Value, result: syncode_orchestration::CommandResult) -> JsonRpcResponse {
+    let aggregate_id = result.events.first().map(|e| e.event.aggregate_id());
+    let event_types: Vec<String> = result
+        .events
+        .iter()
+        .map(|e| format!("{:?}", e.event))
+        .collect();
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "dispatched": true,
+            "aggregateId": aggregate_id.unwrap_or_default(),
+            "eventsAppended": result.events.len(),
+            "eventTypes": event_types,
+        }),
+    )
+}
+
+/// Sugar trait so the handler's `match outcome { Ok => …, Err => … }` reads
+/// symmetrically. Implemented on the `Result<CommandResult, OrchestrationError>`
+/// returned by every `ApplicationService` method.
+trait DispatchOutcomeExt {
+    fn dispatch_success(self, id: Value) -> JsonRpcResponse;
+}
+
+impl DispatchOutcomeExt for Result<syncode_orchestration::CommandResult, syncode_orchestration::OrchestrationError> {
+    fn dispatch_success(self, id: Value) -> JsonRpcResponse {
+        match self {
+            Ok(result) => dispatch_success_envelope(id, result),
+            Err(e) => dispatch_error_response(id, &e),
         }
-        Err(e) => JsonRpcResponse::error(
-            Some(id),
-            crate::error_codes::INVALID_PARAMS,
-            e.to_string(),
-        ),
     }
 }
 
@@ -18369,6 +18617,351 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_some(), "expected error for unknown type");
         assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    // ─── ORCH-5: dispatchCommand through ApplicationService ────────────
+    //
+    // These tests exercise the dispatcher's new role: routing commands
+    // through `ApplicationService` (with its application-layer precondition
+    // guards) rather than `Orchestrator` directly, plus the structured
+    // error mapping (`data.kind` discriminant + JSON-RPC code per variant).
+
+    /// Helper: dispatch a command via `orchestration.dispatchCommand` and
+    /// return the JSON-RPC response.
+    async fn dispatch(
+        state: &WsState,
+        params: serde_json::Value,
+    ) -> JsonRpcResponse {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": params,
+        });
+        rpc(state, 1, &req).await
+    }
+
+    /// Helper: dispatch a CreateProject and return the new project's id (str).
+    async fn seed_project(state: &WsState, name: &str) -> String {
+        let resp = dispatch(
+            state,
+            serde_json::json!({
+                "type": "CreateProject", "name": name, "rootPath": "/tmp"
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "seed CreateProject failed: {:?}", resp.error);
+        resp.result.unwrap()["aggregateId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_create_project_and_thread_lifecycle() {
+        // ORCH-5: CreateProject + CreateThread both succeed and project their
+        // read models; routing through ApplicationService applies the orphan-
+        // thread guard (CreateThread would be rejected if the project didn't
+        // exist). Verifies the dispatch envelope shape end-to-end.
+        let state = WsState::new_in_memory(16);
+
+        // Create a project via the dispatcher.
+        let project_id = seed_project(&state, "demo").await;
+
+        // CreateThread against the real project id — must succeed.
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread",
+                "projectId": project_id,
+                "providerId": "openai",
+                "model": "gpt-4",
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "CreateThread failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+        let thread_id = result["aggregateId"].as_str().unwrap().to_string();
+        assert!(!thread_id.is_empty());
+
+        // Read model reflects the thread.
+        let store = state.read_store.read().await;
+        assert_eq!(store.threads.len(), 1, "thread should be projected");
+        assert_eq!(
+            store.threads.values().next().unwrap().provider_id,
+            "openai"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_thread_lifecycle_pause_resume_archive() {
+        // ORCH-5: a full thread lifecycle (pause → resume → archive) dispatched
+        // through the generic handler. Each step routes through the matching
+        // ApplicationService method and the read model reflects the status.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+
+        // Create the thread.
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "openai", "model": "gpt-4",
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+        // Pause.
+        let resp = dispatch(
+            &state,
+            serde_json::json!({ "type": "PauseThread", "id": thread_id }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "PauseThread failed: {:?}", resp.error);
+        {
+            let store = state.read_store.read().await;
+            assert_eq!(
+                store.threads.get(&thread_id).unwrap().status,
+                "paused"
+            );
+        }
+
+        // Resume.
+        let resp = dispatch(
+            &state,
+            serde_json::json!({ "type": "ResumeThread", "id": thread_id }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "ResumeThread failed: {:?}", resp.error);
+        {
+            let store = state.read_store.read().await;
+            assert_eq!(
+                store.threads.get(&thread_id).unwrap().status,
+                "active"
+            );
+        }
+
+        // Archive (also exercises the threadId alias key).
+        let resp = dispatch(
+            &state,
+            serde_json::json!({ "type": "ArchiveThread", "threadId": thread_id }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "ArchiveThread failed: {:?}", resp.error);
+        let store = state.read_store.read().await;
+        assert_eq!(
+            store.threads.get(&thread_id).unwrap().status,
+            "archived"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_fail_turn_records_error_status() {
+        // ORCH-5: FailTurn dispatched through the generic handler flips the
+        // turn's status to "error" (the same effect as the typed handler).
+        // Exercises the turn-command path + a multi-key require (`id`/`turnId`).
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "openai", "model": "gpt-4",
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+        // StartTurn.
+        let turn_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "StartTurn", "threadId": thread_id,
+                "sequence": 1, "userInput": "hi",
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+        // FailTurn (using the `turnId` alias key).
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "FailTurn", "turnId": turn_id, "error": "provider timeout",
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "FailTurn failed: {:?}", resp.error);
+
+        let store = state.read_store.read().await;
+        assert_eq!(
+            store.turns.get(&turn_id).unwrap().status,
+            "error"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_missing_required_field_errors() {
+        // ORCH-5: CreateThread without a model surfaces a structured
+        // INVALID_PARAMS error mentioning the command + the missing field.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "openai",
+                // model deliberately omitted
+            }),
+        )
+        .await;
+        let err = resp.error.expect("expected INVALID_PARAMS for missing model");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        assert!(
+            err.message.contains("CreateThread"),
+            "error should mention the command: {err:?}"
+        );
+        assert!(
+            err.message.contains("model"),
+            "error should mention the missing field: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_precondition_failure_carries_kind() {
+        // ORCH-5: routing through ApplicationService applies the orphan-thread
+        // guard — CreateThread against a bogus (but well-formed) project id is
+        // rejected with ProjectNotFound, surfaced as INVALID_PARAMS +
+        // `data.kind: "project_not_found"` (the structured discriminant the UI
+        // can branch on without parsing the message).
+        let state = WsState::new_in_memory(16);
+
+        // CreateThread against a non-existent-but-valid-UUID project id.
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread",
+                "projectId": "00000000-0000-0000-0000-000000000000",
+                "providerId": "openai", "model": "gpt-4",
+            }),
+        )
+        .await;
+        let err = resp.error.expect("expected rejection for unknown project");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        let data = err.data.expect("expected structured data.kind");
+        assert_eq!(data["kind"], "project_not_found");
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_invalid_state_transition_maps_decider_error() {
+        // ORCH-5: a Decider rejection (e.g. pausing an already-archived thread)
+        // surfaces as INVALID_PARAMS + `data.kind: "decider_error"`. Confirms
+        // DeciderError → OrchestrationError::Decider → JSON-RPC mapping.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "openai", "model": "gpt-4",
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+        // Archive, then attempt Pause (invalid from archived state).
+        dispatch(
+            &state,
+            serde_json::json!({ "type": "ArchiveThread", "id": thread_id }),
+        )
+        .await;
+        let resp = dispatch(
+            &state,
+            serde_json::json!({ "type": "PauseThread", "id": thread_id }),
+        )
+        .await;
+        let err = resp
+            .error
+            .expect("expected rejection when pausing an archived thread");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        let data = err.data.expect("expected structured data.kind");
+        assert_eq!(data["kind"], "decider_error");
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_update_project_config_applies() {
+        // ORCH-5: UpdateProjectConfig dispatched through the generic handler
+        // updates the project read model (provider + default model). Exercises
+        // optional-string parsing (None fields are tolerated).
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "UpdateProjectConfig", "id": project_id,
+                "providerId": "anthropic", "defaultModel": "claude-3",
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "UpdateProjectConfig failed: {:?}", resp.error);
+
+        let store = state.read_store.read().await;
+        let project = store.projects.get(&project_id).unwrap();
+        assert_eq!(project.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(project.default_model.as_deref(), Some("claude-3"));
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_slash_form_routes_through_application_service() {
+        // ORCH-5: the slash form `orchestration/dispatch-command` resolves to
+        // the same handler and routes through ApplicationService (verified by
+        // the orphan-thread guard firing on a bogus project).
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration/dispatch-command",
+            "params": {
+                "type": "CreateThread",
+                "projectId": "00000000-0000-0000-0000-000000000000",
+                "providerId": "openai", "model": "gpt-4",
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let err = resp.error.expect("slash form should also reject unknown project");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        assert_eq!(err.data.unwrap()["kind"], "project_not_found");
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_command_key_alias_works() {
+        // ORCH-5: the command type may arrive under `command` (as well as
+        // `type`). Both must route identically.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "command": "CreateProject", "name": "alias", "rootPath": "/tmp" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "command-key alias failed: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["dispatched"], true);
     }
 
     #[tokio::test]
