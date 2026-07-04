@@ -20,3 +20,6 @@ async-trait = "0.1"
 async-stream = "0.3"
 tokio-stream = "0.1"
 reqwest = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
