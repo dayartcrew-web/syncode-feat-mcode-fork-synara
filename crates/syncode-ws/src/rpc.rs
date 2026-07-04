@@ -1530,11 +1530,12 @@ async fn handle_orchestration_replay_events(
 /// "repair" affordance is unambiguous.
 async fn handle_orchestration_repair_state(state: &WsState, id: Value) -> JsonRpcResponse {
     match state.orchestrator.replay_read_model().await {
-        Ok(count) => JsonRpcResponse::success(
+        Ok((replayed, seeded)) => JsonRpcResponse::success(
             id,
             serde_json::json!({
                 "repaired": true,
-                "eventsReplayed": count,
+                "eventsReplayed": replayed,
+                "seeded": seeded,
             }),
         ),
         Err(e) => JsonRpcResponse::error(
@@ -15319,9 +15320,11 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "replayEvents failed: {:?}", resp.error);
         let result = resp.result.unwrap();
-        assert_eq!(result["replayed"], true);
+        // ORCH-2 widened replay_read_model to return (replayed, seeded);
+        // the handler now surfaces both. `replayed` is the event count (u32),
+        // `seeded` is the snapshot count (0 on a cold store).
+        assert!(result["replayed"].as_u64().unwrap_or(0) >= 1, "expected replayed >= 1, got {}", result["replayed"]);
         assert_eq!(result["scope"], "all");
-        assert!(result["eventsReplayed"].as_u64().unwrap_or(0) >= 1);
     }
 
     #[tokio::test]
