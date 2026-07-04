@@ -39,7 +39,7 @@
 | `git.stashAndCheckout` | 🟡 STUB | (compose stashCreate + checkout) |
 | `git.summarizeDiff` | ✅ REAL | provider CLI one-shot (LLM) |
 | `git.githubRepository` / `resolvePullRequest` | ✅ REAL | gh CLI (no token — uses gh auth; `gh repo view` / `gh pr view`) |
-| `git.handoffThread` | 🟡 PARTIAL | gh pr create real; worktree-handoff fields stub |
+| `git.handoffThread` | ✅ REAL | gh pr create (branch mode) + git2 worktree add (worktree mode, `targetMode:"worktree"` populates `worktreePath`/`associatedWorktreeBranch`/`changesTransferred`/`conflictsDetected`) |
 | `git.preparePullRequestThread` | 🟡 STUB | composable via resolvePullRequest + worktreeCreate |
 | `git.runStackedAction` / `createDetachedWorktree` | ✅ REAL | syncode-git StackedPipeline (action mapping) + `git worktree add --detach` |
 | `git.subscribeActionProgress` | 🟡 STUB | stacked actions synchronous — no progress push |

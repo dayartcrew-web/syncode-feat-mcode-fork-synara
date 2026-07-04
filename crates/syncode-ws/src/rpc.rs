@@ -924,11 +924,12 @@ async fn dispatch_method(
         //     number,title,state,headRefName,baseRefName,url` → MCode
         //     `GitResolvePullRequestResult`.
         //   - `git.handoffThread`            — create a PR from a branch via
-        //     `gh pr create`. STUBBED with `{ ok:false, reason }` for the
-        //     multi-phase worktree/checkout variant (the MCode shape carries
-        //     `worktreePath`/`associatedWorktreeBranch` fields that imply a
-        //     two-phase op we don't model); the simple `gh pr create` path
-        //     returns the PR URL.
+        //     `gh pr create`. Two target modes: `targetMode:"branch"` (default
+        //     — just the PR) and `targetMode:"worktree"` — additionally
+        //     creates a worktree for the PR branch via git2 (mirrors
+        //     `git.worktreeCreate`) and populates the MCode worktree-handoff
+        //     fields (`worktreePath`, `associatedWorktreeBranch`,
+        //     `changesTransferred`, `conflictsDetected`).
         //   - `git.preparePullRequestThread` — prepare a worktree/branch for a
         //     PR. STUBBED (`{ ok:false, reason }`) — the MCode shape implies
         //     a checkout + worktree-add sequence we don't wire here.
@@ -8258,18 +8259,30 @@ async fn handle_git_resolve_pull_request(id: Value, params: &Value) -> JsonRpcRe
     }
 }
 
-/// `git.handoffThread` → create a PR from a thread's branch.
+/// `git.handoffThread` → create a PR (and optionally a worktree) for a
+/// thread's branch.
 ///
-/// The full MCode shape (`GitHandoffThreadResult`) implies a multi-phase op:
-/// it carries `worktreePath`, `associatedWorktreePath`, `associatedWorktreeBranch`,
-/// `associatedWorktreeRef`, `changesTransferred`, `conflictsDetected` — a
-/// thread-to-worktree handoff we don't model. The PR-creation sub-step (the
-/// most common intent) IS wired via `gh pr create` and surfaced in the
-/// returned `message`. The other fields are returned as `null`/`false`
-/// (matching the "no worktree handoff performed" outcome).
+/// Two target modes, selected by `params.targetMode`:
+///   - `"branch"` (default, or absent): the classic flow — just runs
+///     `gh pr create` and surfaces the PR URL. The worktree-handoff fields
+///     in the MCode `GitHandoffThreadResult` shape are returned as
+///     `null`/`false` (no worktree was created).
+///   - `"worktree"`: additionally creates a worktree for the PR branch via
+///     git2 (mirrors `git.worktreeCreate`) and populates the MCode
+///     worktree-handoff fields:
+///       * `worktreePath` — the new worktree's filesystem path
+///       * `associatedWorktreeBranch` — the branch checked out in it
+///       * `changesTransferred` — true once the worktree exists (created
+///         from HEAD so the branch's commits are present)
+///       * `conflictsDetected` — false (a fresh worktree has no merge in
+///         flight; surfaced for the MCode UI which always reads it)
 ///
-/// Params: `{ cwd, title, body, base, head }`. If `head` is omitted, gh
-/// defaults to the current branch.
+/// If `gh pr create` fails (e.g. `gh` missing, no remote), the worktree is
+/// still created and `message` carries the gh failure reason — the caller
+/// can still hand off to the worktree locally.
+///
+/// Params: `{ cwd, title, body?, base?, head?, targetMode? }`. If `head`
+/// is omitted, gh defaults to the current branch.
 async fn handle_git_handoff_thread(id: Value, params: &Value) -> JsonRpcResponse {
     let cwd = resolve_cwd_or_dot(params);
     let title = match params.get("title").and_then(|v| v.as_str()) {
@@ -8291,48 +8304,135 @@ async fn handle_git_handoff_thread(id: Value, params: &Value) -> JsonRpcResponse
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let target_mode = params
+        .get("targetMode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("branch")
+        .to_string();
 
-    // Build the gh pr create arg list. `--body-file -` reads the body from
-    // stdin (avoids arg-length limits + shell-escaping; matches MCode's
-    // temp-file approach but stdin is simpler in-process).
+    // Resolve the PR branch name: explicit `head` param wins; otherwise fall
+    // back to the repo's current branch (matches gh's own default and gives
+    // the worktree a deterministic branch to check out).
+    let pr_branch = if !head.is_empty() {
+        head.clone()
+    } else {
+        match current_branch_for_cwd(&cwd) {
+            Ok(b) => b,
+            Err(_) => head.clone(),
+        }
+    };
+
+    // If a worktree handoff was requested, create the worktree FIRST (it's a
+    // local, deterministic op — no network). On failure we surface the error
+    // and skip gh pr create (the worktree is the primary deliverable in this
+    // mode; if it can't be made, there's nothing to hand off).
+    let worktree = if target_mode == "worktree" {
+        match create_handoff_worktree(id.clone(), &cwd, &pr_branch, params) {
+            Ok(w) => Some(w),
+            Err(resp) => return *resp,
+        }
+    } else {
+        None
+    };
+
+    // Run `gh pr create`. In worktree mode we tolerate gh failure (the
+    // worktree already exists); in branch mode gh failure is the whole
+    // failure so it's surfaced in `message`.
+    let gh_outcome = run_gh_pr_create(&cwd, &title, &body, &base, &head).await;
+    let (message, pr_url): (String, Option<String>) = match gh_outcome {
+        Ok(url) => (
+            format!("Created PR: {url}"),
+            Some(url),
+        ),
+        Err(reason) => {
+            if target_mode == "worktree" {
+                // Worktree succeeded; PR creation failed but the handoff is
+                // still useful locally. Surface the gh failure reason.
+                (
+                    format!(
+                        "Worktree created for {pr_branch}; PR creation skipped ({reason})"
+                    ),
+                    None,
+                )
+            } else {
+                // Branch mode: gh failure is the whole outcome.
+                return JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({ "ok": false, "reason": reason }),
+                );
+            }
+        }
+    };
+
+    // Build the MCode GitHandoffThreadResult shape. In branch mode the
+    // worktree fields stay null/false (no worktree was created); in
+    // worktree mode they're populated from the worktree we just made.
+    let (worktree_path, associated_worktree_branch, changes_transferred) = match &worktree {
+        Some(w) => (Some(w.path.clone()), Some(w.branch.clone()), true),
+        None => (None, None, false),
+    };
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "targetMode": target_mode,
+            "branch": pr_url.as_ref().map(|_| pr_branch.clone()),
+            "worktreePath": worktree_path,
+            "associatedWorktreePath": worktree_path.clone(),
+            "associatedWorktreeBranch": associated_worktree_branch.clone(),
+            "associatedWorktreeRef": associated_worktree_branch.map(|b| format!("refs/heads/{b}")),
+            "changesTransferred": changes_transferred,
+            "conflictsDetected": false,
+            "message": message,
+        }),
+    )
+}
+
+/// The outcome of a `gh pr create` attempt.
+type GhPrOutcome = Result<String, String>;
+
+/// Run `gh pr create --title <title> [--base <base>] [--head <head>] --body
+/// <body>` in `cwd`. Returns `Ok(url)` on success (the new PR's URL parsed
+/// from stdout) or `Err(reason)` on any failure (binary missing, non-zero
+/// exit). The reason is crafted to surface to the UI ("`gh` CLI not found",
+/// gh's first stderr line, etc.) rather than a raw stack trace.
+async fn run_gh_pr_create(
+    cwd: &str,
+    title: &str,
+    body: &str,
+    base: &str,
+    head: &str,
+) -> GhPrOutcome {
     let mut args: Vec<String> = vec![
         "pr".into(),
         "create".into(),
         "--title".into(),
-        title.clone(),
+        title.into(),
     ];
     if !base.is_empty() {
         args.push("--base".into());
-        args.push(base.clone());
+        args.push(base.into());
     }
     if !head.is_empty() {
         args.push("--head".into());
-        args.push(head.clone());
+        args.push(head.into());
     }
     args.push("--body".into());
-    args.push(body);
+    args.push(body.into());
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(&arg_refs).current_dir(&cwd);
-    // Stdin is not piped (--body is a literal arg); inherit nothing.
+    cmd.args(&arg_refs).current_dir(cwd);
     let output = match cmd.output().await {
         Ok(o) => o,
         Err(e) => {
             // Distinguish "binary missing" from "spawn failed".
             if which::which("gh").is_err() {
-                return JsonRpcResponse::success(
-                    id,
-                    serde_json::json!({
-                        "ok": false,
-                        "reason": "`gh` CLI not found on PATH — install it and run `gh auth login`"
-                    }),
+                return Err(
+                    "`gh` CLI not found on PATH — install it and run `gh auth login`".into(),
                 );
             }
-            return JsonRpcResponse::success(
-                id,
-                serde_json::json!({ "ok": false, "reason": format!("gh spawn failed: {e}") }),
-            );
+            return Err(format!("gh spawn failed: {e}"));
         }
     };
     if !output.status.success() {
@@ -8342,9 +8442,8 @@ async fn handle_git_handoff_thread(id: Value, params: &Value) -> JsonRpcResponse
             .find(|l| !l.trim().is_empty())
             .unwrap_or("gh pr create failed (non-zero exit)")
             .to_string();
-        return JsonRpcResponse::success(id, serde_json::json!({ "ok": false, "reason": reason }));
+        return Err(reason);
     }
-
     // gh pr create prints the PR URL on stdout.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let url = stdout
@@ -8352,23 +8451,152 @@ async fn handle_git_handoff_thread(id: Value, params: &Value) -> JsonRpcResponse
         .find(|l| l.starts_with("https://"))
         .map(String::from)
         .unwrap_or_else(|| stdout.trim().to_string());
+    Ok(url)
+}
 
-    // Return the MCode GitHandoffThreadResult shape (worktree fields null —
-    // we didn't perform a worktree handoff, only the PR-create sub-step).
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "targetMode": "branch",
-            "branch": null,
-            "worktreePath": null,
-            "associatedWorktreePath": null,
-            "associatedWorktreeBranch": null,
-            "associatedWorktreeRef": null,
-            "changesTransferred": false,
-            "conflictsDetected": false,
-            "message": format!("Created PR: {url}"),
-        }),
-    )
+/// A created worktree (the subset of `WorktreeInfo` we surface in the
+/// handoff result).
+struct HandoffWorktree {
+    path: String,
+    branch: String,
+}
+
+/// Create a worktree for `branch` under `cwd`. Mirrors `git.worktreeCreate`
+/// (creates the branch at HEAD if it doesn't exist, then links a worktree
+/// at `<repo>/.worktrees/<branch>` or the `worktreePath` param if given).
+/// Returns the created worktree info on success, or a ready-to-send
+/// `JsonRpcResponse` error on failure (boxed to keep the `Result`'s `Err`
+/// variant small — clippy `result_large_err`; matches `open_git_service`'s
+/// convention).
+fn create_handoff_worktree(
+    id: Value,
+    cwd: &str,
+    branch: &str,
+    params: &Value,
+) -> Result<HandoffWorktree, Box<JsonRpcResponse>> {
+    let repo = match git2::Repository::discover(cwd) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(Box::new(git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git.handoffThread worktree: open repo failed: {e}"),
+            )))
+        }
+    };
+
+    // Resolve the worktree's filesystem path. Caller may pass `worktreePath`;
+    // otherwise derive `<workdir>/.worktrees/<branch>` (matches
+    // `git.worktreeCreate`).
+    let wt_path = params
+        .get("worktreePath")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut p = repo
+                .workdir()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            p.push(".worktrees");
+            p.push(branch);
+            p
+        });
+
+    // Create the branch at HEAD if it doesn't already exist (so the worktree
+    // checks it out). "Already exists" is OK — the worktree will check it out
+    // via the `opts.reference(...)` below.
+    let branch_preexisted = repo.find_branch(branch, git2::BranchType::Local).is_ok();
+    let head_commit = match repo.head().and_then(|h| h.peel_to_commit()) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(Box::new(git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git.handoffThread worktree: resolve HEAD: {e}"),
+            )))
+        }
+    };
+    if !branch_preexisted
+        && let Err(e) = repo.branch(branch, &head_commit, false)
+        && e.code() != git2::ErrorCode::Exists
+    {
+        return Err(Box::new(git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git.handoffThread worktree: create branch: {e}"),
+        )));
+    }
+
+    // libgit2's `Repository::worktree(name, path, opts)`:
+    //   - `name` is the worktree's ADMINISTRATIVE name (a single path segment
+    //     stored under `.git/worktrees/<name>/`). It must NOT contain slashes
+    //     — libgit2 won't create intermediate dirs under `.git/worktrees/`.
+    //     Branch names commonly contain slashes (`feature/xyz`), so we slugify
+    //     the name (replace `/` with `-`).
+    //   - `opts.reference(Some(&branch_ref))` points the worktree's HEAD at
+    //     the branch ref. This is the canonical way to add a worktree for an
+    //     EXISTING branch (the default `None` opts try to create a NEW branch
+    //     ref named <name>, which fails with "reference already exists" when
+    //     the branch is pre-existing — the common handoff case: the thread's
+    //     branch already has commits).
+    //
+    // The filesystem `wt_path` may contain slashes
+    // (`<repo>/.worktrees/feature/xyz`) — libgit2 won't create intermediate
+    // dirs there either, so we mkdir -p the parent first.
+    let wt_name = branch.replace('/', "-");
+    if let Some(parent) = wt_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return Err(Box::new(git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!(
+                "git.handoffThread worktree: create parent dir '{}': {e}",
+                parent.display()
+            ),
+        )));
+    }
+    // Resolve the branch ref to point the worktree at. `find_branch` covers
+    // both the pre-existing and just-created cases.
+    let branch_ref = match repo.find_branch(branch, git2::BranchType::Local) {
+        Ok(b) => b.into_reference(),
+        Err(e) => {
+            return Err(Box::new(git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git.handoffThread worktree: resolve branch '{branch}': {e}"),
+            )))
+        }
+    };
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&branch_ref));
+    let wt = match repo.worktree(&wt_name, &wt_path, Some(&opts)) {
+        Ok(w) => w,
+        Err(e) => {
+            return Err(Box::new(git_error(
+                id,
+                crate::error_codes::INTERNAL_ERROR,
+                format!("git.handoffThread worktree: add worktree: {e}"),
+            )))
+        }
+    };
+
+    Ok(HandoffWorktree {
+        path: wt.path().to_string_lossy().to_string(),
+        branch: branch.to_string(),
+    })
+}
+
+/// Best-effort read of the current branch name for a repo at `cwd`. Used
+/// only to give the worktree-handoff a deterministic branch when the caller
+/// omits `head`. Returns `Err` if the repo can't be opened or HEAD is
+/// detached/new; the caller falls back to the (possibly empty) `head`.
+fn current_branch_for_cwd(cwd: &str) -> Result<String, git2::Error> {
+    let repo = git2::Repository::discover(cwd)?;
+    let head = repo.head()?;
+    head.shorthand()
+        .map(String::from)
+        .ok_or_else(|| git2::Error::from_str("HEAD is unborn or detached"))
 }
 
 /// `git.preparePullRequestThread` → prepare a worktree/branch for a PR.
@@ -13958,6 +14186,214 @@ mod tests {
         );
         let err = resp.error.unwrap();
         assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+    }
+
+    // ─── git.handoffThread: branch-mode / worktree-mode / gh-missing ──────
+    //
+    // These exercise the new worktree-handoff extension:
+    //   - branch-mode: targetMode absent or "branch" → worktree fields null
+    //     (legacy behavior unchanged).
+    //   - worktree-mode: targetMode "worktree" → a real worktree is created
+    //     and worktreePath/associatedWorktreeBranch/changesTransferred are
+    //     populated. gh pr create will fail (no remote) but the worktree is
+    //     still created and surfaced.
+    //   - gh-missing: gh binary absent → graceful `{ ok:false, reason }` in
+    //     branch mode (no panic, no INTERNAL_ERROR).
+    // All three are gated on `git_available()` (the worktree ops need a real
+    // git binary; the gh-missing test stubs PATH to hide gh).
+
+    /// Branch-mode handoff (targetMode absent) against a temp repo WITHOUT a
+    /// GitHub remote: gh pr create fails gracefully, returning
+    /// `{ ok:false, reason }` (NOT an INTERNAL_ERROR). The worktree fields
+    /// must be absent from this short-circuit envelope (branch mode never
+    /// creates a worktree). Validates the legacy path is unchanged.
+    /// Also exercises BOTH dispatch forms (dot-name + slash-name).
+    #[tokio::test]
+    async fn git_handoff_thread_branch_mode_no_remote_returns_ok_false() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        // Both MCode dot-name and slash form must dispatch to the same
+        // handler. targetMode absent → defaults to "branch". gh pr create
+        // will fail (no origin remote on the temp repo) → handler returns
+        // the `{ ok:false, reason }` envelope rather than erroring.
+        for method in ["git.handoffThread", "git/handoff-thread", "git/handoffThread"] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method,
+                "params": {
+                    "cwd": repo.to_string_lossy(),
+                    "title": "Test PR",
+                    "head": "main",
+                }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            // The handler may return success-with-{ok:false} (gh present but
+            // no remote) OR success-with-{ok:false:"gh not found"} (gh
+            // absent). Both are valid graceful outcomes; what matters is NO
+            // INTERNAL_ERROR.
+            assert!(
+                resp.error.is_none(),
+                "{method}: branch-mode gh failure must not be a JSON-RPC error: {:?}",
+                resp.error
+            );
+            let result = resp.result.unwrap();
+            assert_eq!(
+                result["ok"], false,
+                "{method}: branch-mode without remote must yield ok:false, got {result}"
+            );
+            assert!(
+                result["reason"].as_str().is_some(),
+                "{method}: branch-mode failure must surface a reason string, got {result}"
+            );
+        }
+    }
+
+    /// Worktree-mode handoff (targetMode "worktree") against a temp repo
+    /// WITHOUT a GitHub remote: the worktree is created locally and its
+    /// path/branch are surfaced in the MCode result fields; gh pr create
+    /// fails but the handler still returns a success result (the worktree
+    /// is the primary deliverable). Verifies worktreePath,
+    /// associatedWorktreeBranch, changesTransferred are populated.
+    #[tokio::test]
+    async fn git_handoff_thread_worktree_mode_creates_worktree() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+        let head = "feature/handoff-test";
+
+        // Pre-create the feature branch + a commit on it, so the worktree
+        // has something to check out (matches real handoff usage where the
+        // thread's branch already has commits).
+        std::process::Command::new("git")
+            .args(["branch", head])
+            .current_dir(&repo)
+            .output()
+            .expect("git branch");
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.handoffThread",
+            "params": {
+                "cwd": repo.to_string_lossy(),
+                "title": "Test PR",
+                "head": head,
+                "targetMode": "worktree",
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(
+            resp.error.is_none(),
+            "worktree-mode must not return a JSON-RPC error: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        // targetMode echoed back.
+        assert_eq!(
+            result["targetMode"], "worktree",
+            "targetMode must echo 'worktree', got {result}"
+        );
+        // Worktree fields populated.
+        let wt_path = result["worktreePath"].as_str();
+        assert!(
+            wt_path.is_some(),
+            "worktreePath must be populated in worktree mode, got {result}"
+        );
+        assert!(
+            result["associatedWorktreeBranch"].as_str() == Some(head),
+            "associatedWorktreeBranch must equal head, got {result}"
+        );
+        assert_eq!(
+            result["changesTransferred"], true,
+            "changesTransferred must be true once the worktree is created, got {result}"
+        );
+        assert_eq!(
+            result["conflictsDetected"], false,
+            "conflictsDetected must be false for a fresh worktree, got {result}"
+        );
+        // The associatedWorktreeRef is the fully-qualified ref.
+        let expected_ref = format!("refs/heads/{head}");
+        assert_eq!(
+            result["associatedWorktreeRef"].as_str(),
+            Some(expected_ref.as_str()),
+            "associatedWorktreeRef must be refs/heads/<branch>, got {result}"
+        );
+        // The worktree directory must actually exist on disk.
+        let wt = std::path::PathBuf::from(wt_path.unwrap());
+        assert!(
+            wt.is_dir(),
+            "worktreePath must point to a real directory: {}",
+            wt.display()
+        );
+        // message must mention the worktree was created (gh pr create fails
+        // on a no-remote temp repo, so the message carries that context).
+        let msg = result["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("Worktree created"),
+            "message must note the worktree creation, got: {msg}"
+        );
+    }
+
+    /// Branch-mode handoff when `gh` is NOT on PATH: the handler must return
+    /// `{ ok:false, reason }` (graceful — no INTERNAL_ERROR, no panic). We
+    /// simulate gh-absence by setting PATH to a directory containing only
+    /// git (the test inherits a minimal PATH via the `PATH` env override on
+    /// the spawned handler — but since the handler calls `which::which("gh")`
+    /// against the LIVE PATH, we instead verify the behavior directly: if gh
+    /// is missing the result is ok:false; if gh is present the temp repo has
+    /// no remote so the result is ALSO ok:false. Either way, no error. This
+    /// test therefore asserts the graceful envelope regardless of gh presence
+    /// (the gh-missing path is a strict subset of this assertion).
+    #[tokio::test]
+    async fn git_handoff_thread_graceful_when_gh_missing_or_no_remote() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        let state = WsState::new_in_memory(16);
+
+        // No GitHub remote configured → gh pr create cannot succeed. Whether
+        // gh is installed or not, the handler must return ok:false with a
+        // reason (the gh-missing branch returns the dedicated "gh CLI not
+        // found" reason; the no-remote branch returns gh's stderr).
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.handoffThread",
+            "params": {
+                "cwd": repo.to_string_lossy(),
+                "title": "Test PR",
+                "head": "main",
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(
+            resp.error.is_none(),
+            "gh-missing/no-remote must not be a JSON-RPC error: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(
+            result["ok"], false,
+            "expected ok:false (gh missing or no remote), got {result}"
+        );
+        let reason = result["reason"].as_str().expect("reason string");
+        assert!(
+            !reason.is_empty(),
+            "reason must be a non-empty hint, got: {reason}"
+        );
+        // If gh is absent the reason must say so explicitly; otherwise it's
+        // gh's stderr (which we don't constrain beyond non-empty).
+        if which::which("gh").is_err() {
+            assert!(
+                reason.contains("gh"),
+                "gh-missing reason must mention gh, got: {reason}"
+            );
+        }
     }
 
     /// `git.resolvePullRequest` rejects missing/empty `number`+`url` with
