@@ -33,7 +33,37 @@ pub async fn init_database(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
         .connect_with(options)
         .await?;
 
-    // Run embedded migrations
+    // Run the SQLx embedded migrations (`migrations/*.sql`). On a fresh
+    // database this creates all four tables (domain_events, snapshots,
+    // server_config, server_settings). On an existing database the migrations
+    // are a no-op (tracked by sqlx's `_sqlx_migrations` table, and each file is
+    // `CREATE TABLE IF NOT EXISTS` for safety).
+    //
+    // Fall back to the legacy inline `raw_sql` if the embedded migrations fail
+    // (e.g. an exotic pre-existing schema state sqlx can't reconcile). The
+    // fallback keeps existing deployments working during the SRV-2 transition;
+    // it is logged as a warning so the operator knows migrations didn't run.
+    if let Err(migrate_err) = crate::migrations::run(&pool).await {
+        tracing::warn!(
+            error = %migrate_err,
+            "sqlx::migrate! failed; falling back to legacy inline raw_sql schema. \
+             This keeps existing deployments working but the migration framework \
+             should be investigated."
+        );
+        run_legacy_raw_sql(&pool).await?;
+    }
+
+    tracing::info!("Database initialized at {}", db_url);
+    Ok(pool)
+}
+
+/// Legacy inline schema bootstrap, kept as a fallback for environments where
+/// `sqlx::migrate!` cannot run (e.g. an irreconcilable pre-existing schema).
+///
+/// This is the exact SQL that formerly lived inline in `init_database()`. It
+/// is additive (`CREATE TABLE IF NOT EXISTS`) so it never clobbers existing
+/// data. See the `migrations/` directory for the canonical, timestamped copies.
+async fn run_legacy_raw_sql(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
         r#"
         CREATE TABLE IF NOT EXISTS domain_events (
@@ -59,14 +89,6 @@ pub async fn init_database(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
             UNIQUE(aggregate_id)
         );
 
-        -- Server settings/config persistence (SRV-1). Single-row key/value
-        -- tables holding the serialized `ServerConfig` / `ServerSettings` JSON
-        -- documents (see crates/syncode-ws/src/settings.rs). A fixed `singleton`
-        -- key holds the document — the MCode UI models these as a single server
-        -- config/settings document, so a single upsertable row per table is
-        -- sufficient and avoids per-key fan-out. Additive (CREATE IF NOT
-        -- EXISTS) so it composes with the existing event-store schema and is
-        -- forward-compatible with the SRV-2 migrations crate.
         CREATE TABLE IF NOT EXISTS server_config (
             key           TEXT    PRIMARY KEY,
             value         TEXT    NOT NULL
@@ -77,11 +99,9 @@ pub async fn init_database(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
         );
         "#,
     )
-    .execute(&pool)
+    .execute(pool)
     .await?;
-
-    tracing::info!("Database initialized at {}", db_url);
-    Ok(pool)
+    Ok(())
 }
 
 /// Get a connection from the pool
