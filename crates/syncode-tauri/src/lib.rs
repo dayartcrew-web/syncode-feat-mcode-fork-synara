@@ -9,3 +9,7 @@ pub mod shell_commands;
 pub mod terminal_commands;
 pub mod tray;
 pub mod updater;
+/// WS server spawn inside the Tauri shell (DSK-1).
+pub mod ws_setup;
+/// IPC commands exposing the booted WS endpoint to the frontend (DSK-1).
+pub mod ws_commands;
