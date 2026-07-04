@@ -86,6 +86,17 @@ pub struct SessionState {
     pub request_count: AtomicBool, // reuse AtomicBool as a simple flag
     /// Response tokens accumulated
     pub total_output_tokens: std::sync::atomic::AtomicU32,
+    /// Provider-side resume cursor (e.g. a thread id from the provider's API).
+    ///
+    /// When `Some`, this is the cursor the provider returned for the session —
+    /// on a server restart [`SessionManager::rehydrate_sessions`] passes it to
+    /// [`ProviderAdapter::resume_session`] so the provider can reattach to its
+    /// in-flight conversation rather than starting fresh. Stored behind a
+    /// lock so it can be updated after the adapter returns a cursor without
+    /// taking a write lock on the whole `SessionState`.
+    ///
+    /// [`ProviderAdapter::resume_session`]: crate::trait_def::ProviderAdapter::resume_session
+    resume_cursor: std::sync::RwLock<Option<String>>,
 }
 
 impl std::fmt::Debug for SessionState {
@@ -96,6 +107,7 @@ impl std::fmt::Debug for SessionState {
             .field("turn_id", &self.turn_id.as_str())
             .field("working_dir", &self.working_dir)
             .field("created_at", &self.created_at)
+            .field("resume_cursor", &self.resume_cursor())
             .finish()
     }
 }
@@ -113,7 +125,27 @@ impl SessionState {
             created_at: Utc::now(),
             request_count: AtomicBool::new(false),
             total_output_tokens: std::sync::atomic::AtomicU32::new(0),
+            resume_cursor: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Get the provider-side resume cursor, if one has been recorded.
+    ///
+    /// Returns a cloned `String` so callers can hand it to
+    /// [`ProviderAdapter::resume_session`] without holding the session's lock.
+    ///
+    /// [`ProviderAdapter::resume_session`]: crate::trait_def::ProviderAdapter::resume_session
+    pub fn resume_cursor(&self) -> Option<String> {
+        self.resume_cursor.read().unwrap().clone()
+    }
+
+    /// Record (or clear) the provider-side resume cursor.
+    ///
+    /// Adapters call this once the provider returns a thread/conversation id
+    /// so the cursor survives a server restart. Passing `None` clears any
+    /// previously stored cursor.
+    pub fn set_resume_cursor(&self, cursor: Option<String>) {
+        *self.resume_cursor.write().unwrap() = cursor;
     }
 
     /// Get the current session status
@@ -411,6 +443,386 @@ impl SessionManager {
         }
         results
     }
+
+    // -- Resume-cursor persistence -----------------------------------------
+    //
+    // On a server restart the in-memory `SessionManager` is lost — every
+    // provider session that was in flight vanishes. The methods below pair
+    // with [`ResumeCursorStore`] to persist enough of each session (its id +
+    // provider-side resume cursor + thread/turn linkage + working dir) to
+    // rebuild the manager after a restart and let the adapter reattach via
+    // [`ProviderAdapter::resume_session`].
+    //
+    // [`ProviderAdapter::resume_session`]: crate::trait_def::ProviderAdapter::resume_session
+
+    /// Snapshot every session that has a resume cursor into a vector of
+    /// [`PersistedSessionCursor`] entries.
+    ///
+    /// Sessions without a cursor (`resume_cursor == None`) are skipped — the
+    /// provider has nothing to reattach to, so there is no point persisting
+    /// them. The returned vector is what [`Self::persist_sessions`] hands to
+    /// a [`ResumeCursorStore`].
+    pub async fn snapshot_cursorsors(&self) -> Vec<PersistedSessionCursor> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .filter_map(|s| {
+                s.resume_cursor().map(|cursor| PersistedSessionCursor {
+                    session_id: s.id.clone(),
+                    thread_id: s.thread_id,
+                    turn_id: s.turn_id,
+                    working_dir: s.working_dir.clone(),
+                    resume_cursor: cursor,
+                })
+            })
+            .collect()
+    }
+
+    /// Persist every cursor-bearing session through `store` (best-effort).
+    ///
+    /// Wraps [`Self::snapshot_cursorsors`] + [`ResumeCursorStore::save_all`].
+    /// Returns the number of sessions persisted. Errors are logged at `WARN`
+    /// and never propagated — persistence is best-effort, and a failure here
+    /// must not crash the server (the sessions remain live in memory).
+    pub async fn persist_sessions(&self, store: &dyn ResumeCursorStore) -> usize {
+        let snapshot = self.snapshot_cursorsors().await;
+        let count = snapshot.len();
+        if let Err(e) = store.save_all(&snapshot).await {
+            tracing::warn!(
+                error = %e,
+                persisted_count = count,
+                "failed to persist session resume cursors — sessions remain live in memory",
+            );
+            return 0;
+        }
+        tracing::info!(persisted_count = count, "persisted session resume cursors");
+        count
+    }
+
+    /// Rehydrate sessions from a [`ResumeCursorStore`] after a restart.
+    ///
+    /// For every persisted entry:
+    /// 1. Register a fresh [`SessionState`] (keyed by the persisted
+    ///    `session_id`) in the manager's three indices, mirroring
+    ///    [`Self::start_session`]'s bookkeeping but **without** calling the
+    ///    adapter's `start_session` (we already have a session id).
+    /// 2. Seed it with the persisted `resume_cursor`.
+    /// 3. Call `adapter.resume_session(session_id)` so the provider reattaches
+    ///    to its in-flight conversation.
+    ///
+    /// Sessions whose adapter call fails are still tracked (their status
+    /// reflects the failure via [`SessionStateStatus::Errored`]) so the
+    /// operator can see them in `list_active_sessions`; the per-session result
+    /// is returned for observability. The manager is always left in a
+    /// consistent state regardless of how many adapter calls fail.
+    pub async fn rehydrate_sessions(
+        &self,
+        store: &dyn ResumeCursorStore,
+        adapter: &SharedAdapter,
+    ) -> Vec<RehydratedSession> {
+        let entries = match store.load_all().await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to load persisted session cursors — starting with no rehydrated sessions",
+                );
+                return Vec::new();
+            }
+        };
+
+        tracing::info!(
+            persisted_count = entries.len(),
+            "rehydrating sessions from persisted resume cursors"
+        );
+        let mut results = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let session = Arc::new(SessionState::new(
+                entry.session_id.clone(),
+                entry.thread_id,
+                entry.turn_id,
+                entry.working_dir.clone(),
+            ));
+            // Seed the cursor before the adapter call so it is observable even
+            // if the provider reattach fails.
+            session.set_resume_cursor(Some(entry.resume_cursor.clone()));
+            // Rehydrated sessions start in Processing — that is the state they
+            // were in before the restart (only Processing sessions are
+            // reattachable; Interrupted sessions would resume explicitly).
+            session
+                .transition(SessionStateStatus::Processing)
+                .map_err(|e| ProviderAdapterError::Internal(e.to_string()))
+                .ok();
+
+            // Track in all three indices (mirrors start_session).
+            {
+                let mut sessions = self.sessions.write().await;
+                sessions.insert(entry.session_id.clone(), session.clone());
+            }
+            {
+                let mut turn_sessions = self.turn_sessions.write().await;
+                turn_sessions.insert(entry.turn_id.as_str(), entry.session_id.clone());
+            }
+            {
+                let mut thread_sessions = self.thread_sessions.write().await;
+                thread_sessions
+                    .entry(entry.thread_id.as_str())
+                    .or_default()
+                    .push(entry.session_id.clone());
+            }
+
+            // Ask the provider to reattach. Best-effort: a failure marks the
+            // session Errored but does not abort the rest of the rehydration.
+            let mut guard = adapter.write().await;
+            let outcome = match guard.resume_session(&entry.session_id).await {
+                Ok(()) => RehydrationOutcome::Reattached,
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %entry.session_id,
+                        error = %e,
+                        "provider failed to resume rehydrated session",
+                    );
+                    session.set_status(SessionStateStatus::Errored);
+                    RehydrationOutcome::Failed(e.to_string())
+                }
+            };
+            drop(guard);
+
+            results.push(RehydratedSession {
+                session_id: entry.session_id,
+                outcome,
+            });
+        }
+        results
+    }
+}
+
+/// Outcome of rehydrating a single persisted session.
+#[derive(Debug, Clone)]
+pub struct RehydratedSession {
+    /// The session id that was rehydrated.
+    pub session_id: String,
+    /// Whether the adapter's `resume_session` succeeded.
+    pub outcome: RehydrationOutcome,
+}
+
+/// Per-session result of [`SessionManager::rehydrate_sessions`].
+#[derive(Debug, Clone)]
+pub enum RehydrationOutcome {
+    /// The adapter reattached to the provider-side session.
+    Reattached,
+    /// The adapter's `resume_session` failed; the session is tracked but
+    /// marked `Errored`. Carries the error message.
+    Failed(String),
+}
+
+// ---------------------------------------------------------------------------
+// Resume-cursor persistence — survives a server restart
+// ---------------------------------------------------------------------------
+
+/// A serialized snapshot of one session's resume cursor.
+///
+/// [`SessionManager::snapshot_cursorsors`] produces a `Vec<PersistedSessionCursor>`
+/// which a [`ResumeCursorStore`] writes to disk; on the next start
+/// [`SessionManager::rehydrate_sessions`] reads them back and re-registers
+/// each session + asks the adapter to reattach.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PersistedSessionCursor {
+    /// The session id (provider-assigned) to reattach.
+    pub session_id: String,
+    /// The thread this session belongs to.
+    pub thread_id: EntityId,
+    /// The turn this session processes.
+    pub turn_id: EntityId,
+    /// Working directory for the provider.
+    pub working_dir: String,
+    /// The provider-side resume cursor (e.g. a provider thread id).
+    pub resume_cursor: String,
+}
+
+/// Errors that can occur while persisting/loading resume cursors.
+#[derive(Debug, thiserror::Error)]
+pub enum ResumeCursorStoreError {
+    /// Filesystem I/O failure (read, write, create).
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// JSON serialization/deserialization failure (corrupt file or a
+    /// non-array stored shape).
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+}
+
+/// Pluggable persistence for session resume cursors.
+///
+/// Two reference implementations are provided:
+/// - [`FileResumeCursorStore`] — JSON file at `~/.syncode/session_cursors.json`
+///   (production; survives restarts).
+/// - [`InMemoryResumeCursorStore`] — `Arc<Mutex<…>>` (tests).
+///
+/// The trait is async so a future SQLite-backed implementation can drop in
+/// without touching call sites.
+#[async_trait::async_trait]
+pub trait ResumeCursorStore: Send + Sync {
+    /// Replace the on-disk document with `entries` (full snapshot — not a
+    /// merge). Called by [`SessionManager::persist_sessions`].
+    async fn save_all(
+        &self,
+        entries: &[PersistedSessionCursor],
+    ) -> Result<(), ResumeCursorStoreError>;
+
+    /// Load every persisted cursor. Returns an empty vector when the store is
+    /// empty or missing (fresh start). Called by
+    /// [`SessionManager::rehydrate_sessions`].
+    async fn load_all(&self) -> Result<Vec<PersistedSessionCursor>, ResumeCursorStoreError>;
+}
+
+/// File-backed `ResumeCursorStore` writing a single JSON document to
+/// `{base_dir}/session_cursors.json`.
+///
+/// The default `base_dir` is `~/.syncode/` (resolving `$HOME` then
+/// `$USERPROFILE`), matching the `server_home_dir` / `ScrollbackStore`
+/// resolution used elsewhere in the codebase. Tests inject a `tempfile`
+/// directory via [`FileResumeCursorStore::with_dir`].
+///
+/// Writes are atomic (write-to-`.tmp` + rename) so a reader never sees a
+/// half-written document — mirrors the `ScrollbackStore` write strategy.
+#[derive(Debug, Clone)]
+pub struct FileResumeCursorStore {
+    base_dir: std::path::PathBuf,
+}
+
+impl FileResumeCursorStore {
+    /// Create a store rooted at the default location (`~/.syncode/`).
+    ///
+    /// Falls back to `./.syncode/` when neither `$HOME` nor `$USERPROFILE`
+    /// is set, matching [`crate`] conventions.
+    pub fn new() -> Self {
+        Self {
+            base_dir: default_cursor_dir(),
+        }
+    }
+
+    /// Create a store rooted at `base_dir` (tests inject a `tempfile` dir).
+    pub fn with_dir(base_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            base_dir: base_dir.into(),
+        }
+    }
+
+    /// The full path to the JSON document.
+    fn file_path(&self) -> std::path::PathBuf {
+        self.base_dir.join("session_cursors.json")
+    }
+
+    /// The full path to the sibling `.tmp` file used by atomic writes.
+    fn tmp_path(&self) -> std::path::PathBuf {
+        let mut name = self
+            .file_path()
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("session_cursors.json"));
+        name.push(".tmp");
+        self.file_path().with_file_name(name)
+    }
+}
+
+impl Default for FileResumeCursorStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl ResumeCursorStore for FileResumeCursorStore {
+    async fn save_all(
+        &self,
+        entries: &[PersistedSessionCursor],
+    ) -> Result<(), ResumeCursorStoreError> {
+        let json = serde_json::to_string(entries)
+            .map_err(|e| ResumeCursorStoreError::Serialization(e.to_string()))?;
+        let path = self.file_path();
+        let tmp = self.tmp_path();
+
+        // Ensure the base directory exists (best-effort; ignore "already
+        // exists" — mirrors `ScrollbackStore` posture).
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(ResumeCursorStoreError::Io(e));
+        }
+
+        // Write-to-tmp then rename — atomic on both POSIX and Windows.
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all().map_err(ResumeCursorStoreError::Io)?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    async fn load_all(&self) -> Result<Vec<PersistedSessionCursor>, ResumeCursorStoreError> {
+        let path = self.file_path();
+        let json = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Fresh start — no persisted cursors.
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(ResumeCursorStoreError::Io(e)),
+        };
+        if json.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str::<Vec<PersistedSessionCursor>>(&json)
+            .map_err(|e| ResumeCursorStoreError::Serialization(e.to_string()))
+    }
+}
+
+/// Resolve the default base directory: `$HOME/.syncode` on POSIX,
+/// `$USERPROFILE/.syncode` on Windows. Falls back to `./.syncode` when
+/// neither env var is set (mirrors `ScrollbackStore::default_base_dir`).
+fn default_cursor_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    home.join(".syncode")
+}
+
+/// In-memory `ResumeCursorStore` for tests.
+///
+/// Holds a single snapshot behind an `async RwLock`; `save_all` replaces it,
+/// `load_all` clones it. Drop-in replacement for [`FileResumeCursorStore`]
+/// without touching the filesystem.
+#[derive(Debug, Default)]
+pub struct InMemoryResumeCursorStore {
+    entries: tokio::sync::RwLock<Vec<PersistedSessionCursor>>,
+}
+
+impl InMemoryResumeCursorStore {
+    /// Create an empty in-memory store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl ResumeCursorStore for InMemoryResumeCursorStore {
+    async fn save_all(
+        &self,
+        entries: &[PersistedSessionCursor],
+    ) -> Result<(), ResumeCursorStoreError> {
+        let mut guard = self.entries.write().await;
+        *guard = entries.to_vec();
+        Ok(())
+    }
+
+    async fn load_all(&self) -> Result<Vec<PersistedSessionCursor>, ResumeCursorStoreError> {
+        Ok(self.entries.read().await.clone())
+    }
 }
 
 impl Default for SessionManager {
@@ -441,6 +853,28 @@ mod tests {
         assert!(session.is_active());
         assert_eq!(session.status(), SessionStateStatus::Pending);
         assert_eq!(session.total_tokens(), 0);
+    }
+
+    #[test]
+    fn session_resume_cursor_defaults_none() {
+        // A fresh session has no resume cursor — nothing to reattach to.
+        let session = make_session();
+        assert!(session.resume_cursor().is_none());
+    }
+
+    #[test]
+    fn session_resume_cursor_round_trip() {
+        // set_resume_cursor then resume_cursor returns a clone of the value.
+        let session = make_session();
+        session.set_resume_cursor(Some("provider-thread-123".to_string()));
+        assert_eq!(
+            session.resume_cursor().as_deref(),
+            Some("provider-thread-123")
+        );
+
+        // Clearing works.
+        session.set_resume_cursor(None);
+        assert!(session.resume_cursor().is_none());
     }
 
     #[test]
@@ -780,5 +1214,387 @@ mod tests {
         let adapter = make_shared_mock();
         let result = mgr.interrupt_session(&adapter, "nope").await;
         assert!(result.is_err());
+    }
+
+    // ---------------------------------------------------------------------------
+    // P0-4: Resume-cursor persistence + rehydration tests
+    // ---------------------------------------------------------------------------
+
+    /// A mock adapter whose `resume_session` succeeds only for session ids
+    /// registered via [`Self::allow_resume`]. Used by the rehydration tests to
+    /// exercise both the success and failure paths without touching a real
+    /// provider.
+    struct ResumableMockAdapter {
+        /// Session ids that `resume_session` will accept.
+        resumable: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ResumableMockAdapter {
+        fn new() -> Self {
+            Self {
+                resumable: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Allow `resume_session` to succeed for this session id.
+        fn allow_resume(&self, session_id: &str) {
+            self.resumable
+                .lock()
+                .unwrap()
+                .push(session_id.to_string());
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderAdapter for ResumableMockAdapter {
+        fn provider_id(&self) -> &str {
+            "resumable-mock"
+        }
+        fn capabilities(&self) -> Vec<ProviderCapability> {
+            vec![]
+        }
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus::Idle
+        }
+        fn available_models(&self) -> Vec<String> {
+            vec!["mock".to_string()]
+        }
+
+        async fn spawn(&mut self, _config: ProviderConfig) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn interrupt(&self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, ProviderAdapterError> {
+            Ok(format!("session-{}", uuid::Uuid::new_v4().hyphenated()))
+        }
+
+        async fn resume_session(
+            &mut self,
+            session_id: &str,
+        ) -> Result<(), ProviderAdapterError> {
+            let resumable = self.resumable.lock().unwrap();
+            if resumable.contains(&session_id.to_string()) {
+                Ok(())
+            } else {
+                Err(ProviderAdapterError::SessionNotFound(session_id.to_string()))
+            }
+        }
+
+        async fn stop_session(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn send_request(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<ProviderResponse, ProviderAdapterError> {
+            Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(1),
+                result: Some(serde_json::json!({})),
+                error: None,
+            })
+        }
+        fn event_stream(
+            &self,
+            _session_id: &str,
+        ) -> Result<ProviderStream, ProviderAdapterError> {
+            Ok(Box::pin(tokio_stream::empty()))
+        }
+        async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_round_trip() {
+        // save_all then load_all returns the same entries.
+        let store = InMemoryResumeCursorStore::new();
+        let entries = vec![PersistedSessionCursor {
+            session_id: "sess-1".to_string(),
+            thread_id: EntityId::new(),
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/x".to_string(),
+            resume_cursor: "cursor-1".to_string(),
+        }];
+        store.save_all(&entries).await.unwrap();
+        let loaded = store.load_all().await.unwrap();
+        assert_eq!(loaded, entries);
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_load_empty_returns_empty_vec() {
+        // A fresh store has no entries — load_all returns an empty vec (not an
+        // error), so rehydration is a no-op on first boot.
+        let store = InMemoryResumeCursorStore::new();
+        let loaded = store.load_all().await.unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_store_round_trip_under_tempdir() {
+        // The file store persists to {dir}/session_cursors.json; a save then
+        // load round-trips the entries exactly.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileResumeCursorStore::with_dir(dir.path());
+        let entries = vec![
+            PersistedSessionCursor {
+                session_id: "sess-a".to_string(),
+                thread_id: EntityId::new(),
+                turn_id: EntityId::new(),
+                working_dir: "/tmp/a".to_string(),
+                resume_cursor: "cursor-a".to_string(),
+            },
+            PersistedSessionCursor {
+                session_id: "sess-b".to_string(),
+                thread_id: EntityId::new(),
+                turn_id: EntityId::new(),
+                working_dir: "/tmp/b".to_string(),
+                resume_cursor: "cursor-b".to_string(),
+            },
+        ];
+        store.save_all(&entries).await.unwrap();
+        let loaded = store.load_all().await.unwrap();
+        assert_eq!(loaded, entries);
+        // The file actually exists on disk.
+        assert!(dir.path().join("session_cursors.json").exists());
+    }
+
+    #[tokio::test]
+    async fn file_store_load_missing_returns_empty_vec() {
+        // A non-existent file is the first-boot case — load returns an empty
+        // vec rather than an error.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileResumeCursorStore::with_dir(dir.path());
+        let loaded = store.load_all().await.unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_store_save_replaces_prior_snapshot() {
+        // save_all is a full-snapshot replace — a second save with fewer
+        // entries yields exactly those entries (no append, no leftovers).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileResumeCursorStore::with_dir(dir.path());
+
+        let first = vec![PersistedSessionCursor {
+            session_id: "sess-1".to_string(),
+            thread_id: EntityId::new(),
+            turn_id: EntityId::new(),
+            working_dir: "/tmp".to_string(),
+            resume_cursor: "c1".to_string(),
+        }];
+        store.save_all(&first).await.unwrap();
+
+        let second = vec![PersistedSessionCursor {
+            session_id: "sess-2".to_string(),
+            thread_id: EntityId::new(),
+            turn_id: EntityId::new(),
+            working_dir: "/tmp".to_string(),
+            resume_cursor: "c2".to_string(),
+        }];
+        store.save_all(&second).await.unwrap();
+
+        let loaded = store.load_all().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].session_id, "sess-2");
+    }
+
+    #[tokio::test]
+    async fn snapshot_skips_cursorless_sessions() {
+        // Only sessions with a resume cursor are snapshotted — sessions with
+        // no cursor are skipped (the provider has nothing to reattach to).
+        let mgr = SessionManager::new();
+        let adapter = make_shared_mock();
+
+        // Start two sessions; neither has a cursor yet.
+        let s1 = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
+        let s2 = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
+
+        // Give only s1 a cursor.
+        s1.set_resume_cursor(Some("provider-thread-1".to_string()));
+
+        let snapshot = mgr.snapshot_cursorsors().await;
+        assert_eq!(snapshot.len(), 1, "only the cursor-bearing session appears");
+        assert_eq!(snapshot[0].session_id, s1.id);
+        assert_eq!(snapshot[0].resume_cursor, "provider-thread-1");
+        // s2 is omitted.
+        assert!(
+            !snapshot.iter().any(|e| e.session_id == s2.id),
+            "cursorless session must be skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_then_rehydrate_round_trip() {
+        // The full P0-4 lifecycle: start sessions, record cursors, persist to
+        // an in-memory store, then on a "restart" (fresh manager) rehydrate —
+        // the rehydrated sessions are tracked and the adapter's
+        // `resume_session` is called for each.
+        let adapter = make_shared_mock();
+
+        // --- Pre-restart: build the original manager + cursors ---
+        let mgr = SessionManager::new();
+        let ctx1 = make_session_ctx();
+        let ctx2 = make_session_ctx();
+
+        let s1 = mgr.start_session(&adapter, ctx1).await.unwrap();
+        let s2 = mgr.start_session(&adapter, ctx2).await.unwrap();
+        s1.set_resume_cursor(Some("cursor-1".to_string()));
+        s2.set_resume_cursor(Some("cursor-2".to_string()));
+
+        // Persist via an in-memory store (simulates the JSON file on disk).
+        let store = Arc::new(InMemoryResumeCursorStore::new());
+        let persisted = mgr.persist_sessions(store.as_ref()).await;
+        assert_eq!(persisted, 2, "both cursor-bearing sessions persisted");
+
+        // --- Restart: fresh manager + fresh adapter state ---
+        // A real restart re-creates both the SessionManager and the provider
+        // adapter. Build a ResumableMockAdapter that pre-registers the two
+        // persisted session ids so its `resume_session` succeeds — this
+        // models "the provider still knows about these sessions".
+        let new_mgr = SessionManager::new();
+        let new_adapter: SharedAdapter = {
+            let entries = store.load_all().await.unwrap();
+            let mock = ResumableMockAdapter::new();
+            for e in &entries {
+                mock.allow_resume(&e.session_id);
+            }
+            Arc::new(RwLock::new(mock))
+        };
+        // The pre-restart adapter is dropped (out of scope after the restart).
+        drop(adapter);
+
+        // Rehydrate.
+        let results = new_mgr.rehydrate_sessions(store.as_ref(), &new_adapter).await;
+        assert_eq!(results.len(), 2, "both sessions rehydrated");
+
+        // Both should have reattached.
+        let mut reattached_ids: Vec<String> = results
+            .iter()
+            .map(|r| match &r.outcome {
+                RehydrationOutcome::Reattached => r.session_id.clone(),
+                RehydrationOutcome::Failed(msg) => panic!("unexpected failure: {msg}"),
+            })
+            .collect();
+        reattached_ids.sort();
+        assert_eq!(reattached_ids.len(), 2);
+
+        // The new manager tracks both sessions, and each carries its cursor.
+        assert_eq!(new_mgr.session_count().await, 2);
+        for sid in &reattached_ids {
+            let session = new_mgr.get_session(sid).await.expect("tracked");
+            assert!(
+                session.resume_cursor().is_some(),
+                "rehydrated session must carry its cursor"
+            );
+        }
+
+        // The persisted session ids match the originals.
+        let mut original_ids = vec![s1.id.clone(), s2.id.clone()];
+        original_ids.sort();
+        assert_eq!(reattached_ids, original_ids);
+    }
+
+    #[tokio::test]
+    async fn rehydrate_marks_failed_resume_as_errored() {
+        // When the adapter's resume_session fails for a session, the manager
+        // still tracks it but marks it Errored — so a single bad session
+        // doesn't abort the whole rehydration.
+        let store = InMemoryResumeCursorStore::new();
+        let entry = PersistedSessionCursor {
+            session_id: "doomed-session".to_string(),
+            thread_id: EntityId::new(),
+            turn_id: EntityId::new(),
+            working_dir: "/tmp".to_string(),
+            resume_cursor: "cursor".to_string(),
+        };
+        store.save_all(&[entry]).await.unwrap();
+
+        // The mock does not pre-register the session → resume_session errors.
+        let adapter: SharedAdapter = Arc::new(RwLock::new(ResumableMockAdapter::new()));
+        let mgr = SessionManager::new();
+
+        let results = mgr.rehydrate_sessions(&store, &adapter).await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            results[0].outcome,
+            RehydrationOutcome::Failed(_)
+        ));
+
+        // The session is tracked but Errored.
+        let session = mgr.get_session("doomed-session").await.expect("tracked");
+        assert_eq!(session.status(), SessionStateStatus::Errored);
+        // Its cursor was seeded before the failure, so it is still observable.
+        assert_eq!(session.resume_cursor().as_deref(), Some("cursor"));
+    }
+
+    #[tokio::test]
+    async fn rehydrate_empty_store_is_no_op() {
+        // First boot (no persisted file) → load returns empty → rehydrate is a
+        // no-op, the manager stays empty, and the adapter is never called.
+        let store = InMemoryResumeCursorStore::new();
+        let adapter: SharedAdapter = Arc::new(RwLock::new(ResumableMockAdapter::new()));
+        let mgr = SessionManager::new();
+
+        let results = mgr.rehydrate_sessions(&store, &adapter).await;
+        assert!(results.is_empty());
+        assert_eq!(mgr.session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn persist_via_file_store_survives_new_manager() {
+        // End-to-end through the file store: persist from one manager, load +
+        // rehydrate into a second manager — proves the JSON file is the bridge
+        // between two separate `SessionManager` instances (i.e. across a
+        // restart).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileResumeCursorStore::with_dir(dir.path());
+
+        // First manager: start a session, set a cursor, persist.
+        let adapter = make_shared_mock();
+        let mgr_a = SessionManager::new();
+        let session = mgr_a
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
+        session.set_resume_cursor(Some("file-cursor".to_string()));
+        let persisted = mgr_a.persist_sessions(&store).await;
+        assert_eq!(persisted, 1);
+
+        // Second manager: rehydrate from the same file store.
+        let mgr_b = SessionManager::new();
+        // Pre-register the session id so the mock's resume_session succeeds.
+        let new_adapter: SharedAdapter = {
+            let mock = ResumableMockAdapter::new();
+            mock.allow_resume(&session.id);
+            Arc::new(RwLock::new(mock))
+        };
+        let results = mgr_b.rehydrate_sessions(&store, &new_adapter).await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            results[0].outcome,
+            RehydrationOutcome::Reattached
+        ));
+
+        // The session id from the first manager is now tracked in the second.
+        let rehydrated = mgr_b.get_session(&session.id).await.expect("tracked");
+        assert_eq!(rehydrated.resume_cursor().as_deref(), Some("file-cursor"));
     }
 }

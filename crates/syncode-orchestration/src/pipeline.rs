@@ -344,6 +344,24 @@ impl Orchestrator {
         }
     }
 
+    /// Borrow the configured command reactor (if any).
+    ///
+    /// Used by the server binary to (a) rehydrate sessions into the reactor's
+    /// [`SessionManager`] on startup and (b) persist cursors to disk on
+    /// shutdown. Returns `None` for the inert `Orchestrator::new` path.
+    pub fn command_reactor(&self) -> Option<&Arc<ProviderCommandReactor>> {
+        self.command_reactor.as_ref()
+    }
+
+    /// Borrow the configured provider adapter (if any).
+    ///
+    /// Pairs with [`Self::command_reactor`] for resume-cursor rehydration
+    /// (which needs both the `SessionManager` and the adapter to call
+    /// `resume_session`).
+    pub fn adapter(&self) -> Option<&syncode_provider::registry::SharedAdapter> {
+        self.adapter.as_ref()
+    }
+
     /// Handle a command through the full pipeline.
     ///
     /// 1. Extract aggregate state from read model as JSON

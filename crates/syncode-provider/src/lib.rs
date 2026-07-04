@@ -35,7 +35,11 @@ pub use opencode_server::{
     OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnOutcome as OpenCodeTurnOutcome,
     TurnStatus as OpenCodeTurnStatus,
 };
-pub use session::{SessionManager, SessionState, SessionStateStatus, SessionTransitionError};
+pub use session::{
+    FileResumeCursorStore, InMemoryResumeCursorStore, PersistedSessionCursor, RehydratedSession,
+    RehydrationOutcome, ResumeCursorStore, ResumeCursorStoreError, SessionManager, SessionState,
+    SessionStateStatus, SessionTransitionError,
+};
 pub use trait_def::{
     ALL_PROVIDERS, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE, PROVIDER_CODEX, PROVIDER_CURSOR,
     PROVIDER_GEMINI, PROVIDER_GROK, PROVIDER_KILO, PROVIDER_OPENAI, PROVIDER_OPENCODE, PROVIDER_PI,
