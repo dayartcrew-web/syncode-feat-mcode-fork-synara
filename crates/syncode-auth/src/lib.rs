@@ -7,6 +7,7 @@
 pub mod authenticator;
 pub mod config;
 pub mod credential;
+pub mod pairing;
 pub mod policy;
 pub mod principal;
 pub mod secret_store;
@@ -19,5 +20,9 @@ pub use authenticator::{
     AuthError, AuthenticatedSession, Authenticator, SharedSecretAuthenticator,
 };
 pub use config::{AuthMode, WsAuthConfig};
+pub use pairing::{
+    InMemoryPairingLinkStore, PairingLink, PairingLinkStore, PairingStoreError,
+    SqlitePairingLinkStore, DEFAULT_PAIRING_TTL,
+};
 pub use principal::{Principal, Role};
 pub use session::{SessionRegistry, SessionToken};

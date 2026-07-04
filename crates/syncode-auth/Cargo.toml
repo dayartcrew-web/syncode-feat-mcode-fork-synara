@@ -15,3 +15,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 async-trait = "0.1"
+# SQLite backing for the pairing_links store (AUTH-1). Mirrors the workspace
+# pin already used by syncode-persistence so the migrations story is uniform.
+sqlx = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
