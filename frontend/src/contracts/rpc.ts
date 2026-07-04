@@ -1606,11 +1606,13 @@ export const UNSERVED_RPC = [
   // PROJ-3: `project.discoverScripts` + `project.runScript` are NOW SERVED
   // (mapped via MCODE_TO_SERVED to `project.discover-scripts` /
   // `project.run-script` — backed by `project_fs::discover_scripts` +
-  // `project_fs::run_script`). The remaining project ops below are still
-  // unserved (MethodNotFound):
-  "project.listDevServers",
-  "project.startDevServer",
-  "project.stopDevServer",
+  // `project_fs::run_script`). PROJ-4: `project.startDevServer`,
+  // `project.stopDevServer`, and `project.listDevServers` are NOW SERVED
+  // (mapped via MCODE_TO_SERVED to `project.start-dev-server` /
+  // `project.stop-dev-server` / `project.list-dev-servers` — backed by the
+  // `LocalServerManager`, the same manager `server.startLocalServer` uses,
+  // with a sidecar `dev_servers` registry tagging which ids are dev servers).
+  // No project ops remain unserved (MethodNotFound).
 
   // ─── Orchestration extras (beyond served thread/turn set) ────────────
   // ORCH-2: `orchestration.replayEvents` is NOW SERVED (mapped to slash form,
