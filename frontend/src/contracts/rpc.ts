@@ -1439,9 +1439,26 @@ export const SERVED_RPC = {
     request: null as unknown as Record<string, unknown>,
     result: null as unknown as { readonly diff: string; readonly note?: string },
   },
+  // ORCH-7: `orchestration.getFullThreadDiff` aggregates the per-turn diffs
+  // across an entire thread by reusing ORCH-6's `compute_diff` primitive. For
+  // every turn (ordered by `sequence`) it loads the matching `CheckpointView`,
+  // resolves `(from_ref, to_ref)` exactly like `getTurnDiff` (this checkpoint →
+  // next checkpoint, or HEAD for the latest), and concatenates the patches.
+  // Returns `{ threadId, turns: [{ turnId, sequence, diff, note? }], totalDiff }`
+  // — never an error (empty `turns` + `totalDiff` when no checkpoints).
   "orchestration/get-full-thread-diff": {
     request: null as unknown as Record<string, unknown>,
-    result: null as unknown as Record<string, unknown>,
+    result: null as unknown as {
+      readonly threadId: string;
+      readonly turns: ReadonlyArray<{
+        readonly turnId: string;
+        readonly sequence: number;
+        readonly diff: string;
+        readonly note?: string;
+      }>;
+      readonly totalDiff: string;
+      readonly note?: string;
+    },
   },
   "orchestration/replay-events": {
     request: null as unknown as Record<string, unknown>,
@@ -1607,9 +1624,10 @@ export const UNSERVED_RPC = [
   // `orchestration.dispatchCommand` is NOW SERVED (routes the `{type,
   // ...payload}` shape through the matching `ApplicationService` method, with
   // structured error mapping `data.kind` — see
-  // `handle_orchestration_dispatch_command` in rpc.rs). The remaining op below
-  // is still unserved.
-  "orchestration.getFullThreadDiff",
+  // `handle_orchestration_dispatch_command` in rpc.rs). ORCH-7:
+  // `orchestration.getFullThreadDiff` is NOW SERVED (aggregates per-turn diffs
+  // across a thread by reusing ORCH-6's `compute_diff` primitive — see
+  // SERVED_RPC). No orchestration extras remain unserved.
 
   // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing + AUTH-2 session RPCs served; these are not) ─────
   // AUTH-1: `auth.createPairingCredential`, `auth.revokePairingLink`, and
