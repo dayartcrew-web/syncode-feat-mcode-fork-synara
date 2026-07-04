@@ -1,6 +1,6 @@
 # Syncode — Clone+Rewire Status & REAL-vs-STUB Matrix
 
-> **Status (2026-07-04): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32. **Server (config/Settings) section re-audited 2026-07-04** against code post-sync to `7789fa9`. **Desktop WS spawn (DSK-1) added 2026-07-04** — in-process WS server now boots inside Tauri `.setup()`.
+> **Status (2026-07-04): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32. **Server (config/Settings) section re-audited 2026-07-04** against code post-sync to `7789fa9`. **Desktop WS spawn (DSK-1) added 2026-07-04** — in-process WS server now boots inside Tauri `.setup()`. **Desktop boot E2E (DSK-3) added 2026-07-04** — full `.setup()` wiring + actual binary boot now verified under `xvfb-run` in CI (`.github/workflows/desktop-e2e.yml`).
 >
 > This is the single source of truth for "mana yang masih stub vs real app-wired." Other docs (`COMPARISON-FRONTEND`, `CONTRACTS-BRIDGE-DESIGN`, `SHELL-GAPS`, `TEST_SUMMARY`, `CRATES`, `ARCHITECTURE`) carry detail/history; this file carries current status.
 
@@ -110,7 +110,7 @@
 | Terminal live output | ✅ reader-task → push bus |
 | Automation execution | ✅ `ProcessRunExecutor` (sh -c) |
 | LLM ops | ✅ provider CLI one-shot (`llm.rs::invoke_llm_oneshot`) — **no API key** (providers use CLI auth) |
-| Desktop shell (Tauri) | ✅ builds + **29 commands** wired (added `getWsEndpoint`); WS server spawned in `.setup()` (DSK-1). **GUI window boot still needs a display** (headless-blocked), but WS-layer boot E2E verified. |
+| Desktop shell (Tauri) | ✅ builds + **29 commands** wired (added `getWsEndpoint`); WS server spawned in `.setup()` (DSK-1). **Boot E2E verified** (DSK-3): the full `.setup()` wiring (`ws_setup::boot` → `WsRuntimeState` → endpoint accessor → WS handshake + JSON-RPC round-trip) is covered by a headless test (`tests/boot_e2e.rs::ws_setup_boot_wiring_e2e`), and the **actual binary** is booted under `xvfb-run` in CI (`.github/workflows/desktop-e2e.yml`) with a WS-connect assertion against the live shell (`desktop_binary_boot_connects_ws`, env-gated by `DESKTOP_E2E_WS_URL`). |
 
 ## Test/quality state
 - **Frontend**: tsc **0 errors**, vitest **2128 pass / 0 fail**, vite build green.
@@ -122,7 +122,7 @@
 - **GitHub-API ops** — achievable via `gh api` subprocess (gh CLI authed); niche PR-handoff flow.
 - **voice ops** (transcribeVoice/…) — STT subsystem (different from LLM-text).
 - **Real persistence for server settings** — ✅ **DONE (SRV-1)**: `ServerSettingsState` now write-throughs to SQLite `server_config`/`server_settings` tables; edits survive a restart (server binary attaches the pool in `build_state`).
-- **Desktop GUI boot E2E** — needs a display (headless-blocked). **WS-layer boot is verified** (DSK-1: server spawns in `.setup()`, `/ws` reachable, JSON-RPC round-trips); only the webview window rendering is unverified without a display.
+- **Desktop GUI boot E2E** — ✅ **DONE (DSK-3)**: the full `.setup()` wiring is covered headlessly by `tests/boot_e2e.rs::ws_setup_boot_wiring_e2e` (boot → `WsRuntimeState` → endpoint accessor → WS connect + JSON-RPC), and the actual Tauri binary is booted under `xvfb-run` in CI (`.github/workflows/desktop-e2e.yml`) with `desktop_binary_boot_connects_ws` asserting the live shell's `/ws` endpoint answers. Manual GUI verification procedure is documented in `tests/boot_e2e.rs` (run the binary under `xvfb-run` locally + point `DESKTOP_E2E_WS_URL` at it).
 
 ---
 
