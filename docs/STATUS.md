@@ -81,7 +81,8 @@
 |---|---|---|
 | `provider.listModels` / `listAgents` | ✅ REAL | `ALL_PROVIDERS` static (8 real provider descriptors) |
 | `provider.getComposerCapabilities` / `listSkills` / `listSkillsCatalog` / `listCommands` / `readSkill` | ✅ REAL | per-provider capability flags + filesystem `.skills/*.md` scan + static native commands + skill file read (traversal-guarded) |
-| `provider.listPlugins` / `readPlugin` / `listOptions` | ✅ REAL | filesystem `.plugins/*.json` scan (per-plugin `id`/`name`/`source`/`description`/`version`) + install-state manifest overlay at `~/.synara/plugins.json` (env-configurable via `SYNCODE_PLUGINS_MANIFEST`, per-request-pinnable via `pluginsManifestPath`) — drives real `installed`/`enabled`/`installPolicy` (`auto`\|`manual`\|`disabled`) fields. **Remote marketplace sync (OAuth, remote catalog) is out of scope.** |
+| `provider.listPlugins` / `readPlugin` | ✅ REAL | filesystem `.plugins/*.json` scan (per-plugin `id`/`name`/`source`/`description`/`version`) + install-state manifest overlay at `~/.synara/plugins.json` (env-configurable via `SYNCODE_PLUGINS_MANIFEST`, per-request-pinnable via `pluginsManifestPath`) — drives real `installed`/`enabled`/`installPolicy` (`auto`\|`manual`\|`disabled`) fields. **Remote marketplace sync (OAuth, remote catalog) is out of scope.** |
+| `provider.listOptions` | ✅ REAL | `ProviderOptionInfo[]` per `ALL_PROVIDERS` id — real model lists + capability flags (temperature / system-prompt / tool-use / streaming / vision / maxTokens) read from each provider's adapter, plus reasoning-effort / thinking-level selects (PROV-2) |
 | `provider.compactThread` | ✅ REAL | provider CLI one-shot (LLM compaction) |
 
 ### Stats (Profile)

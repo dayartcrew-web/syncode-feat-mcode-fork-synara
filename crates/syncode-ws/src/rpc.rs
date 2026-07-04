@@ -7996,26 +7996,82 @@ impl CanonicalizeUnchecked for Path {
 }
 
 /// `provider.listOptions` — return per-provider model configuration options
-/// (`ProviderOptionDescriptor[]`). Mirrors the MCode `model.ts` option sets:
-/// reasoning-effort (codex/claude/grok), thinking-level (gemini/pi). Other
-/// providers return an empty array (no configurable options). The `provider`
-/// param is read from the request (defaults to `claude` when absent). Returns
-/// `{ options: [...] }`.
+/// (`ProviderOptionDescriptor[]`). One descriptor per provider in
+/// [`syncode_provider::ALL_PROVIDERS`], each carrying the provider's real model
+/// list + capability flags (temperature / system-prompt / tool-use / streaming /
+/// vision / max-tokens) read from its adapter. An optional `provider` param
+/// filters the result to a single provider; absent → every provider is
+/// returned. Returns `{ options: [...] }`.
 fn handle_provider_list_options(id: Value, params: &Value) -> JsonRpcResponse {
-    let provider = params
+    let filter = params
         .get("provider")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("claude");
-    let kind = to_mcode_provider_kind(provider).unwrap_or(provider);
-    let options = provider_option_descriptors(kind);
+        .map(str::to_owned);
+    let mut infos = syncode_provider::all_provider_option_infos();
+    if let Some(provider) = filter {
+        // Normalize syncode ids to themselves; accept mcode kinds too
+        // (e.g. `claudeAgent` → `claude`) so callers using the mcode vocabulary
+        // still hit a match.
+        let normalized = normalize_provider_filter(&provider);
+        infos.retain(|i| i.provider == normalized);
+    }
+    let options: Vec<Value> = infos
+        .iter()
+        .map(|info| {
+            // The reasoning-effort / thinking-level select for this provider, if
+            // it exposes one (codex/claude/grok/gemini/pi). Surfaced alongside
+            // the capability flags so the UI can render both the model picker
+            // and the per-provider reasoning toggle from a single descriptor.
+            let kind = to_mcode_provider_kind(&info.provider).unwrap_or(&info.provider);
+            let reasoning_options = provider_option_descriptors(kind);
+            let mut obj = serde_json::json!({
+                "provider": info.provider,
+                "models": info.models,
+                "supportsTemperature": info.supports_temperature,
+                "supportsSystemPrompt": info.supports_system_prompt,
+                "supportsToolUse": info.supports_tool_use,
+                "supportsStreaming": info.supports_streaming,
+                "supportsVision": info.supports_vision,
+                "maxTokens": info.max_tokens,
+                "capabilities": info.capabilities,
+            });
+            if !reasoning_options.is_empty()
+                && let Some(map) = obj.as_object_mut()
+            {
+                map.insert("reasoningOptions".to_string(), Value::Array(reasoning_options));
+            }
+            obj
+        })
+        .collect();
     JsonRpcResponse::success(
         id,
         serde_json::json!({
             "options": options,
-            "source": "static",
+            "source": "syncode",
         }),
     )
+}
+
+/// Normalize a `provider` filter value to its canonical syncode id. Accepts
+/// both the syncode id (`claude`) and the mcode kind (`claudeAgent`); any other
+/// value is returned unchanged so the retain() filter simply matches nothing.
+fn normalize_provider_filter(provider: &str) -> String {
+    match provider {
+        syncode_provider::PROVIDER_CODEX
+        | syncode_provider::PROVIDER_CLAUDE
+        | syncode_provider::PROVIDER_CURSOR
+        | syncode_provider::PROVIDER_GEMINI
+        | syncode_provider::PROVIDER_GROK
+        | syncode_provider::PROVIDER_KILO
+        | syncode_provider::PROVIDER_OPENCODE
+        | syncode_provider::PROVIDER_PI
+        | syncode_provider::PROVIDER_ANTHROPIC
+        | syncode_provider::PROVIDER_OPENAI => provider.to_string(),
+        // mcode kind → syncode id
+        "claudeAgent" => syncode_provider::PROVIDER_CLAUDE.to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Build the static `ProviderOptionDescriptor[]` for a given MCode provider
@@ -13868,7 +13924,10 @@ mod tests {
             "listCommands should return static non-empty command list"
         );
 
-        // listOptions → returns reasoningEffort select descriptor for codex.
+        // listOptions (PROV-2) → filters to the requested provider and returns
+        // a real per-provider descriptor with models + capability flags. The
+        // codex descriptor carries a gpt-family model list, capability booleans,
+        // and a maxTokens value.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
             "params": { "provider": "codex" }
@@ -13878,21 +13937,18 @@ mod tests {
         assert_eq!(
             options.len(),
             1,
-            "codex should expose one option descriptor"
+            "provider filter should narrow to one descriptor"
         );
-        assert_eq!(options[0]["id"], "reasoningEffort");
-        assert_eq!(options[0]["type"], "select");
-        let choices = options[0]["options"].as_array().unwrap();
+        assert_eq!(options[0]["provider"], "codex");
         assert!(
-            choices.len() >= 3,
-            "codex reasoningEffort has multiple levels"
+            options[0]["models"].as_array().unwrap().iter().any(|m| {
+                m.as_str().unwrap_or("").contains("gpt")
+            }),
+            "codex descriptor should surface gpt-family models"
         );
-        // "medium" is the default for the gpt-5.5 codex model.
-        let medium = choices
-            .iter()
-            .find(|c| c["id"] == "medium")
-            .expect("codex reasoningEffort includes a medium option");
-        assert_eq!(medium["isDefault"], true);
+        assert_eq!(options[0]["supportsTemperature"], true);
+        assert_eq!(options[0]["supportsSystemPrompt"], true);
+        assert_eq!(options[0]["maxTokens"], 4096);
 
         // readPlugin → { plugin: null }
         let req = serde_json::json!({
@@ -13934,42 +13990,105 @@ mod tests {
         assert!(result["featuredPluginIds"].is_array());
     }
 
-    /// listOptions must return a per-provider static option descriptor map
-    /// mirroring the MCode `model.ts` capability constants: codex/claude/grok
-    /// get a `reasoningEffort` select, gemini/pi get a `thinkingLevel` select,
-    /// and unmapped providers (e.g. kilo) get an empty array. Default provider
-    /// (no param) resolves to claudeAgent.
+    /// listOptions (PROV-2) must return one real per-provider descriptor per
+    /// id in `ALL_PROVIDERS` when no `provider` filter is supplied. Each
+    /// descriptor carries the provider's real model list + capability flags
+    /// (temperature / system-prompt / tool-use / streaming / vision / maxTokens)
+    /// read from its adapter, plus a `reasoningOptions` select for providers
+    /// that expose a reasoning-effort / thinking-level toggle.
     #[tokio::test]
     async fn provider_list_options_per_provider_map() {
         let state = WsState::new_in_memory(16);
 
-        // codex → reasoningEffort select with medium as default (gpt-5.5).
+        // No provider param → every ALL_PROVIDERS id appears, in order.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions"
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let options = result["options"].as_array().unwrap();
+        assert_eq!(
+            options.len(),
+            syncode_provider::ALL_PROVIDERS.len(),
+            "no filter → one descriptor per ALL_PROVIDERS id"
+        );
+        let providers: Vec<&str> = options
+            .iter()
+            .map(|o| o["provider"].as_str().unwrap())
+            .collect();
+        for id in syncode_provider::ALL_PROVIDERS {
+            assert!(
+                providers.contains(id),
+                "missing listOptions descriptor for provider {id}"
+            );
+        }
+
+        // Each descriptor surfaces the invariant capability-flag shape.
+        for opt in options {
+            assert!(opt["provider"].is_string(), "missing provider field");
+            assert!(opt["models"].is_array(), "missing models field");
+            assert!(
+                opt["supportsTemperature"].is_boolean(),
+                "missing supportsTemperature"
+            );
+            assert!(
+                opt["supportsSystemPrompt"].is_boolean(),
+                "missing supportsSystemPrompt"
+            );
+            assert!(opt["maxTokens"].is_number(), "missing maxTokens");
+            assert!(
+                opt["capabilities"].is_array(),
+                "missing capabilities field"
+            );
+        }
+
+        // codex filter → single descriptor with gpt-family models, capability
+        // flags, and a reasoningEffort select under reasoningOptions.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
             "params": { "provider": "codex" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
         let options = result["options"].as_array().unwrap();
-        assert_eq!(options.len(), 1);
-        assert_eq!(options[0]["id"], "reasoningEffort");
-        assert_eq!(options[0]["type"], "select");
-        let codex_choices = options[0]["options"].as_array().unwrap();
-        assert_eq!(codex_choices.len(), 4);
-        let values: Vec<&str> = codex_choices
+        assert_eq!(options.len(), 1, "codex filter narrows to one descriptor");
+        let codex = &options[0];
+        assert_eq!(codex["provider"], "codex");
+        assert_eq!(codex["supportsTemperature"], true);
+        assert_eq!(codex["supportsSystemPrompt"], true);
+        assert_eq!(codex["supportsStreaming"], true);
+        assert_eq!(codex["maxTokens"], 4096);
+        let codex_models: Vec<&str> = codex["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        assert!(
+            codex_models.iter().any(|m| m.contains("gpt")),
+            "codex models should include gpt-family entries, got {codex_models:?}"
+        );
+        // codex reasoningEffort select is preserved under reasoningOptions.
+        let reasoning = codex["reasoningOptions"].as_array().unwrap();
+        assert_eq!(reasoning.len(), 1);
+        assert_eq!(reasoning[0]["id"], "reasoningEffort");
+        assert_eq!(reasoning[0]["type"], "select");
+        let values: Vec<&str> = reasoning[0]["options"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
         assert_eq!(values, vec!["low", "medium", "high", "xhigh"]);
 
-        // claudeAgent → reasoningEffort with ultrathink-style levels.
+        // claude (claudeAgent kind) → reasoningEffort with ultrathink levels,
+        // surfaced under reasoningOptions.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
-            "params": { "provider": "claudeAgent" }
+            "params": { "provider": "claude" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        let options = result["options"].as_array().unwrap();
-        assert_eq!(options[0]["id"], "reasoningEffort");
-        let claude_values: Vec<&str> = options[0]["options"]
+        let claude = &result["options"][0];
+        assert_eq!(claude["provider"], "claude");
+        let claude_values: Vec<&str> = claude["reasoningOptions"][0]["options"]
             .as_array()
             .unwrap()
             .iter()
@@ -13978,31 +14097,40 @@ mod tests {
         assert!(claude_values.contains(&"ultrathink"));
         assert!(claude_values.contains(&"ultracode"));
 
-        // gemini → thinkingLevel.
+        // claudeAgent (mcode kind) also resolves to the claude descriptor.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "claudeAgent" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert_eq!(result["options"][0]["provider"], "claude");
+
+        // gemini → thinkingLevel select under reasoningOptions.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
             "params": { "provider": "gemini" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        let options = result["options"].as_array().unwrap();
-        assert_eq!(options[0]["id"], "thinkingLevel");
-        assert_eq!(options[0]["type"], "select");
+        assert_eq!(result["options"][0]["provider"], "gemini");
+        assert_eq!(
+            result["options"][0]["reasoningOptions"][0]["id"],
+            "thinkingLevel"
+        );
 
-        // grok → reasoningEffort including "none".
+        // grok → reasoningEffort including "none", low is default.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
             "params": { "provider": "grok" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        let grok_values: Vec<&str> = result["options"][0]["options"]
+        let grok_values: Vec<&str> = result["options"][0]["reasoningOptions"][0]["options"]
             .as_array()
             .unwrap()
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
         assert!(grok_values.contains(&"none"));
-        // grok default is "low".
-        let low = result["options"][0]["options"]
+        let low = result["options"][0]["reasoningOptions"][0]["options"]
             .as_array()
             .unwrap()
             .iter()
@@ -14016,22 +14144,33 @@ mod tests {
             "params": { "provider": "pi" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["options"][0]["id"], "thinkingLevel");
+        assert_eq!(
+            result["options"][0]["reasoningOptions"][0]["id"],
+            "thinkingLevel"
+        );
 
-        // kilo → empty (no configurable options).
+        // kilo → single descriptor, no reasoningOptions (kilo has no reasoning
+        // toggle), but still surfaces models + capability flags.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
             "params": { "provider": "kilo" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["options"].as_array().unwrap().len(), 0);
+        let kilo = &result["options"][0];
+        assert_eq!(kilo["provider"], "kilo");
+        assert!(!kilo["models"].as_array().unwrap().is_empty());
+        assert!(
+            kilo["reasoningOptions"].as_array().is_none(),
+            "kilo does not surface a reasoning toggle"
+        );
 
-        // default provider (no param) → claudeAgent reasoningEffort.
+        // unknown provider filter → empty array (graceful, not an error).
         let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions"
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listOptions",
+            "params": { "provider": "nonexistent" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["options"][0]["id"], "reasoningEffort");
+        assert_eq!(result["options"].as_array().unwrap().len(), 0);
     }
 
     /// listPlugins must scan a project `.plugins/` dir for `*.json` plugin

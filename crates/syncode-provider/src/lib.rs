@@ -43,3 +43,4 @@ pub use trait_def::{
     ProviderEvent, ProviderId, ProviderRequest, ProviderResponse, ProviderStatus, ProviderStream,
     SessionContext, UsageInfo,
 };
+pub use registry::{ProviderOptionInfo, all_provider_option_infos};
