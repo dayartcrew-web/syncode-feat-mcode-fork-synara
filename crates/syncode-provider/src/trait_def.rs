@@ -60,6 +60,13 @@ pub enum ProviderCapability {
     FileSystem,
     /// Supports system prompts / custom instructions
     SystemPrompt,
+    /// Supports steering an in-progress generation (mid-turn redirect).
+    ///
+    /// When a provider advertises this capability, `DispatchQueuedTurn` can
+    /// "steer" an active (Processing) session instead of dropping/queuing the
+    /// turn or spinning up a new session. Adapters that don't support steering
+    /// fall back to the default `send_request` path.
+    Steering,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +321,29 @@ pub trait ProviderAdapter: Send + Sync {
         request: ProviderRequest,
     ) -> Result<ProviderResponse, ProviderAdapterError>;
 
+    /// Steer an in-progress generation: redirect an already-active session
+    /// toward new input without ending the current turn.
+    ///
+    /// Adapters that advertise [`ProviderCapability::Steering`] override this
+    /// to ship a provider-specific steer (e.g. an MCP `turn/steer` JSON-RPC
+    /// method, an Anthropic in-progress edit, an OpenAI cancel-and-replay).
+    /// The default implementation reports the operation as unsupported so
+    /// callers can fall back to [`ProviderAdapter::send_request`] (or start a
+    /// fresh turn) when steering is unavailable.
+    ///
+    /// `session_id` targets the active session; `payload` carries the
+    /// steer-specific body (new message text, queued-turn metadata, etc.).
+    async fn steer_turn(
+        &self,
+        _session_id: &str,
+        _payload: serde_json::Value,
+    ) -> Result<ProviderResponse, ProviderAdapterError> {
+        Err(ProviderAdapterError::UnsupportedOperation(format!(
+            "provider '{}' does not support steering",
+            self.provider_id()
+        )))
+    }
+
     /// Subscribe to a stream of events from the provider.
     /// The stream yields until the session ends or the provider disconnects.
     fn event_stream(&self, session_id: &str) -> Result<ProviderStream, ProviderAdapterError>;
@@ -360,6 +390,11 @@ pub enum ProviderAdapterError {
 
     #[error("Provider not supported: {0}")]
     UnsupportedProvider(String),
+
+    /// The operation is not supported by this adapter (e.g. steering a turn
+    /// on a provider that doesn't implement `steer_turn`).
+    #[error("Unsupported operation: {0}")]
+    UnsupportedOperation(String),
 
     #[error("Provider internal error: {0}")]
     Internal(String),

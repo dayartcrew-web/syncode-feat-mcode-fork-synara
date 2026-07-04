@@ -12,7 +12,8 @@
 
 use syncode_core::EntityId;
 use syncode_provider::{
-    ProviderEvent, ProviderRequest, SessionContext, SessionManager, SessionStateStatus,
+    ProviderCapability, ProviderEvent, ProviderRequest, SessionContext, SessionManager,
+    SessionStateStatus,
 };
 
 use crate::decider::Command;
@@ -191,11 +192,17 @@ impl ProviderCommandReactor {
                 interaction_mode,
                 dispatch_mode,
             } => {
-                // Dispatch the queued turn to the thread's active Processing session,
-                // if any (faithful to mcode `thread.turn.dispatch-queued` → provider
-                // dispatch). The full queued-turn lifecycle (resolving the message
-                // body, model selection, spawning a fresh session) is deferred; this
-                // reuses the existing session-dispatch path.
+                // Dispatch the queued turn to the thread's active Processing
+                // session, if any (faithful to mcode
+                // `thread.turn.dispatch-queued` → provider dispatch).
+                //
+                // Steering fast-path: if a session is actively Processing the
+                // thread AND the provider advertises
+                // [`ProviderCapability::Steering`], redirect the in-progress
+                // generation with the queued-turn payload via `steer_turn`
+                // instead of sending a new turn request. When no session is
+                // active or the provider can't steer, fall back to the normal
+                // session-dispatch path.
                 let payload = serde_json::json!({
                     "message_id": message_id.as_str(),
                     "runtime_mode": runtime_mode,
@@ -203,7 +210,7 @@ impl ProviderCommandReactor {
                     "dispatch_mode": dispatch_mode,
                 });
                 let session_id = self
-                    .dispatch_to_thread_session(*id, "turn/dispatch-queued", payload, adapter)
+                    .dispatch_or_steer_thread_session(*id, "turn/dispatch-queued", payload, adapter)
                     .await?;
                 Ok(CommandReaction {
                     handled: session_id.is_some(),
@@ -308,6 +315,75 @@ impl ProviderCommandReactor {
             .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
 
         Ok(Some(session_id))
+    }
+
+    /// Dispatch a queued turn to a thread's active session, steering when
+    /// supported.
+    ///
+    /// Used by `DispatchQueuedTurn` to honor the mcode "steer an active turn
+    /// rather than start a new one" semantics:
+    ///
+    /// 1. If a session is actively `Processing` the thread AND the provider
+    ///    advertises [`ProviderCapability::Steering`], call `steer_turn` with
+    ///    the queued-turn payload (no new session, no new request id) — the
+    ///    in-progress generation is redirected.
+    /// 2. Otherwise fall back to [`Self::dispatch_to_thread_session`], which
+    ///    sends a new JSON-RPC request to the active session (or returns
+    ///    `None` if nothing is Processing).
+    ///
+    /// Returns the targeted session id on success, or `None` when no session
+    /// is active for the thread.
+    async fn dispatch_or_steer_thread_session(
+        &self,
+        thread_id: EntityId,
+        method: &str,
+        payload: serde_json::Value,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> Result<Option<String>, CommandReactorError> {
+        // Steering only applies when a session is actively Processing the
+        // thread (i.e. a turn is in flight that can be redirected).
+        let active_session_id = self.active_session_id_for_thread(thread_id).await;
+
+        if let Some(session_id) = active_session_id
+            && self.provider_supports_steering(adapter).await
+        {
+            let mut steer_params = match payload {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            steer_params.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.clone()),
+            );
+            // Surface the dispatch method so steering-aware providers can
+            // distinguish turn dispatches from other steer sources.
+            steer_params.insert(
+                "method".to_string(),
+                serde_json::Value::String(method.to_string()),
+            );
+
+            let guard = adapter.read().await;
+            guard
+                .steer_turn(&session_id, serde_json::Value::Object(steer_params))
+                .await
+                .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
+            return Ok(Some(session_id));
+        }
+
+        // No active session, or provider can't steer → normal dispatch path.
+        self.dispatch_to_thread_session(thread_id, method, payload, adapter)
+            .await
+    }
+
+    /// Whether the (shared) adapter advertises [`ProviderCapability::Steering`].
+    async fn provider_supports_steering(
+        &self,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> bool {
+        let guard = adapter.read().await;
+        guard
+            .capabilities()
+            .contains(&ProviderCapability::Steering)
     }
 
     /// Handle StartTurn: create a provider session and send the initial request
@@ -480,6 +556,9 @@ pub(crate) mod tests {
     /// Recorded (method, params) dispatch log shared between the mock and tests.
     type RecordedRequests = Arc<std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>>;
 
+    /// Recorded `(session_id, payload)` entries for every `steer_turn` call.
+    type RecordedSteers = Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
     /// Mock adapter for command reactor tests
     struct CmdTestMock {
         started_sessions: std::sync::Mutex<Vec<String>>,
@@ -487,6 +566,10 @@ pub(crate) mod tests {
         stopped: Arc<std::sync::Mutex<Vec<String>>>,
         /// (method, params) for every dispatched JSON-RPC request
         requests: RecordedRequests,
+        /// (session_id, payload) for every `steer_turn` invocation.
+        steers: RecordedSteers,
+        /// When true the adapter advertises `ProviderCapability::Steering`.
+        supports_steering: bool,
     }
 
     impl CmdTestMock {
@@ -496,6 +579,8 @@ pub(crate) mod tests {
                 interrupted: std::sync::Mutex::new(Vec::new()),
                 stopped: Arc::new(std::sync::Mutex::new(Vec::new())),
                 requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+                steers: Arc::new(std::sync::Mutex::new(Vec::new())),
+                supports_steering: false,
             }
         }
 
@@ -510,8 +595,33 @@ pub(crate) mod tests {
                 interrupted: std::sync::Mutex::new(Vec::new()),
                 stopped: Arc::clone(&stopped),
                 requests: Arc::clone(&requests),
+                steers: Arc::new(std::sync::Mutex::new(Vec::new())),
+                supports_steering: false,
             };
             (this, stopped, requests)
+        }
+
+        /// Construct a steering-capable mock with shared recording handles for
+        /// `send_request`, `steer_turn`, and `stop_session`. Used to exercise
+        /// the `DispatchQueuedTurn` steer fast-path.
+        fn new_steering_with_handles() -> (
+            Self,
+            Arc<std::sync::Mutex<Vec<String>>>,
+            RecordedRequests,
+            RecordedSteers,
+        ) {
+            let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let steers = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let this = Self {
+                started_sessions: std::sync::Mutex::new(Vec::new()),
+                interrupted: std::sync::Mutex::new(Vec::new()),
+                stopped: Arc::clone(&stopped),
+                requests: Arc::clone(&requests),
+                steers: Arc::clone(&steers),
+                supports_steering: true,
+            };
+            (this, stopped, requests, steers)
         }
     }
 
@@ -521,7 +631,11 @@ pub(crate) mod tests {
             "cmd-test-mock"
         }
         fn capabilities(&self) -> Vec<syncode_provider::ProviderCapability> {
-            vec![]
+            if self.supports_steering {
+                vec![syncode_provider::ProviderCapability::Steering]
+            } else {
+                vec![]
+            }
         }
         fn status(&self) -> ProviderStatus {
             ProviderStatus::Idle
@@ -591,6 +705,23 @@ pub(crate) mod tests {
             })
         }
 
+        async fn steer_turn(
+            &self,
+            session_id: &str,
+            payload: serde_json::Value,
+        ) -> Result<ProviderResponse, syncode_provider::ProviderAdapterError> {
+            self.steers
+                .lock()
+                .unwrap()
+                .push((session_id.to_string(), payload));
+            Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(1),
+                result: Some(serde_json::json!({"steered": true})),
+                error: None,
+            })
+        }
+
         fn event_stream(
             &self,
             _session_id: &str,
@@ -617,6 +748,19 @@ pub(crate) mod tests {
     ) {
         let (mock, stopped, requests) = CmdTestMock::new_with_handles();
         (Arc::new(RwLock::new(mock)), stopped, requests)
+    }
+
+    /// A steering-capable mock with recording handles for `send_request`,
+    /// `steer_turn`, and `stop_session`. Advertises
+    /// `ProviderCapability::Steering` so the reactor's steer fast-path engages.
+    pub(crate) fn make_steering_test_mock() -> (
+        syncode_provider::registry::SharedAdapter,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        RecordedRequests,
+        RecordedSteers,
+    ) {
+        let (mock, stopped, requests, steers) = CmdTestMock::new_steering_with_handles();
+        (Arc::new(RwLock::new(mock)), stopped, requests, steers)
     }
 
     #[tokio::test]
@@ -966,5 +1110,123 @@ pub(crate) mod tests {
             .await
             .unwrap();
         r.session_id.expect("session id")
+    }
+
+    // -----------------------------------------------------------------------
+    // DispatchQueuedTurn → steerTurn tests (P0-3)
+    // -----------------------------------------------------------------------
+
+    /// Helper: dispatch a queued turn for a thread, returning the reaction.
+    async fn dispatch_queued(
+        reactor: &ProviderCommandReactor,
+        adapter: &syncode_provider::registry::SharedAdapter,
+        thread_id: EntityId,
+    ) -> CommandReaction {
+        reactor
+            .react(
+                &Command::DispatchQueuedTurn {
+                    id: thread_id,
+                    message_id: EntityId::new(),
+                    runtime_mode: "standard".to_string(),
+                    interaction_mode: "chat".to_string(),
+                    dispatch_mode: "queue".to_string(),
+                },
+                adapter,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    /// When a steering-capable provider has an active (Processing) session,
+    /// `DispatchQueuedTurn` must call `steer_turn` instead of `send_request`.
+    #[tokio::test]
+    async fn dispatch_queued_turn_steers_active_session_when_supported() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, requests, steers) = make_steering_test_mock();
+        let thread_id = EntityId::new();
+
+        // Start a turn → a Processing session exists for the thread.
+        start_turn(&reactor, &adapter, thread_id).await;
+
+        let result = dispatch_queued(&reactor, &adapter, thread_id).await;
+
+        assert!(result.handled, "steer dispatch should be handled");
+        let session_id = result.session_id.expect("session id");
+
+        // The provider's steer_turn should record exactly one call targeting
+        // the active session, carrying the queued-turn payload.
+        let steers = steers.lock().unwrap().clone();
+        assert_eq!(steers.len(), 1, "exactly one steer_turn call expected");
+        assert_eq!(steers[0].0, session_id, "steer must target the active session");
+        let payload = &steers[0].1;
+        assert_eq!(
+            payload["method"].as_str(),
+            Some("turn/dispatch-queued"),
+            "payload must carry the dispatch method for steer-aware providers"
+        );
+        assert_eq!(
+            payload["dispatch_mode"].as_str(),
+            Some("queue"),
+            "payload must carry the queued-turn dispatch_mode"
+        );
+
+        // The steer fast-path must NOT also fire a send_request for the
+        // dispatch (only the StartTurn "chat" request should be present).
+        let reqs = requests.lock().unwrap().clone();
+        assert_eq!(
+            reqs.len(),
+            1,
+            "no extra send_request should fire when steering; got {reqs:?}"
+        );
+        assert_eq!(reqs[0].0, "chat", "only the initial StartTurn request expected");
+    }
+
+    /// When the provider does NOT support steering but a session is active,
+    /// `DispatchQueuedTurn` falls back to the normal `send_request` dispatch
+    /// path (faithful to the pre-steer behavior).
+    #[tokio::test]
+    async fn dispatch_queued_turn_falls_back_to_send_request_without_capability() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        // Non-steering mock — capabilities() returns [].
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        start_turn(&reactor, &adapter, thread_id).await;
+
+        let result = dispatch_queued(&reactor, &adapter, thread_id).await;
+
+        assert!(result.handled, "fallback dispatch should still be handled");
+        assert!(result.session_id.is_some(), "session id returned");
+
+        // The fallback fires turn/dispatch-queued via send_request (no steer).
+        let reqs = requests.lock().unwrap().clone();
+        // [0] = "chat" (StartTurn), [1] = "turn/dispatch-queued" (fallback)
+        assert_eq!(reqs.len(), 2, "fallback should dispatch via send_request");
+        assert_eq!(reqs[1].0, "turn/dispatch-queued");
+    }
+
+    /// With no active Processing session, `DispatchQueuedTurn` is not handled
+    /// regardless of steering capability (nothing to steer or dispatch to).
+    #[tokio::test]
+    async fn dispatch_queued_turn_no_active_session_not_handled_even_if_steering() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        // Steering-capable mock, but no turn started → no active session.
+        let (adapter, _stopped, requests, steers) = make_steering_test_mock();
+
+        let result = dispatch_queued(&reactor, &adapter, EntityId::new()).await;
+
+        assert!(!result.handled, "nothing to dispatch to without an active session");
+        assert!(result.session_id.is_none());
+
+        // Neither path should have fired any provider call.
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "no send_request should fire when no session is active"
+        );
+        assert!(
+            steers.lock().unwrap().is_empty(),
+            "no steer_turn should fire when no session is active"
+        );
     }
 }
