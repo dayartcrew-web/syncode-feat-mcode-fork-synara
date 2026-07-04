@@ -2,12 +2,15 @@
 //!
 //! Manages the lifecycle of terminal sessions: create, list, attach,
 //! detach, and destroy. Each session has a PTY handle and output buffer.
+//! Sessions are keyed by `(threadId, terminalId)` and persist their
+//! scrollback to disk on close / restore it on open.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::output::OutputBuffer;
+use crate::persistence::ScrollbackStore;
 use crate::pty::{PtyError, PtyHandle, PtyProcessInfo};
 
 /// A terminal session with PTY and output buffer
@@ -16,8 +19,10 @@ pub struct TerminalSession {
     pty: PtyHandle,
     /// Output buffer
     output: OutputBuffer,
-    /// Session ID
+    /// Session ID (the MCode `terminalId`, stable across reopens)
     session_id: String,
+    /// MCode thread id (pane identity; empty for legacy callers)
+    thread_id: String,
     /// Creation timestamp
     created_at: String,
 }
@@ -32,6 +37,25 @@ impl TerminalSession {
         cols: u16,
         rows: u16,
     ) -> Result<Self, PtyError> {
+        Self::new_with_thread_id(String::new(), session_id, command, args, working_dir, cols, rows)
+    }
+
+    /// Create a new terminal session with an explicit MCode `threadId`.
+    ///
+    /// `thread_id` is the MCode pane identity (carried through the
+    /// `TerminalSessionSnapshot`); it pairs with `session_id` (the
+    /// `terminalId`) to form the scrollback persistence key. May be empty for
+    /// legacy callers, in which case the terminal id alone keys the
+    /// scrollback file.
+    pub fn new_with_thread_id(
+        thread_id: String,
+        session_id: String,
+        command: &str,
+        args: &[&str],
+        working_dir: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Self, PtyError> {
         let pty = PtyHandle::spawn(session_id.clone(), command, args, working_dir, cols, rows)?;
         let output = OutputBuffer::new(1000, 4096);
 
@@ -39,6 +63,7 @@ impl TerminalSession {
             pty,
             output,
             session_id,
+            thread_id,
             created_at: chrono::Utc::now().to_rfc3339(),
         })
     }
@@ -46,6 +71,11 @@ impl TerminalSession {
     /// Get session ID
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Get the MCode thread id (may be empty for legacy callers).
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
     }
 
     /// Get PTY handle reference
@@ -87,14 +117,35 @@ impl TerminalSession {
 /// Terminal session manager
 pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<RwLock<TerminalSession>>>>,
+    /// Scrollback persistence layer. `None` disables persistence entirely
+    /// (used by tests that don't want to touch the disk).
+    scrollback: Option<ScrollbackStore>,
 }
 
 impl SessionManager {
-    /// Create a new session manager
+    /// Create a new session manager with scrollback persistence enabled
+    /// (default store rooted at `~/.syncode/terminal/`).
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            scrollback: Some(ScrollbackStore::new()),
         }
+    }
+
+    /// Create a new session manager backed by an explicit scrollback store.
+    ///
+    /// Pass `None` to disable persistence (tests / ephemeral runs). Pass a
+    /// store rooted at a tempdir for isolated testing.
+    pub fn with_scrollback(scrollback: Option<ScrollbackStore>) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            scrollback,
+        }
+    }
+
+    /// Borrow the scrollback store (if persistence is enabled).
+    pub fn scrollback(&self) -> Option<&ScrollbackStore> {
+        self.scrollback.as_ref()
     }
 
     /// Create a new terminal session
@@ -118,6 +169,11 @@ impl SessionManager {
     /// the WS handler calls this with that id to keep the UI's session
     /// references stable across `open`/`write`/`resize`/`close`. If a session
     /// with the given id already exists it is overwritten (re-open semantics).
+    ///
+    /// Scrollback persistence (P4-1): if persistence is enabled and a
+    /// scrollback file exists for `(thread_id, session_id)`, it is loaded and
+    /// replayed into the new session's output buffer before the session is
+    /// registered (read-on-open).
     pub async fn create_session_with_id(
         &self,
         session_id: String,
@@ -127,8 +183,66 @@ impl SessionManager {
         cols: u16,
         rows: u16,
     ) -> Result<String, PtyError> {
-        let session =
-            TerminalSession::new(session_id.clone(), command, args, working_dir, cols, rows)?;
+        self.create_session_full(
+            String::new(),
+            session_id,
+            command,
+            args,
+            working_dir,
+            cols,
+            rows,
+        )
+        .await
+    }
+
+    /// Create a new terminal session with an explicit MCode `threadId`.
+    ///
+    /// Full-form create that threads the pane identity (`thread_id`) through
+    /// to the scrollback persistence key. The WS `terminal.open` handler
+    /// calls this so re-opened panes restore their previous scrollback. If a
+    /// session with the given id already exists it is overwritten (re-open
+    /// semantics); the previous session's scrollback is **not** saved in
+    /// that case (the overwrite is treated as a fresh open, and the next
+    /// `destroy_session` / `save_scrollback` will persist the new state).
+    #[allow(clippy::too_many_arguments)] // mirrors create_session_with_id + thread id
+    pub async fn create_session_full(
+        &self,
+        thread_id: String,
+        session_id: String,
+        command: &str,
+        args: &[&str],
+        working_dir: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, PtyError> {
+        let mut session = TerminalSession::new_with_thread_id(
+            thread_id.clone(),
+            session_id.clone(),
+            command,
+            args,
+            working_dir,
+            cols,
+            rows,
+        )?;
+
+        // Read-on-open: replay persisted scrollback into the new buffer.
+        if let Some(store) = &self.scrollback {
+            match store.load(&thread_id, &session_id) {
+                Ok(Some(scrollback)) if !scrollback.is_empty() => {
+                    session.output_mut().restore(&scrollback);
+                }
+                Ok(_) => { /* no file yet — first open */ }
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        session_id = %session_id,
+                        error = %e,
+                        "scrollback load failed; continuing without restore",
+                    );
+                }
+            }
+        }
+
         self.sessions
             .write()
             .await
@@ -159,15 +273,59 @@ impl SessionManager {
         info
     }
 
-    /// Destroy a session
+    /// Destroy a session.
+    ///
+    /// Before removing the session, its current scrollback is persisted to
+    /// disk (save-on-close) when persistence is enabled. Persistence errors
+    /// are logged and do **not** prevent destruction — losing scrollback is
+    /// preferable to leaking a dead PTY session.
     pub async fn destroy_session(&self, session_id: &str) -> bool {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.remove(session_id) {
             let s = session.read().await;
             s.pty().mark_stopped();
+            // Save-on-close: best-effort.
+            if let Some(store) = &self.scrollback {
+                let scrollback = s.output().scrollback();
+                if let Err(e) = store.save(s.thread_id(), s.session_id(), &scrollback) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "scrollback save failed on session destroy",
+                    );
+                }
+            }
             true
         } else {
             false
+        }
+    }
+
+    /// Explicitly persist a live session's scrollback without destroying it.
+    ///
+    /// Useful for periodic checkpoints or before a graceful shutdown where
+    /// `destroy_session` is not desired. Returns `false` (and logs) when the
+    /// session is unknown or the save fails.
+    pub async fn save_scrollback(&self, session_id: &str) -> bool {
+        let Some(store) = &self.scrollback else {
+            return false;
+        };
+        let session = match self.get_session(session_id).await {
+            Some(s) => s,
+            None => return false,
+        };
+        let s = session.read().await;
+        let scrollback = s.output().scrollback();
+        match store.save(s.thread_id(), s.session_id(), &scrollback) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "scrollback save failed",
+                );
+                false
+            }
         }
     }
 

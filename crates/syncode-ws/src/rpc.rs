@@ -7540,11 +7540,22 @@ async fn handle_terminal_open(state: &WsState, id: Value, params: &Value) -> Jso
     let session_key = terminal_session_key(params)
         .unwrap_or_else(|| format!("term-{}", uuid::Uuid::new_v4().hyphenated()));
 
+    // MCode pane identity (P4-1): `threadId` pairs with `terminalId` to form
+    // the scrollback persistence key. May be absent for legacy callers — the
+    // session manager tolerates an empty thread id (keys on terminal id only).
+    let thread_id = params
+        .get("threadId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+
     let mgr = state.terminal_manager.clone();
     let create_result = {
         let write_guard = mgr.write().await;
         write_guard
-            .create_session_with_id(
+            .create_session_full(
+                thread_id.clone(),
                 session_key.clone(),
                 &command,
                 &arg_refs,
