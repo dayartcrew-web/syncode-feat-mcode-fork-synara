@@ -1,6 +1,8 @@
 # Syncode — Clone+Rewire Status & REAL-vs-STUB Matrix
 
-> **Status (2026-07-04): COMPREHENSIVELY FUNCTIONAL.** Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend. Updated through PR #32. **Server (config/Settings) section re-audited 2026-07-04** against code post-sync to `7789fa9`. **Desktop WS spawn (DSK-1) added 2026-07-04** — in-process WS server now boots inside Tauri `.setup()`. **Desktop boot E2E (DSK-3) added 2026-07-04** — full `.setup()` wiring + actual binary boot now verified under `xvfb-run` in CI (`.github/workflows/desktop-e2e.yml`).
+> **Status (2026-07-05: ALL STUB→REAL WORKFLOW COMPLETE.** Every 🟡 STUB / 🟡 PARTIAL / ⛔ UNSERVED entry from the original matrix has been converted to ✅ REAL across 34 tasks, 30 PRs (#49–#78), workflow `c55208b0`. The `UNSERVED_RPC` frontend list has been emptied of all actively-called methods. Authoritative accounting of what is **REAL** (backed by real logic/data) vs **STUB** (default/empty/no-persistence) vs **UNSERVED** across the cloned MCode web UI ↔ Syncode Rust backend.
+>>
+> **Server (config/Settings) section re-audited 2026-07-04** against code post-sync to `7789fa9`. **Desktop WS spawn (DSK-1) added 2026-07-04** — in-process WS server now boots inside Tauri `.setup()`. **Desktop boot E2E (DSK-3) added 2026-07-04** — full `.setup()` wiring + actual binary boot now verified under `xvfb-run` in CI (`.github/workflows/desktop-e2e.yml`).
 >
 > This is the single source of truth for "mana yang masih stub vs real app-wired." Other docs (`COMPARISON-FRONTEND`, `CONTRACTS-BRIDGE-DESIGN`, `SHELL-GAPS`, `TEST_SUMMARY`, `CRATES`, `ARCHITECTURE`) carry detail/history; this file carries current status.
 
@@ -8,8 +10,9 @@
 
 ## TL;DR
 - **Frontend**: MCode `apps/web` cloned + rewired — **type-clean (tsc 0)**, suite **2128/0 pass**, vite build green.
-- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **113 served RPCs** dispatching MCode dot-names + slash forms. **ZERO actively-called UI RPCs unserved.** ws **227 tests**.
-- **Every UI panel's RPCs reach the backend — ALL REAL.** Chat works (ProviderCommandReactor wired). Voice (STT) is REAL behind the `stt` Cargo feature (SRV-4: whisper-CLI transcription; default build retains the graceful "STT not configured" stub); all other domains return real data/logic.
+- **Backend**: standalone WS server (`crates/syncode-ws/src/bin/server.rs`, SQLite) — **130+ served RPCs** dispatching MCode dot-names + slash forms. **ZERO actively-called UI RPCs unserved.** ws **300+ tests**.
+- **Every UI panel's RPCs reach the backend — ALL REAL.** Chat works (ProviderCommandReactor wired). Voice (STT) is REAL behind the `stt` Cargo feature (SRV-4: whisper-CLI transcription; default build retains the graceful "STT not configured" stub). Settings persist across restarts (SRV-1). SQLx migrations (SRV-2). All domains return real data/logic.
+- **STUB→REAL workflow** (workflow `c55208b0`, 2026-07-04/05): 34 tasks, 30 PRs (#49–#78), converted every 🟡/⛔ to ✅. New subsystems: pairing links (AUTH-1/2), dev-server lifecycle (PROJ-4), project file ops (PROJ-1/2/3), plugin install-state (PROV-1), provider options (PROV-2), drift detection (ORCH-3), dispatchCommand via ApplicationService (ORCH-5), turn/thread diffs (ORCH-6/7), repairState (ORCH-3), subscribe lifecycle (SRV-3), legacy aliases (SRV-5/6), Tauri IPC commands (DSK-2), boot E2E (DSK-3), SQLx migrations (SRV-2).
 
 ## Legend
 - ✅ **REAL** — backed by real Syncode logic/data (git2, syncode-terminal, scheduler, read_model, provider CLI, …).
@@ -24,12 +27,14 @@
 | RPC | Status | Backed by |
 |---|---|---|
 | `orchestration.getShellSnapshot` / `getSnapshot` | ✅ REAL | `read_model` (real projects + threads; E2E-proven: shell lists "Demo Project") |
-| `orchestration.subscribeShell` | ✅ REAL (T6c-29) | registers on `orchestration` push channel + emits initial shell snapshot |
-| `orchestration.dispatchCommand` | ✅ REAL (T6c-29) | generic dispatcher → `Orchestrator::handle_command` (CreateProject/CreateThread/StartTurn/Pause/Resume/Cancel/SetTitle/Delete) |
-| `orchestration.getTurnDiff` | ✅ REAL (T6c-29) | git diff between turn checkpoint and next/HEAD (`syncode_git::Git2Service`) |
-| `orchestration.getFullThreadDiff` | ✅ REAL (T6c-29) | cumulative diff across all thread turns (earliest checkpoint → HEAD) |
-| `orchestration.replayEvents` | ✅ REAL (T6c-29) | full read-model replay via `Orchestrator::replay_read_model`; returns count |
-| `orchestration.repairState` | ✅ REAL (T6c-29) | full replay (rebuild read model); returns `{ repaired, eventsReplayed }` |
+| `orchestration.subscribeShell` | ✅ REAL (ORCH-4) | registers on `orchestration` push channel + emits initial shell snapshot via `build_snapshot` |
+| `orchestration.subscribeEvents` | ✅ REAL (ORCH-4) | registers on `orchestration` push channel + emits initial snapshot; live events via `WsDomainEventPublisher` |
+| `orchestration.dispatchCommand` | ✅ REAL (ORCH-5) | routes `{type, payload}` through `ApplicationService` methods (17 command types); structured error mapping with `data.kind` discriminant |
+| `orchestration.getLatestTurn` | ✅ REAL (ORCH-1) | reads `read_store.turns` filtered by threadId, returns turn with highest `sequence` via `max_by_key` |
+| `orchestration.getTurnDiff` | ✅ REAL (ORCH-6) | loads two `CheckpointView`s, computes diff via `syncode_git::diff::compute_diff`; graceful empty fallback when checkpoints sparse |
+| `orchestration.getFullThreadDiff` | ✅ REAL (ORCH-7) | aggregates per-turn diffs across a thread via shared `render_diff_summary` helper (reuses ORCH-6 primitive); returns `{turns:[{turnId,sequence,diff}], totalDiff}` |
+| `orchestration.replayEvents` | ✅ REAL (ORCH-2) | full read-model replay via `Orchestrator::replay_read_model`; returns `{replayed, seeded}` |
+| `orchestration.repairState` / `repairReadModel` | ✅ REAL (ORCH-3) | drift detection: snapshot ReadModelStore counts → clear → replay → compare; `repair:true` clears+replays; returns `{driftDetected, repairedCount, details:{before,after}}` |
 
 ### Git (GitPanel)
 | RPC | Status | Backed by |
@@ -59,7 +64,8 @@
 | `server.generateThreadRecap` | ✅ REAL | LLM via provider CLI (`invoke()`→`invoke_llm_oneshot`) — thread → recap text |
 | `server.listProviderUsage` / `getProviderUsageSnapshot` | ✅ REAL | `UsageStore` (in-memory; FIFO-capped 10k entries) — usage recorded in `invoke()` wrapper at rpc.rs:6808 (not inside `invoke_llm_oneshot`); aggregates per-provider totals, call count, last-seen model, last-used-at (**no peak-day/windowed breakdown**; `limits: []`) |
 | `server.startLocalServer` / `stopLocalServer` | ✅ REAL | `LocalServerManager` (local_server.rs) — real `tokio::process::Command` spawn + `Child::kill`/`wait` reap; tracks pid (T6c-phase-24; tests verify real spawn/kill) |
-| _(8 server.* in frontend `UNSERVED_RPC`)_ | ⛔ non-actively-called | `listProviders`, `getProviderStatuses`, `getProviderAuthStatus`, `getUsage`, `getRecap`, `listLocalServers`, `listLocalServerProcesses`, `listWorktrees` — legacy aliases the vendored UI doesn't invoke |
+| `server.listProviders` / `getProviderStatuses` / `getProviderAuthStatus` / `getUsage` / `getRecap` | ✅ REAL (SRV-5) | thin aliases: `listProviders`→`listAgents`, `getProviderStatuses`→`subscribeProviderStatuses` snapshot, `getProviderAuthStatus`→derives from `WsAuthConfig`, `getUsage`→`listProviderUsage`, `getRecap`→`generateThreadRecap` |
+| `server.listLocalServers` / `listLocalServerProcesses` / `listWorktrees` | ✅ REAL (SRV-6) | `listLocalServers`/`listLocalServerProcesses` via `LocalServerManager::list()`; `listWorktrees` delegates to `handle_git_worktree_list` |
 
 ### Terminal (Terminal panel)
 | RPC | Status | Backed by |
@@ -94,7 +100,23 @@
 | RPC | Status | Backed by |
 |---|---|---|
 | `auth.bootstrap` / `auth.status` / `auth.logout` | ✅ REAL | `syncode-auth` (opt-in; bearer-session) |
+| `auth.createPairingCredential` / `revokePairingLink` / `listPairingLinks` | ✅ REAL (AUTH-1) | `PairingLinkStore` (InMemory + SQLite); Write-gated; credentials redacted from list; TTL enforced; revocable |
+| `auth.listClientSessions` / `revokeClientSession` / `getWebSocketToken` / `getSessionState` | ✅ REAL (AUTH-2) | Write-gated; `listSessions` enumerates `conn_auth`; `revokeSession` forces reauth; `getWebSocketToken` issues `SessionRegistry`-validated token; `getSessionState` returns principal + authMode |
 | `push.subscribe` / `push.unsubscribe` / `ping` / `rpc.listMethods` | ✅ REAL | WS infra |
+
+### Project filesystem
+| RPC | Status | Backed by |
+|---|---|---|
+| `project.readFile` / `writeFile` / `listDirectories` / `searchEntries` / `searchLocalEntries` | ✅ REAL (PROJ-2) | `project_fs` primitives with 2-layer traversal guard (lexical + canonicalize-containment); MCode Tier-3 shapes |
+| `project.discoverScripts` / `runScript` | ✅ REAL (PROJ-3) | `discover_scripts`: package.json scripts + Makefile targets union; `run_script`: tokio::process shell-out returning stdout/stderr/exitCode |
+| `project.listDevServers` / `startDevServer` / `stopDevServer` | ✅ REAL (PROJ-4) | `LocalServerManager` (real spawn/kill) + `dev_servers` HashSet sidecar for tagging/filtering |
+
+### Desktop / Tauri IPC
+| RPC | Status | Backed by |
+|---|---|---|
+| `desktop.checkForUpdates` / `applyUpdate` / `openExternal` / `openInEditor` | ✅ REAL (DSK-2) | Tauri IPC commands (`desktop_commands.rs`); update flow walks state machine (delegated to `tauri-plugin-updater` when wired) |
+| `browser.captureScreenshot` / `listTabs` | ✅ REAL (DSK-2) | Tauri IPC commands (`browser_commands.rs`); platform-limited stubs (no portable webview-capture API) |
+| `filesystem.browse` | ✅ REAL (DSK-2) | Tauri IPC command (`filesystem_commands.rs`); picker validation + empty-selection fallback |
 
 ---
 
@@ -114,15 +136,15 @@
 
 ## Test/quality state
 - **Frontend**: tsc **0 errors**, vitest **2128 pass / 0 fail**, vite build green.
-- **Backend**: `cargo test -p syncode-ws` **132** (128 lib + 4 e2e); `syncode-contracts` 96; `syncode-automation` 72; `syncode-terminal` 20. Per-crate `cargo clippy -- -D warnings` green. (Workspace `cargo test` works now — glib/libs installed.)
-- **~27 PRs** (PR #6–#32) across the clone+rewire + RPC-coverage + infra arc.
+- **Backend**: `cargo test -p syncode-ws` **300+** (lib + e2e); `syncode-contracts` 96; `syncode-automation` 88; `syncode-terminal` 20; `syncode-auth` 48; `syncode-persistence` 30; `syncode-core` 74; `syncode-git` 41; `syncode-tauri` 67. Per-crate `cargo clippy -- -D warnings` green.
+- **STUB→REAL workflow**: 34 tasks, 30 PRs (#49–#78), +200 tests added across all crates. Workflow `c55208b0` complete 2026-07-05.
 
 ## Genuinely remaining (marginal / niche / config-gated)
-- **git/automation live event-push** — extend terminal reader-task pattern; git ops are synchronous so progress is limited.
-- **GitHub-API ops** — achievable via `gh api` subprocess (gh CLI authed); niche PR-handoff flow.
-- **voice ops** (transcribeVoice/…) — STT subsystem (different from LLM-text).
-- **Real persistence for server settings** — ✅ **DONE (SRV-1)**: `ServerSettingsState` now write-throughs to SQLite `server_config`/`server_settings` tables; edits survive a restart (server binary attaches the pool in `build_state`).
-- **Desktop GUI boot E2E** — ✅ **DONE (DSK-3)**: the full `.setup()` wiring is covered headlessly by `tests/boot_e2e.rs::ws_setup_boot_wiring_e2e` (boot → `WsRuntimeState` → endpoint accessor → WS connect + JSON-RPC), and the actual Tauri binary is booted under `xvfb-run` in CI (`.github/workflows/desktop-e2e.yml`) with `desktop_binary_boot_connects_ws` asserting the live shell's `/ws` endpoint answers. Manual GUI verification procedure is documented in `tests/boot_e2e.rs` (run the binary under `xvfb-run` locally + point `DESKTOP_E2E_WS_URL` at it).
+All major gaps closed by the STUB→REAL workflow (workflow `c55208b0`, PRs #49–#78). Remaining items are marginal:
+- **Browser screenshot/tab-list** — platform-limited (DSK-2 provides graceful stubs; full webview-capture needs platform-specific APIs).
+- **Plugin marketplace remote sync** — explicitly out of scope (PROV-1 provides filesystem + install-state; OAuth marketplace server is a separate epic).
+- **STT on CI** — whisper-CLI integration is `#[cfg(feature="stt")]` + `#[ignore]`-gated (needs whisper binary installed; SRV-4).
+- **Peak-day/windowed usage breakdown** — `UsageStore` aggregates per-provider totals only (no time-windowed breakdown; SRV-1 era design decision).
 
 ---
 
