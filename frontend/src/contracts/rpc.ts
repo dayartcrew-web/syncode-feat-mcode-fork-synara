@@ -653,6 +653,16 @@ export const SERVED_RPC = {
     result: null as unknown as OrchestrationReadModel,
   },
 
+  // `orchestration.replayEvents` (ORCH-2): rebuilds the in-memory read model
+  // from the event repository. The backend dispatch accepts both the
+  // `orchestration.replayEvents` dot-string and this slash form. Returns
+  // `{ replayed, seeded }` — `replayed` is the total number of events read,
+  // `seeded` is the number of aggregate snapshots used (0 on a cold store).
+  "orchestration/replayEvents": {
+    request: null as unknown as null,
+    result: null as unknown as { readonly replayed: number; readonly seeded: number },
+  },
+
   // ─── Git (syncode-git-backed, T6c-3) ────────────────────────────────
   // The cloned MCode GitPanel calls `git.*` RPCs. The transport remaps the
   // MCode dot-strings (`git.status`, `git.readWorkingTreeDiff`,
@@ -1411,10 +1421,11 @@ export const UNSERVED_RPC = [
   "project.stopDevServer",
 
   // ─── Orchestration extras (beyond served thread/turn set) ────────────
-  // T6c-29 made 4 of these SERVED (dispatchCommand, getFullThreadDiff,
-  // getTurnDiff, replayEvents — mapped to slash forms via MCODE_TO_SERVED).
-  // subscribeShell / repairState are NEW served RPCs (no MCode dot-name in
-  // UNSERVED_RPC). The remaining ~3 are still unserved.
+  // ORCH-2: `orchestration.replayEvents` is NOW SERVED (mapped to slash form,
+  // returns `{ replayed, seeded }`). The remaining ops below are still unserved.
+  "orchestration.dispatchCommand",
+  "orchestration.getFullThreadDiff",
+  "orchestration.getTurnDiff",
   "orchestration.subscribeEvents",
   "orchestration.repairReadModel",
 

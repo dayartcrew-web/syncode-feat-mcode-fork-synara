@@ -314,6 +314,18 @@ async fn dispatch_method(
             handle_orchestration_get_latest_turn(state, id, &request.params).await
         }
 
+        // ─── Orchestration replay (read-model rebuild) ──────────────
+        // Rebuilds the in-memory read model from the event repository. The
+        // orchestrator's `replay_read_model` seeds the projection from any
+        // stored aggregate snapshots, then replays each aggregate's tail, so
+        // `seed + tail == full replay` (plain full replay when no snapshots).
+        // Returns `{ replayed, seeded }` — `replayed` is the total number of
+        // events read, `seeded` is the number of snapshots used (0 on a cold
+        // store with no snapshots).
+        "orchestration.replayEvents" | "orchestration/replayEvents" => {
+            handle_orchestration_replay_events(state, id).await
+        }
+
         // ─── Git Methods (syncode-git-backed) ─────────────────────
         // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
         // `git.readWorkingTreeDiff`, `git.listBranches`, …). We reuse the
@@ -2446,6 +2458,31 @@ async fn handle_orchestration_get_latest_turn(
         .cloned()
         .map(|t| serde_json::to_value(&t).unwrap_or(Value::Null));
     JsonRpcResponse::success(id, latest.unwrap_or(Value::Null))
+}
+
+/// `orchestration.replayEvents` handler — rebuilds the in-memory read model
+/// from the event repository. Delegates to `Orchestrator::replay_read_model`
+/// (pipeline.rs:690), which seeds the projection from any stored aggregate
+/// snapshots then replays each aggregate's tail.
+///
+/// Returns `{ replayed, seeded }` where `replayed` is the total number of
+/// events read from the repository and `seeded` is the number of snapshots
+/// used to seed the projection (0 when none exist).
+async fn handle_orchestration_replay_events(state: &WsState, id: Value) -> JsonRpcResponse {
+    match state.orchestrator.replay_read_model().await {
+        Ok((replayed, seeded)) => JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "replayed": replayed,
+                "seeded": seeded,
+            }),
+        ),
+        Err(e) => JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            format!("replay_read_model failed: {e}"),
+        ),
+    }
 }
 
 // ─── Server config / settings / lifecycle Handlers (T6c-4) ───────
@@ -8747,6 +8784,84 @@ mod tests {
             resp.result.as_ref().map_or(true, |v| v.is_null()),
             "expected null result, got {:?}",
             resp.result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_orchestration_replay_events_empty_store() {
+        // An empty event repository has nothing to replay and no snapshots to
+        // seed from, so the handler must return `{replayed:0, seeded:0}` and no
+        // error. Exercises both dispatch aliases (dot + slash resolve to the
+        // same handler).
+        let state = WsState::new_in_memory(16);
+
+        // Dot-string form (the raw MCode method the UI sends before remap).
+        let req_dot = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.replayEvents"
+        });
+        let resp = handle_rpc(&state, 1, &req_dot.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["replayed"].as_u64(), Some(0));
+        assert_eq!(result["seeded"].as_u64(), Some(0));
+
+        // Slash form (the served key the transport remaps to).
+        let req_slash = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration/replayEvents"
+        });
+        let resp = handle_rpc(&state, 1, &req_slash.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["replayed"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_orchestration_replay_events_populated_store_returns_count() {
+        // After creating a project (which appends a ProjectCreated event), the
+        // replay must report a non-zero event count and surface the `{replayed,
+        // seeded}` envelope shape. Resetting the read model first proves the
+        // rebuild actually repopulates it.
+        let state = WsState::new_in_memory(16);
+        let create_proj = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "project/create",
+            "params": { "name": "Replay Project", "rootPath": "/tmp/replay" }
+        });
+        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        // Wipe the in-memory read model so the replay has something to rebuild.
+        // `read_store` is the same `Arc<RwLock<ReadModelStore>>` the orchestrator
+        // projects onto, so clearing it clears the orchestrator's read model.
+        {
+            let mut rm = state.read_store.write().await;
+            *rm = syncode_orchestration::ReadModelStore::new();
+        }
+        let snap = state.read_store.read().await;
+        assert_eq!(snap.projects.len(), 0, "read model should be cleared");
+        drop(snap);
+
+        // Replay — both the dot and slash keys must resolve to the handler.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "orchestration.replayEvents"
+        });
+        let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        // At least one event (ProjectCreated) was replayed.
+        let replayed = result["replayed"].as_u64().expect("replayed is u64");
+        assert!(replayed > 0, "expected non-zero replayed count, got {replayed}");
+        // No snapshots were written by a bare create → seeded is 0.
+        assert_eq!(result["seeded"].as_u64(), Some(0));
+
+        // The read model was actually rebuilt — the project is back.
+        let snap = state.read_store.read().await;
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(
+            snap.projects.values().next().unwrap().name,
+            "Replay Project"
         );
     }
 
