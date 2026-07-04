@@ -1,12 +1,12 @@
 //! In-memory server settings (T6c-18) — REAL persistence for the server
-//! session.
+//! session, with optional on-disk write-through (SRV-1).
 //!
 //! The cloned MCode UI persists user edits via `server.setConfig` /
 //! `updateSettings` / `patchSettings` / `updateProvider` /
-//! `upsertKeybinding`. Syncode has no on-disk settings file, but the
-//! in-memory store defined here makes those edits durable for the lifetime
-//! of the WebSocket server: reads return the stored value, writes merge into
-//! it, and push events fan out the new state to subscribed connections.
+//! `upsertKeybinding`. The in-memory store defined here makes those edits
+//! durable for the lifetime of the WebSocket server: reads return the stored
+//! value, writes merge into it, and push events fan out the new state to
+//! subscribed connections.
 //!
 //! The store holds two top-level JSON documents:
 //!   - `config`   — the MCode `ServerConfig` shape
@@ -19,6 +19,17 @@
 //! the config's `authMode` field stays consistent across the session (the
 //! UI doesn't read it today, but it's a cheap accurate signal).
 //!
+//! # On-disk persistence (SRV-1)
+//!
+//! When a SQLite pool is attached via [`ServerSettingsState::with_pool`] /
+//! [`ServerSettingsState::attach_pool`], the constructor loads any previously
+//! persisted `config`/`settings` documents from the `server_config` /
+//! `server_settings` tables (falling back to defaults on a fresh DB), and
+//! every mutation (`set_config` / `update_settings` / `patch_settings` /
+//! `upsert_keybinding` / `update_provider`) write-throughs to disk so the
+//! edits survive a server restart. Without a pool the store is purely
+//! in-memory (backward-compatible with tests and `new_in_memory`).
+//!
 //! `merge_json` is a recursive JSON deep-merge used by `patchSettings` /
 //! `updateSettings` to apply a partial patch: objects are merged key-by-key,
 //! arrays and scalars are replaced wholesale (the MCode
@@ -26,8 +37,10 @@
 //! appended).
 
 use serde_json::{Map, Value};
+use syncode_persistence::SqlitePool;
 
-/// In-memory server settings — persists during the server session.
+/// In-memory server settings — persists during the server session, with
+/// optional on-disk write-through (SRV-1).
 ///
 /// Stored as opaque `serde_json::Value` rather than typed structs because the
 /// MCode `ServerConfig`/`ServerSettings` schemas are large and partially
@@ -35,24 +48,128 @@ use serde_json::{Map, Value};
 /// avoids drifting from the contracts layer when MCode evolves. The shapes
 /// are validated structurally at the handler boundary (reject non-object
 /// patches with `-32602`).
+///
+/// `pool` is `None` for in-memory/test deployments (the historical behavior —
+/// edits don't survive a restart). When `Some`, mutations write-through to the
+/// `server_config` / `server_settings` SQLite tables and the constructor loads
+/// any prior document.
 #[derive(Debug, Clone)]
 pub struct ServerSettingsState {
-    /// `ServerConfig` document. Initialized from `build_default_server_config`.
+    /// `ServerConfig` document. Initialized from `build_default_server_config`,
+    /// or loaded from disk when a pool is attached.
     pub config: Value,
-    /// `ServerSettings` document. Initialized from `build_default_server_settings`.
+    /// `ServerSettings` document. Initialized from
+    /// `build_default_server_settings`, or loaded from disk when a pool is
+    /// attached.
     pub settings: Value,
+    /// Optional SQLite pool for on-disk persistence. `None` for in-memory
+    /// deployments (backward-compatible with `new_in_memory` tests). When
+    /// `Some`, [`Self::persist_config`] / [`Self::persist_settings`] write
+    /// the documents to the `server_config` / `server_settings` tables.
+    pub pool: Option<SqlitePool>,
 }
 
 impl ServerSettingsState {
-    /// Build the default state. `auth_mode` is the syncode `WsAuthConfig` mode
-    /// string (`unsafe-no-auth` | `remote-reachable` | …) surfaced in the
-    /// config's `authMode` field. Kept here (rather than reading `WsState` at
-    /// materialize time) so the store can be built before `WsState` is fully
-    /// assembled.
+    /// Build the default in-memory state (no disk persistence). `auth_mode` is
+    /// the syncode `WsAuthConfig` mode string (`unsafe-no-auth` |
+    /// `remote-reachable` | …) surfaced in the config's `authMode` field. Kept
+    /// here (rather than reading `WsState` at materialize time) so the store
+    /// can be built before `WsState` is fully assembled.
+    ///
+    /// This is the backward-compatible constructor — no pool is attached, so
+    /// mutations are in-memory only. Use [`Self::with_pool`] to enable disk
+    /// persistence.
     pub fn new(auth_mode: String) -> Self {
         Self {
             config: build_default_server_config(&auth_mode),
             settings: build_default_server_settings(),
+            pool: None,
+        }
+    }
+
+    /// Build the state backed by a SQLite pool, loading any persisted
+    /// `config`/`settings` documents from disk. Falls back to defaults when
+    /// the tables are empty (fresh DB or pre-SRV-1 schema) — identical to the
+    /// in-memory behavior.
+    ///
+    /// The `auth_mode` is used to seed the default config's `authMode` field
+    /// **only when no document was previously persisted**. A persisted config
+    /// wins (the stored `authMode` is restored verbatim).
+    pub async fn with_pool(auth_mode: String, pool: SqlitePool) -> Self {
+        let config = match syncode_persistence::settings_store::load_config(&pool).await {
+            Ok(Some(stored)) => stored,
+            Ok(None) => build_default_server_config(&auth_mode),
+            // A load failure is non-fatal: fall back to defaults and keep the
+            // pool attached so subsequent writes can still attempt to persist
+            // (the schema is created by init_database, so this is rare — e.g.
+            // a transient lock). Logged for diagnostics.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to load persisted server_config — falling back to defaults"
+                );
+                build_default_server_config(&auth_mode)
+            }
+        };
+        let settings = match syncode_persistence::settings_store::load_settings(&pool).await {
+            Ok(Some(stored)) => stored,
+            Ok(None) => build_default_server_settings(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to load persisted server_settings — falling back to defaults"
+                );
+                build_default_server_settings()
+            }
+        };
+        Self {
+            config,
+            settings,
+            pool: Some(pool),
+        }
+    }
+
+    /// Attach a SQLite pool to an existing in-memory store, loading any
+    /// persisted documents from disk (overriding the in-memory values). Used
+    /// when the pool is constructed after the store (e.g. the server binary
+    /// builds `WsState` then attaches the pool). The in-memory documents are
+    /// replaced by the on-disk values when present, else left as-is (defaults).
+    pub async fn attach_pool(&mut self, pool: SqlitePool) {
+        if let Ok(Some(stored)) = syncode_persistence::settings_store::load_config(&pool).await {
+            self.config = stored;
+        }
+        if let Ok(Some(stored)) = syncode_persistence::settings_store::load_settings(&pool).await {
+            self.settings = stored;
+        }
+        self.pool = Some(pool);
+    }
+
+    /// Write-through the `config` document to disk (no-op when no pool is
+    /// attached). Best-effort: a persistence failure is logged at `WARN` but
+    /// does **not** surface to the RPC caller — the in-memory mutation has
+    /// already succeeded, and failing the RPC would roll back a valid edit
+    /// for a disk-only issue. The next successful write retries the upsert.
+    pub async fn persist_config(&self) {
+        let Some(pool) = self.pool.as_ref() else {
+            return;
+        };
+        if let Err(e) =
+            syncode_persistence::settings_store::save_config(pool, &self.config).await
+        {
+            tracing::warn!(error = %e, "failed to persist server_config to disk");
+        }
+    }
+
+    /// Write-through the `settings` document to disk (no-op when no pool is
+    /// attached). Same best-effort semantics as [`Self::persist_config`].
+    pub async fn persist_settings(&self) {
+        let Some(pool) = self.pool.as_ref() else {
+            return;
+        };
+        if let Err(e) =
+            syncode_persistence::settings_store::save_settings(pool, &self.settings).await
+        {
+            tracing::warn!(error = %e, "failed to persist server_settings to disk");
         }
     }
 }
@@ -323,5 +440,134 @@ mod tests {
         assert_eq!(target["providers"]["codex"]["enabled"], false);
         // Untouched sibling keys preserved.
         assert_eq!(target["providers"]["codex"]["binaryPath"], "codex");
+    }
+
+    // ─── SRV-1: on-disk persistence tests ──────────────────────────
+    //
+    // Four scenarios covering the acceptance criteria:
+    //   1. load-default — fresh DB → defaults (backward-compat).
+    //   2. write-read   — mutate + persist → reload returns the edit.
+    //   3. patch-merge  — patch (deep-merge) + persist → reload reflects merge.
+    //   4. restart-survives — simulated WsState reconstruction reads the
+    //      persisted documents and the edits survive.
+
+    /// Build an in-memory SQLite pool with the SRV-1 schema initialized.
+    async fn setup_pool() -> SqlitePool {
+        syncode_persistence::init_database(std::path::Path::new(""))
+            .await
+            .expect("init_database should succeed")
+    }
+
+    #[tokio::test]
+    async fn srv1_load_default_on_fresh_db() {
+        // AC: "empty/new DB → defaults (current behavior)".
+        let pool = setup_pool().await;
+        let state = ServerSettingsState::with_pool("unsafe-no-auth".into(), pool).await;
+        // Defaults are loaded — no persisted document existed.
+        assert_eq!(state.config["authMode"], "unsafe-no-auth");
+        assert_eq!(state.settings["defaultThreadEnvMode"], "local");
+        assert!(state.settings["providers"]["codex"].is_object());
+    }
+
+    #[tokio::test]
+    async fn srv1_write_read_roundtrip() {
+        // AC: "every mutation write-throughs" + "write-read".
+        let pool = setup_pool().await;
+
+        // First session: set config + update settings, then persist.
+        let mut state = ServerSettingsState::with_pool("unsafe-no-auth".into(), pool.clone()).await;
+        state.config = serde_json::json!({ "cwd": "/srv1", "authMode": "remote-reachable" });
+        state.settings = serde_json::json!({
+            "defaultThreadEnvMode": "container",
+            "providers": { "codex": { "enabled": false } },
+        });
+        state.persist_config().await;
+        state.persist_settings().await;
+
+        // Second session on the same DB: with_pool loads the persisted docs.
+        let reloaded = ServerSettingsState::with_pool("unsafe-no-auth".into(), pool).await;
+        assert_eq!(reloaded.config["cwd"], "/srv1");
+        assert_eq!(reloaded.config["authMode"], "remote-reachable");
+        assert_eq!(reloaded.settings["defaultThreadEnvMode"], "container");
+        assert_eq!(reloaded.settings["providers"]["codex"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn srv1_patch_merge_persists() {
+        // AC: "patch-merge" — a deep-merge patch is persisted and reloads
+        // with the merged shape (untouched sibling keys preserved).
+        let pool = setup_pool().await;
+        let mut state = ServerSettingsState::with_pool("unsafe-no-auth".into(), pool.clone()).await;
+
+        // Apply a partial patch via the same merge_json the RPC handler uses.
+        let patch = serde_json::json!({
+            "textGenerationModelSelection": { "model": "claude-4" }
+        });
+        merge_json(&mut state.settings, &patch);
+        state.persist_settings().await;
+
+        // Reload — the merge is reflected, untouched sibling key preserved.
+        let reloaded = ServerSettingsState::with_pool("unsafe-no-auth".into(), pool).await;
+        assert_eq!(
+            reloaded.settings["textGenerationModelSelection"]["model"],
+            "claude-4"
+        );
+        // Untouched sibling key from the default survives the merge.
+        assert_eq!(
+            reloaded.settings["textGenerationModelSelection"]["provider"],
+            "codex"
+        );
+    }
+
+    #[tokio::test]
+    async fn srv1_restart_survives_wsstate_reconstruction() {
+        // AC: "Settings survive WsState reconstruction in tests".
+        //
+        // Simulates: session 1 writes a config + a keybinding + a settings
+        // edit; the process "restarts" (state dropped + reconstructed from
+        // the same DB); session 2 reads back the full persisted state.
+        let pool = setup_pool().await;
+
+        // ── Session 1: writes ──
+        let mut s1 = ServerSettingsState::with_pool("unsafe-no-auth".into(), pool.clone()).await;
+        // setConfig (replace) — mirrors handle_server_set_config.
+        s1.config = serde_json::json!({
+            "cwd": "/restart-test",
+            "keybindings": [{ "id": "kb1", "keys": "ctrl+s" }],
+            "providers": [],
+            "issues": [],
+            "authMode": "unsafe-no-auth",
+        });
+        s1.persist_config().await;
+        // updateSettings (deep-merge) — mirrors handle_server_update_settings.
+        merge_json(
+            &mut s1.settings,
+            &serde_json::json!({ "enableAssistantStreaming": true }),
+        );
+        s1.persist_settings().await;
+
+        // ── "Restart": drop the store, reconstruct from disk ──
+        drop(s1);
+        let s2 = ServerSettingsState::with_pool("unsafe-no-auth".into(), pool).await;
+
+        // ── Session 2: reads ── everything survived.
+        assert_eq!(s2.config["cwd"], "/restart-test");
+        let keybindings = s2.config["keybindings"].as_array().unwrap();
+        assert_eq!(keybindings.len(), 1);
+        assert_eq!(keybindings[0]["id"], "kb1");
+        assert_eq!(keybindings[0]["keys"], "ctrl+s");
+        assert_eq!(s2.settings["enableAssistantStreaming"], true);
+        // Untouched default key preserved through the merge + restart.
+        assert_eq!(s2.settings["defaultThreadEnvMode"], "local");
+    }
+
+    #[tokio::test]
+    async fn srv1_in_memory_state_has_no_pool() {
+        // Backward-compat: the plain `new` constructor is purely in-memory.
+        let state = ServerSettingsState::new("unsafe-no-auth".into());
+        assert!(state.pool.is_none());
+        // persist_* are no-ops (no panic, no write).
+        state.persist_config().await;
+        state.persist_settings().await;
     }
 }

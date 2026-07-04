@@ -7,9 +7,10 @@ pub mod adapters;
 pub mod event_store;
 pub mod migrations;
 pub mod projections;
+pub mod settings_store;
 pub mod snapshot;
 
-use sqlx::SqlitePool;
+pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::Path;
 use std::str::FromStr;
@@ -56,6 +57,23 @@ pub async fn init_database(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
             data          TEXT    NOT NULL,
             created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
             UNIQUE(aggregate_id)
+        );
+
+        -- Server settings/config persistence (SRV-1). Single-row key/value
+        -- tables holding the serialized `ServerConfig` / `ServerSettings` JSON
+        -- documents (see crates/syncode-ws/src/settings.rs). A fixed `singleton`
+        -- key holds the document — the MCode UI models these as a single server
+        -- config/settings document, so a single upsertable row per table is
+        -- sufficient and avoids per-key fan-out. Additive (CREATE IF NOT
+        -- EXISTS) so it composes with the existing event-store schema and is
+        -- forward-compatible with the SRV-2 migrations crate.
+        CREATE TABLE IF NOT EXISTS server_config (
+            key           TEXT    PRIMARY KEY,
+            value         TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS server_settings (
+            key           TEXT    PRIMARY KEY,
+            value         TEXT    NOT NULL
         );
         "#,
     )

@@ -2254,6 +2254,8 @@ async fn handle_server_set_config(
             "providers": store.config["providers"].clone(),
         });
         let response = store.config.clone();
+        // SRV-1: write-through to disk (best-effort, no-op without a pool).
+        store.persist_config().await;
         (push_payload, response)
     };
     // Broadcast the update to subscribed connections. Best-effort: no
@@ -2285,6 +2287,8 @@ async fn handle_server_update_settings(
     let updated = {
         let mut store = state.settings.write().await;
         crate::settings::merge_json(&mut store.settings, params);
+        // SRV-1: write-through to disk (best-effort, no-op without a pool).
+        store.persist_settings().await;
         store.settings.clone()
     };
     let _ = state.push_tx.send((
@@ -2410,6 +2414,8 @@ async fn handle_server_upsert_keybinding(
             "issues": cfg_obj["issues"].clone(),
             "providers": cfg_obj["providers"].clone(),
         });
+        // SRV-1: write-through to disk (best-effort, no-op without a pool).
+        store.persist_config().await;
         (keybindings, push_payload)
     };
     let _ = state.push_tx.send((
