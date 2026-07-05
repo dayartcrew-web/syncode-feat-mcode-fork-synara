@@ -406,6 +406,9 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "server.getProviderAuthStatus": "server/get-provider-auth-status",
   "server.getUsage": "server/get-usage",
   "server.getRecap": "server/get-recap",
+  "server.listLocalServers": "server/list-local-servers",
+  "server.listLocalServerProcesses": "server/list-local-server-processes",
+  "server.listWorktrees": "server/list-worktrees",
 
   // PROJ-2: project file-op RPCs. The cloned MCode UI's file browser / search /
   // read-write surface calls these `project.*` dot-strings

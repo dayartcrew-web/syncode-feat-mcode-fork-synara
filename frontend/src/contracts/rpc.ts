@@ -1414,6 +1414,19 @@ export const SERVED_RPC = {
     request: null as unknown as ServerGenerateThreadRecapInput,
     result: null as unknown as ServerGenerateThreadRecapResult,
   },
+  // SRV-6: list-only server RPCs (LocalServerManager + git worktree delegation)
+  "server/list-local-servers": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "server/list-local-server-processes": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "server/list-worktrees": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
   // ─── T6c-29: orchestration generic RPCs ───────────────────────────
   // All 6 accept a generic params object and return a generic result object;
   // the typed shapes live on the wire but are intentionally loose here (the
