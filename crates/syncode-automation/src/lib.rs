@@ -14,6 +14,7 @@ pub mod run_reactor;
 pub mod runner;
 pub mod schedule;
 pub mod scheduler;
+pub mod worktree;
 
 pub use completion_eval::{
     CompletionLlmCall, CompletionResult, CompletionVerdict, NoMatchReason,
@@ -33,3 +34,4 @@ pub use run_reactor::{
 };
 pub use runner::{AutomationRun, RunStatus};
 pub use scheduler::{Scheduler, SchedulerError};
+pub use worktree::{WorktreeError, WorktreeManager, WorktreeMode};
