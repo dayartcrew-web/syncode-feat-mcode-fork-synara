@@ -63,6 +63,7 @@ use crate::session::SessionState;
 /// Per-session record: the shared session state plus the system prompt captured
 /// at [`ClaudeAdapter::start_session`] (the CLI takes it per-turn via
 /// `--append-system-prompt`, so it must be carried to `send_request`).
+#[derive(Clone)]
 struct ClaudeSession {
     state: Arc<SessionState>,
     system_prompt: Option<String>,
@@ -1316,6 +1317,111 @@ mod tests {
         assert_eq!(
             adapter.model_for(&req.params).as_deref(),
             Some("default-model")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR-1-1 trace proof — reproduces the EXACT SessionContext the command
+    // reactor builds in `handle_start_turn` (command.rs:794-802) and drives it
+    // through ClaudeAdapter::start_session, then reconstructs the argv
+    // send_request would spawn. Asserts the two break points:
+    //   (1) working_dir is the hardcoded "/tmp/syncode" (DEFAULT_WORKING_DIR),
+    //       NOT the user's actual project cwd → `claude` runs in a phantom dir.
+    //   (2) system_prompt is the hardcoded "You are a helpful AI coding
+    //       assistant." string → project-specific instructions never reach the
+    //       CLI.
+    // No real `claude` binary is spawned: start_session only records state, and
+    // the argv is built from the public ClaudeConfig::argv helper using the
+    // recorded (working_dir, system_prompt) — exactly what send_request does
+    // (claude.rs:684-708) before it calls Command::spawn.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn pr_1_1_trace_start_turn_propagates_hardcoded_working_dir_and_prompt() {
+        // --- Arrange: a spawned Claude adapter (no binary needed for this path).
+        let mut adapter = ClaudeAdapter::with_claude_config(ClaudeConfig {
+            bin_path: "claude".to_string(),
+            model: "sonnet".to_string(),
+            full_auto: true,
+            api_key: Some("sk-test".to_string()),
+            extra_args: vec![],
+        });
+        adapter.spawn(ProviderConfig::default()).await.unwrap();
+
+        // --- Reproduce the SessionContext that command.rs::handle_start_turn
+        //     builds (command.rs:794-802). These are the two hardcoded values
+        //     that the trace identifies as the break point:
+        //       - working_dir: DEFAULT_WORKING_DIR = "/tmp/syncode"
+        //       - system_prompt: "You are a helpful AI coding assistant."
+        let reactor_built_ctx = SessionContext {
+            thread_id: EntityId::new(),
+            turn_id: EntityId::new(),
+            // BREAK POINT 1: hardcoded in command.rs:134 / 798.
+            working_dir: "/tmp/syncode".to_string(),
+            // BREAK POINT 2: hardcoded in command.rs:799.
+            system_prompt: Some("You are a helpful AI coding assistant.".to_string()),
+            user_input: "Fix the bug in main.rs".to_string(),
+            context_files: vec![],
+        };
+
+        // --- Act: drive it through start_session (what ensure_session_for_thread
+        //     → SessionManager::start_session → adapter.start_session does).
+        let session_id = adapter.start_session(reactor_built_ctx).await.unwrap();
+        assert!(session_id.starts_with("claude-"));
+
+        // --- Assert (1): the session recorded the HARDCODED working_dir, not a
+        //     real project cwd. send_request (claude.rs:716) does
+        //     `current_dir(&working_dir)`, so the `claude` CLI would spawn in
+        //     /tmp/syncode — a directory that does not exist on Windows and is
+        //     almost never the user's project root.
+        let recorded = {
+            let sessions = adapter.sessions.lock().await;
+            sessions.get(&session_id).expect("session recorded").clone()
+        };
+        assert_eq!(
+            recorded.state.working_dir, "/tmp/syncode",
+            "BREAK POINT 1: handle_start_turn hardcodes working_dir to DEFAULT_WORKING_DIR \
+             (/tmp/syncode); the user's real project cwd never reaches the adapter"
+        );
+
+        // --- Assert (2): the session recorded the HARDCODED system prompt, not
+        //     any project-specific instructions. send_request (claude.rs:708)
+        //     passes this verbatim to argv → `--append-system-prompt`.
+        assert_eq!(
+            recorded.system_prompt.as_deref(),
+            Some("You are a helpful AI coding assistant."),
+            "BREAK POINT 2: handle_start_turn hardcodes the system prompt; project-specific \
+             instructions are never injected"
+        );
+
+        // --- Assert (3): reconstruct the argv send_request WOULD spawn
+        //     (claude.rs:706-708 builds it via ClaudeConfig::argv from the
+        //     recorded prompt + system_prompt), and verify the working_dir and
+        //     prompt land in the spawn. This is the exact argv that
+        //     `Command::new(&bin).args(&args).current_dir(&working_dir)` uses.
+        let prompt = ClaudeAdapter::turn_prompt(&Some(json!({ "input": "Fix the bug in main.rs" })));
+        let argv = adapter
+            .claude_config
+            .argv(&prompt, Some("sonnet"), recorded.system_prompt.as_deref());
+
+        // The user input flows through as the -p prompt.
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-p" && w[1] == "Fix the bug in main.rs"),
+            "user input should reach the CLI as the -p prompt"
+        );
+        // The hardcoded system prompt flows through as --append-system-prompt.
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--append-system-prompt"
+                && w[1] == "You are a helpful AI coding assistant."),
+            "the hardcoded system prompt should reach the CLI via --append-system-prompt"
+        );
+        // The working_dir is NOT the real project root — confirm it is the
+        // sentinel value the trace flags as the break point.
+        assert_ne!(
+            recorded.state.working_dir,
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            "the hardcoded working_dir differs from the actual process cwd — confirming the break"
         );
     }
 }
