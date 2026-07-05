@@ -274,22 +274,40 @@ fn project_summary(p: &rm::ProjectView) -> dto::ProjectSummary {
     }
 }
 
-/// Map an orchestration `ThreadView` to the contracts `ThreadSummary` DTO.
-fn thread_summary(t: &rm::ThreadView) -> dto::ThreadSummary {
-    dto::ThreadSummary {
-        id: t.id.clone(),
-        project_id: t.project_id.clone(),
-        provider_id: t.provider_id.clone(),
-        model: t.model.clone(),
-        status: t.status.clone(),
-        title: t.title.clone(),
-        git_checkpoint: t.git_checkpoint.clone(),
-        runtime_mode: t.runtime_mode.clone(),
-        interaction_mode: t.interaction_mode.clone(),
-        turn_count: t.turn_count,
-        created_at: t.created_at.clone(),
-        updated_at: t.updated_at.clone(),
+/// Map a Rust provider_id to the MCode frontend `ProviderKind` string.
+/// The frontend uses "claudeAgent" while the Rust backend uses "claude".
+fn to_mcode_provider_kind(provider_id: &str) -> String {
+    match provider_id {
+        "claude" => "claudeAgent".to_string(),
+        other => other.to_string(),
     }
+}
+
+/// Map an orchestration `ThreadView` to the MCode-compatible shell snapshot
+/// thread shape. The frontend expects `modelSelection: { provider, model }`
+/// rather than flat `provider_id` + `model` fields.
+fn thread_summary(t: &rm::ThreadView) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id,
+        "projectId": t.project_id,
+        "title": t.title.clone().unwrap_or_default(),
+        "modelSelection": {
+            "provider": to_mcode_provider_kind(&t.provider_id),
+            "model": t.model,
+        },
+        "runtimeMode": t.runtime_mode,
+        "interactionMode": t.interaction_mode,
+        "branch": serde_json::Value::Null,
+        "worktreePath": serde_json::Value::Null,
+        "turn_count": t.turn_count,
+        "created_at": t.created_at,
+        "updated_at": t.updated_at,
+        // Legacy flat fields (backward compat for code paths that still read them)
+        "provider_id": t.provider_id,
+        "model": t.model,
+        "status": t.status,
+        "git_checkpoint": t.git_checkpoint,
+    })
 }
 
 /// Map an orchestration `TurnView` to the contracts `TurnSummary` DTO.
@@ -371,36 +389,38 @@ fn build_snapshot(
                     .filter(|m| turns.iter().any(|t: &dto::TurnSummary| t.id == m.turn_id))
                     .map(message_summary)
                     .collect();
-                let snap = dto::ThreadDetailSnapshot {
-                    scope: dto::SnapshotScope::Thread,
-                    thread: thread_summary(thread),
-                    turns,
-                    messages,
-                    snapshot_at,
-                };
-                Some(serde_json::to_value(&snap).ok()?)
+                let snap = serde_json::json!({
+                    "scope": "thread",
+                    "thread": thread_summary(thread),
+                    "turns": turns,
+                    "messages": messages,
+                    "snapshot_at": snapshot_at,
+                });
+                Some(snap)
             }
             None => {
-                let snap = dto::ShellSnapshot {
-                    scope: dto::SnapshotScope::Shell,
-                    projects: store.projects.values().map(project_summary).collect(),
-                    threads: store.threads.values().map(thread_summary).collect(),
-                    snapshot_at,
-                };
-                Some(serde_json::to_value(&snap).ok()?)
+                // Build shell snapshot as raw JSON to use MCode-compatible
+                // thread shape (modelSelection instead of flat provider_id/model).
+                let snap = serde_json::json!({
+                    "scope": "shell",
+                    "projects": store.projects.values().map(project_summary).collect::<Vec<_>>(),
+                    "threads": store.threads.values().map(thread_summary).collect::<Vec<_>>(),
+                    "snapshot_at": snapshot_at,
+                });
+                Some(snap)
             }
         },
         crate::channels::CHANNEL_ALL => {
-            let snap = dto::FullSnapshot {
-                scope: dto::SnapshotScope::Full,
-                projects: store.projects.values().map(project_summary).collect(),
-                threads: store.threads.values().map(thread_summary).collect(),
-                turns: store.turns.values().map(turn_summary).collect(),
-                messages: store.messages.values().map(message_summary).collect(),
-                activities: store.activities.iter().map(activity_summary).collect(),
-                snapshot_at,
-            };
-            Some(serde_json::to_value(&snap).ok()?)
+            let snap = serde_json::json!({
+                "scope": "full",
+                "projects": store.projects.values().map(project_summary).collect::<Vec<_>>(),
+                "threads": store.threads.values().map(thread_summary).collect::<Vec<_>>(),
+                "turns": store.turns.values().map(turn_summary).collect::<Vec<_>>(),
+                "messages": store.messages.values().map(message_summary).collect::<Vec<_>>(),
+                "activities": store.activities.iter().map(activity_summary).collect::<Vec<_>>(),
+                "snapshot_at": snapshot_at,
+            });
+            Some(snap)
         }
         // provider/git/terminal/automation: no snapshot yet (future work).
         _ => None,

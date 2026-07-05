@@ -580,10 +580,13 @@ export function normalizeModelSlug(
 
   const providerScopedModel =
     provider === "claudeAgent" ? trimmed.replace(/\[[^\]]+\]$/u, "") : trimmed;
-  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] as Record<string, ModelSlug>;
-  const aliased = Object.prototype.hasOwnProperty.call(aliases, providerScopedModel)
-    ? aliases[providerScopedModel]
-    : undefined;
+  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] as
+    | Record<string, ModelSlug>
+    | undefined;
+  const aliased =
+    aliases && Object.prototype.hasOwnProperty.call(aliases, providerScopedModel)
+      ? aliases[providerScopedModel]
+      : undefined;
   return typeof aliased === "string" ? aliased : (providerScopedModel as ModelSlug);
 }
 

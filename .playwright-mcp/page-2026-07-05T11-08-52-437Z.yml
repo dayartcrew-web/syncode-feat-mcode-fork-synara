@@ -1,0 +1,64 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e3]:
+    - generic [ref=f1e6]:
+      - generic [ref=f1e9]:
+        - button "Toggle thread sidebar" [ref=f1e10] [cursor=pointer]:
+          - generic [ref=f1e12]: Toggle Sidebar
+        - button "World Cup 2026" [ref=f1e13] [cursor=pointer]:
+          - img [ref=f1e14]
+      - generic [ref=f1e17]:
+        - list [ref=f1e19]:
+          - listitem [ref=f1e20]:
+            - button "New thread" [ref=f1e21] [cursor=pointer]:
+              - generic [ref=f1e24]: New thread
+          - listitem [ref=f1e25]:
+            - button "Search Ctrl K" [ref=f1e26] [cursor=pointer]:
+              - generic [ref=f1e29]: Search
+              - generic [ref=f1e31]:
+                - generic: Ctrl
+                - generic: K
+          - listitem [ref=f1e32]:
+            - button "Kanban" [ref=f1e33] [cursor=pointer]:
+              - generic [ref=f1e36]: Kanban
+          - listitem [ref=f1e37]:
+            - button "Automations" [ref=f1e38] [cursor=pointer]:
+              - img [ref=f1e40]
+              - generic [ref=f1e43]: Automations
+        - generic [ref=f1e44]:
+          - generic [ref=f1e45]:
+            - generic [ref=f1e47]: Projects
+            - generic:
+              - button "Sort projects":
+                - img
+              - button "Add project":
+                - img
+          - list
+          - status [ref=f1e48]
+          - generic "Loading projects" [ref=f1e49]:
+            - generic [ref=f1e50]: Loading projects...
+      - generic [ref=f1e55]:
+        - generic [ref=f1e56]:
+          - generic [ref=f1e57]:
+            - button "Chats" [ref=f1e58] [cursor=pointer]:
+              - img [ref=f1e60]
+              - generic [ref=f1e63]: Chats
+            - generic [ref=f1e64]:
+              - button "Sort chats" [ref=f1e65] [cursor=pointer]:
+                - img [ref=f1e66]
+              - button "Open new chat home" [ref=f1e68] [cursor=pointer]
+          - generic [ref=f1e70]:
+            - generic:
+              - list:
+                - generic: No chats yet
+        - list [ref=f1e71]:
+          - listitem [ref=f1e72]:
+            - button "Settings" [ref=f1e75] [cursor=pointer]:
+              - img [ref=f1e77]
+              - generic [ref=f1e80]: Settings
+    - generic [ref=f1e81]:
+      - button "Resize Sidebar" [ref=f1e82]
+      - img "MCode" [ref=f1e85]
+  - generic:
+    - region "Notifications"
+  - generic:
+    - region "Notifications"
