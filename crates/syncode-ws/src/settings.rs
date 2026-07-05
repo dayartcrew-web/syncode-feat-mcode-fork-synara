@@ -209,13 +209,34 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
         auth_mode.to_string()
     };
 
+    // Build provider status objects for all known providers so the frontend's
+    // `subscribeConfig` snapshot (which includes a `providers` array) matches
+    // the `subscribeProviderStatuses` snapshot. Without this, the config
+    // snapshot sends `providers: []` which overwrites the real statuses the
+    // provider-statuses snapshot just delivered, causing "Provider status is
+    // still loading." toast.
+    let now = chrono::Utc::now().to_rfc3339();
+    let default_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
+        .iter()
+        .map(|pid| {
+            let mcode_kind = if *pid == "claude" { "claudeAgent" } else { *pid as &str };
+            serde_json::json!({
+                "provider": mcode_kind,
+                "status": "ready",
+                "available": true,
+                "authStatus": "authenticated",
+                "checkedAt": now,
+            })
+        })
+        .collect();
+
     let mut cfg = serde_json::json!({
         "cwd": cwd,
         "worktreesDir": worktrees_dir,
         "keybindingsConfigPath": keybindings_path,
         "keybindings": [],
         "issues": [],
-        "providers": [],
+        "providers": default_providers,
         "availableEditors": [],
         "authMode": auth_mode_str,
     });

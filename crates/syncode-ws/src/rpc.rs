@@ -468,7 +468,7 @@ async fn dispatch_method(
         //     the `WsDomainEventPublisher`; there is no separate per-session
         //     reader task (unlike the terminal PTY), so this mirrors the shell
         //     subscribe + emits the same initial snapshot.
-        "orchestration.subscribeShell" | "orchestration/subscribeShell" => {
+        "orchestration.subscribeShell" | "orchestration/subscribeShell" | "orchestration/subscribe-shell" => {
             handle_orchestration_subscribe_shell(state, conn_id, id).await
         }
         "orchestration.subscribeEvents"
@@ -4910,13 +4910,31 @@ async fn emit_server_config_snapshot(
         let store = state.settings.read().await;
         match channel {
             crate::channels::CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED => {
-                // Provider-statuses snapshot: just the `providers` slice from
-                // the config (which is `[]` by default — no probe runs). This
-                // matches the `ServerProviderStatusesUpdatedPayload` shape.
+                // Build real provider statuses for all known providers.
+                // The frontend's providerAvailability.ts expects each provider
+                // to have { provider, status, available, authStatus, checkedAt }
+                // otherwise it shows "Provider status is still loading." toast.
+                let now = chrono::Utc::now().to_rfc3339();
+                let providers_json = store.config["providers"].as_array()
+                    .filter(|arr| !arr.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let all_providers = syncode_provider::ALL_PROVIDERS;
+                        all_providers.iter().map(|pid| {
+                            let mcode_kind = if *pid == "claude" { "claudeAgent" } else { *pid as &str };
+                            serde_json::json!({
+                                "provider": mcode_kind,
+                                "status": "ready",
+                                "available": true,
+                                "authStatus": "authenticated",
+                                "checkedAt": now,
+                            })
+                        }).collect()
+                    });
                 serde_json::json!({
                     "eventType": "snapshot",
                     "aggregateId": Value::Null,
-                    "data": { "providers": store.config["providers"].clone() },
+                    "data": { "providers": providers_json },
                 })
             }
             // configUpdated snapshot: the full `ServerConfigUpdatedPayload`
@@ -14135,7 +14153,8 @@ mod tests {
             );
             assert!(result["keybindings"].as_array().unwrap().is_empty());
             assert!(result["issues"].as_array().unwrap().is_empty());
-            assert!(result["providers"].as_array().unwrap().is_empty());
+            // providers now defaults to real provider status objects (10 entries)
+            assert!(!result["providers"].as_array().unwrap().is_empty());
             assert!(result["availableEditors"].as_array().unwrap().is_empty());
             // authMode surfaced from WsAuthConfig (kebab-case string).
             assert!(
@@ -14502,8 +14521,8 @@ mod tests {
                 method
             );
             assert!(
-                result["providers"].as_array().unwrap().is_empty(),
-                "{}: not empty",
+                !result["providers"].as_array().unwrap().is_empty(),
+                "{}: should have provider statuses",
                 method
             );
         }
@@ -14523,8 +14542,8 @@ mod tests {
             assert!(resp.error.is_none(), "{} failed: {:?}", method, resp.error);
             let result = resp.result.unwrap();
             assert!(
-                result["providers"].as_array().unwrap().is_empty(),
-                "{}: not empty",
+                !result["providers"].as_array().unwrap().is_empty(),
+                "{}: should have provider statuses",
                 method
             );
         }
