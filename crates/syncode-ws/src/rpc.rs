@@ -4453,9 +4453,9 @@ async fn orchestration_subscribe(
 // mirrored from MCode `packages/contracts/src/server.ts`):
 //   - ServerConfig       { cwd, worktreesDir, keybindingsConfigPath,
 //                          keybindings, issues, providers, availableEditors,
-//                          +optional homeDir/chatWorkspaceRoot }
+//                          homeDir, +optional chatWorkspaceRoot }
 //   - ServerSettings     (DEFAULT_SERVER_SETTINGS literal — see server.ts)
-//   - WsWelcomePayload   { cwd, projectName, +optional homeDir/…/bootstrap*Id }
+//   - WsWelcomePayload   { cwd, projectName, homeDir, +optional bootstrap*Id }
 //   - ExecutionEnvironmentDescriptor { environmentId, label, platform,
 //                                      serverVersion, capabilities }
 //   - ServerDiagnosticsResult { generatedAt, process{pid,uptimeSeconds,memory},
@@ -4606,8 +4606,16 @@ fn build_server_welcome_payload(state: &WsState) -> Value {
             "repositoryIdentity": repository_identity,
         },
     });
-    if let (Some(h), Some(obj)) = (home, payload.as_object_mut()) {
-        obj.insert("homeDir".into(), Value::String(h));
+    // Always populate `homeDir`. When the home directory is resolvable we use
+    // the real value; otherwise we fall back to `cwd` so the field is never
+    // absent. The MCode frontend's `useHandleNewChat` errors with "Home
+    // folder is not available yet" when `homeDir` is null/empty, blocking the
+    // splash screen from reaching the chat UI — see PR-4-1.
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "homeDir".into(),
+            Value::String(home.unwrap_or_else(|| cwd.clone())),
+        );
     }
     payload
 }
@@ -14170,6 +14178,19 @@ mod tests {
                 method,
                 result["authMode"]
             );
+            // PR-4-1: `homeDir` must always be present and non-empty — the
+            // frontend's `useHandleNewChat` blocks "New chat" with "Home
+            // folder is not available yet" when this field is null/empty.
+            let home_dir = result
+                .get("homeDir")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert!(
+                !home_dir.trim().is_empty(),
+                "{}: homeDir must be non-empty: {:?}",
+                method,
+                result.get("homeDir")
+            );
         }
     }
 
@@ -14350,6 +14371,40 @@ mod tests {
             result["capabilities"]["repositoryIdentity"].is_boolean(),
             "capabilities.repositoryIdentity must be bool: {:?}",
             result["capabilities"]
+        );
+        // PR-4-1: `homeDir` must always be present and non-empty so the
+        // frontend's `useHandleNewChat` never errors with "Home folder is
+        // not available yet".
+        let home_dir = result
+            .get("homeDir")
+            .and_then(|v| v.as_str())
+            .expect("welcome payload must include homeDir");
+        assert!(
+            !home_dir.trim().is_empty(),
+            "homeDir must be non-empty: {home_dir:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_welcome_homedir_never_missing_or_empty() {
+        // PR-4-1: the welcome payload must always include a non-empty
+        // `homeDir`. The resolution logic (HOME → USERPROFILE →
+        // HOMEDRIVE+HOMEPATH) is exercised in settings.rs against the pure
+        // `home_dir_from_env` helper; here we assert the end-to-end payload
+        // contract that the frontend depends on (the field is always present
+        // and trimmed-non-empty, regardless of the host's env).
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server.welcome" });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let home_dir = result
+            .get("homeDir")
+            .and_then(|v| v.as_str())
+            .expect("welcome payload must include homeDir");
+        assert!(
+            !home_dir.trim().is_empty(),
+            "homeDir must be trimmed-non-empty: {home_dir:?}"
         );
     }
 
