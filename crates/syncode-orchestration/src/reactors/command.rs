@@ -11,8 +11,10 @@
 //! - Command::CancelThread → adapter.stop_session() all sessions
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use syncode_core::EntityId;
+use syncode_memory::{MemoryProvider, NO_PRIOR_CONTEXT};
 use syncode_provider::{
     ProviderCapability, ProviderEvent, ProviderRequest, SessionContext, SessionIdentity,
     SessionManager, SessionStateStatus,
@@ -195,9 +197,20 @@ impl EnsureOutcome {
 /// their thread already has an in-flight `Processing` session are parked
 /// rather than dispatched, and drained by the ingestion reactor when the
 /// in-flight turn completes.
+///
+/// When a [`MemoryProvider`] is attached via [`Self::with_memory`] (P3-4),
+/// every freshly started provider session has its `system_prompt` augmented
+/// with the memory context retrieved for the turn's thread — grounding the
+/// provider in prior interactions without the caller having to assemble it.
 pub struct ProviderCommandReactor {
     session_manager: SessionManager,
     turn_queue: TurnQueue,
+    /// Optional persistent-memory backing. When `Some`, retrieved context is
+    /// injected into the system prompt of every freshly started session (the
+    /// Fresh and Restarted paths of `ensure_session_for_thread`). Reused
+    /// sessions are left untouched — their prompt was already grounded when
+    /// they were started.
+    memory: Option<Arc<dyn MemoryProvider>>,
 }
 
 impl ProviderCommandReactor {
@@ -206,7 +219,34 @@ impl ProviderCommandReactor {
         Self {
             session_manager,
             turn_queue: TurnQueue::new(),
+            memory: None,
         }
+    }
+
+    /// Attach a persistent-memory backing so freshly started provider sessions
+    /// are grounded in retrieved context (P3-4).
+    ///
+    /// On the Fresh and Restarted paths of `ensure_session_for_thread`, the
+    /// reactor queries `memory.retrieve_context(thread_id, user_input)` and
+    /// appends the result to the session's `system_prompt` (or seeds one when
+    /// the caller supplied `None`). The Reused path skips injection — that
+    /// session was already grounded when it was started, and re-querying
+    /// memory on every turn would needlessly bloat an in-flight conversation.
+    ///
+    /// Consumes `self` and returns the configured reactor (builder style).
+    /// `new()` remains the zero-arg default for callers that don't yet wire
+    /// memory, so existing construction sites compile unchanged.
+    #[must_use]
+    pub fn with_memory(mut self, memory: Arc<dyn MemoryProvider>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// The attached memory provider, if any (P3-4). Exposed for inspection by
+    /// tests and integration callers; the reactor itself routes through this
+    /// internally during session start.
+    pub fn memory(&self) -> Option<&Arc<dyn MemoryProvider>> {
+        self.memory.as_ref()
     }
 
     /// Get a reference to the session manager
@@ -593,7 +633,7 @@ impl ProviderCommandReactor {
     /// turn in the `SessionManager`'s turn→session index.
     pub(crate) async fn ensure_session_for_thread(
         &self,
-        ctx: SessionContext,
+        mut ctx: SessionContext,
         requested_model: Option<String>,
         adapter: &syncode_provider::registry::SharedAdapter,
     ) -> Result<EnsureOutcome, CommandReactorError> {
@@ -621,14 +661,21 @@ impl ProviderCommandReactor {
             .max_by_key(|s| s.created_at.timestamp_millis());
 
         let Some(existing) = existing else {
-            // (1) No active session → start fresh.
+            // (1) No active session → start fresh. When a memory provider is
+            // attached, ground the new session's system prompt in the retrieved
+            // context for this thread (P3-4). Retrieval happens only on the
+            // start paths so a reused session is not re-queried.
+            ctx = self.augment_ctx_with_memory(ctx).await;
             let session = self.start_and_stamp(ctx, requested, None, adapter).await?;
             return Ok(EnsureOutcome::Fresh {
                 session_id: session.id.clone(),
             });
         };
 
-        // (2) Active session with matching identity → reuse.
+        // (2) Active session with matching identity → reuse. No memory
+        // augmentation: that session was already grounded when it started, and
+        // re-querying memory on every turn would bloat an in-flight
+        // conversation without changing the provider's already-seen context.
         if existing.identity().as_ref() == Some(&requested) {
             return Ok(EnsureOutcome::Reused {
                 session_id: existing.id.clone(),
@@ -636,13 +683,15 @@ impl ProviderCommandReactor {
         }
 
         // (3) Identity changed → stop the old session, carry its resume cursor,
-        // and start a new one stamped with the requested identity.
+        // and start a new one stamped with the requested identity. The new
+        // session is grounded in freshly retrieved memory context (P3-4).
         let old_session_id = existing.id.clone();
         let resume_cursor = existing.resume_cursor();
         let _ = self
             .session_manager
             .stop_session(adapter, &old_session_id)
             .await;
+        ctx = self.augment_ctx_with_memory(ctx).await;
         let session = self
             .start_and_stamp(ctx, requested, resume_cursor.clone(), adapter)
             .await?;
@@ -651,6 +700,46 @@ impl ProviderCommandReactor {
             new_session_id: session.id.clone(),
             resume_cursor,
         })
+    }
+
+    /// Retrieve memory context for the session's thread and append it to
+    /// `ctx.system_prompt` (P3-4).
+    ///
+    /// Called on the Fresh and Restarted paths of
+    /// [`Self::ensure_session_for_thread`] — i.e. only when a brand-new
+    /// provider session is about to start. The context is scoped to the
+    /// thread id (used as the memory `user_id` so each conversation has its
+    /// own recalled history) and is appended to whatever system prompt the
+    /// caller already assembled, separated by a blank line. When the caller
+    /// supplied `None` for the system prompt, the retrieved context seeds
+    /// one directly.
+    ///
+    /// The sentinel [`NO_PRIOR_CONTEXT`] is filtered out so a fresh thread
+    /// (no history yet) doesn't get a literal "No prior context available."
+    /// string injected into its prompt — in that case the prompt is left
+    /// untouched. When no memory provider is attached, this is a no-op.
+    async fn augment_ctx_with_memory(&self, mut ctx: SessionContext) -> SessionContext {
+        let Some(memory) = self.memory.as_ref() else {
+            return ctx;
+        };
+        // The thread id is the memory scope key: one conversation = one
+        // recalled history. `user_input` is the retrieval query (reserved for
+        // future semantic search; the current store returns the N most recent
+        // interactions for the scope regardless of the query text).
+        let retrieved = memory
+            .retrieve_context(&ctx.thread_id.as_str(), &ctx.user_input)
+            .await;
+        // Skip the no-history sentinel so we don't pollute the prompt with a
+        // literal "No prior context available." on a thread's very first turn.
+        if retrieved.is_empty() || retrieved == NO_PRIOR_CONTEXT {
+            return ctx;
+        }
+        let augmented = match ctx.system_prompt.take() {
+            Some(existing) => format!("{existing}\n\n{retrieved}"),
+            None => retrieved,
+        };
+        ctx.system_prompt = Some(augmented);
+        ctx
     }
 
     /// Start a new session on the adapter, then stamp the requested identity
@@ -897,6 +986,11 @@ pub(crate) mod tests {
     /// Recorded `(session_id, payload)` entries for every `steer_turn` call.
     type RecordedSteers = Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
 
+    /// Recorded system prompts captured from every `start_session` call.
+    /// Used by the P3-4 context-injection tests to assert that retrieved
+    /// memory context flowed into the provider session's system prompt.
+    type RecordedSystemPrompts = Arc<std::sync::Mutex<Vec<Option<String>>>>;
+
     /// Mock adapter for command reactor tests
     struct CmdTestMock {
         started_sessions: std::sync::Mutex<Vec<String>>,
@@ -908,6 +1002,11 @@ pub(crate) mod tests {
         steers: RecordedSteers,
         /// When true the adapter advertises `ProviderCapability::Steering`.
         supports_steering: bool,
+        /// System prompt captured from each `start_session` call (P3-4). One
+        /// entry per started session, in start order. `None` means the caller
+        /// supplied no system prompt; `Some(s)` means `s` was the (possibly
+        /// memory-augmented) prompt the provider received.
+        recorded_system_prompts: RecordedSystemPrompts,
     }
 
     impl CmdTestMock {
@@ -919,6 +1018,7 @@ pub(crate) mod tests {
                 requests: Arc::new(std::sync::Mutex::new(Vec::new())),
                 steers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 supports_steering: false,
+                recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
 
@@ -935,6 +1035,7 @@ pub(crate) mod tests {
                 requests: Arc::clone(&requests),
                 steers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 supports_steering: false,
+                recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
             };
             (this, stopped, requests)
         }
@@ -958,8 +1059,33 @@ pub(crate) mod tests {
                 requests: Arc::clone(&requests),
                 steers: Arc::clone(&steers),
                 supports_steering: true,
+                recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
             };
             (this, stopped, requests, steers)
+        }
+
+        /// Like `new_with_handles` but also returns the shared handle for the
+        /// recorded system prompts (P3-4). Tests assert that memory context
+        /// flowed into the prompt by reading this vector after a start.
+        fn new_with_prompt_handles() -> (
+            Self,
+            Arc<std::sync::Mutex<Vec<String>>>,
+            RecordedRequests,
+            RecordedSystemPrompts,
+        ) {
+            let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let this = Self {
+                started_sessions: std::sync::Mutex::new(Vec::new()),
+                interrupted: std::sync::Mutex::new(Vec::new()),
+                stopped: Arc::clone(&stopped),
+                requests: Arc::clone(&requests),
+                steers: Arc::new(std::sync::Mutex::new(Vec::new())),
+                supports_steering: false,
+                recorded_system_prompts: Arc::clone(&prompts),
+            };
+            (this, stopped, requests, prompts)
         }
     }
 
@@ -1005,10 +1131,17 @@ pub(crate) mod tests {
 
         async fn start_session(
             &mut self,
-            _ctx: SessionContext,
+            ctx: SessionContext,
         ) -> Result<String, syncode_provider::ProviderAdapterError> {
             let sid = format!("cmd-{}", uuid::Uuid::new_v4().hyphenated());
             self.started_sessions.lock().unwrap().push(sid.clone());
+            // Capture the system prompt so P3-4 tests can assert that memory
+            // context was injected. The vector mirrors `started_sessions` —
+            // one entry per start, in start order.
+            self.recorded_system_prompts
+                .lock()
+                .unwrap()
+                .push(ctx.system_prompt.clone());
             Ok(sid)
         }
 
@@ -1099,6 +1232,20 @@ pub(crate) mod tests {
     ) {
         let (mock, stopped, requests, steers) = CmdTestMock::new_steering_with_handles();
         (Arc::new(RwLock::new(mock)), stopped, requests, steers)
+    }
+
+    /// Like `make_recorded_test_mock` but also returns the shared handle for
+    /// recorded system prompts (P3-4). Tests assert that memory context was
+    /// injected into the provider session's system prompt by inspecting the
+    /// prompt vector after `ensure_session_for_thread` starts a fresh session.
+    pub(crate) fn make_prompt_recording_mock() -> (
+        syncode_provider::registry::SharedAdapter,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        RecordedRequests,
+        RecordedSystemPrompts,
+    ) {
+        let (mock, stopped, requests, prompts) = CmdTestMock::new_with_prompt_handles();
+        (Arc::new(RwLock::new(mock)), stopped, requests, prompts)
     }
 
     #[tokio::test]
@@ -2100,6 +2247,255 @@ pub(crate) mod tests {
         assert!(
             stopped.lock().unwrap().is_empty(),
             "reuse path must not stop the session"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P3-4: Memory context injection into provider sessions
+    // -----------------------------------------------------------------------
+    //
+    // `ProviderCommandReactor::with_memory` wires a `MemoryProvider` so that
+    // freshly started sessions (Fresh + Restarted paths of
+    // `ensure_session_for_thread`) have their `system_prompt` augmented with
+    // the retrieved context for the thread. The two tests below prove:
+    //   (1) a thread with prior history → the new session's prompt contains
+    //       the retrieved interaction text, appended to the base prompt.
+    //   (2) a thread with NO history → the sentinel is filtered out and the
+    //       base prompt is left untouched (no "No prior context available."
+    //       leaks into the system prompt).
+
+    /// A minimal in-memory `MemoryProvider` for context-injection tests.
+    ///
+    /// Returns a fixed context string so the test can assert on exact
+    /// substring presence without coupling to SQLite formatting. Implements
+    /// `persist_interaction` as a no-op (the injection path only calls
+    /// `retrieve_context`).
+    struct StubMemory {
+        context: String,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryProvider for StubMemory {
+        async fn retrieve_context(&self, _user_id: &str, _query: &str) -> String {
+            self.context.clone()
+        }
+        async fn persist_interaction(
+            &self,
+            _user_id: &str,
+            _prompt: &str,
+            _response: &str,
+            _provider: &str,
+            _tokens: u32,
+        ) -> Result<(), syncode_memory::MemoryProviderError> {
+            Ok(())
+        }
+    }
+
+    /// (1) A freshly started session for a thread WITH prior memory history
+    /// has its `system_prompt` augmented with the retrieved context. The base
+    /// prompt is preserved and the memory block is appended after a blank
+    /// line. This is the P3-4 happy path: retrieved context reaches the
+    /// provider session's startup prompt.
+    #[tokio::test]
+    async fn memory_context_injected_into_fresh_session_prompt() {
+        let memory: Arc<dyn MemoryProvider> = Arc::new(StubMemory {
+            context: "## Prior Context\n### Interaction 1\nQ: prior question\nA: prior answer"
+                .to_string(),
+        });
+        let reactor =
+            ProviderCommandReactor::new(SessionManager::new()).with_memory(memory);
+        let (adapter, _stopped, _requests, prompts) = make_prompt_recording_mock();
+        let thread_id = EntityId::new();
+
+        let ctx = SessionContext {
+            thread_id,
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/proj".to_string(),
+            system_prompt: Some("You are a helpful AI coding assistant.".to_string()),
+            user_input: "next turn".to_string(),
+            context_files: vec![],
+        };
+
+        let outcome = reactor
+            .ensure_session_for_thread(ctx, Some("claude".to_string()), &adapter)
+            .await
+            .expect("ensure should succeed");
+
+        assert!(
+            matches!(outcome, EnsureOutcome::Fresh { .. }),
+            "no prior session → Fresh, got {outcome:?}"
+        );
+
+        // Exactly one start → exactly one recorded prompt.
+        let recorded = prompts.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "expected one recorded system prompt");
+        let prompt = recorded[0].as_ref().expect("prompt should be Some");
+
+        // Base prompt preserved...
+        assert!(
+            prompt.contains("You are a helpful AI coding assistant."),
+            "base system prompt must be preserved; got: {prompt}"
+        );
+        // ...and memory context appended.
+        assert!(
+            prompt.contains("## Prior Context"),
+            "retrieved memory context must be injected; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("prior question"),
+            "retrieved interaction text must be present; got: {prompt}"
+        );
+        // The memory block follows the base prompt (augmentation, not
+        // replacement): the base prompt text appears before the context header.
+        let base_pos = prompt.find("helpful AI").expect("base prompt present");
+        let ctx_pos = prompt.find("## Prior Context").expect("context present");
+        assert!(
+            base_pos < ctx_pos,
+            "base prompt must precede the injected context"
+        );
+    }
+
+    /// (2) A freshly started session for a thread with NO prior history leaves
+    /// the base prompt untouched — the `NO_PRIOR_CONTEXT` sentinel is filtered
+    /// out so it never leaks into the provider's system prompt. Also covers
+    /// the Restarted path: an identity change re-runs augmentation.
+    #[tokio::test]
+    async fn memory_sentinel_filtered_and_restarted_path_re_injects() {
+        // Memory returns the no-history sentinel, simulating a fresh thread.
+        let memory: Arc<dyn MemoryProvider> = Arc::new(StubMemory {
+            context: NO_PRIOR_CONTEXT.to_string(),
+        });
+        let reactor =
+            ProviderCommandReactor::new(SessionManager::new()).with_memory(memory);
+        let (adapter, _stopped, _requests, prompts) = make_prompt_recording_mock();
+        let thread_id = EntityId::new();
+
+        // First ensure — Fresh path. Sentinel is filtered → base prompt intact.
+        let ctx = SessionContext {
+            thread_id,
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/proj".to_string(),
+            system_prompt: Some("base-instructions".to_string()),
+            user_input: "first turn".to_string(),
+            context_files: vec![],
+        };
+        let first = reactor
+            .ensure_session_for_thread(ctx, Some("model-a".to_string()), &adapter)
+            .await
+            .expect("first ensure");
+        assert!(matches!(first, EnsureOutcome::Fresh { .. }));
+
+        let recorded = prompts.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        let prompt = recorded[0].as_ref().expect("prompt Some");
+        assert_eq!(
+            prompt, "base-instructions",
+            "sentinel must be filtered — base prompt unchanged; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains(NO_PRIOR_CONTEXT),
+            "sentinel string must NOT leak into the prompt; got: {prompt}"
+        );
+
+        // Now restart with a changed model — the Restarted path re-runs
+        // augmentation. Replace the stub memory with one that returns real
+        // context to prove augmentation fires on restart too.
+        let reactor2 = ProviderCommandReactor::new(SessionManager::new())
+            .with_memory(Arc::new(StubMemory {
+                context: "## Prior Context\nQ: earlier\nA: earlier-answer".to_string(),
+            })
+                as Arc<dyn MemoryProvider>);
+        let (adapter2, _stopped2, _requests2, prompts2) = make_prompt_recording_mock();
+
+        // Seed a session first so the second call takes the Restarted path.
+        let seed_ctx = SessionContext {
+            thread_id,
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/proj".to_string(),
+            system_prompt: None,
+            user_input: "seed".to_string(),
+            context_files: vec![],
+        };
+        reactor2
+            .ensure_session_for_thread(seed_ctx, Some("model-a".to_string()), &adapter2)
+            .await
+            .unwrap();
+
+        // Changed model → Restarted. Memory augmentation should fire and seed
+        // the prompt (which was `None`) directly from retrieved context.
+        let restart_ctx = SessionContext {
+            thread_id,
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/proj".to_string(),
+            system_prompt: None,
+            user_input: "restart turn".to_string(),
+            context_files: vec![],
+        };
+        let restarted = reactor2
+            .ensure_session_for_thread(restart_ctx, Some("model-b".to_string()), &adapter2)
+            .await
+            .expect("restart ensure");
+        assert!(
+            matches!(restarted, EnsureOutcome::Restarted { .. }),
+            "model change → Restarted, got {restarted:?}"
+        );
+
+        let recorded2 = prompts2.lock().unwrap().clone();
+        // Two starts: seed (Fresh, no memory since prompt None + sentinel-less
+        // stub returns real context here) + restart. The restart's prompt is
+        // the last entry.
+        assert!(
+            recorded2.len() >= 2,
+            "expected at least two recorded prompts (seed + restart)"
+        );
+        let restart_prompt = recorded2
+            .last()
+            .expect("restart prompt present")
+            .as_ref()
+            .expect("restart prompt Some");
+        assert!(
+            restart_prompt.contains("## Prior Context"),
+            "Restarted path must re-inject memory context; got: {restart_prompt}"
+        );
+        assert!(
+            restart_prompt.contains("earlier-answer"),
+            "retrieved context must be present on restart; got: {restart_prompt}"
+        );
+    }
+
+    /// (3) When no memory provider is attached, the reactor behaves exactly as
+    /// before: the system prompt passes through to the adapter unchanged.
+    /// Guards the backward-compatibility contract of `new()` (no memory) —
+    /// existing construction sites must see no behavioural change.
+    #[tokio::test]
+    async fn no_memory_attached_leaves_prompt_untouched() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        assert!(
+            reactor.memory().is_none(),
+            "new() must not attach a memory provider"
+        );
+        let (adapter, _stopped, _requests, prompts) = make_prompt_recording_mock();
+        let thread_id = EntityId::new();
+
+        let ctx = SessionContext {
+            thread_id,
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/proj".to_string(),
+            system_prompt: Some("passthrough-prompt".to_string()),
+            user_input: "turn".to_string(),
+            context_files: vec![],
+        };
+        reactor
+            .ensure_session_for_thread(ctx, None, &adapter)
+            .await
+            .unwrap();
+
+        let recorded = prompts.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].as_deref(),
+            Some("passthrough-prompt"),
+            "no memory → prompt must pass through unchanged"
         );
     }
 }

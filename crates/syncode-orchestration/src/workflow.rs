@@ -449,4 +449,210 @@ mod tests {
             "persist failure should be logged; logs: {logs}"
         );
     }
+
+    // ------------------------------------------------------------------
+    // P1-6: end-to-end with a REAL SqliteMemoryStore
+    // ------------------------------------------------------------------
+    //
+    // The tests above exercise `execute_workflow` with an in-process mock
+    // memory. P1-6's contract is that the retrieve→plan→execute→persist
+    // pipeline works end-to-end against the real SQLite-backed
+    // [`syncode_memory::SqliteMemoryStore`] — proving the trait wiring, the
+    // SQL round-trip, and the markdown formatting all compose inside the
+    // orchestrator. These two tests are the integration acceptance gate for
+    // the memory-bound phases of the workflow.
+
+    /// (1) Happy path: the workflow retrieves prior context from a real
+    /// SQLite store (seeded before the run) and persists the new interaction
+    /// so a *subsequent* run sees it.
+    ///
+    /// This proves the full chain:
+    /// - `retrieve_context` reads the seeded row and grounds the plan in it
+    ///   (verified via the executor receiving the prior prompt text).
+    /// - `persist_interaction` writes the new prompt/response so a fresh
+    ///   store instance reading the same DB sees the just-completed turn.
+    #[tokio::test]
+    async fn execute_workflow_end_to_end_with_sqlite_roundtrips_context() {
+        use syncode_memory::SqliteMemoryStore;
+
+        // In-memory SQLite — private pool, survives across the two calls
+        // (retrieve + persist) within this test.
+        let store = SqliteMemoryStore::new_in_memory()
+            .await
+            .expect("in-memory store should init");
+
+        // Seed one prior interaction so retrieve_context has something to
+        // return (rather than the NO_PRIOR_CONTEXT sentinel).
+        store
+            .persist_interaction("user-e2e", "earlier question", "earlier answer", "claude", 10)
+            .await
+            .expect("seed persist");
+
+        // Capture the context the executor received so we can assert the
+        // seeded row was retrieved and passed through.
+        struct CtxExecutor {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        impl WorkflowExecutor for CtxExecutor {
+            fn plan(&self, _task: &str, context: &str) -> Result<String, WorkflowError> {
+                self.seen.lock().unwrap().push(context.to_string());
+                Ok("plan-from-prior-context".to_string())
+            }
+            fn execute(&self, _plan: &str) -> Result<String, WorkflowError> {
+                Ok("final-output".to_string())
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let executor = CtxExecutor {
+            seen: Arc::clone(&seen),
+        };
+
+        let state = execute_workflow(
+            "user-e2e",
+            "wf-e2e-1",
+            "follow up on the earlier work",
+            &store,
+            &executor,
+        )
+        .await
+        .expect("e2e happy path should complete");
+
+        // Terminal state — the workflow completed through all 6 steps.
+        assert_eq!(state.current_step, WorkflowStep::Completed);
+        assert!(state.is_completed);
+
+        // The plan step received the retrieved prior context (the seeded
+        // prompt text), proving retrieve_context → execute_step plumbing
+        // works against the real store.
+        let captured = seen.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1, "plan should be called exactly once");
+        assert!(
+            captured[0].contains("earlier question"),
+            "retrieved context must contain the seeded prompt; got: {}",
+            captured[0]
+        );
+        assert!(
+            captured[0].contains("earlier answer"),
+            "retrieved context must contain the seeded response; got: {}",
+            captured[0]
+        );
+
+        // The ephemeral context slot mirrors what was retrieved.
+        assert!(
+            state
+                .memory
+                .get_ephemeral("context")
+                .is_some_and(|c| c.contains("earlier question")),
+            "ephemeral['context'] must reflect the retrieved store data"
+        );
+
+        // The persist step wrote the new turn — a fresh retrieve now returns
+        // BOTH the seed and the just-completed interaction, most-recent first.
+        let after = store.retrieve_context("user-e2e", "").await;
+        assert!(
+            after.contains("follow up on the earlier work"),
+            "persisted prompt missing from post-run retrieval: {after}"
+        );
+        assert!(
+            after.contains("final-output"),
+            "persisted response missing from post-run retrieval: {after}"
+        );
+        assert!(
+            after.contains("earlier question"),
+            "seed row must still be present after the run: {after}"
+        );
+        // Most-recent first: the new interaction (just persisted) should
+        // appear before the seed.
+        let new_pos = after
+            .find("follow up")
+            .expect("new interaction present");
+        let seed_pos = after
+            .find("earlier question")
+            .expect("seed interaction present");
+        assert!(
+            new_pos < seed_pos,
+            "new interaction must be ordered before the seed (most-recent first)"
+        );
+    }
+
+    /// (2) Empty-store path: the workflow still completes when the SQLite
+    /// store has no prior interactions for the user. `retrieve_context`
+    /// returns the `NO_PRIOR_CONTEXT` sentinel, the workflow grounds the plan
+    /// in that sentinel (no crash, no empty-string special-case at the
+    /// orchestrator boundary), and the new interaction is persisted — proving
+    /// the first-turn cold-start works end-to-end.
+    #[tokio::test]
+    async fn execute_workflow_sqlite_cold_start_persists_first_interaction() {
+        use syncode_memory::{SqliteMemoryStore, NO_PRIOR_CONTEXT};
+
+        // Brand-new in-memory store — no rows for this user.
+        let store = SqliteMemoryStore::new_in_memory()
+            .await
+            .expect("in-memory store should init");
+
+        // Executor that asserts it received the sentinel on a cold start.
+        struct ColdStartExecutor {
+            received_context: Arc<Mutex<Option<String>>>,
+        }
+        impl WorkflowExecutor for ColdStartExecutor {
+            fn plan(&self, _task: &str, context: &str) -> Result<String, WorkflowError> {
+                *self.received_context.lock().unwrap() = Some(context.to_string());
+                Ok("cold-start-plan".to_string())
+            }
+            fn execute(&self, _plan: &str) -> Result<String, WorkflowError> {
+                Ok("cold-start-output".to_string())
+            }
+        }
+
+        let received = Arc::new(Mutex::new(None));
+        let executor = ColdStartExecutor {
+            received_context: Arc::clone(&received),
+        };
+
+        let state = execute_workflow(
+            "cold-user",
+            "wf-cold",
+            "very first question",
+            &store,
+            &executor,
+        )
+        .await
+        .expect("cold-start happy path should complete");
+
+        assert_eq!(state.current_step, WorkflowStep::Completed);
+        assert!(state.is_completed);
+
+        // On a cold start the orchestrator receives the sentinel, not an
+        // empty string — proving the store's emptiness contract holds through
+        // the workflow boundary.
+        let ctx = received.lock().unwrap().clone().expect("plan was called");
+        assert_eq!(
+            ctx, NO_PRIOR_CONTEXT,
+            "cold start must surface the no-prior-context sentinel"
+        );
+
+        // The first interaction is now persisted — a second retrieve returns
+        // it (no longer the sentinel).
+        let after = store.retrieve_context("cold-user", "").await;
+        assert_ne!(
+            after, NO_PRIOR_CONTEXT,
+            "after one run the store must have real context, not the sentinel"
+        );
+        assert!(
+            after.contains("very first question"),
+            "first-turn prompt must be persisted: {after}"
+        );
+        assert!(
+            after.contains("cold-start-output"),
+            "first-turn response must be persisted: {after}"
+        );
+        assert!(
+            state
+                .execution_logs
+                .join("\n")
+                .contains("Interaction persisted to memory"),
+            "the persist-success log line must be present"
+        );
+    }
 }
