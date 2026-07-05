@@ -54,7 +54,10 @@ impl RunExecutor for NoopExecutor {
 
 /// The scheduler engine
 pub struct Scheduler {
-    repo: Arc<dyn AutomationRepository>,
+    /// The backing repository. `pub(crate)` so the run-reactor's tests (and
+    /// other in-crate callers) can persist fixture runs directly, mirroring
+    /// the access this module's own tests already enjoy.
+    pub(crate) repo: Arc<dyn AutomationRepository>,
     executor: Arc<dyn RunExecutor>,
     /// Completion policy (global default; per-automation overrides are future work)
     default_completion: CompletionPolicy,
@@ -460,6 +463,94 @@ impl Scheduler {
             .save_def(&def.id.as_str(), payload)
             .await
             .map_err(repo_err)
+    }
+
+    // ─── Run-Reactor reconciliation helpers (P2-3) ──────────────────────
+    //
+    // These methods support the event-driven [`crate::run_reactor::
+    // AutomationRunReactor`]: they let the reactor find the active run bound
+    // to a thread (heartbeat mode) and apply status transitions derived from
+    // orchestration domain events. They are pure additions to the manual
+    // `complete_run` / `fail_run` / `cancel_run` surface.
+
+    /// Find the most recent **non-terminal** automation run whose definition
+    /// targets `thread_id` (heartbeat mode). Returns `None` when no such run
+    /// exists — the common case for threads not driven by an automation.
+    ///
+    /// Used by the [`AutomationRunReactor`](crate::run_reactor) to locate the
+    /// run to reconcile when a lifecycle event arrives for a thread.
+    pub async fn find_active_run_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Option<AutomationRun> {
+        for def in self.list().await {
+            if def.target_thread_id.as_deref() == Some(thread_id) {
+                let runs = self.list_runs(&def.id.as_str()).await;
+                // Newest non-terminal run (list_runs returns oldest→newest).
+                for run in runs.into_iter().rev() {
+                    if !run.status.is_terminal() {
+                        return Some(run);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Mark a run as blocked waiting for a human approval / user input.
+    /// Idempotent. Used by the reactor on `ApprovalRequested`-style events.
+    pub async fn set_run_waiting_for_approval(
+        &self,
+        run_id: &str,
+    ) -> Result<AutomationRun, SchedulerError> {
+        let payload = self
+            .repo
+            .get_run(run_id)
+            .await
+            .map_err(repo_err)?
+            .ok_or_else(|| SchedulerError::NotFound(run_id.to_string()))?;
+        let mut run: AutomationRun = serde_json::from_value(payload).map_err(serialization_err)?;
+        run.mark_waiting_for_approval();
+        let updated = serde_json::to_value(&run).map_err(serialization_err)?;
+        self.repo.save_run(updated).await.map_err(repo_err)?;
+        Ok(run)
+    }
+
+    /// Resume a previously-blocked run back to `Running` after its pending
+    /// approval / user input was responded to. Only transitions from
+    /// `WaitingForApproval`; a no-op for any other status. Used by the reactor
+    /// on `ThreadApprovalResponded` / `ThreadUserInputResponded`.
+    pub async fn resume_run_from_approval(
+        &self,
+        run_id: &str,
+    ) -> Result<AutomationRun, SchedulerError> {
+        let payload = self
+            .repo
+            .get_run(run_id)
+            .await
+            .map_err(repo_err)?
+            .ok_or_else(|| SchedulerError::NotFound(run_id.to_string()))?;
+        let mut run: AutomationRun = serde_json::from_value(payload).map_err(serialization_err)?;
+        run.resume_from_approval();
+        let updated = serde_json::to_value(&run).map_err(serialization_err)?;
+        self.repo.save_run(updated).await.map_err(repo_err)?;
+        Ok(run)
+    }
+
+    /// Mark a run as interrupted (the underlying turn was interrupted while
+    /// still running). Terminal. Used by the reactor on `TurnInterrupted`.
+    pub async fn interrupt_run(&self, run_id: &str) -> Result<AutomationRun, SchedulerError> {
+        let payload = self
+            .repo
+            .get_run(run_id)
+            .await
+            .map_err(repo_err)?
+            .ok_or_else(|| SchedulerError::NotFound(run_id.to_string()))?;
+        let mut run: AutomationRun = serde_json::from_value(payload).map_err(serialization_err)?;
+        run.mark_interrupted();
+        let updated = serde_json::to_value(&run).map_err(serialization_err)?;
+        self.repo.save_run(updated).await.map_err(repo_err)?;
+        Ok(run)
     }
 }
 
