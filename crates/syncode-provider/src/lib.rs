@@ -36,9 +36,10 @@ pub use opencode_server::{
     TurnStatus as OpenCodeTurnStatus,
 };
 pub use session::{
-    FileResumeCursorStore, InMemoryResumeCursorStore, PersistedSessionCursor, RehydratedSession,
-    RehydrationOutcome, ResumeCursorStore, ResumeCursorStoreError, SessionIdentity,
-    SessionManager, SessionState, SessionStateStatus, SessionTransitionError,
+    DEFAULT_IDLE_TTL_SECS, ENV_IDLE_TTL_SECS, IDLE_STOP_SWEEP_INTERVAL_SECS, FileResumeCursorStore,
+    InMemoryResumeCursorStore, PersistedSessionCursor, RehydratedSession, RehydrationOutcome,
+    ResumeCursorStore, ResumeCursorStoreError, SessionIdentity, SessionManager, SessionState,
+    SessionStateStatus, SessionTransitionError, configured_idle_ttl_secs,
 };
 pub use trait_def::{
     ALL_PROVIDERS, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE, PROVIDER_CODEX, PROVIDER_CURSOR,

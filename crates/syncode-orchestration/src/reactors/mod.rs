@@ -7,5 +7,10 @@
 pub mod command;
 pub mod ingestion;
 
-pub use command::{CommandReaction, CommandReactorError, EnsureOutcome, ProviderCommandReactor};
-pub use ingestion::{IngestionResult, ingest_provider_event};
+pub use command::{
+    CommandReaction, CommandReactorError, EnsureOutcome, ProviderCommandReactor, QueuedTurn,
+    TurnQueue,
+};
+pub use ingestion::{
+    IngestionResult, dispatch_queued_turn_after_completion, ingest_provider_event,
+};
