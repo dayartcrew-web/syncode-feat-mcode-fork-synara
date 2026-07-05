@@ -259,6 +259,29 @@ pub struct SessionContext {
 }
 
 // ---------------------------------------------------------------------------
+// External thread history (provider read)
+// ---------------------------------------------------------------------------
+
+/// A message read from an external provider's conversation history.
+///
+/// A lightweight, provider-agnostic shape mirroring the essential fields of a
+/// chat transcript entry: the role (e.g. "user", "assistant") and the text
+/// content. Provider adapters translate their native history representation
+/// into this common shape so the orchestration layer can import it uniformly
+/// (e.g. to seed a syncode thread from a provider-side conversation).
+///
+/// Faithful to mcode's `ThreadHandoffImportedMessage` essentials ({messageId,
+/// role, text, createdAt}) — the source message id and timestamp are deferred
+/// (the orchestration layer assigns ids on import; ordering is positional).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalThreadMessage {
+    /// Authoring role of the entry (e.g. "user", "assistant", "system").
+    pub role: String,
+    /// The message text content.
+    pub text: String,
+}
+
+// ---------------------------------------------------------------------------
 // Core trait
 // ---------------------------------------------------------------------------
 
@@ -342,6 +365,24 @@ pub trait ProviderAdapter: Send + Sync {
             "provider '{}' does not support steering",
             self.provider_id()
         )))
+    }
+
+    /// Read an external provider's conversation history for a thread/session.
+    ///
+    /// Adapters that can surface a provider-side transcript (e.g. a remote MCP
+    /// conversation, an Anthropic stored message thread) override this to return
+    /// the message history as a vector of [`ExternalThreadMessage`]. The default
+    /// implementation returns an empty vector — providers opt in by overriding —
+    /// so callers that need a transcript can fall back to syncode's own message
+    /// store when the provider has no readable history.
+    ///
+    /// `thread_ref` is a provider-specific reference to the external conversation
+    /// (a session id, a conversation id, a thread handle, etc.).
+    async fn read_external_thread(
+        &self,
+        _thread_ref: &str,
+    ) -> Result<Vec<ExternalThreadMessage>, ProviderAdapterError> {
+        Ok(Vec::new())
     }
 
     /// Subscribe to a stream of events from the provider.
@@ -579,5 +620,197 @@ mod tests {
 
         let err = ProviderAdapterError::SessionNotFound("sess-99".to_string());
         assert!(err.to_string().contains("sess-99"));
+    }
+
+    // ─── ExternalThreadMessage + read_external_thread ────────────────────
+
+    #[test]
+    fn external_thread_message_serialization_roundtrip() {
+        let msg = ExternalThreadMessage {
+            role: "user".to_string(),
+            text: "Hello, world!".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"text\":\"Hello, world!\""));
+
+        let back: ExternalThreadMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn external_thread_message_partial_role_values() {
+        // The shape is intentionally provider-agnostic: any role string the
+        // provider emits (system/assistant/tool/...) round-trips unchanged.
+        for role in ["user", "assistant", "system", "tool"] {
+            let msg = ExternalThreadMessage {
+                role: role.to_string(),
+                text: format!("msg from {role}"),
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let back: ExternalThreadMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.role, role);
+            assert_eq!(back.text, format!("msg from {role}"));
+        }
+    }
+
+    /// Minimal adapter that only implements the required trait methods, so the
+    /// default `read_external_thread` body is exercised (no override).
+    struct NoHistoryAdapter;
+
+    #[async_trait::async_trait]
+    impl ProviderAdapter for NoHistoryAdapter {
+        fn provider_id(&self) -> &str {
+            "no-history"
+        }
+        fn capabilities(&self) -> Vec<ProviderCapability> {
+            Vec::new()
+        }
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus::Idle
+        }
+        fn available_models(&self) -> Vec<String> {
+            Vec::new()
+        }
+        async fn spawn(&mut self, _config: ProviderConfig) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn interrupt(&self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, ProviderAdapterError> {
+            Ok("s".to_string())
+        }
+        async fn resume_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn stop_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn send_request(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<ProviderResponse, ProviderAdapterError> {
+            Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: None,
+            })
+        }
+        fn event_stream(&self, _session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
+            let stream = tokio_stream::empty();
+            Ok(Box::pin(stream))
+        }
+        async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn read_external_thread_default_returns_empty_vec() {
+        // A provider that does not override read_external_thread should return
+        // an empty history (opt-in pattern, mirroring steer_turn's default).
+        let adapter = NoHistoryAdapter;
+        let messages = adapter
+            .read_external_thread("any-thread-ref")
+            .await
+            .expect("default impl must not error");
+        assert!(messages.is_empty(), "default read_external_thread must return an empty vec");
+    }
+
+    /// Adapter that opts into read_external_thread by overriding it.
+    struct HistoryAdapter;
+
+    #[async_trait::async_trait]
+    impl ProviderAdapter for HistoryAdapter {
+        fn provider_id(&self) -> &str {
+            "with-history"
+        }
+        fn capabilities(&self) -> Vec<ProviderCapability> {
+            Vec::new()
+        }
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus::Idle
+        }
+        fn available_models(&self) -> Vec<String> {
+            Vec::new()
+        }
+        async fn spawn(&mut self, _config: ProviderConfig) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn interrupt(&self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, ProviderAdapterError> {
+            Ok("s".to_string())
+        }
+        async fn resume_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn stop_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn send_request(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<ProviderResponse, ProviderAdapterError> {
+            Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: None,
+            })
+        }
+        fn event_stream(&self, _session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
+            let stream = tokio_stream::empty();
+            Ok(Box::pin(stream))
+        }
+        async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
+            Ok(true)
+        }
+
+        // Opt in: surface a provider-side transcript.
+        async fn read_external_thread(
+            &self,
+            thread_ref: &str,
+        ) -> Result<Vec<ExternalThreadMessage>, ProviderAdapterError> {
+            Ok(vec![
+                ExternalThreadMessage {
+                    role: "user".to_string(),
+                    text: format!("history for {thread_ref}"),
+                },
+                ExternalThreadMessage {
+                    role: "assistant".to_string(),
+                    text: "reply".to_string(),
+                },
+            ])
+        }
+    }
+
+    #[tokio::test]
+    async fn read_external_thread_override_returns_messages() {
+        // A provider that overrides read_external_thread returns its own history.
+        let adapter = HistoryAdapter;
+        let messages = adapter
+            .read_external_thread("conv-42")
+            .await
+            .expect("override must not error");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].text, "history for conv-42");
+        assert_eq!(messages[1].role, "assistant");
     }
 }
