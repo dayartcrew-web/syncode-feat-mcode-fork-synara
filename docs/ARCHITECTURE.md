@@ -136,3 +136,36 @@ All 28 MCode client-orchestration commands are now ported (command-port workflow
 - **Crate quick-reference:** [CRATES.md](CRATES.md).
 - **Test breakdown:** [TEST_SUMMARY.md](../TEST_SUMMARY.md).
 - **MCode reference:** `/home/vibe-dev/mcode/` (authoritative domain vocabulary: `packages/contracts/src/orchestration.ts`).
+
+## 11. Build, run, deploy
+
+See [`../README.md`](../README.md) for the canonical Quick Start. Summary:
+
+| Goal | Command |
+|---|---|
+| Run the WS server | `cargo run -p syncode-ws --bin server` (→ `ws://127.0.0.1:3000/ws`) |
+| Frontend dev server | `cd frontend && npm ci && npm run dev` |
+| Desktop shell | `cargo build -p syncode-tauri` (Linux needs webkit2gtk deps) |
+| Docker (all-in-one) | `cp .env.example .env && docker compose up --build` |
+| Workspace tests | `cargo test --workspace --exclude syncode-tauri` |
+| Clippy gate | `cargo clippy --workspace --exclude syncode-tauri --all-targets -- -D warnings` |
+| Frontend tests | `cd frontend && npm run typecheck && npm test` |
+
+**Deployment paths:**
+- **Docker (recommended)** — `docker compose up -d --build`. The bind-mounted
+  `./data` volume holds the SQLite DB + resume cursors so state survives
+  container restarts; `restart: unless-stopped` reboots on crash/host reboot.
+- **Release binary** — `cargo build --release -p syncode-ws --bin server`. Run
+  with the env vars from [`.env.example`](../.env.example); front with a reverse
+  proxy for TLS.
+
+**Environment variables** are documented in [`.env.example`](../.env.example).
+The notable ones: `SYNCODE_WS_PORT` (default `3000`), `SYNCODE_DB` (SQLite path;
+empty = in-memory), `SYNCODE_DEFAULT_PROVIDER` (default `claude`),
+`RUST_LOG` (tracing filter).
+
+**CI** (`.github/workflows/ci.yml`) runs `cargo fmt --check`, per-crate clippy
+with `-D warnings`, workspace tests (excluding `syncode-tauri`, which needs
+system webkit/gtk deps and is covered by `desktop-e2e.yml`), a WS-server binary
+build, and frontend typecheck + vitest on every PR. `syncode-tauri` clippy is
+owned by the `desktop-e2e.yml` workflow which installs the system deps first.
