@@ -18,3 +18,5 @@ dunce = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# Required for `#[tokio::test]` macros in the harness unit tests.
+tokio = { workspace = true }
