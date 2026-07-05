@@ -23,7 +23,7 @@
 //! The schema is created idempotently via [`SqliteMemoryStore::init_schema`]
 //! (called automatically by [`SqliteMemoryStore::new`]/[`new_in_memory`]).
 
-use crate::provider::{MemoryProvider, Result};
+use crate::provider::{MemoryProvider, Result, NO_PRIOR_CONTEXT};
 use crate::DEFAULT_PROJECT_ID;
 use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -134,20 +134,29 @@ impl SqliteMemoryStore {
     /// ### Interaction 2 (...)
     /// ```
     ///
-    /// Returns an empty string when `rows` is empty (no prior context),
-    /// so callers can concatenate the result unconditionally.
+    /// Only the date portion (`YYYY-MM-DD`) of each row's RFC-3339 timestamp
+    /// is rendered in the heading; the full-precision timestamp remains in
+    /// the database for budget/audit queries. Returns
+    /// [`NO_PRIOR_CONTEXT`] when `rows` is empty so the result can be
+    /// rendered unconditionally without a separate emptiness check.
     fn format_context(rows: &[InteractionRow]) -> String {
         if rows.is_empty() {
-            return String::new();
+            return String::from(NO_PRIOR_CONTEXT);
         }
         let mut out = String::from("## Prior Context\n");
         for (idx, row) in rows.iter().enumerate() {
             // idx is bounded by the SELECT LIMIT, so +1 cannot overflow.
             let n = idx + 1;
+            // `timestamp` is RFC-3339 (`to_rfc3339()`), whose first 10 chars
+            // are exactly `YYYY-MM-DD`. Truncating avoids pulling in another
+            // parse/format pass while still rendering a stable, sortable date
+            // in the heading (sub-second precision would only add noise in a
+            // human-readable context block).
+            let date = truncate_iso_date(&row.timestamp);
             out.push_str(&format!(
-                "\n### Interaction {n} ({ts}, {provider})\n**User:** {prompt}\n**Assistant:** {response}\n",
+                "\n### Interaction {n} ({date}, {provider})\n**User:** {prompt}\n**Assistant:** {response}\n",
                 n = n,
-                ts = row.timestamp,
+                date = date,
                 provider = row.provider,
                 prompt = row.prompt,
                 response = row.response,
@@ -253,17 +262,34 @@ async fn connect(db_path: &str) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Reduce an RFC-3339 timestamp like `2026-07-04T13:45:02.123+00:00` to its
+/// `YYYY-MM-DD` prefix for display. Falls back to the original string if it
+/// is shorter than 10 chars, which is a defensive no-op — `persist_interaction`
+/// always writes a full RFC-3339 value via `chrono::Utc::now().to_rfc3339()`.
+fn truncate_iso_date(timestamp: &str) -> &str {
+    if timestamp.len() >= 10 {
+        &timestamp[..10]
+    } else {
+        timestamp
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `retrieve_context` on a fresh store returns an empty string — no
-    /// panic, no stale data, no error. This is the PRD's "empty" case.
+    /// `retrieve_context` on a fresh store returns the documented
+    /// [`NO_PRIOR_CONTEXT`] sentinel — no panic, no stale data, and a
+    /// renderable message instead of an empty string. This is the PRD's
+    /// "empty" case (P3-2).
     #[tokio::test]
-    async fn retrieve_context_returns_empty_when_no_interactions() {
+    async fn retrieve_context_returns_no_prior_message_when_empty() {
         let store = SqliteMemoryStore::new_in_memory().await.unwrap();
         let ctx = store.retrieve_context("user-1", "anything").await;
-        assert!(ctx.is_empty(), "fresh store should have no context");
+        assert_eq!(
+            ctx, NO_PRIOR_CONTEXT,
+            "fresh store should surface the no-prior-context sentinel"
+        );
     }
 
     /// Persisting one interaction and then retrieving it round-trips the
@@ -366,5 +392,117 @@ mod tests {
         let ctx = store.retrieve_context("u", "").await;
         assert!(ctx.contains("persist me"), "data not persisted to disk: {ctx}");
         assert!(ctx.contains("across reopen"));
+    }
+
+    // ─────────────────────────── P3-2: context retrieval ──────────────────
+
+    /// The empty-store sentinel is also returned for a user who has no rows
+    /// while *another* user does — scoping + emptiness must compose. Guards
+    /// the contract that the no-context message surfaces per-scope, not just
+    /// for a globally empty table (P3-2).
+    #[tokio::test]
+    async fn retrieve_context_returns_sentinel_for_unknown_user_when_others_have_data() {
+        let store = SqliteMemoryStore::new_in_memory().await.unwrap();
+        store
+            .persist_interaction("alice", "alice-prompt", "alice-resp", "claude", 5)
+            .await
+            .unwrap();
+
+        let ghost_ctx = store.retrieve_context("never-seen", "").await;
+        assert_eq!(
+            ghost_ctx, NO_PRIOR_CONTEXT,
+            "an unknown user should get the no-prior-context sentinel, not alice's data"
+        );
+    }
+
+    /// The interaction heading renders only the date portion (`YYYY-MM-DD`)
+    /// of the stored RFC-3339 timestamp, matching the documented format
+    /// example `### Interaction 1 (2026-07-04, claude)`. The full-precision
+    /// timestamp stays out of the rendered block (P3-2).
+    #[tokio::test]
+    async fn retrieve_context_renders_date_only_in_heading() {
+        let store = SqliteMemoryStore::new_in_memory().await.unwrap();
+        store
+            .persist_interaction("user-3", "p", "r", "claude", 1)
+            .await
+            .unwrap();
+
+        let ctx = store.retrieve_context("user-3", "").await;
+        // Today's date prefix must appear, but the full RFC-3339 `T...` part
+        // must NOT leak into the heading.
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert!(
+            ctx.contains(&today),
+            "heading should contain today's date {today}: {ctx}"
+        );
+        // The 'T' separator only exists in the full timestamp; its absence in
+        // any heading line proves date-only rendering. We check the first
+        // interaction heading line specifically.
+        let heading_line = ctx
+            .lines()
+            .find(|l| l.starts_with("### Interaction 1"))
+            .expect("interaction heading present");
+        assert!(
+            !heading_line.contains('T'),
+            "heading should be date-only, got: {heading_line}"
+        );
+    }
+
+    // ─────────────────────────── P3-3: persistence ────────────────────────
+
+    /// `persist_interaction` must round-trip the full metadata tuple —
+    /// provider, token count, prompt, and response — not just the text
+    /// fields. This directly exercises the P3-3 acceptance criterion that
+    /// the store records provider + tokens alongside the pair.
+    #[tokio::test]
+    async fn persist_interaction_records_provider_and_token_metadata() {
+        let store = SqliteMemoryStore::new_in_memory().await.unwrap();
+        store
+            .persist_interaction("meta-user", "the prompt", "the response", "openai", 1337)
+            .await
+            .unwrap();
+
+        let ctx = store.retrieve_context("meta-user", "").await;
+        assert!(ctx.contains("the prompt"), "prompt not stored: {ctx}");
+        assert!(ctx.contains("the response"), "response not stored: {ctx}");
+        assert!(ctx.contains("openai"), "provider metadata not stored: {ctx}");
+        // tokens are intentionally not surfaced in the rendered markdown
+        // (kept for future budget-aware retrieval), so we verify them at the
+        // row level instead.
+        let count: (i64,) = sqlx::query_as("SELECT tokens FROM interactions WHERE user_id = ?")
+            .bind("meta-user")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1337, "token count not persisted correctly");
+    }
+
+    /// Two interactions persisted for the same user both come back on
+    /// retrieval, in most-recent-first order — proving the store doesn't
+    /// overwrite previous rows and that `retrieve_context` surfaces the
+    /// full recent history up to the limit (P3-3 + P3-2 ordering).
+    #[tokio::test]
+    async fn persist_multiple_interactions_all_retrievable_most_recent_first() {
+        let store = SqliteMemoryStore::new_in_memory().await.unwrap().with_limit(5);
+        store
+            .persist_interaction("hist-user", "first-q", "first-a", "claude", 10)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        store
+            .persist_interaction("hist-user", "second-q", "second-a", "openai", 20)
+            .await
+            .unwrap();
+
+        let ctx = store.retrieve_context("hist-user", "").await;
+        assert!(ctx.contains("first-q") && ctx.contains("first-a"));
+        assert!(ctx.contains("second-q") && ctx.contains("second-a"));
+        // Most-recent first: second (later timestamp) must precede first.
+        let pos_second = ctx.find("second-q").unwrap();
+        let pos_first = ctx.find("first-q").unwrap();
+        assert!(
+            pos_second < pos_first,
+            "expected most-recent first, got second={pos_second} first={pos_first}"
+        );
     }
 }

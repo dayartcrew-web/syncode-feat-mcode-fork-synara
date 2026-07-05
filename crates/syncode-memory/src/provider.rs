@@ -7,6 +7,11 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+/// Sentinel returned by [`MemoryProvider::retrieve_context`] when no prior
+/// interactions are stored for the requested scope. Exposed so callers and
+/// tests can compare against it without hard-coding the literal.
+pub const NO_PRIOR_CONTEXT: &str = "No prior context available.";
+
 /// Errors surfaced by [`MemoryProvider`] implementations.
 #[derive(Debug, Error)]
 pub enum MemoryProviderError {
@@ -30,14 +35,17 @@ pub type Result<T> = std::result::Result<T, MemoryProviderError>;
 /// - [`retrieve_context`](MemoryProvider::retrieve_context) returns a
 ///   formatted markdown string of the N most recent interactions for the
 ///   given `user_id` (and an optional project scope), ordered most-recent
-///   first. It returns an empty string when no interactions are stored.
+///   first. It returns the sentinel message `"No prior context available."`
+///   when no interactions are stored, so callers can render the result
+///   unconditionally without a separate emptiness check.
 /// - [`persist_interaction`](MemoryProvider::persist_interaction) inserts a
 ///   new interaction row keyed by `user_id` with the supplied metadata. The
 ///   timestamp is recorded by the implementation (UTC ISO-8601).
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
     /// Retrieve formatted prior context for `user_id`, optionally scoped to
-    /// a project. Returns an empty string when no interactions exist.
+    /// a project. Returns `"No prior context available."` when no
+    /// interactions exist, so the result can be rendered unconditionally.
     async fn retrieve_context(&self, user_id: &str, query: &str) -> String;
 
     /// Persist a prompt/response pair with provider metadata and token count.
