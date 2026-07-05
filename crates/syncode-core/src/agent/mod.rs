@@ -7,9 +7,12 @@
 //! - [`AgentState`] — the full state frame passed between pipeline steps
 //!
 //! These types are PURE DATA: no async, no I/O. The pipeline execution
-//! wrappers (`execute_step`, `run_output_guardrails`, `execute_workflow`)
-//! are implemented in `syncode-orchestration` (tasks P1-2..P1-4).
+//! wrappers (`execute_step`, `run_output_guardrails`) live in [`harness`]
+//! (tasks P1-2, P1-3); the provider/memory-bound `execute_workflow`
+//! orchestrator is implemented in `syncode-orchestration` (task P1-4).
 
+pub mod harness;
 pub mod state;
 
+pub use harness::{execute_step, handle_workflow_failure, run_output_guardrails, StepResult, WorkflowError};
 pub use state::{AgentMemory, AgentState, WorkflowStep};
