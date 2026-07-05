@@ -29,4 +29,4 @@ pub use read_model::{
     ActivityView, CheckpointView, MessageView, ProjectView, ThreadSessionView, ThreadView, TurnView,
 };
 pub use use_cases::{ApplicationService, ProjectDashboard, ThreadDetail};
-pub use workflow::{execute_workflow, WorkflowExecutor};
+pub use workflow::{execute_workflow, ProviderWorkflowExecutor, WorkflowExecutor};
