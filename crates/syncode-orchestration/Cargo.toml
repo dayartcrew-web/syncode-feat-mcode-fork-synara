@@ -8,6 +8,7 @@ description = "CQRS/Event Sourcing engine — command bus, event store, decider,
 
 [dependencies]
 syncode-core = { workspace = true }
+syncode-memory = { workspace = true }
 syncode-provider = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

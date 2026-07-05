@@ -5,6 +5,7 @@
 //! - Events → Projector → Read Models
 //! - Reactors for side effects
 //! - Orchestrator pipeline wiring everything together
+//! - Supervised agent workflow (`execute_workflow`)
 
 pub mod decider;
 pub mod events;
@@ -13,6 +14,7 @@ pub mod projector;
 pub mod reactors;
 pub mod read_model;
 pub mod use_cases;
+pub mod workflow;
 
 // Re-exports for convenience
 pub use decider::{Command, Decider, DeciderError};
@@ -27,3 +29,4 @@ pub use read_model::{
     ActivityView, CheckpointView, MessageView, ProjectView, ThreadSessionView, ThreadView, TurnView,
 };
 pub use use_cases::{ApplicationService, ProjectDashboard, ThreadDetail};
+pub use workflow::{execute_workflow, WorkflowExecutor};
