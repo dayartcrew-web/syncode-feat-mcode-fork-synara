@@ -15,12 +15,40 @@ use tokio::sync::mpsc;
 pub fn build_ws_router(state: Arc<WsState>) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
+        .route("/health", get(health_handler))
+        .route("/api/project-favicon", get(project_favicon_handler))
         .with_state(state)
 }
 
 /// Build the full app router (WS + optional HTTP)
 pub fn build_app(state: Arc<WsState>) -> Router {
     build_ws_router(state)
+}
+
+/// Health check endpoint
+async fn health_handler() -> impl IntoResponse {
+    axum::Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// Project favicon — returns a transparent 1x1 PNG placeholder.
+/// The MCode frontend requests this to display a project icon; without it
+/// the browser logs a 404 error. A real implementation would probe the
+/// project's website for a favicon, but a placeholder is sufficient for
+/// dev/test.
+async fn project_favicon_handler() -> impl IntoResponse {
+    // 1x1 transparent PNG
+    const TRANSPARENT_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+        0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        TRANSPARENT_PNG,
+    )
 }
 
 /// WebSocket upgrade handler
