@@ -315,6 +315,33 @@ impl Orchestrator {
         }
     }
 
+    /// Create with a command reactor, provider adapter, AND a shared read model
+    /// that the reactor is already wired to (PR-1-2).
+    ///
+    /// This is the production constructor: the caller constructs the read model
+    /// `Arc` first, wires it into the reactor via
+    /// [`ProviderCommandReactor::with_read_model`], then passes both the reactor
+    /// and the same `Arc` here. Sharing the handle lets the reactor resolve a
+    /// thread's project root path for the session working directory in real time
+    /// (the projector updates the store, the reactor reads it under a short
+    /// lock). Without this sharing, the reactor falls back to the hardcoded
+    /// `/tmp/syncode` working directory (unit-test path).
+    pub fn with_reactor_adapter_and_read_model(
+        event_repo: Arc<dyn EventRepository>,
+        command_reactor: Arc<ProviderCommandReactor>,
+        adapter: syncode_provider::registry::SharedAdapter,
+        read_model: Arc<tokio::sync::RwLock<ReadModelStore>>,
+    ) -> Self {
+        Self {
+            read_model,
+            event_repo,
+            command_reactor: Some(command_reactor),
+            adapter: Some(adapter),
+            event_publisher: None,
+        }
+    }
+
+
     /// Attach an outbound domain-event publisher (builder-style, consumes and
     /// returns `self` so it chains after a constructor). When attached, every
     /// appended domain event is pushed to the bus after append+project.

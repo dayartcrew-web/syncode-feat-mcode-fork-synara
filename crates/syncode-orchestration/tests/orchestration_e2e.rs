@@ -3,7 +3,6 @@
 //! Gating: `SYNICODE_ORCHESTRATION_E2E=1`.
 
 use std::sync::Arc;
-use syncode_core::ports::EventRepository;
 use syncode_core::EntityId;
 use syncode_orchestration::{Command, Orchestrator};
 use tempfile::TempDir;
@@ -94,11 +93,11 @@ async fn orchestration_real_db_thread_lifecycle() {
     drop(rm);
     drop(rm_arc);
 
-    orch.handle_command(Command::PauseThread { id: thread_id.clone() })
+    orch.handle_command(Command::PauseThread { id: thread_id })
         .await.expect("PauseThread");
-    orch.handle_command(Command::ResumeThread { id: thread_id.clone() })
+    orch.handle_command(Command::ResumeThread { id: thread_id })
         .await.expect("ResumeThread");
-    orch.handle_command(Command::CompleteThread { id: thread_id.clone() })
+    orch.handle_command(Command::CompleteThread { id: thread_id })
         .await.expect("CompleteThread");
 
     let rm_arc = orch.read_model_ref();
@@ -151,6 +150,6 @@ async fn orchestration_real_db_replay_rebuilds_read_model() {
 
     let rm_arc = orch.read_model_ref();
     let rm = rm_arc.read().await;
-    assert!(rm.projects.get(&pid_str).is_some());
+    assert!(rm.projects.contains_key(&pid_str));
     assert_eq!(rm.projects[&pid_str].name, name);
 }

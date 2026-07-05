@@ -190,10 +190,21 @@ async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
     let default_provider =
         std::env::var("SYNCODE_DEFAULT_PROVIDER").unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
 
+    // PR-1-2: construct the shared read model handle first so the reactor and
+    // the orchestrator can both see it. The reactor uses it to resolve a
+    // thread's project root path as the session working directory; the
+    // orchestrator's projector writes to it as commands are handled. Sharing
+    // the Arc (not cloning the store) keeps them in lock-step.
+    let read_model: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>> =
+        Arc::new(tokio::sync::RwLock::new(
+            syncode_orchestration::ReadModelStore::new(),
+        ));
+
     let session_manager = SessionManager::new();
-    let reactor = Arc::new(syncode_orchestration::ProviderCommandReactor::new(
-        session_manager,
-    ));
+    let reactor = Arc::new(
+        syncode_orchestration::ProviderCommandReactor::new(session_manager)
+            .with_read_model(Arc::clone(&read_model)),
+    );
 
     match syncode_provider::registry::create_by_id(&default_provider) {
         Some(adapter) => {
@@ -223,7 +234,11 @@ async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
                 "session resume cursors rehydrated"
             );
 
-            Orchestrator::with_reactor_and_adapter(repo, reactor, adapter)
+            // PR-1-2: pass the shared read model so the reactor can resolve
+            // the session working directory from the thread's project root.
+            Orchestrator::with_reactor_adapter_and_read_model(
+                repo, reactor, adapter, read_model,
+            )
         }
         None => {
             tracing::warn!(

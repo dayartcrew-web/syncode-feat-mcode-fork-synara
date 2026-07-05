@@ -38,7 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use syncode_core::ports::EventRepository;
-use syncode_orchestration::{Orchestrator, ProviderCommandReactor};
+use syncode_orchestration::{Orchestrator, ProviderCommandReactor, ReadModelStore};
 use syncode_persistence::adapters::SqliteEventRepository;
 use syncode_provider::SessionManager;
 use syncode_ws::{WsState, server::build_app};
@@ -251,7 +251,15 @@ async fn build_state(config: &WsConfig) -> WsState {
 /// still recorded but no AI response is generated, and the server still boots).
 /// Mirrors the standalone binary's `build_orchestrator`.
 fn build_orchestrator(repo: Arc<dyn EventRepository>, default_provider: &str) -> Orchestrator {
-    let reactor = Arc::new(ProviderCommandReactor::new(SessionManager::new()));
+    // PR-1-2: share the read model between reactor and orchestrator so the
+    // reactor can resolve the session working directory from the thread's
+    // project root path. Mirrors the standalone binary's build_orchestrator.
+    let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+        Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+    let reactor = Arc::new(
+        ProviderCommandReactor::new(SessionManager::new())
+            .with_read_model(Arc::clone(&read_model)),
+    );
 
     match syncode_provider::registry::create_by_id(default_provider) {
         Some(adapter) => {
@@ -259,7 +267,7 @@ fn build_orchestrator(repo: Arc<dyn EventRepository>, default_provider: &str) ->
                 provider = %default_provider,
                 "chat pipeline armed: turns will dispatch to the provider"
             );
-            Orchestrator::with_reactor_and_adapter(repo, reactor, adapter)
+            Orchestrator::with_reactor_adapter_and_read_model(repo, reactor, adapter, read_model)
         }
         None => {
             tracing::warn!(

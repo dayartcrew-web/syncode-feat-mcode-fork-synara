@@ -129,9 +129,28 @@ impl TurnQueue {
 
 /// Default working directory stamped on a provider session when the
 /// `StartTurn` command (which carries no working-dir field) flows through the
-/// reactor. Centralized here so [`ProviderCommandReactor::ensure_session_for_thread`]
-/// builds a stable [`SessionIdentity`] for the production path.
+/// reactor AND the reactor has no read model wired (so it cannot look up the
+/// thread's project root). Centralized here so
+/// [`ProviderCommandReactor::ensure_session_for_thread`] builds a stable
+/// [`SessionIdentity`] for the production path.
+///
+/// In production the reactor is constructed via [`Self::with_read_model`] and
+/// `handle_start_turn` resolves the thread's project `root_path` from the read
+/// model instead of falling back to this constant. This constant is only the
+/// last-resort fallback for unit tests / bare construction.
 const DEFAULT_WORKING_DIR: &str = "/tmp/syncode";
+
+/// Default system prompt stamped on a freshly started provider session when
+/// neither the caller nor an attached memory provider supplies one.
+///
+/// This is intentionally a generic, harmless coding-assistant prompt — the
+/// production system prompt is normally augmented by the memory provider
+/// ([`ProviderCommandReactor::with_memory`]) or by a future project-config
+/// override. Keeping it as a named const (rather than an inline string at the
+/// `handle_start_turn` call site) makes the contract explicit and easy to
+/// locate/replace.
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful AI coding assistant. \
+Work in the user's project; prefer minimal, targeted changes.";
 
 /// Outcome of [`ProviderCommandReactor::ensure_session_for_thread`].
 ///
@@ -211,6 +230,17 @@ pub struct ProviderCommandReactor {
     /// sessions are left untouched — their prompt was already grounded when
     /// they were started.
     memory: Option<Arc<dyn MemoryProvider>>,
+    /// Optional shared read model used to resolve a thread's project root path
+    /// for the session working directory (PR-1-2). When `Some`,
+    /// [`Self::handle_start_turn`] looks up the thread → project → `root_path`
+    /// and uses that as `working_dir` instead of the [`DEFAULT_WORKING_DIR`]
+    /// fallback. This is what makes a real chat round-trip target the user's
+    /// project rather than `/tmp/syncode`.
+    ///
+    /// The reference is shared (not cloned) so the reactor always sees the
+    /// projector's latest view — a thread created in the same command batch is
+    /// visible by the time `StartTurn` reaches `react()`.
+    read_model: Option<Arc<tokio::sync::RwLock<crate::projector::ReadModelStore>>>,
 }
 
 impl ProviderCommandReactor {
@@ -220,7 +250,26 @@ impl ProviderCommandReactor {
             session_manager,
             turn_queue: TurnQueue::new(),
             memory: None,
+            read_model: None,
         }
+    }
+
+    /// Attach a shared read model so `handle_start_turn` resolves the thread's
+    /// project root path and uses it as the session working directory (PR-1-2).
+    ///
+    /// The production pipeline wires this with the orchestrator's own read
+    /// model ([`Orchestrator::read_model_ref`]); without it, sessions fall back
+    /// to [`DEFAULT_WORKING_DIR`] (the unit-test path).
+    ///
+    /// Consumes `self` and returns the configured reactor (builder style),
+    /// matching [`Self::with_memory`].
+    #[must_use]
+    pub fn with_read_model(
+        mut self,
+        read_model: Arc<tokio::sync::RwLock<crate::projector::ReadModelStore>>,
+    ) -> Self {
+        self.read_model = Some(read_model);
+        self
     }
 
     /// Attach a persistent-memory backing so freshly started provider sessions
@@ -230,8 +279,8 @@ impl ProviderCommandReactor {
     /// reactor queries `memory.retrieve_context(thread_id, user_input)` and
     /// appends the result to the session's `system_prompt` (or seeds one when
     /// the caller supplied `None`). The Reused path skips injection — that
-    /// session was already grounded when it was started, and re-querying
-    /// memory on every turn would needlessly bloat an in-flight conversation.
+    /// session was already grounded when it started, and re-querying memory on
+    /// every turn would needlessly bloat an in-flight conversation.
     ///
     /// Consumes `self` and returns the configured reactor (builder style).
     /// `new()` remains the zero-arg default for callers that don't yet wire
@@ -247,6 +296,42 @@ impl ProviderCommandReactor {
     /// internally during session start.
     pub fn memory(&self) -> Option<&Arc<dyn MemoryProvider>> {
         self.memory.as_ref()
+    }
+
+    /// Resolve the working directory for a session about to start on `thread_id`
+    /// (PR-1-2).
+    ///
+    /// When a read model is attached (production), look up the thread's project
+    /// and return its `root_path`. When no read model is wired, or when the
+    /// thread / project is not yet materialized (e.g. a brand-new thread whose
+    /// projection hasn't run), fall back to [`DEFAULT_WORKING_DIR`]. The lookup
+    /// is best-effort: it never fails a turn, only degrades to the fallback.
+    ///
+    /// The read model is read under a short-lived read lock and the resolved
+    /// path is returned by value, so the lock is released before any provider
+    /// call — no lock is held across an await on the adapter.
+    async fn resolve_working_dir(&self, thread_id: EntityId) -> String {
+        let Some(read_model) = self.read_model.as_ref() else {
+            return DEFAULT_WORKING_DIR.to_string();
+        };
+        let store = read_model.read().await;
+        // thread → project_id → project root_path. `EntityId::as_str` returns
+        // an owned `String`, so bind it once and borrow for both lookups.
+        let thread_key = thread_id.as_str();
+        let Some(thread) = store.threads.get(&thread_key) else {
+            return DEFAULT_WORKING_DIR.to_string();
+        };
+        let project_id = thread.project_id.clone();
+        let Some(project) = store.projects.get(&project_id) else {
+            return DEFAULT_WORKING_DIR.to_string();
+        };
+        // An empty root_path should not normally happen (the projector stamps
+        // it from ProjectCreated), but guard against it anyway so we never
+        // hand the provider an empty working directory.
+        if project.root_path.is_empty() {
+            return DEFAULT_WORKING_DIR.to_string();
+        }
+        project.root_path.clone()
     }
 
     /// Get a reference to the session manager
@@ -791,12 +876,23 @@ impl ProviderCommandReactor {
             });
         }
 
-        // Build session context
+        // Resolve the session working directory from the thread's project
+        // root path (PR-1-2). When a read model is wired (production path),
+        // look up thread → project → `root_path` so the provider operates in
+        // the user's actual project rather than the `/tmp/syncode` fallback.
+        // Without a read model (unit tests / bare construction) we fall back
+        // to [`DEFAULT_WORKING_DIR`] — the lookup is best-effort and never
+        // fails the turn when the project mapping is missing.
+        let working_dir = self.resolve_working_dir(thread_id).await;
+
+        // Build session context. The system prompt uses the named default
+        // constant; an attached memory provider may augment or replace it
+        // during `ensure_session_for_thread` (see `augment_ctx_with_memory`).
         let ctx = SessionContext {
             thread_id,
             turn_id,
-            working_dir: DEFAULT_WORKING_DIR.to_string(),
-            system_prompt: Some("You are a helpful AI coding assistant.".to_string()),
+            working_dir,
+            system_prompt: Some(DEFAULT_SYSTEM_PROMPT.to_string()),
             user_input: user_input.to_string(),
             context_files: vec![],
         };
@@ -991,6 +1087,12 @@ pub(crate) mod tests {
     /// memory context flowed into the provider session's system prompt.
     type RecordedSystemPrompts = Arc<std::sync::Mutex<Vec<Option<String>>>>;
 
+    /// Recorded working directories captured from every `start_session` call
+    /// (PR-1-2). One entry per started session, in start order. Tests assert
+    /// the reactor resolved the thread's project root path (rather than the
+    /// `/tmp/syncode` fallback) by inspecting this vector after a start.
+    type RecordedWorkingDirs = Arc<std::sync::Mutex<Vec<String>>>;
+
     /// Mock adapter for command reactor tests
     struct CmdTestMock {
         started_sessions: std::sync::Mutex<Vec<String>>,
@@ -1007,6 +1109,8 @@ pub(crate) mod tests {
         /// supplied no system prompt; `Some(s)` means `s` was the (possibly
         /// memory-augmented) prompt the provider received.
         recorded_system_prompts: RecordedSystemPrompts,
+        /// Working directory captured from each `start_session` call (PR-1-2).
+        recorded_working_dirs: RecordedWorkingDirs,
     }
 
     impl CmdTestMock {
@@ -1019,6 +1123,7 @@ pub(crate) mod tests {
                 steers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 supports_steering: false,
                 recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
 
@@ -1036,6 +1141,7 @@ pub(crate) mod tests {
                 steers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 supports_steering: false,
                 recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             };
             (this, stopped, requests)
         }
@@ -1060,6 +1166,7 @@ pub(crate) mod tests {
                 steers: Arc::clone(&steers),
                 supports_steering: true,
                 recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             };
             (this, stopped, requests, steers)
         }
@@ -1084,8 +1191,34 @@ pub(crate) mod tests {
                 steers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 supports_steering: false,
                 recorded_system_prompts: Arc::clone(&prompts),
+                recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             };
             (this, stopped, requests, prompts)
+        }
+
+        /// Like `new_with_handles` but also returns the shared handle for the
+        /// recorded working directories (PR-1-2). Tests assert the reactor
+        /// resolved the project root path by reading this vector after a start.
+        fn new_with_working_dir_handles() -> (
+            Self,
+            Arc<std::sync::Mutex<Vec<String>>>,
+            RecordedRequests,
+            RecordedWorkingDirs,
+        ) {
+            let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let working_dirs = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let this = Self {
+                started_sessions: std::sync::Mutex::new(Vec::new()),
+                interrupted: std::sync::Mutex::new(Vec::new()),
+                stopped: Arc::clone(&stopped),
+                requests: Arc::clone(&requests),
+                steers: Arc::new(std::sync::Mutex::new(Vec::new())),
+                supports_steering: false,
+                recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                recorded_working_dirs: Arc::clone(&working_dirs),
+            };
+            (this, stopped, requests, working_dirs)
         }
     }
 
@@ -1142,6 +1275,13 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push(ctx.system_prompt.clone());
+            // Capture the working directory so PR-1-2 tests can assert the
+            // reactor resolved the thread's project root path. Mirrors
+            // `started_sessions` — one entry per start, in start order.
+            self.recorded_working_dirs
+                .lock()
+                .unwrap()
+                .push(ctx.working_dir.clone());
             Ok(sid)
         }
 
@@ -1248,6 +1388,20 @@ pub(crate) mod tests {
         (Arc::new(RwLock::new(mock)), stopped, requests, prompts)
     }
 
+    /// Like `make_recorded_test_mock` but also returns the shared handle for
+    /// recorded working directories (PR-1-2). Tests assert that the reactor
+    /// resolved the thread's project root path (rather than the `/tmp/syncode`
+    /// fallback) by inspecting the working-dir vector after a start.
+    pub(crate) fn make_working_dir_recording_mock() -> (
+        syncode_provider::registry::SharedAdapter,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        RecordedRequests,
+        RecordedWorkingDirs,
+    ) {
+        let (mock, stopped, requests, working_dirs) = CmdTestMock::new_with_working_dir_handles();
+        (Arc::new(RwLock::new(mock)), stopped, requests, working_dirs)
+    }
+
     #[tokio::test]
     async fn start_turn_creates_session() {
         let reactor = ProviderCommandReactor::new(SessionManager::new());
@@ -1267,6 +1421,109 @@ pub(crate) mod tests {
             .unwrap();
         assert!(result.handled);
         assert!(result.session_id.is_some());
+    }
+
+    // PR-1-2: when no read model is wired (the bare `new()` constructor used by
+    // unit tests), `handle_start_turn` falls back to the DEFAULT_WORKING_DIR
+    // constant. This pins the fallback so a regression that silently changes
+    // the constant is caught.
+    #[tokio::test]
+    async fn start_turn_uses_default_working_dir_without_read_model() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, _requests, working_dirs) = make_working_dir_recording_mock();
+
+        let turn_id = EntityId::new();
+        let thread_id = EntityId::new();
+        let command = Command::StartTurn {
+            thread_id,
+            sequence: 1,
+            user_input: "hello".to_string(),
+        };
+
+        let result = reactor.react(&command, &adapter, Some(turn_id)).await.unwrap();
+        assert!(result.handled, "StartTurn should be handled");
+
+        // Exactly one session was started, and its working dir is the fallback.
+        let dirs = working_dirs.lock().unwrap().clone();
+        assert_eq!(dirs.len(), 1, "exactly one session should have started");
+        assert_eq!(
+            dirs[0], DEFAULT_WORKING_DIR,
+            "without a read model the working dir must fall back to DEFAULT_WORKING_DIR"
+        );
+    }
+
+    // PR-1-2: when a read model is wired AND the thread is mapped to a project,
+    // `handle_start_turn` resolves the project's root_path and uses it as the
+    // session working dir (instead of the `/tmp/syncode` fallback). This is the
+    // break-point-1 fix: a real chat round-trip targets the user's project.
+    #[tokio::test]
+    async fn start_turn_resolves_project_root_path_from_read_model() {
+        use crate::projector::ReadModelStore;
+        use crate::read_model::{ProjectView, ThreadView};
+
+        // Seed a read model with a project + a thread pointing at it.
+        let project_id = "proj-123".to_string();
+        let thread_id = EntityId::new();
+        let expected_root = "/home/user/my-project".to_string();
+
+        let mut store = ReadModelStore::new();
+        store.projects.insert(
+            project_id.clone(),
+            ProjectView {
+                id: project_id.clone(),
+                name: "my-project".to_string(),
+                root_path: expected_root.clone(),
+                provider_id: None,
+                default_model: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                thread_count: 1,
+            },
+        );
+        store.threads.insert(
+            thread_id.as_str().to_string(),
+            ThreadView {
+                id: thread_id.as_str().to_string(),
+                project_id: project_id.clone(),
+                provider_id: "claude".to_string(),
+                model: "sonnet".to_string(),
+                status: "idle".to_string(),
+                title: None,
+                git_checkpoint: None,
+                runtime_mode: "approval-required".to_string(),
+                interaction_mode: "default".to_string(),
+                turn_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                session: None,
+            },
+        );
+        let read_model = Arc::new(tokio::sync::RwLock::new(store));
+
+        let reactor = ProviderCommandReactor::new(SessionManager::new())
+            .with_read_model(Arc::clone(&read_model));
+        let (adapter, _stopped, _requests, working_dirs) = make_working_dir_recording_mock();
+
+        let turn_id = EntityId::new();
+        let command = Command::StartTurn {
+            thread_id,
+            sequence: 1,
+            user_input: "hello".to_string(),
+        };
+
+        let result = reactor.react(&command, &adapter, Some(turn_id)).await.unwrap();
+        assert!(result.handled, "StartTurn should be handled");
+
+        let dirs = working_dirs.lock().unwrap().clone();
+        assert_eq!(dirs.len(), 1, "exactly one session should have started");
+        assert_eq!(
+            dirs[0], expected_root,
+            "working dir must resolve to the project's root_path, not the fallback"
+        );
+        assert_ne!(
+            dirs[0], DEFAULT_WORKING_DIR,
+            "with a mapped project the fallback must NOT be used"
+        );
     }
 
     #[tokio::test]
