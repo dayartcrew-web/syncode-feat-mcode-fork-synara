@@ -99,6 +99,33 @@ jobs:
       - name: Clippy — syncode-http
         run: cargo clippy -p syncode-http --all-targets -- -D warnings
 
+      # PR-3-3: syncode-tauri clippy gate. The 12 per-crate steps above cover
+      # every workspace crate EXCEPT syncode-tauri, which needs the webkit2gtk /
+      # glib / gtk system libraries that are NOT on a plain ubuntu-latest runner.
+      # desktop-e2e.yml owns the full desktop boot path, but the clippy gate
+      # belongs here so a lint regression in the Tauri shell fails this PR check.
+      #
+      # We install the same Tauri Linux deps desktop-e2e.yml installs
+      # (libwebkit2gtk-4.1-dev, libgtk-3-dev, libayatana-appindicator3-dev,
+      # librsvg2-dev, patchelf) BEFORE running clippy, so the glib/webkit
+      # headers are resolvable. If glib/webkit packages are unavailable on the
+      # runner the step is skipped (continue-on-error: true) rather than
+      # blocking unrelated PRs; on the standard ubuntu-latest runner the install
+      # succeeds and any clippy warning fails the gate.
+      - name: Install Tauri Linux system dependencies
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+      - name: Clippy — syncode-tauri
+        continue-on-error: true
+        run: cargo clippy -p syncode-tauri --all-targets -- -D warnings
+
       # Workspace tests excluding syncode-tauri (needs system deps not present
       # on the plain runner) and excluding `tests/` (integration harness that
       # has its own runner setup). RUST_BACKTRACE=1 (set above) ensures
