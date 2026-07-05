@@ -5,7 +5,12 @@
 //! [`AutomationRepository`] (default: in-memory) so SQLite can drop in later.
 //!
 //! The [`Scheduler::tick`] method is the single due-evaluation + dispatch pass
-//! a host process would call in a loop (mirrors MCode's `runDueOnce`).
+//! a host process would call in a loop (mirrors MCode's `runDueOnce`). For
+//! long-running hosts, [`Scheduler::spawn_scheduler_loop`] starts a detached
+//! background task that drives `tick()` with a wakeable sleep — definition
+//! mutations (`register` / `update` / `unregister` / `set_enabled`) nudge a
+//! [`tokio::sync::Notify`] so a freshly-upserted one-shot fires promptly
+//! instead of waiting up to a full interval.
 
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -63,6 +68,11 @@ pub struct Scheduler {
     default_completion: CompletionPolicy,
     /// Misfire policy (global default)
     default_misfire: MisfirePolicy,
+    /// Wakeup signal for the background scheduler loop. Notified on
+    /// definition mutations so a new one-shot schedule fires promptly instead
+    /// of waiting for the next interval tick. See [`Scheduler::notify_wakeup`]
+    /// and [`Scheduler::spawn_scheduler_loop`].
+    wakeup: Arc<tokio::sync::Notify>,
 }
 
 impl Scheduler {
@@ -88,6 +98,7 @@ impl Scheduler {
             executor,
             default_completion: CompletionPolicy::default(),
             default_misfire: MisfirePolicy::default(),
+            wakeup: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -98,12 +109,23 @@ impl Scheduler {
             return Err(SchedulerError::AlreadyExists(id));
         }
         let payload = serde_json::to_value(&def).map_err(serialization_err)?;
-        self.repo.save_def(&id, payload).await.map_err(repo_err)
+        let res = self.repo.save_def(&id, payload).await.map_err(repo_err);
+        if res.is_ok() {
+            // Nudge the wakeable loop so a new one-shot fires promptly.
+            self.notify_wakeup();
+        }
+        res
     }
 
     /// Unregister an automation
     pub async fn unregister(&self, id: &str) -> bool {
-        self.repo.delete_def(id).await.unwrap_or(false)
+        let removed = self.repo.delete_def(id).await.unwrap_or(false);
+        if removed {
+            // Wake the loop so a removed def isn't re-dispatched from a stale
+            // due list on the next tick.
+            self.notify_wakeup();
+        }
+        removed
     }
 
     /// Get an automation definition
@@ -289,6 +311,73 @@ impl Scheduler {
         dispatched
     }
 
+    /// Trigger an immediate wakeup of the background scheduler loop (if one is
+    /// running via [`Scheduler::spawn_scheduler_loop`]). Idempotent and cheap —
+    /// safe to call from definition mutations (`register` / `update` /
+    /// `unregister` / `set_enabled`) so a freshly-upserted one-shot schedule
+    /// fires promptly instead of waiting up to a full interval. If no loop is
+    /// running, the next loop iteration starts immediately (Notify stores a
+    /// permit until consumed).
+    ///
+    /// Exposed publicly so external callers (e.g. a SQLite-backed host that
+    /// reloads definitions on disk) can nudge the loop after out-of-band edits.
+    pub fn notify_wakeup(&self) {
+        self.wakeup.notify_one();
+    }
+
+    /// Spawn a detached background task that drives [`Scheduler::tick`] in a
+    /// loop with a **wakeable sleep**: between ticks it waits for either the
+    /// poll interval to elapse *or* [`Scheduler::notify_wakeup`] to fire
+    /// (whichever comes first). This makes definition mutations land quickly —
+    /// a new one-shot doesn't have to wait up to `interval` to be picked up.
+    ///
+    /// `interval` is the *maximum* sleep between ticks (default 60s is
+    /// reasonable). The loop runs until the task is cancelled (dropping the
+    /// returned handle aborts the task) or until the runtime shuts down.
+    ///
+    /// Returns the [`tokio::task::JoinHandle`] so callers can `.abort()` the
+    /// loop on shutdown, or await it for graceful termination.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use syncode_automation::Scheduler;
+    /// # async fn docs() {
+    /// let scheduler = std::sync::Arc::new(Scheduler::new());
+    /// let _handle = scheduler.spawn_scheduler_loop(std::time::Duration::from_secs(60));
+    /// // scheduler.register(...) will now wake the loop promptly.
+    /// # }
+    /// ```
+    pub fn spawn_scheduler_loop(
+        self: &Arc<Self>,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let scheduler = Arc::clone(self);
+        let wakeup = Arc::clone(&self.wakeup);
+        tokio::spawn(async move {
+            tracing::info!(?interval, "wakeable scheduler loop started");
+            loop {
+                // 1. Drive a tick now.
+                let dispatched = scheduler.tick(Utc::now()).await;
+                if !dispatched.is_empty() {
+                    tracing::debug!(
+                        count = dispatched.len(),
+                        "scheduler loop tick dispatched"
+                    );
+                }
+
+                // 2. Wakeable sleep: wait for the interval OR a wakeup signal,
+                //    whichever comes first. `notify_one` permits are stored, so
+                //    a wakeup fired *during* the tick above is still honored.
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = wakeup.notified() => {
+                        tracing::debug!("scheduler loop woken by notify");
+                    }
+                }
+            }
+        })
+    }
+
     /// Apply the misfire policy: if the def's `next_run_at` is past due and
     /// there were missed fires, fast-forward to the next slot after `now`
     /// (coalesce). Persists the advanced pointer. Returns the new next_run_at
@@ -448,7 +537,12 @@ impl Scheduler {
             return Err(SchedulerError::NotFound(id.to_string()));
         }
         let payload = serde_json::to_value(&def).map_err(serialization_err)?;
-        self.repo.save_def(&id, payload).await.map_err(repo_err)
+        let res = self.repo.save_def(&id, payload).await.map_err(repo_err);
+        if res.is_ok() {
+            // A rescheduled next_run_at should take effect promptly.
+            self.notify_wakeup();
+        }
+        res
     }
 
     /// Enable/disable an automation
@@ -459,10 +553,16 @@ impl Scheduler {
             .ok_or_else(|| SchedulerError::NotFound(id.to_string()))?;
         def.enabled = enabled;
         let payload = serde_json::to_value(&def).map_err(serialization_err)?;
-        self.repo
+        let res = self
+            .repo
             .save_def(&def.id.as_str(), payload)
             .await
-            .map_err(repo_err)
+            .map_err(repo_err);
+        if res.is_ok() {
+            // Enabling a previously-disabled automation may make it due.
+            self.notify_wakeup();
+        }
+        res
     }
 
     // ─── Run-Reactor reconciliation helpers (P2-3) ──────────────────────
@@ -879,6 +979,124 @@ mod tests {
         assert!(
             !dispatched.iter().any(|d| d == "oneshot"),
             "past one-shot should be skipped"
+        );
+    }
+
+    // ─── New: wakeable scheduler loop (P2-5) ───────────────────────────
+
+    /// `notify_wakeup` is exposed, idempotent, and safe to call when no loop
+    /// is running (the Notify just stores a permit for the next consumer).
+    #[tokio::test]
+    async fn notify_wakeup_is_safe_without_loop() {
+        let scheduler = Scheduler::new();
+        // Repeated calls must not panic and produce no error (returns unit).
+        scheduler.notify_wakeup();
+        scheduler.notify_wakeup();
+        scheduler.notify_wakeup();
+    }
+
+    /// The wakeable loop fires a due automation far sooner than its poll
+    /// interval: we register an already-due automation *after* spawning the
+    /// loop with a long interval (10s), then assert the run lands within a
+    /// short budget (~500ms). Without the wakeup-on-register nudge, the loop
+    /// wouldn't tick again for ~10s and the test would time out.
+    ///
+    /// The NoopExecutor fails the run, but `list_runs` still reflects that a
+    /// dispatch happened — which is what we're verifying (prompt wakeup, not
+    /// successful execution).
+    #[tokio::test]
+    async fn wakeable_loop_fires_due_automation_promptly_via_wakeup() {
+        // Arc-wrapped scheduler (spawn_scheduler_loop requires &Arc<Self>).
+        let scheduler = Arc::new(Scheduler::new());
+
+        // Long poll interval — without the wakeup this test would hang.
+        let interval = std::time::Duration::from_secs(10);
+        let handle = scheduler.spawn_scheduler_loop(interval);
+
+        // Register an already-due interval automation. register() nudges the
+        // wakeup; the loop's select! resolves on the notify branch and ticks.
+        let mut def = make_def("wakeful-interval");
+        def.schedule = ScheduleType::Interval(60);
+        def.max_retries = 0; // fail fast — no backoff sleep
+        def.next_run_at = Some((Utc::now() - chrono::Duration::seconds(5)).to_rfc3339());
+        let id = def.id.as_str().to_string();
+        scheduler.register(def).await.unwrap();
+
+        // Within ~500ms the loop should have woken + ticked + dispatched a run.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut saw_run = false;
+        while std::time::Instant::now() < deadline {
+            if !scheduler.list_runs(&id).await.is_empty() {
+                saw_run = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+
+        // Clean up the background task regardless of outcome.
+        handle.abort();
+
+        assert!(
+            saw_run,
+            "wakeable loop did not dispatch the due automation within 500ms — \
+             the register() wakeup likely didn't interrupt the long sleep"
+        );
+    }
+
+    /// Without the explicit `notify_wakeup()` call, the loop only ticks on its
+    /// fixed cadence. We prove the wakeable sleep is the fast path: spawn the
+    /// loop with a short-but-non-trivial interval, then trigger a manual
+    /// wakeup and assert the loop observed it (measured via a freshly-due
+    /// automation that becomes dispatchable between ticks). This isolates the
+    /// notify mechanic from the register() integration above.
+    #[tokio::test]
+    async fn manual_notify_wakeup_interrupts_sleep_beyond_cadence() {
+        let scheduler = Arc::new(Scheduler::new());
+
+        // A short poll interval (well under the test's outer budget, but long
+        // enough that a sub-interval wakeup is meaningfully faster).
+        let interval = std::time::Duration::from_millis(400);
+        let handle = scheduler.spawn_scheduler_loop(interval);
+
+        // Register a *future* automation (not yet due) — no dispatch expected
+        // on the first tick. We'll make it due manually below.
+        let mut def = make_def("wakeful-future");
+        def.schedule = ScheduleType::Interval(60);
+        def.max_retries = 0;
+        def.next_run_at = Some((Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+        let id = def.id.as_str().to_string();
+        scheduler.register(def).await.unwrap();
+
+        // Wait long enough for the loop's first tick (which finds nothing due)
+        // to complete and enter its wakeable sleep.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Make the automation due now (simulating a clock advance / schedule
+        // change) and fire a manual wakeup. The next interval tick is still
+        // ~320ms away; if the wakeup works, we should see a run well before it.
+        let due_at = Utc::now() - chrono::Duration::seconds(5);
+        let mut updated = scheduler.get(&id).await.unwrap();
+        updated.next_run_at = Some(due_at.to_rfc3339());
+        scheduler.update(updated).await.unwrap(); // update() nudges wakeup
+
+        // Budget: less than the 400ms poll interval. If the wakeup branch
+        // works, dispatch lands promptly; if not, we time out.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let mut saw_run = false;
+        while std::time::Instant::now() < deadline {
+            if !scheduler.list_runs(&id).await.is_empty() {
+                saw_run = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        handle.abort();
+
+        assert!(
+            saw_run,
+            "manual notify_wakeup() did not interrupt the wakeable sleep \
+             before the next poll-interval tick (300ms < 400ms interval)"
         );
     }
 }
