@@ -23,12 +23,14 @@
 //!
 //! Context retrieval returns a formatted markdown string of the N most
 //! recent interactions (default 3) for the given user/project scope, which
-//! an integrator injects into the provider session's system prompt.
+//! an integrator injects into the provider session's system prompt. When no
+//! interactions exist, it returns [`NO_PRIOR_CONTEXT`] instead of an empty
+//! string so the result is renderable without a separate emptiness check.
 
 pub mod provider;
 pub mod sqlite_store;
 
-pub use provider::{MemoryProvider, MemoryProviderError};
+pub use provider::{MemoryProvider, MemoryProviderError, NO_PRIOR_CONTEXT};
 pub use sqlite_store::{SqliteMemoryStore, DEFAULT_CONTEXT_LIMIT};
 
 /// Default project identifier used when no project scope is supplied.
