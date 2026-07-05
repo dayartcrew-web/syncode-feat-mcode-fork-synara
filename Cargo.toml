@@ -85,6 +85,12 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }
 
+# Native file/folder picker (DSK-2 / P4-4 filesystem.browse). Cross-platform:
+# Win32 common dialogs, macOS NSOpenPanel, Linux portal/xdg. The async
+# `AsyncFileDialog::pick_*` API is always enabled; rfd drives it internally
+# with `pollster`, which composes fine inside a Tauri (tokio) command.
+rfd = "0.17"
+
 # Internal crates
 syncode-core = { path = "crates/syncode-core" }
 syncode-contracts = { path = "crates/syncode-contracts" }
