@@ -627,7 +627,7 @@ interface ProviderCompactThreadResult {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ─── SERVED_RPC — 110 entries (latest: SRV-5 legacy server.* aliases +5) ──
+// ─── SERVED_RPC — 111 entries (latest: P5-3 orchestration/import-thread) ──
 // ════════════════════════════════════════════════════════════════════════
 
 /**
@@ -1468,6 +1468,31 @@ export const SERVED_RPC = {
     request: null as unknown as Record<string, unknown>,
     result: null as unknown as Record<string, unknown>,
   },
+  // P5-3: `orchestration.importThread` reads an external provider thread
+  // (via the registered adapter's `read_external_thread`) and imports its
+  // messages into a syncode thread. Composes four steps: resolve target →
+  // read external → import messages (P5-1 ImportMessages command) →
+  // optionally set session with a resume cursor (P5-2 read_external_thread).
+  // The backend dispatch accepts both the MCode dot-string
+  // (`orchestration.importThread`) and this slash form. Returns
+  // `{ ok, imported, threadId, provider, threadRef, sessionSet }`.
+  "orchestration/import-thread": {
+    request: null as unknown as {
+      readonly threadId: string;
+      readonly threadRef: string;
+      readonly provider?: string;
+      readonly providerId?: string;
+      readonly setSession?: boolean;
+    },
+    result: null as unknown as {
+      readonly ok: boolean;
+      readonly imported: number;
+      readonly threadId: string;
+      readonly provider: string;
+      readonly threadRef: string;
+      readonly sessionSet: boolean;
+    },
+  },
 } as const;
 
 /** Union of all served JSON-RPC method strings. */
@@ -1631,7 +1656,11 @@ export const UNSERVED_RPC = [
   // `handle_orchestration_dispatch_command` in rpc.rs). ORCH-7:
   // `orchestration.getFullThreadDiff` is NOW SERVED (aggregates per-turn diffs
   // across a thread by reusing ORCH-6's `compute_diff` primitive — see
-  // SERVED_RPC). No orchestration extras remain unserved.
+  // SERVED_RPC). P5-3: `orchestration.importThread` is NOW SERVED (reads an
+  // external provider thread via the registered adapter's
+  // `read_external_thread` and imports its messages — see
+  // `handle_orchestration_import_thread` in rpc.rs). No orchestration extras
+  // remain unserved.
 
   // ─── Auth extras (bootstrap/status/logout + AUTH-1 pairing + AUTH-2 session RPCs served; these are not) ─────
   // AUTH-1: `auth.createPairingCredential`, `auth.revokePairingLink`, and
