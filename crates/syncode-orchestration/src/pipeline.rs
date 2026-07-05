@@ -2768,4 +2768,165 @@ mod tests {
         let params = edit_dispatch.1.as_ref().expect("edit-and-resend params");
         assert!(params["session_id"].as_str().is_some());
     }
+
+    // ─── PR-1-3: E2E chat verification ──────────────────────────────────
+    //
+    // Verifies the full chat round-trip pipeline with a mocked provider
+    // adapter: send message → provider responds → message appears in the read
+    // model. This is the E2E proof that the StartTurn → TurnCompleted pipeline
+    // works end-to-end and that the working_dir fix (PR-1-2) is in place.
+    //
+    // The mock adapter records every call (sessions started, requests sent) so
+    // the test asserts on observable behavior without a real provider process.
+    // If the `claude` CLI binary is available locally, a manual verification
+    // can be run via `cargo run -p syncode-ws --bin server` + the desktop UI.
+
+    #[tokio::test]
+    async fn e2e_chat_send_message_provider_responds_message_appears() {
+        // Build the full armed pipeline: orchestrator + command reactor + mock
+        // adapter. The reactor is wired with the orchestrator's shared read
+        // model so handle_start_turn resolves the thread's project root path
+        // (the PR-1-2 fix) instead of falling back to /tmp/syncode.
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let reactor = Arc::new(
+            ProviderCommandReactor::new(SessionManager::new())
+                .with_read_model(Arc::clone(&read_model)),
+        );
+        let (adapter, _stopped, requests, working_dirs) =
+            crate::reactors::command::tests::make_working_dir_recording_mock();
+        let orch =
+            Orchestrator::with_reactor_adapter_and_read_model(repo, reactor, adapter, read_model);
+
+        // 1. Create a project whose root_path is the user's actual project dir.
+        let project_root = "/home/user/my-chat-project";
+        let project_result = orch
+            .handle_command(Command::CreateProject {
+                name: "Chat E2E".into(),
+                root_path: project_root.into(),
+            })
+            .await
+            .expect("create project");
+        let project_id = project_result
+            .events
+            .iter()
+            .find_map(|env| match &env.event {
+                DomainEvent::ProjectCreated { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("ProjectCreated produced");
+
+        // 2. Create a thread in that project.
+        let thread_result = orch
+            .handle_command(Command::CreateThread {
+                project_id,
+                provider_id: "claude".into(),
+                model: "claude-sonnet".into(),
+            })
+            .await
+            .expect("create thread");
+        let thread_id = thread_result
+            .events
+            .iter()
+            .find_map(|env| match &env.event {
+                DomainEvent::ThreadCreated { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("ThreadCreated produced");
+
+        // 3. SEND MESSAGE: StartTurn. This is the user sending a chat message.
+        //    The pipeline must (a) produce TurnStarted, and (b) trigger the
+        //    command reactor which starts a provider session and dispatches the
+        //    initial "chat" request to the mock adapter.
+        let user_message = "Hello, can you explain this codebase?";
+        let start_result = orch
+            .handle_command(Command::StartTurn {
+                thread_id,
+                sequence: 1,
+                user_input: user_message.into(),
+            })
+            .await
+            .expect("start turn");
+
+        // The turn was started.
+        assert!(!start_result.events.is_empty(), "StartTurn must produce events");
+        let turn_id = start_result
+            .events
+            .iter()
+            .find_map(|env| match &env.event {
+                DomainEvent::TurnStarted { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("TurnStarted produced");
+
+        // The provider side effect fired (reactor → adapter).
+        assert!(
+            start_result.side_effect_triggered,
+            "StartTurn should trigger the provider side effect (session + request)"
+        );
+
+        // 4. PROVIDER RESPONDS: the adapter received the message. The mock
+        //    records the dispatched "chat" request carrying the user input.
+        let recorded = requests.lock().unwrap().clone();
+        let chat_dispatch = recorded
+            .iter()
+            .find(|(method, _)| method == "chat")
+            .expect("reactor should have dispatched the initial chat request");
+        let chat_params = chat_dispatch
+            .1
+            .as_ref()
+            .expect("chat request must carry params");
+        assert_eq!(
+            chat_params["input"].as_str(),
+            Some(user_message),
+            "the dispatched request must carry the user's message"
+        );
+
+        // PR-1-2 verification: the provider session was started with the
+        // project's root_path as its working directory (not the /tmp fallback).
+        let dirs = working_dirs.lock().unwrap().clone();
+        assert_eq!(dirs.len(), 1, "exactly one session should have started");
+        assert_eq!(
+            dirs[0], project_root,
+            "session working_dir must be the project root_path (PR-1-2 fix), got {}",
+            dirs[0]
+        );
+
+        // 5. MESSAGE APPEARS: complete the turn with the provider's response.
+        //    This simulates the provider's reply arriving (in production the
+        //    ingestion reactor would ingest the Completed provider event and
+        //    drive CompleteTurn). CompleteTurn persists TurnCompleted.
+        let assistant_reply = "This codebase is a Rust workspace implementing a CQRS orchestration engine.";
+        orch.handle_command(Command::CompleteTurn {
+            id: turn_id,
+            assistant_output: assistant_reply.into(),
+            duration_ms: 1_200,
+        })
+        .await
+        .expect("complete turn");
+
+        // The turn read model now reflects the completed turn + reply.
+        let snapshot = orch.read_model_snapshot().await;
+        let turn_view = snapshot
+            .turns
+            .get(&turn_id.as_str())
+            .expect("turn exists in read model");
+        assert_eq!(turn_view.status, "completed");
+        assert_eq!(
+            turn_view.assistant_output.as_deref(),
+            Some(assistant_reply),
+            "the provider's response must appear on the turn"
+        );
+
+        // And the thread's turn_count advanced.
+        let thread_view = snapshot
+            .threads
+            .get(&thread_id.as_str())
+            .expect("thread exists in read model");
+        assert_eq!(
+            thread_view.turn_count, 1,
+            "the thread must reflect the completed turn"
+        );
+    }
 }
