@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::policies::CompletionPolicy;
+use crate::worktree::WorktreeMode;
 
 /// Unique automation identifier
 pub type AutomationId = syncode_core::EntityId;
@@ -93,6 +94,45 @@ pub struct AutomationDef {
     /// the default (`1`) via `#[serde(default)]`.
     #[serde(default = "default_version")]
     pub version: u64,
+    /// Maximum number of runs before the automation is auto-disabled (P2-6).
+    ///
+    /// When `Some(n)`, the engine increments `iteration_count` after each run;
+    /// once it reaches `n`, the automation is disabled (its `enabled` flag is
+    /// flipped to `false`). `None` means run indefinitely (the default —
+    /// backward compatible with stored defs serialized before this field).
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
+    /// Whether a single failed run auto-disables the automation (P2-6).
+    ///
+    /// Mirrors MCode's `stopOnError`: when `true`, a run that ends in a
+    /// terminal `Failed` status disables the automation so it isn't
+    /// re-triggered. Defaults to `false` (a failed run schedules the next
+    /// fire as usual — the historical behavior).
+    #[serde(default)]
+    pub stop_on_error: bool,
+    /// Counter of completed runs for this automation (P2-6).
+    ///
+    /// Incremented after each run (success or failure) and compared against
+    /// [`AutomationDef::max_iterations`]. Persisted with the def so the count
+    /// survives restarts. Defaults to `0`; legacy defs deserialize to `0`.
+    #[serde(default)]
+    pub iteration_count: u32,
+    /// Maximum wall-clock seconds a single run may take before it is failed
+    /// with a timeout error (P2-7).
+    ///
+    /// Distinct from the existing `timeout_secs` (which configures the
+    /// `ProcessRunExecutor`'s per-command cap): `max_runtime_seconds` is
+    /// enforced at the [`crate::executor`] level, wrapping the entire
+    /// dispatch + retry loop. `None` = no run-level cap (the default).
+    #[serde(default)]
+    pub max_runtime_seconds: Option<u64>,
+    /// Whether to isolate each standalone run in a git worktree (P2-8).
+    ///
+    /// Defaults to [`WorktreeMode::Local`] (no isolation — the historical
+    /// behavior). `Worktree` / `Auto` create a dedicated worktree per run
+    /// under `automation/<name>/<suffix>`.
+    #[serde(default)]
+    pub worktree_mode: WorktreeMode,
 }
 
 /// Default value for [`AutomationDef::version`] — `1` (the first revision).
@@ -132,6 +172,11 @@ impl AutomationDef {
             target_thread_id: None,
             completion_policy: CompletionPolicy::default(),
             version: 1,
+            max_iterations: None,
+            stop_on_error: false,
+            iteration_count: 0,
+            max_runtime_seconds: None,
+            worktree_mode: WorktreeMode::default(),
         }
     }
 
@@ -181,6 +226,50 @@ impl AutomationDef {
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = Some(secs);
         self
+    }
+
+    /// Builder: set the max-iterations cap (P2-6). Once `iteration_count`
+    /// reaches this, the automation is auto-disabled.
+    pub fn with_max_iterations(mut self, max: u32) -> Self {
+        self.max_iterations = Some(max);
+        self
+    }
+
+    /// Builder: set stop-on-error (P2-6). When `true`, a failed run
+    /// auto-disables the automation.
+    pub fn with_stop_on_error(mut self, stop: bool) -> Self {
+        self.stop_on_error = stop;
+        self
+    }
+
+    /// Builder: set the max-runtime cap in seconds (P2-7).
+    pub fn with_max_runtime_seconds(mut self, secs: u64) -> Self {
+        self.max_runtime_seconds = Some(secs);
+        self
+    }
+
+    /// Builder: set the worktree mode (P2-8).
+    pub fn with_worktree_mode(mut self, mode: WorktreeMode) -> Self {
+        self.worktree_mode = mode;
+        self
+    }
+
+    /// Increment the iteration counter (P2-6). Called after each run completes
+    /// (success or failure). Returns the new count. Saturating — never
+    /// overflows.
+    pub fn increment_iteration_count(&mut self) -> u32 {
+        self.iteration_count = self.iteration_count.saturating_add(1);
+        self.iteration_count
+    }
+
+    /// Whether this automation has reached its `max_iterations` cap and should
+    /// be auto-disabled (P2-6). Returns `false` when `max_iterations` is
+    /// `None` (run indefinitely).
+    pub fn is_max_iterations_reached(&self) -> bool {
+        match self.max_iterations {
+            Some(cap) => self.iteration_count >= cap,
+            None => false,
+        }
     }
 
     /// Record a mutation: bump the version counter and refresh `updated_at`.
@@ -371,5 +460,212 @@ mod tests {
         let legacy_def: AutomationDef =
             serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy_def.version, 1, "legacy defs default to version 1");
+    }
+
+    // ─── P2-6: maxIterations / stopOnError / iterationCount ────────────
+
+    #[test]
+    fn automation_def_new_defaults_max_iterations_none_and_stop_on_error_false() {
+        let def = AutomationDef::new(
+            "p2-6".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        );
+        assert_eq!(def.max_iterations, None, "default: no iteration cap");
+        assert!(!def.stop_on_error, "default: stop_on_error is false");
+        assert_eq!(def.iteration_count, 0, "default: iteration_count is 0");
+        assert!(
+            !def.is_max_iterations_reached(),
+            "no cap → never reached"
+        );
+    }
+
+    #[test]
+    fn automation_def_max_iterations_reached_at_cap() {
+        let mut def = AutomationDef::new(
+            "p2-6".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        )
+        .with_max_iterations(3);
+
+        // Two runs — under the cap.
+        def.increment_iteration_count();
+        assert_eq!(def.iteration_count, 1);
+        assert!(!def.is_max_iterations_reached());
+        def.increment_iteration_count();
+        assert_eq!(def.iteration_count, 2);
+        assert!(!def.is_max_iterations_reached());
+
+        // Third run — reaches the cap.
+        def.increment_iteration_count();
+        assert_eq!(def.iteration_count, 3);
+        assert!(
+            def.is_max_iterations_reached(),
+            "iteration_count == max_iterations → reached"
+        );
+    }
+
+    #[test]
+    fn automation_def_iteration_count_saturates() {
+        let mut def = AutomationDef::new(
+            "p2-6".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        );
+        def.iteration_count = u32::MAX;
+        let next = def.increment_iteration_count();
+        assert_eq!(next, u32::MAX, "saturating add does not overflow");
+    }
+
+    #[test]
+    fn automation_def_max_iterations_roundtrip_and_legacy_default() {
+        let mut def = AutomationDef::new(
+            "p2-6".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        )
+        .with_max_iterations(10)
+        .with_stop_on_error(true);
+        def.increment_iteration_count();
+        def.increment_iteration_count();
+
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(json.contains("maxIterations"));
+        assert!(json.contains("stopOnError"));
+        assert!(json.contains("iterationCount"));
+        let back: AutomationDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_iterations, Some(10));
+        assert!(back.stop_on_error);
+        assert_eq!(back.iteration_count, 2);
+
+        // Legacy payload (no P2-6 fields) → defaults.
+        let legacy = serde_json::json!({
+            "id": def.id.as_str(),
+            "name": "x",
+            "description": "",
+            "enabled": true,
+            "schedule": "manual",
+            "command": "y",
+            "args": [],
+            "env": {},
+            "maxRetries": 3,
+            "retryDelaySecs": 30,
+            "tags": [],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "checkpointBefore": false,
+            "autoCommitAfter": false,
+        });
+        let legacy_def: AutomationDef = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy_def.max_iterations, None);
+        assert!(!legacy_def.stop_on_error);
+        assert_eq!(legacy_def.iteration_count, 0);
+    }
+
+    // ─── P2-7: maxRuntimeSeconds ───────────────────────────────────────
+
+    #[test]
+    fn automation_def_new_defaults_max_runtime_seconds_none() {
+        let def = AutomationDef::new(
+            "p2-7".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        );
+        assert_eq!(def.max_runtime_seconds, None);
+    }
+
+    #[test]
+    fn automation_def_max_runtime_seconds_builder_and_roundtrip() {
+        let def = AutomationDef::new(
+            "p2-7".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        )
+        .with_max_runtime_seconds(120);
+
+        assert_eq!(def.max_runtime_seconds, Some(120));
+
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(json.contains("maxRuntimeSeconds"));
+        let back: AutomationDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_runtime_seconds, Some(120));
+    }
+
+    #[test]
+    fn automation_def_max_runtime_seconds_legacy_default() {
+        // Legacy payload without maxRuntimeSeconds → None.
+        let legacy = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "x",
+            "description": "",
+            "enabled": true,
+            "schedule": "manual",
+            "command": "y",
+            "args": [],
+            "env": {},
+            "maxRetries": 3,
+            "retryDelaySecs": 30,
+            "tags": [],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "checkpointBefore": false,
+            "autoCommitAfter": false,
+        });
+        let def: AutomationDef = serde_json::from_value(legacy).unwrap();
+        assert_eq!(def.max_runtime_seconds, None);
+    }
+
+    // ─── P2-8: worktreeMode ────────────────────────────────────────────
+
+    #[test]
+    fn automation_def_new_defaults_worktree_mode_local() {
+        let def = AutomationDef::new(
+            "p2-8".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        );
+        assert_eq!(def.worktree_mode, WorktreeMode::Local);
+    }
+
+    #[test]
+    fn automation_def_worktree_mode_builder_and_roundtrip() {
+        let def = AutomationDef::new(
+            "p2-8".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        )
+        .with_worktree_mode(WorktreeMode::Worktree);
+
+        assert_eq!(def.worktree_mode, WorktreeMode::Worktree);
+
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(json.contains("worktreeMode"));
+        let back: AutomationDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worktree_mode, WorktreeMode::Worktree);
+    }
+
+    #[test]
+    fn automation_def_worktree_mode_legacy_default() {
+        // Legacy payload without worktreeMode → Local.
+        let legacy = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "x",
+            "description": "",
+            "enabled": true,
+            "schedule": "manual",
+            "command": "y",
+            "args": [],
+            "env": {},
+            "maxRetries": 3,
+            "retryDelaySecs": 30,
+            "tags": [],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "checkpointBefore": false,
+            "autoCommitAfter": false,
+        });
+        let def: AutomationDef = serde_json::from_value(legacy).unwrap();
+        assert_eq!(def.worktree_mode, WorktreeMode::Local);
     }
 }

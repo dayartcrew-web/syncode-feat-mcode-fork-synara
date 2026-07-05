@@ -15,6 +15,7 @@
 //! backoffs.
 
 use chrono::{DateTime, Utc};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ use crate::events::{RunContext, RunEventSink, with_run_context};
 use crate::policies::{CompletionPolicy, RetryPolicy};
 use crate::runner::{AutomationRun, RunStatus};
 use crate::schedule;
+use crate::worktree::{WorktreeError, WorktreeManager};
 
 /// How the retry loop should wait between attempts. Injectable so tests can
 /// skip real delays.
@@ -50,6 +52,14 @@ impl Delay {
 pub struct RunOutcome {
     pub final_status: RunStatus,
     pub attempts: u32,
+    /// Whether the automation should be auto-disabled after this run (P2-6).
+    ///
+    /// Set when `iteration_count` reached `max_iterations`, or when
+    /// `stop_on_error` is `true` and the run failed. The caller (scheduler /
+    /// host) is responsible for flipping the def's `enabled` flag; the
+    /// executor only signals the condition (it does not mutate the stored
+    /// def's `enabled` field directly, to avoid racing concurrent edits).
+    pub should_disable: bool,
 }
 
 /// Derive the [`RetryPolicy`] from an automation def's fields. The def stores
@@ -111,6 +121,15 @@ pub fn dispatch_request_for(def: &AutomationDef) -> DispatchRequest {
 /// policy (up to `max_retries`), then records the final outcome + advances
 /// `next_run_at`. Returns the final status + attempt count.
 ///
+/// **P2-6 / P2-7** — the executor now also:
+/// - enforces `max_runtime_seconds` (P2-7): the entire dispatch + retry loop
+///   is wrapped in a wall-clock timeout; on expiry the run is failed with a
+///   timeout error;
+/// - tracks `iteration_count` and signals auto-disable via
+///   [`RunOutcome::should_disable`] when `max_iterations` is reached or
+///   `stop_on_error` fires (P2-6). The updated iteration count is persisted
+///   via [`increment_def_iterations`].
+///
 /// `now` is injected (not read from the system clock) so tests are deterministic.
 pub async fn execute_run(
     def: &AutomationDef,
@@ -120,70 +139,7 @@ pub async fn execute_run(
     delay: Delay,
     now: DateTime<Utc>,
 ) -> RunOutcome {
-    let policy = retry_policy_for(def);
-    let mut attempt: u32 = 0;
-    let req = dispatch_request_for(def);
-
-    // Create + persist the initial run record.
-    let mut run = AutomationRun::new(def.id.as_str().to_string());
-    run.attempt = attempt;
-    run.mark_started();
-    persist_run(repo, &run).await;
-
-    loop {
-        match executor.dispatch_turn(req.clone()).await {
-            Ok(outcome) => {
-                // Success signal: a dispatched turn maps to "exit code 0".
-                let exit_code = 0;
-                run.mark_completed(
-                    exit_code,
-                    format!("turn {}", outcome.turn_id),
-                    String::new(),
-                );
-
-                // If the completion policy rejects (e.g. AllowedExitCodes), mark failed.
-                if !completion.is_success(exit_code) {
-                    run.status = RunStatus::Failed;
-                    run.error = Some(format!(
-                        "completion policy rejected exit code {}",
-                        exit_code
-                    ));
-                }
-                persist_run(repo, &run).await;
-                advance_schedule(repo, def, &run.status, now).await;
-                return RunOutcome {
-                    final_status: run.status.clone(),
-                    attempts: attempt + 1,
-                };
-            }
-            Err(err) => {
-                // Consult the retry policy for the next delay.
-                match policy.delay_for_attempt(attempt) {
-                    Some(backoff) if !policy.exhausted(attempt) => {
-                        run.mark_retrying(attempt + 1);
-                        persist_run(repo, &run).await;
-                        delay.wait(backoff).await;
-                        attempt += 1;
-                        continue;
-                    }
-                    _ => {
-                        // Retries exhausted (or policy is None) → fail permanently.
-                        run.mark_failed(format!(
-                            "dispatch failed after {} attempt(s): {}",
-                            attempt + 1,
-                            err
-                        ));
-                        persist_run(repo, &run).await;
-                        advance_schedule(repo, def, &run.status, now).await;
-                        return RunOutcome {
-                            final_status: RunStatus::Failed,
-                            attempts: attempt + 1,
-                        };
-                    }
-                }
-            }
-        }
-    }
+    execute_run_inner(def, executor, repo, completion, delay, now, None).await
 }
 
 /// Execute a single automation run **with live event push** (PUSH-1).
@@ -198,11 +154,9 @@ pub async fn execute_run(
 ///
 /// ## Behavior parity
 ///
-/// The retry loop, run-record lifecycle, and schedule advance are identical
-/// to [`execute_run`]. The only addition is the run-context scope around the
-/// dispatch call: when `sink` is a [`NoopRunEventSink`] (or the executor
-/// doesn't read the context), behavior is indistinguishable from
-/// [`execute_run`].
+/// The retry loop, run-record lifecycle, schedule advance, P2-6 auto-disable,
+/// and P2-7 runtime timeout are identical to [`execute_run`]. The only
+/// addition is the run-context scope around the dispatch call.
 ///
 /// ## Why a sink argument (not a stored field)
 ///
@@ -220,6 +174,28 @@ pub async fn execute_run_with_events(
     now: DateTime<Utc>,
     sink: Arc<dyn RunEventSink>,
 ) -> RunOutcome {
+    execute_run_inner(def, executor, repo, completion, delay, now, Some(sink)).await
+}
+
+/// Shared retry loop backing both [`execute_run`] and [`execute_run_with_events`].
+///
+/// `sink` selects the dispatch path:
+/// - `None` → plain `dispatch_turn` (synchronous trigger contract).
+/// - `Some` → scopes a [`RunContext`] around each dispatch (live push).
+///
+/// P2-6: after the loop, `iteration_count` is incremented + persisted and the
+/// auto-disable condition is computed into [`RunOutcome::should_disable`].
+/// P2-7: the dispatch+retry loop is wrapped in `tokio::time::timeout(
+/// max_runtime_seconds)` when the def sets that cap.
+async fn execute_run_inner(
+    def: &AutomationDef,
+    executor: &dyn RunExecutor,
+    repo: &dyn AutomationRepository,
+    completion: &CompletionPolicy,
+    delay: Delay,
+    now: DateTime<Utc>,
+    sink: Option<Arc<dyn RunEventSink>>,
+) -> RunOutcome {
     let policy = retry_policy_for(def);
     let mut attempt: u32 = 0;
     let req = dispatch_request_for(def);
@@ -230,16 +206,113 @@ pub async fn execute_run_with_events(
     run.mark_started();
     persist_run(repo, &run).await;
 
+    // P2-7: optional wall-clock cap on the entire dispatch+retry loop. The
+    // retry delays count against the budget — correct, since
+    // max_runtime_seconds is the total wall-clock for the run, not per-attempt.
+    let runtime_cap = def_max_runtime(def);
+    let inputs = DispatchLoopInputs {
+        run: &mut run,
+        req,
+        policy: &policy,
+        completion,
+        delay,
+        repo,
+        attempt: &mut attempt,
+        executor,
+        sink: sink.as_ref(),
+    };
+    let loop_fut = dispatch_retry_loop(inputs);
+
+    let loop_result = match runtime_cap {
+        Some(cap) => match tokio::time::timeout(cap, loop_fut).await {
+            Ok(()) => LoopResult::Done,
+            Err(_) => LoopResult::TimedOut,
+        },
+        None => {
+            loop_fut.await;
+            LoopResult::Done
+        }
+    };
+
+    // P2-7: if the runtime cap fired, fail the run with a timeout (unless it
+    // already reached a terminal state from the dispatch itself).
+    let final_status = match loop_result {
+        LoopResult::Done => run.status.clone(),
+        LoopResult::TimedOut => {
+            if !run.status.is_terminal() {
+                run.mark_timed_out();
+                persist_run(repo, &run).await;
+            }
+            run.status.clone()
+        }
+    };
+
+    advance_schedule(repo, def, &final_status, now).await;
+
+    // P2-6: increment iteration_count + persist, then decide auto-disable.
+    let new_count = increment_def_iterations(repo, def).await;
+    let should_disable = should_disable_after(def, new_count, &final_status);
+
+    RunOutcome {
+        final_status,
+        attempts: attempt + 1,
+        should_disable,
+    }
+}
+
+/// The outcome of the dispatch loop: either it completed naturally (`Done`)
+/// or was killed by the P2-7 runtime timeout (`TimedOut`).
+#[derive(Debug, Clone, Copy)]
+enum LoopResult {
+    Done,
+    TimedOut,
+}
+
+/// Bundled inputs for [`dispatch_retry_loop`] — avoids the clippy
+/// `too_many_arguments` lint (9 params > 7 limit) without scattering the
+/// state across loose locals.
+struct DispatchLoopInputs<'a> {
+    run: &'a mut AutomationRun,
+    req: DispatchRequest,
+    policy: &'a RetryPolicy,
+    completion: &'a CompletionPolicy,
+    delay: Delay,
+    repo: &'a dyn AutomationRepository,
+    attempt: &'a mut u32,
+    executor: &'a dyn RunExecutor,
+    sink: Option<&'a Arc<dyn RunEventSink>>,
+}
+
+/// The core retry loop, factored out of [`execute_run_inner`] so it can be
+/// wrapped in a runtime timeout (P2-7). Mutates `run` + `attempt` in place.
+async fn dispatch_retry_loop(inputs: DispatchLoopInputs<'_>) {
+    let DispatchLoopInputs {
+        run,
+        req,
+        policy,
+        completion,
+        delay,
+        repo,
+        attempt,
+        executor,
+        sink,
+    } = inputs;
+
     loop {
-        // PUSH-1: scope the run context around this dispatch_turn so the
-        // executor can emit live events. The sink + run id are stable across
-        // retries (the same run record is retried, not replaced).
-        let ctx = RunContext {
-            run_id: run.id.clone(),
-            automation_id: run.automation_id.clone(),
-            sink: sink.clone(),
+        // PUSH-1: when a sink is supplied, scope a RunContext around this
+        // dispatch_turn so the executor can emit live events. The sink + run
+        // id are stable across retries (the same run record is retried).
+        let outcome_res = match sink {
+            None => executor.dispatch_turn(req.clone()).await,
+            Some(s) => {
+                let ctx = RunContext {
+                    run_id: run.id.clone(),
+                    automation_id: run.automation_id.clone(),
+                    sink: Arc::clone(s),
+                };
+                with_run_context(ctx, executor.dispatch_turn(req.clone())).await
+            }
         };
-        let outcome_res = with_run_context(ctx, executor.dispatch_turn(req.clone())).await;
 
         match outcome_res {
             Ok(outcome) => {
@@ -259,40 +332,131 @@ pub async fn execute_run_with_events(
                         exit_code
                     ));
                 }
-                persist_run(repo, &run).await;
-                advance_schedule(repo, def, &run.status, now).await;
-                return RunOutcome {
-                    final_status: run.status.clone(),
-                    attempts: attempt + 1,
-                };
+                persist_run(repo, run).await;
+                return;
             }
             Err(err) => {
                 // Consult the retry policy for the next delay.
-                match policy.delay_for_attempt(attempt) {
-                    Some(backoff) if !policy.exhausted(attempt) => {
-                        run.mark_retrying(attempt + 1);
-                        persist_run(repo, &run).await;
+                match policy.delay_for_attempt(*attempt) {
+                    Some(backoff) if !policy.exhausted(*attempt) => {
+                        run.mark_retrying(*attempt + 1);
+                        persist_run(repo, run).await;
                         delay.wait(backoff).await;
-                        attempt += 1;
+                        *attempt += 1;
                         continue;
                     }
                     _ => {
                         // Retries exhausted (or policy is None) → fail permanently.
                         run.mark_failed(format!(
                             "dispatch failed after {} attempt(s): {}",
-                            attempt + 1,
+                            *attempt + 1,
                             err
                         ));
-                        persist_run(repo, &run).await;
-                        advance_schedule(repo, def, &run.status, now).await;
-                        return RunOutcome {
-                            final_status: RunStatus::Failed,
-                            attempts: attempt + 1,
-                        };
+                        persist_run(repo, run).await;
+                        return;
                     }
                 }
             }
         }
+    }
+}
+
+/// P2-7: read `max_runtime_seconds` from the def as a `Duration` (if set).
+fn def_max_runtime(def: &AutomationDef) -> Option<Duration> {
+    def.max_runtime_seconds.map(Duration::from_secs)
+}
+
+/// P2-6: increment the def's `iteration_count` in storage and return the new
+/// value. Reads the current stored def (so the count is accurate even if the
+/// in-memory `def` argument is stale), bumps it, and persists. On failure
+/// (def missing / serialization error), falls back to the in-memory count + 1
+/// and logs — the run outcome is the primary result.
+async fn increment_def_iterations(repo: &dyn AutomationRepository, def: &AutomationDef) -> u32 {
+    let id = def.id.as_str();
+    // Load the freshest stored def so we increment the persisted count (not a
+    // potentially-stale in-memory snapshot).
+    let current = match repo.get_def(&id).await {
+        Ok(Some(payload)) => {
+            serde_json::from_value::<AutomationDef>(payload).map(|d| d.iteration_count).ok()
+        }
+        _ => None,
+    };
+    let new_count = match current {
+        Some(c) => c.saturating_add(1),
+        None => def.iteration_count.saturating_add(1),
+    };
+
+    // Persist by loading the def, bumping the field, and saving. We re-load
+    // (not mutate `def`) so we don't clobber concurrent edits to other fields.
+    if let Ok(Some(payload)) = repo.get_def(&id).await
+        && let Ok(mut stored) = serde_json::from_value::<AutomationDef>(payload)
+    {
+        stored.iteration_count = new_count;
+        if let Ok(p) = serde_json::to_value(&stored)
+            && let Err(e) = repo.save_def(&id, p).await
+        {
+            tracing::warn!(error = %e, %id, count = new_count, "failed to persist iteration_count");
+        }
+    }
+    new_count
+}
+
+/// P2-6: decide whether the automation should be auto-disabled after this run.
+///
+/// - `max_iterations` reached → disable (regardless of success/failure).
+/// - `stop_on_error` and the run failed → disable.
+pub(crate) fn should_disable_after(
+    def: &AutomationDef,
+    new_iteration_count: u32,
+    final_status: &RunStatus,
+) -> bool {
+    // Max-iterations cap.
+    if let Some(cap) = def.max_iterations
+        && new_iteration_count >= cap
+    {
+        return true;
+    }
+    // stop_on_error: a failed run disables the automation.
+    if def.stop_on_error && matches!(final_status, RunStatus::Failed) {
+        return true;
+    }
+    false
+}
+
+/// P2-8: create a git worktree for a standalone run when `worktree_mode`
+/// requests isolation, returning the worktree path. Returns `None` when
+/// isolation is off (`Local`) or the run is a heartbeat (`target_thread_id`
+/// is set — worktrees are for standalone runs only).
+///
+/// The caller is responsible for removing the worktree on failure (see
+/// [`cleanup_worktree_on_failure`]).
+pub async fn setup_worktree_for_run(
+    def: &AutomationDef,
+    repo_root: &std::path::Path,
+    run_suffix: &str,
+) -> Option<Result<PathBuf, WorktreeError>> {
+    if !WorktreeManager::should_isolate(def.worktree_mode) {
+        return None;
+    }
+    // Heartbeat runs (target_thread_id set) append to an existing thread —
+    // worktree isolation is for standalone runs.
+    if def.target_thread_id.is_some() {
+        return None;
+    }
+    let mgr = WorktreeManager::new(repo_root);
+    Some(mgr.create(&def.name, run_suffix).await)
+}
+
+/// P2-8: remove a worktree on run failure (cleanup). Best-effort — logs on
+/// error. Called by the host/scheduler after a run that used worktree
+/// isolation ends in failure.
+pub async fn cleanup_worktree_on_failure(
+    repo_root: &std::path::Path,
+    worktree_path: &std::path::Path,
+) {
+    let mgr = WorktreeManager::new(repo_root);
+    if let Err(e) = mgr.remove(worktree_path).await {
+        tracing::warn!(error = %e, path = %worktree_path.display(), "failed to clean up worktree");
     }
 }
 
@@ -782,5 +946,344 @@ mod tests {
         assert_eq!(outcome.final_status, RunStatus::Completed);
         assert_eq!(outcome.attempts, 1);
         assert_eq!(executor.requests().len(), 1);
+    }
+
+    // ─── P2-6: maxIterations / stopOnError / iterationCount ────────────
+
+    /// Helper: register a def into the TestRepo so increment_def_iterations
+    /// can load + persist it.
+    async fn register_def(repo: &Arc<TestRepo>, def: &AutomationDef) {
+        let payload = serde_json::to_value(def).unwrap();
+        repo.save_def(&def.id.as_str(), payload).await.unwrap();
+    }
+
+    /// Read the persisted iteration_count for a def from the TestRepo.
+    async fn persisted_iteration_count(repo: &Arc<TestRepo>, def: &AutomationDef) -> u32 {
+        let p = repo.get_def(&def.id.as_str()).await.unwrap().unwrap();
+        serde_json::from_value::<AutomationDef>(p).unwrap().iteration_count
+    }
+
+    #[tokio::test]
+    async fn p2_6_max_iterations_signals_disable_when_cap_reached() {
+        let repo = repo();
+        // Cap at 1 iteration. A single successful run should bump the count
+        // to 1 and signal disable.
+        let mut def = def_with_retries(3, 1);
+        def.max_iterations = Some(1);
+        register_def(&repo, &def).await;
+
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        assert!(
+            outcome.should_disable,
+            "iteration_count reached max_iterations → should_disable"
+        );
+        // Persisted count advanced to 1.
+        assert_eq!(persisted_iteration_count(&repo, &def).await, 1);
+    }
+
+    #[tokio::test]
+    async fn p2_6_max_iterations_not_reached_does_not_disable() {
+        let repo = repo();
+        // Cap at 5; one run leaves us at 1 — under the cap.
+        let mut def = def_with_retries(3, 1);
+        def.max_iterations = Some(5);
+        register_def(&repo, &def).await;
+
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        assert!(
+            !outcome.should_disable,
+            "iteration_count (1) < max_iterations (5) → no disable"
+        );
+        assert_eq!(persisted_iteration_count(&repo, &def).await, 1);
+    }
+
+    #[tokio::test]
+    async fn p2_6_stop_on_error_disables_after_failed_run() {
+        let repo = repo();
+        let mut def = def_with_retries(0, 0); // no retries → fails immediately
+        def.stop_on_error = true;
+        register_def(&repo, &def).await;
+
+        let executor = RecordedExecutor::new(vec![Err(PortError::Internal("boom".into()))]);
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Failed);
+        assert!(
+            outcome.should_disable,
+            "stop_on_error=true + failed run → should_disable"
+        );
+    }
+
+    #[tokio::test]
+    async fn p2_6_stop_on_error_false_does_not_disable_on_failure() {
+        let repo = repo();
+        let mut def = def_with_retries(0, 0);
+        def.stop_on_error = false; // default
+        register_def(&repo, &def).await;
+
+        let executor = RecordedExecutor::new(vec![Err(PortError::Internal("boom".into()))]);
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Failed);
+        assert!(
+            !outcome.should_disable,
+            "stop_on_error=false → a failed run does NOT disable"
+        );
+    }
+
+    #[tokio::test]
+    async fn p2_6_no_max_iterations_no_stop_on_error_never_disables() {
+        let repo = repo();
+        let def = def_with_retries(0, 0);
+        register_def(&repo, &def).await;
+
+        let executor = RecordedExecutor::new(vec![Err(PortError::Internal("boom".into()))]);
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Failed);
+        assert!(!outcome.should_disable, "no caps → never disables");
+    }
+
+    #[test]
+    fn p2_6_should_disable_after_unit_logic() {
+        let mut def = AutomationDef::new(
+            "t".into(),
+            "echo".into(),
+            crate::definition::ScheduleType::Manual,
+        );
+
+        // No caps → never disable.
+        assert!(!should_disable_after(&def, 1, &RunStatus::Failed));
+        assert!(!should_disable_after(&def, 100, &RunStatus::Completed));
+
+        // max_iterations reached → disable regardless of status.
+        def.max_iterations = Some(3);
+        assert!(!should_disable_after(&def, 2, &RunStatus::Completed));
+        assert!(should_disable_after(&def, 3, &RunStatus::Completed));
+        assert!(should_disable_after(&def, 4, &RunStatus::Failed)); // over cap
+
+        // stop_on_error.
+        def.max_iterations = None;
+        def.stop_on_error = true;
+        assert!(should_disable_after(&def, 1, &RunStatus::Failed));
+        assert!(!should_disable_after(&def, 1, &RunStatus::Completed));
+
+        // TimedOut also counts as a failure for stop_on_error? It's a distinct
+        // terminal status — we only auto-disable on `Failed`, matching MCode's
+        // stopOnError semantics (a timeout is a separate condition).
+        assert!(
+            !should_disable_after(&def, 1, &RunStatus::TimedOut),
+            "TimedOut is not Failed — stop_on_error targets Failed only"
+        );
+    }
+
+    #[tokio::test]
+    async fn p2_6_iteration_count_accumulates_across_runs() {
+        let repo = repo();
+        let mut def = def_with_retries(0, 0);
+        def.max_iterations = Some(2);
+        register_def(&repo, &def).await;
+
+        // Run 1: count → 1, not yet at cap.
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+        assert_eq!(persisted_iteration_count(&repo, &def).await, 1);
+        assert!(!outcome.should_disable);
+
+        // Run 2: count → 2, cap reached → disable.
+        let executor2 = RecordedExecutor::new(vec![ok_outcome()]);
+        let outcome2 = execute_run(
+            &def,
+            &executor2,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+        assert_eq!(persisted_iteration_count(&repo, &def).await, 2);
+        assert!(outcome2.should_disable, "second run reached the cap");
+    }
+
+    // ─── P2-7: maxRuntimeSeconds ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn p2_7_max_runtime_seconds_times_out_long_running_run() {
+        let repo = repo();
+        // An executor whose dispatch never resolves (pending forever). The
+        // runtime timeout must fire and fail the run as TimedOut.
+        struct HangingExecutor;
+        #[async_trait::async_trait]
+        impl RunExecutor for HangingExecutor {
+            async fn dispatch_turn(
+                &self,
+                _req: DispatchRequest,
+            ) -> Result<DispatchOutcome, PortError> {
+                // Never resolves within the test's lifetime.
+                std::future::pending::<()>().await;
+                unreachable!("pending should never resolve")
+            }
+        }
+
+        // max_runtime_seconds = 1 (the field is u64 seconds). The hanging
+        // executor ensures the timeout, not the dispatch, ends the run.
+        let mut def = def_with_retries(5, 1);
+        def.max_runtime_seconds = Some(1);
+        register_def(&repo, &def).await;
+
+        let executor = HangingExecutor;
+        let start = std::time::Instant::now();
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            outcome.final_status,
+            RunStatus::TimedOut,
+            "run exceeding max_runtime_seconds must be TimedOut"
+        );
+        // TimedOut is distinct from Failed, and max_iterations is unset, so
+        // the run should NOT signal auto-disable (stop_on_error targets
+        // Failed only; a timeout is a separate condition).
+        assert!(
+            !outcome.should_disable,
+            "TimedOut alone (no max_iterations) should not auto-disable"
+        );
+        // Sanity: the timeout fired roughly around the 1s mark (allow slack).
+        assert!(
+            elapsed >= std::time::Duration::from_millis(900),
+            "timeout should have waited ~1s, elapsed={elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn p2_7_max_runtime_seconds_allows_fast_run() {
+        let repo = repo();
+        let mut def = def_with_retries(3, 1);
+        def.max_runtime_seconds = Some(60); // generous — run completes well under
+        register_def(&repo, &def).await;
+
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let outcome = execute_run(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        assert!(!outcome.should_disable, "successful run under the cap");
+    }
+
+    #[test]
+    fn p2_7_def_max_runtime_reads_field() {
+        let mut def = AutomationDef::new(
+            "t".into(),
+            "echo".into(),
+            crate::definition::ScheduleType::Manual,
+        );
+        assert_eq!(def_max_runtime(&def), None, "default: no cap");
+
+        def.max_runtime_seconds = Some(30);
+        assert_eq!(
+            def_max_runtime(&def),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    // ─── P2-8: worktree integration helpers ───────────────────────────
+
+    #[tokio::test]
+    async fn p2_8_setup_worktree_returns_none_for_local_mode() {
+        let mut def = AutomationDef::new(
+            "build".into(),
+            "echo".into(),
+            crate::definition::ScheduleType::Manual,
+        );
+        def.worktree_mode = crate::worktree::WorktreeMode::Local;
+        let result = setup_worktree_for_run(&def, std::path::Path::new("/repo"), "r1").await;
+        assert!(result.is_none(), "Local mode → no worktree setup");
+    }
+
+    #[tokio::test]
+    async fn p2_8_setup_worktree_returns_none_for_heartbeat_run() {
+        // Even with Worktree mode, a heartbeat run (target_thread_id set) is
+        // not isolated — worktrees are for standalone runs.
+        let mut def = AutomationDef::new(
+            "build".into(),
+            "echo".into(),
+            crate::definition::ScheduleType::Manual,
+        );
+        def.worktree_mode = crate::worktree::WorktreeMode::Worktree;
+        def.target_thread_id = Some("00000000-0000-0000-0000-000000000001".into());
+        let result = setup_worktree_for_run(&def, std::path::Path::new("/repo"), "r1").await;
+        assert!(
+            result.is_none(),
+            "heartbeat run → no worktree (standalone-only)"
+        );
     }
 }
