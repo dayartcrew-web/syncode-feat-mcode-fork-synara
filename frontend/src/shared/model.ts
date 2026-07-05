@@ -25,8 +25,9 @@ import {
   CodexReasoningEffort,
 } from "@t3tools/contracts";
 
-const MODEL_SLUG_SET_BY_PROVIDER: Record<ProviderKind, ReadonlySet<ModelSlug>> = {
+const MODEL_SLUG_SET_BY_PROVIDER: Record<ProviderKind, ReadonlySet<ModelSlug>> & Record<string, ReadonlySet<ModelSlug>> = {
   claudeAgent: new Set(MODEL_OPTIONS_BY_PROVIDER.claudeAgent.map((option) => option.slug)),
+  claude: new Set(MODEL_OPTIONS_BY_PROVIDER.claudeAgent.map((option) => option.slug)),
   codex: new Set(MODEL_OPTIONS_BY_PROVIDER.codex.map((option) => option.slug)),
   cursor: new Set(MODEL_OPTIONS_BY_PROVIDER.cursor.map((option) => option.slug)),
   gemini: new Set(MODEL_OPTIONS_BY_PROVIDER.gemini.map((option) => option.slug)),

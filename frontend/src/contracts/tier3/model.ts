@@ -288,7 +288,7 @@ export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini" as const;
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<
   ProviderKind,
   Record<string, ModelSlug>
-> = {
+> & Record<string, Record<string, ModelSlug>> = {
   codex: {
     "5.5": "gpt-5.5",
     "5.4": "gpt-5.4",
@@ -298,6 +298,31 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<
     "gpt-5.3-spark": "gpt-5.3-codex-spark",
   },
   claudeAgent: {
+    fable: "claude-fable-5",
+    "fable-5": "claude-fable-5",
+    opus: "claude-opus-4-8",
+    "opus-4.8": "claude-opus-4-8",
+    "claude-opus-4.8": "claude-opus-4-8",
+    "claude-opus-4-8-20260528": "claude-opus-4-8",
+    "opus-4.7": "claude-opus-4-7",
+    "claude-opus-4.7": "claude-opus-4-7",
+    "claude-opus-4-7-20260416": "claude-opus-4-7",
+    "opus-4.6": "claude-opus-4-6",
+    "claude-opus-4.6": "claude-opus-4-6",
+    "claude-opus-4-6-20251117": "claude-opus-4-6",
+    "opus-4.5": "claude-opus-4-5",
+    "claude-opus-4.5": "claude-opus-4-5",
+    "claude-opus-4-5-20250120": "claude-opus-4-5",
+    sonnet: "claude-sonnet-4-6",
+    "sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-4-6-20251117": "claude-sonnet-4-6",
+    haiku: "claude-haiku-4-5",
+    "haiku-4.5": "claude-haiku-4-5",
+    "claude-haiku-4.5": "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+  },
+  claude: {
     fable: "claude-fable-5",
     "fable-5": "claude-fable-5",
     opus: "claude-opus-4-8",
@@ -372,9 +397,10 @@ export const MODEL_CAPABILITIES_INDEX = Object.fromEntries(
   ]),
 ) as unknown as Record<ProviderKind, Record<string, ModelCapabilities>>;
 
-export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
+export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> & Record<string, string> = {
   codex: "Codex",
   claudeAgent: "Claude",
+  claude: "Claude",
   cursor: "Cursor",
   gemini: "Gemini",
   grok: "Grok",
