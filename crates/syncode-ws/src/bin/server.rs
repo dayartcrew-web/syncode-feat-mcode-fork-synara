@@ -54,7 +54,7 @@ use syncode_core::ports::EventRepository;
 use syncode_orchestration::Orchestrator;
 use syncode_persistence::adapters::SqliteEventRepository;
 use syncode_provider::{FileResumeCursorStore, SessionManager};
-use syncode_ws::{WsState, server::build_app};
+use syncode_ws::{server::build_app, WsState};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 3000;
@@ -195,10 +195,9 @@ async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
     // thread's project root path as the session working directory; the
     // orchestrator's projector writes to it as commands are handled. Sharing
     // the Arc (not cloning the store) keeps them in lock-step.
-    let read_model: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>> =
-        Arc::new(tokio::sync::RwLock::new(
-            syncode_orchestration::ReadModelStore::new(),
-        ));
+    let read_model: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>> = Arc::new(
+        tokio::sync::RwLock::new(syncode_orchestration::ReadModelStore::new()),
+    );
 
     let session_manager = SessionManager::new();
     let reactor = Arc::new(
@@ -208,6 +207,29 @@ async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
 
     match syncode_provider::registry::create_by_id(&default_provider) {
         Some(adapter) => {
+            // Spawn the provider adapter (launches codex app-server / claude CLI).
+            {
+                let mut guard = adapter.write().await;
+                let config = syncode_provider::ProviderConfig {
+                    provider_id: default_provider.clone(),
+                    model: std::env::var("SYNCODE_DEFAULT_MODEL")
+                        .ok()
+                        .unwrap_or_default(),
+                    api_key: None,
+                    base_url: None,
+                    max_tokens: Some(4096),
+                    extra: std::collections::HashMap::new(),
+                };
+                match guard.spawn(config).await {
+                    Ok(()) => {
+                        tracing::info!(provider = %default_provider, "provider adapter spawned")
+                    }
+                    Err(e) => {
+                        tracing::error!(provider = %default_provider, error = %e, "failed to spawn provider adapter — turns will fail")
+                    }
+                }
+            }
+
             tracing::info!(
                 provider = %default_provider,
                 "chat pipeline armed: turns will dispatch to the provider"
@@ -236,9 +258,7 @@ async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
 
             // PR-1-2: pass the shared read model so the reactor can resolve
             // the session working directory from the thread's project root.
-            Orchestrator::with_reactor_adapter_and_read_model(
-                repo, reactor, adapter, read_model,
-            )
+            Orchestrator::with_reactor_adapter_and_read_model(repo, reactor, adapter, read_model)
         }
         None => {
             tracing::warn!(

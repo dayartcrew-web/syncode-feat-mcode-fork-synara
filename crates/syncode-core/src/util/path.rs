@@ -123,7 +123,10 @@ pub fn is_windows() -> bool {
 pub fn normalize_separators(path: &Path) -> PathBuf {
     let style = current_path_style();
     let s = path.to_string_lossy();
-    let normalized = s.replace(style.other_separator(), style.separator().to_string().as_str());
+    let normalized = s.replace(
+        style.other_separator(),
+        style.separator().to_string().as_str(),
+    );
     PathBuf::from(normalized)
 }
 
@@ -138,7 +141,7 @@ pub fn normalize_separators(path: &Path) -> PathBuf {
 /// # Examples
 ///
 /// ```
-/// # use std::path::Path;
+/// # use std::path::{Path, PathBuf};
 /// # use syncode_core::util::path::canonicalize_lexical;
 /// assert_eq!(canonicalize_lexical(Path::new("a/./b")), PathBuf::from("a/b"));
 /// assert_eq!(canonicalize_lexical(Path::new("a/b/../c")), PathBuf::from("a/c"));
@@ -433,34 +436,58 @@ mod lexical_tests {
 
     #[test]
     fn canonicalize_lexical_collapses_curdir() {
-        assert_eq!(canonicalize_lexical(Path::new("a/./b")), PathBuf::from("a/b"));
+        assert_eq!(
+            canonicalize_lexical(Path::new("a/./b")),
+            PathBuf::from("a/b")
+        );
         assert_eq!(canonicalize_lexical(Path::new("./a")), PathBuf::from("a"));
         assert_eq!(canonicalize_lexical(Path::new("a/.")), PathBuf::from("a"));
     }
 
     #[test]
     fn canonicalize_lexical_resolves_parentdir() {
-        assert_eq!(canonicalize_lexical(Path::new("a/b/../c")), PathBuf::from("a/c"));
-        assert_eq!(canonicalize_lexical(Path::new("a/../b")), PathBuf::from("b"));
+        assert_eq!(
+            canonicalize_lexical(Path::new("a/b/../c")),
+            PathBuf::from("a/c")
+        );
+        assert_eq!(
+            canonicalize_lexical(Path::new("a/../b")),
+            PathBuf::from("b")
+        );
     }
 
     #[test]
     fn canonicalize_lexical_collapses_redundant_separators() {
-        assert_eq!(canonicalize_lexical(Path::new("a//b")), PathBuf::from("a/b"));
-        assert_eq!(canonicalize_lexical(Path::new("a///b")), PathBuf::from("a/b"));
+        assert_eq!(
+            canonicalize_lexical(Path::new("a//b")),
+            PathBuf::from("a/b")
+        );
+        assert_eq!(
+            canonicalize_lexical(Path::new("a///b")),
+            PathBuf::from("a/b")
+        );
     }
 
     #[test]
     fn canonicalize_lexical_preserves_leading_parentdir() {
         // `../x` — can't resolve without root, preserved.
-        assert_eq!(canonicalize_lexical(Path::new("../x")), PathBuf::from("../x"));
-        assert_eq!(canonicalize_lexical(Path::new("../../x")), PathBuf::from("../../x"));
+        assert_eq!(
+            canonicalize_lexical(Path::new("../x")),
+            PathBuf::from("../x")
+        );
+        assert_eq!(
+            canonicalize_lexical(Path::new("../../x")),
+            PathBuf::from("../../x")
+        );
     }
 
     #[test]
     fn canonicalize_lexical_parentdir_after_normal_cancels() {
         // `a/../..` → `..` (a is cancelled, then .. escapes)
-        assert_eq!(canonicalize_lexical(Path::new("a/../..")), PathBuf::from(".."));
+        assert_eq!(
+            canonicalize_lexical(Path::new("a/../..")),
+            PathBuf::from("..")
+        );
     }
 
     #[test]
@@ -476,10 +503,7 @@ mod lexical_tests {
             PathBuf::from("/a/c")
         );
         // `..` at root is a no-op.
-        assert_eq!(
-            canonicalize_lexical(Path::new("/..")),
-            PathBuf::from("/")
-        );
+        assert_eq!(canonicalize_lexical(Path::new("/..")), PathBuf::from("/"));
         assert_eq!(
             canonicalize_lexical(Path::new("/a/../..")),
             PathBuf::from("/")
@@ -672,9 +696,12 @@ mod fs_tests {
         let hybrid = canonicalize_hybrid(&candidate).unwrap();
         // The resolved path must be under `outside`, NOT under `inside`.
         let canonical_inside = canonicalize_existing(inside.path()).unwrap();
-        assert!(!hybrid.starts_with(&canonical_inside),
+        assert!(
+            !hybrid.starts_with(&canonical_inside),
             "hybrid {:?} should NOT be within inside {:?} (symlink escape detected)",
-            hybrid, canonical_inside);
+            hybrid,
+            canonical_inside
+        );
     }
 
     // --- is_within_root ---

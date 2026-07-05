@@ -41,7 +41,8 @@ fn e2e_enabled() -> bool {
     if std::env::var("SYNICODE_OPENCODE_E2E").as_deref() != Ok("1") {
         return false;
     }
-    std::process::Command::new("opencode")
+    let resolved = syncode_provider::resolve_binary("opencode");
+    std::process::Command::new(&resolved)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

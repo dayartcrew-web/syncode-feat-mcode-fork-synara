@@ -49,13 +49,13 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::super::trait_def::*;
 use crate::session::SessionState;
@@ -119,10 +119,16 @@ impl Default for ClaudeConfig {
 
 impl ClaudeConfig {
     /// Build the `claude` argv for one streaming turn.
+    ///
+    /// `claude --print --output-format stream-json` requires `--verbose` (the
+    /// CLI enforces this: stream-json under `--print` without `--verbose` exits
+    /// with `Error: When using --print, --output-format=stream-json requires
+    /// --verbose`). We add it unconditionally whenever we use stream-json.
     fn argv(&self, prompt: &str, model: Option<&str>, system_prompt: Option<&str>) -> Vec<String> {
         let mut argv = vec![self.bin_path.clone(), "-p".to_string(), prompt.to_string()];
         argv.push("--output-format".to_string());
         argv.push("stream-json".to_string());
+        argv.push("--verbose".to_string());
         if let Some(m) = model.filter(|m| !m.is_empty()) {
             argv.push("--model".to_string());
             argv.push(m.to_string());
@@ -707,11 +713,34 @@ impl ProviderAdapter for ClaudeAdapter {
         let argv = self
             .claude_config
             .argv(&prompt, model.as_deref(), system_prompt.as_deref());
-        let (bin, args) = (argv[0].clone(), argv[1..].to_vec());
+        let resolved_bin = crate::bin_resolver::resolve_binary(&argv[0]);
+        let args = argv[1..].to_vec();
 
-        let mut cmd = Command::new(&bin);
-        cmd.args(&args)
-            .stdin(Stdio::null())
+        // On Windows, .cmd wrappers need cmd /C for stdio pipes to work
+        #[cfg(windows)]
+        let mut cmd = if resolved_bin.ends_with(".cmd") || resolved_bin.ends_with(".bat") {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&resolved_bin);
+            for a in &args {
+                c.arg(a);
+            }
+            c
+        } else {
+            let mut c = Command::new(&resolved_bin);
+            for a in &args {
+                c.arg(a);
+            }
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = Command::new(&resolved_bin);
+            for a in &args {
+                c.arg(a);
+            }
+            c
+        };
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .current_dir(&working_dir)
@@ -720,7 +749,9 @@ impl ProviderAdapter for ClaudeAdapter {
             cmd.env("ANTHROPIC_API_KEY", key);
         }
         let mut child = cmd.spawn().map_err(|e| {
-            ProviderAdapterError::ProcessExited(format!("failed to spawn `claude` ({bin}): {e}"))
+            ProviderAdapterError::ProcessExited(format!(
+                "failed to spawn `claude` ({resolved_bin}): {e}"
+            ))
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
             ProviderAdapterError::ProcessExited("claude subprocess stdout not captured".to_string())
@@ -890,22 +921,18 @@ mod tests {
 
     #[test]
     fn stream_event_empty_text_emits_nothing() {
-        assert!(
-            map_stream_event(
-                &json!({ "type": "content_block_delta", "delta": { "text": "" } }),
-                "s1"
-            )
-            .is_empty()
-        );
+        assert!(map_stream_event(
+            &json!({ "type": "content_block_delta", "delta": { "text": "" } }),
+            "s1"
+        )
+        .is_empty());
         // Non-text deltas (e.g. tool input streaming) are ignored here.
-        assert!(
-            map_stream_event(
-                &json!({ "type": "content_block_delta",
+        assert!(map_stream_event(
+            &json!({ "type": "content_block_delta",
                 "delta": { "type": "input_json_delta", "partial_json": "{" } }),
-                "s1"
-            )
-            .is_empty()
-        );
+            "s1"
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1236,18 +1263,17 @@ mod tests {
         assert_eq!(argv[0], "claude");
         assert!(argv.iter().any(|a| a == "-p"));
         assert!(argv.windows(2).any(|w| w[0] == "-p" && w[1] == "hello"));
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--output-format" && w[1] == "stream-json")
-        );
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--model" && w[1] == "sonnet")
-        );
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--append-system-prompt" && w[1] == "Be terse.")
-        );
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
+        // stream-json under --print REQUIRES --verbose (Claude CLI enforces it).
+        assert!(argv.iter().any(|a| a == "--verbose"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "sonnet"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--append-system-prompt" && w[1] == "Be terse."));
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 
@@ -1398,14 +1424,17 @@ mod tests {
         //     recorded prompt + system_prompt), and verify the working_dir and
         //     prompt land in the spawn. This is the exact argv that
         //     `Command::new(&bin).args(&args).current_dir(&working_dir)` uses.
-        let prompt = ClaudeAdapter::turn_prompt(&Some(json!({ "input": "Fix the bug in main.rs" })));
-        let argv = adapter
-            .claude_config
-            .argv(&prompt, Some("sonnet"), recorded.system_prompt.as_deref());
+        let prompt =
+            ClaudeAdapter::turn_prompt(&Some(json!({ "input": "Fix the bug in main.rs" })));
+        let argv =
+            adapter
+                .claude_config
+                .argv(&prompt, Some("sonnet"), recorded.system_prompt.as_deref());
 
         // The user input flows through as the -p prompt.
         assert!(
-            argv.windows(2).any(|w| w[0] == "-p" && w[1] == "Fix the bug in main.rs"),
+            argv.windows(2)
+                .any(|w| w[0] == "-p" && w[1] == "Fix the bug in main.rs"),
             "user input should reach the CLI as the -p prompt"
         );
         // The hardcoded system prompt flows through as --append-system-prompt.
