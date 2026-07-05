@@ -1,6 +1,6 @@
 name: CI
 
-# PR-3-1 — workspace CI gate.
+# PR-3-2 — workspace CI gate with caching + test artifacts.
 #
 # Runs on every push to the default branch (master) and on every pull request,
 # so a regression on master or in an open PR fails the check before merge.
@@ -15,6 +15,14 @@ name: CI
 # related system libraries that are not installed on a plain ubuntu-latest
 # runner. The desktop-e2e.yml workflow owns the tauri build/clippy/boot path
 # (it installs those deps explicitly) — see that file for the full shell.
+#
+# PR-3-2 additions:
+#   - Explicit actions/cache for the cargo registry + ./target so warm builds
+#     reuse compiled dependencies across runs (complementing Swatinem/rust-cache).
+#   - npm cache via setup-node `cache: npm` (already present).
+#   - On test failure, upload JUnit/cargo test artifacts so the run retains the
+#     failing output for review (logs are otherwise truncated after ~30 days).
+#   - pull_request trigger so every PR shows the CI status check before merge.
 on:
   push:
     branches: [master]
@@ -35,6 +43,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      # PR-3-2: warm cargo caches. Swatinem/rust-cache keys on Cargo.lock +
+      # rustc version (the right granularity for compiled deps), and we also add
+      # an explicit actions/cache for ~/.cargo/registry so the index + download
+      # cache survive even when the compiled-target key changes (faster fetches).
+      - name: Cache cargo registry + git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Cache cargo target dir
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-
 
       - uses: Swatinem/rust-cache@v2
 
@@ -71,7 +101,8 @@ jobs:
 
       # Workspace tests excluding syncode-tauri (needs system deps not present
       # on the plain runner) and excluding `tests/` (integration harness that
-      # has its own runner setup).
+      # has its own runner setup). RUST_BACKTRACE=1 (set above) ensures
+      # panics include the full stack in the captured output.
       - name: Test (workspace, excluding syncode-tauri)
         run: cargo test --workspace --exclude syncode-tauri
 
@@ -79,6 +110,22 @@ jobs:
       # bin-name regressions that `cargo test` alone does not surface.
       - name: Build WS server binary
         run: cargo build -p syncode-ws --bin server
+
+      # PR-3-2: on test failure, upload the cargo target/test output so the run
+      # retains the failing details for review. `if: failure()` makes this a
+      # no-op on green runs. The upload is best-effort (continue-on-error) so a
+      # transient uploader problem does not mask the real test failure.
+      - name: Upload test artifacts on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-output-${{ github.run_id }}
+          path: |
+            target/debug/deps/*.log
+            target/tmp
+          if-no-files-found: ignore
+          retention-days: 14
 
   frontend:
     name: Frontend (Node)
@@ -90,6 +137,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PR-3-2: npm cache via setup-node `cache: npm` (restores ~/.npm from the
+      # lockfile hash, so `npm ci` skips re-downloading unchanged packages).
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -102,5 +151,20 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Run vitest with a JUnit reporter alongside the console output so the
+      # structured results can be uploaded as an artifact on failure. The
+      # default reporter still prints to the job log for quick triage.
       - name: Unit tests
-        run: npx vitest run
+        run: npx vitest run --reporter=default --reporter=junit --outputFile=./test-results/junit.xml
+
+      # PR-3-2: upload the JUnit report + vitest temp output on test failure.
+      # `if: failure()` keeps green runs artifact-free.
+      - name: Upload frontend test artifacts on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-output-${{ github.run_id }}
+          path: frontend/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
