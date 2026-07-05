@@ -1,0 +1,10 @@
+- generic [ref=e136]:
+  - paragraph [ref=e137]: MCode (Dev)
+  - heading "Something went wrong." [level=1] [ref=e138]
+  - paragraph [ref=e139]: Cannot read properties of undefined (reading 'length')
+  - generic [ref=e140]:
+    - button "Try again" [ref=e141] [cursor=pointer]
+    - button "Reload app" [ref=e142] [cursor=pointer]
+  - group [ref=e143]:
+    - generic "Hide error details" [active] [ref=e145] [cursor=pointer]
+    - generic [ref=e146]: "TypeError: Cannot read properties of undefined (reading 'length') at normalizeServerProviderUsageRateLimit (http://localhost:5174/src/lib/providerUsageSnapshot.ts:5:35) at useProviderUsageSummary (http://localhost:5174/src/hooks/useProviderUsageSummary.ts:113:32) at useProviderUsageMenuModel (http://localhost:5174/src/components/ProviderUsageMenuControl.tsx:53:23) at EnvironmentUsageSection (http://localhost:5174/src/components/chat/environment/EnvironmentUsageSection.tsx:19:16) at Object.react_stack_bottom_frame (http://localhost:5174/node_modules/.vite/deps/react-dom_client.js?v=e334f31e:12866:12) at renderWithHooks (http://localhost:5174/node_modules/.vite/deps/react-dom_client.js?v=e334f31e:4213:19) at updateFunctionComponent (http://localhost:5174/node_modules/.vite/deps/react-dom_client.js?v=e334f31e:5569:16) at beginWork (http://localhost:5174/node_modules/.vite/deps/react-dom_client.js?v=e334f31e:6140:20) at runWithFiberInDEV (http://localhost:5174/node_modules/.vite/deps/react-dom_client.js?v=e334f31e:851:66) at performUnitOfWork (http://localhost:5174/node_modules/.vite/deps/react-dom_client.js?v=e334f31e:8429:92)"

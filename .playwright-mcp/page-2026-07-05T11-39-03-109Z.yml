@@ -1,0 +1,90 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e6]:
+      - generic [ref=e9]:
+        - button "Toggle thread sidebar" [ref=e10] [cursor=pointer]:
+          - generic [ref=e12]: Toggle Sidebar
+        - button "World Cup 2026" [ref=e13] [cursor=pointer]:
+          - img [ref=e14]
+      - generic [ref=e17]:
+        - list [ref=e19]:
+          - listitem [ref=e20]:
+            - button "New thread" [ref=e21] [cursor=pointer]:
+              - generic [ref=e24]: New thread
+          - listitem [ref=e25]:
+            - button "Search Ctrl K" [ref=e26] [cursor=pointer]:
+              - generic [ref=e29]: Search
+              - generic [ref=e31]:
+                - generic: Ctrl
+                - generic: K
+          - listitem [ref=e32]:
+            - button "Kanban" [ref=e33] [cursor=pointer]:
+              - generic [ref=e36]: Kanban
+          - listitem [ref=e37]:
+            - button "Automations" [ref=e38] [cursor=pointer]:
+              - img [ref=e40]
+              - generic [ref=e43]: Automations
+        - generic [ref=e44]:
+          - generic [ref=e45]:
+            - generic [ref=e47]: Projects
+            - generic:
+              - button "Collapse all projects":
+                - img
+              - button "Sort projects":
+                - img
+              - button "Add project":
+                - img
+          - list [ref=e48]:
+            - listitem [ref=e49]:
+              - generic [ref=e50]:
+                - generic [ref=e51]:
+                  - button "E2E Test Project" [ref=e52]:
+                    - generic [ref=e56]: E2E Test Project
+                  - button "Pin E2E Test Project"
+                  - generic:
+                    - button "Create new terminal thread in E2E Test Project"
+                    - button "Create disposable thread in E2E Test Project":
+                      - img
+                    - button "Create new thread in E2E Test Project"
+                - list [ref=e59]:
+                  - listitem [ref=e60]:
+                    - button "ceea4fa3-4836-4f20-b04e-8825a28c3d71 31m Pin thread Archive thread" [ref=e61] [cursor=pointer]:
+                      - img [ref=e64]
+                      - generic [ref=e67]: ceea4fa3-4836-4f20-b04e-8825a28c3d71
+                      - generic [ref=e69]:
+                        - generic [ref=e70]: 31m
+                        - generic [ref=e71]:
+                          - button "Pin thread" [ref=e72]
+                          - button "Archive thread" [ref=e74]:
+                            - img [ref=e75]
+          - status [ref=e77]
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - button "Chats" [ref=e81] [cursor=pointer]:
+              - img [ref=e83]
+              - generic [ref=e86]: Chats
+            - generic [ref=e87]:
+              - button "Sort chats" [ref=e88] [cursor=pointer]:
+                - img [ref=e89]
+              - button "Open new chat home" [ref=e91] [cursor=pointer]
+          - generic [ref=e93]:
+            - generic:
+              - list:
+                - generic: No chats yet
+        - list [ref=e94]:
+          - listitem [ref=e95]:
+            - button "Settings" [ref=e98] [cursor=pointer]:
+              - img [ref=e100]
+              - generic [ref=e103]: Settings
+    - generic [ref=e104]:
+      - button "Resize Sidebar" [ref=e105]
+      - generic [ref=e107]:
+        - img "MCode" [ref=e108]
+        - generic [ref=e112]:
+          - generic [ref=e113]: Home folder is not available yet.
+          - button "Retry" [ref=e114]
+  - generic:
+    - region "Notifications"
+  - generic:
+    - region "Notifications"

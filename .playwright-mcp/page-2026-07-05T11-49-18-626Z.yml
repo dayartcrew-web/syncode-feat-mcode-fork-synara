@@ -1,0 +1,199 @@
+- generic [active] [ref=f6e1]:
+  - generic [ref=f6e3]:
+    - generic [ref=f6e6]:
+      - generic [ref=f6e9]:
+        - button "Toggle thread sidebar" [ref=f6e10] [cursor=pointer]:
+          - generic [ref=f6e12]: Toggle Sidebar
+        - button "World Cup 2026" [ref=f6e13] [cursor=pointer]:
+          - img [ref=f6e14]
+      - generic [ref=f6e19]:
+        - button "Back to app" [ref=f6e21] [cursor=pointer]:
+          - generic [ref=f6e24]: Back to app
+        - textbox "Search settings" [ref=f6e28]:
+          - /placeholder: Search settings...
+        - navigation "Settings sections" [ref=f6e29]:
+          - region "App" [ref=f6e30]:
+            - heading "App" [level=2] [ref=f6e31]
+            - list [ref=f6e32]:
+              - listitem [ref=f6e33]:
+                - button "General" [ref=f6e34] [cursor=pointer]:
+                  - generic [ref=f6e37]: General
+              - listitem [ref=f6e38]:
+                - button "Profile" [ref=f6e39] [cursor=pointer]:
+                  - generic [ref=f6e42]: Profile
+              - listitem [ref=f6e43]:
+                - button "Appearance" [ref=f6e44] [cursor=pointer]:
+                  - generic [ref=f6e47]: Appearance
+              - listitem [ref=f6e48]:
+                - button "Notifications" [ref=f6e49] [cursor=pointer]:
+                  - generic [ref=f6e52]: Notifications
+              - listitem [ref=f6e53]:
+                - button "Behavior" [ref=f6e54] [cursor=pointer]:
+                  - generic [ref=f6e57]: Behavior
+              - listitem [ref=f6e58]:
+                - button "Worktrees" [ref=f6e59] [cursor=pointer]:
+                  - generic [ref=f6e62]: Worktrees
+              - listitem [ref=f6e63]:
+                - button "Archived" [ref=f6e64] [cursor=pointer]:
+                  - generic [ref=f6e67]: Archived
+          - region "MCode" [ref=f6e68]:
+            - heading "MCode" [level=2] [ref=f6e69]
+            - list [ref=f6e70]:
+              - listitem [ref=f6e71]:
+                - button "Models" [ref=f6e72] [cursor=pointer]:
+                  - generic [ref=f6e75]: Models
+              - listitem [ref=f6e76]:
+                - button "Providers" [ref=f6e77] [cursor=pointer]:
+                  - generic [ref=f6e80]: Providers
+              - listitem [ref=f6e81]:
+                - button "Skills" [ref=f6e82] [cursor=pointer]:
+                  - generic [ref=f6e85]: Skills
+              - listitem [ref=f6e86]:
+                - button "Usage" [ref=f6e87] [cursor=pointer]:
+                  - generic [ref=f6e90]: Usage
+              - listitem [ref=f6e91]:
+                - button "Advanced" [ref=f6e92] [cursor=pointer]:
+                  - generic [ref=f6e95]: Advanced
+      - generic [ref=f6e96]:
+        - list:
+          - listitem
+    - generic [ref=f6e97]:
+      - button "Resize Sidebar" [ref=f6e98]
+      - main [ref=f6e100]:
+        - generic [ref=f6e105]:
+          - generic [ref=f6e106]:
+            - generic [ref=f6e107]:
+              - heading "General" [level=1] [ref=f6e108]
+              - paragraph [ref=f6e109]: Default provider, thread mode, and sidebar organization.
+            - button "Restore defaults" [disabled]:
+              - img
+              - text: Restore defaults
+          - generic [ref=f6e110]:
+            - generic [ref=f6e111]:
+              - heading "Core defaults" [level=2] [ref=f6e112]
+              - generic [ref=f6e113]:
+                - generic [ref=f6e115]:
+                  - generic [ref=f6e116]:
+                    - heading "Default provider" [level=3] [ref=f6e118]
+                    - paragraph [ref=f6e120]: Choose the provider used for new chats.
+                  - generic [ref=f6e121]:
+                    - combobox "Default provider" [ref=f6e122] [cursor=pointer]:
+                      - generic [ref=f6e124]:
+                        - img
+                        - generic [ref=f6e125]: Codex
+                      - generic [ref=f6e126]:
+                        - img
+                    - textbox [ref=f6e127]: codex
+                - generic [ref=f6e129]:
+                  - generic [ref=f6e130]:
+                    - heading "New threads" [level=3] [ref=f6e132]
+                    - paragraph [ref=f6e134]: Pick the default workspace mode for newly created draft threads.
+                  - generic [ref=f6e135]:
+                    - combobox "Default thread mode" [ref=f6e136] [cursor=pointer]:
+                      - generic [ref=f6e137]: Local
+                      - generic [ref=f6e138]:
+                        - img
+                    - textbox [ref=f6e139]: local
+            - generic [ref=f6e140]:
+              - heading "Sidebar organization" [level=2] [ref=f6e141]
+              - generic [ref=f6e142]:
+                - generic [ref=f6e144]:
+                  - generic [ref=f6e145]:
+                    - heading "Project order" [level=3] [ref=f6e147]
+                    - paragraph [ref=f6e149]: Controls how projects are arranged in the main sidebar.
+                  - generic [ref=f6e150]:
+                    - combobox "Project sort order" [ref=f6e151] [cursor=pointer]:
+                      - generic [ref=f6e152]: Manual order
+                      - generic [ref=f6e153]:
+                        - img
+                    - textbox [ref=f6e154]: manual
+                - generic [ref=f6e156]:
+                  - generic [ref=f6e157]:
+                    - heading "Thread order" [level=3] [ref=f6e159]
+                    - paragraph [ref=f6e161]: Controls how threads are arranged inside each project in the main sidebar.
+                  - generic [ref=f6e162]:
+                    - combobox "Thread sort order" [ref=f6e163] [cursor=pointer]:
+                      - generic [ref=f6e164]: Recently active
+                      - generic [ref=f6e165]:
+                        - img
+                    - textbox [ref=f6e166]: updated_at
+            - generic [ref=f6e167]:
+              - heading "Sidebar sections" [level=2] [ref=f6e168]
+              - generic [ref=f6e169]:
+                - generic [ref=f6e171]:
+                  - generic [ref=f6e172]:
+                    - heading "Chats" [level=3] [ref=f6e174]
+                    - paragraph [ref=f6e176]: Show the standalone Chats list in the sidebar footer (chats not tied to a project).
+                  - generic [ref=f6e177]:
+                    - switch "Show the Chats section in the sidebar" [checked] [ref=f6e178] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e179]
+                - generic [ref=f6e181]:
+                  - generic [ref=f6e182]:
+                    - heading "Workspace" [level=3] [ref=f6e184]
+                    - paragraph [ref=f6e186]: Show the Workspace tab in the sidebar switcher. The Threads tab always stays visible.
+                  - generic [ref=f6e187]:
+                    - switch "Show the Workspace section in the sidebar" [ref=f6e188] [cursor=pointer]
+                    - checkbox [ref=f6e189]
+            - generic [ref=f6e191]:
+              - heading "Environment panel" [level=2] [ref=f6e192]
+              - generic [ref=f6e193]:
+                - generic [ref=f6e195]:
+                  - generic [ref=f6e196]:
+                    - heading "Usage" [level=3] [ref=f6e198]
+                    - paragraph [ref=f6e200]: Show the provider usage row in the chat Environment panel.
+                  - generic [ref=f6e201]:
+                    - switch "Show the Usage section in the Environment panel" [checked] [ref=f6e202] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e203]
+                - generic [ref=f6e205]:
+                  - generic [ref=f6e206]:
+                    - heading "Repository" [level=3] [ref=f6e208]
+                    - paragraph [ref=f6e210]: Show the GitHub repository link in the chat Environment panel. The git block (Changes, Worktree, branch, Commit and Push) always stays visible.
+                  - generic [ref=f6e211]:
+                    - switch "Show the Repository section in the Environment panel" [checked] [ref=f6e212] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e213]
+                - generic [ref=f6e215]:
+                  - generic [ref=f6e216]:
+                    - heading "Editor" [level=3] [ref=f6e218]
+                    - paragraph [ref=f6e220]: Show the Editor section (in-app editor view and Open in editor picker) in the chat Environment panel.
+                  - generic [ref=f6e221]:
+                    - switch "Show the Editor section in the Environment panel" [checked] [ref=f6e222] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e223]
+                - generic [ref=f6e225]:
+                  - generic [ref=f6e226]:
+                    - heading "Recap" [level=3] [ref=f6e228]
+                    - paragraph [ref=f6e230]: Show the auto-generated chat recap in the Environment panel.
+                  - generic [ref=f6e231]:
+                    - switch "Show the Recap section in the Environment panel" [checked] [ref=f6e232] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e233]
+                - generic [ref=f6e235]:
+                  - generic [ref=f6e236]:
+                    - heading "Pinned messages" [level=3] [ref=f6e238]
+                    - paragraph [ref=f6e240]: Show the pinned-messages checklist in the Environment panel.
+                  - generic [ref=f6e241]:
+                    - switch "Show the Pinned messages section in the Environment panel" [checked] [ref=f6e242] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e243]
+                - generic [ref=f6e245]:
+                  - generic [ref=f6e246]:
+                    - heading "Text markers" [level=3] [ref=f6e248]
+                    - paragraph [ref=f6e250]: Show highlighted and underlined transcript text in the Environment panel.
+                  - generic [ref=f6e251]:
+                    - switch "Show the Text markers section in the Environment panel" [checked] [ref=f6e252] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e253]
+                - generic [ref=f6e255]:
+                  - generic [ref=f6e256]:
+                    - heading "Project instructions" [level=3] [ref=f6e258]
+                    - paragraph [ref=f6e260]: Show project-level instructions in the Environment panel.
+                  - generic [ref=f6e261]:
+                    - switch "Show the Project instructions section in the Environment panel" [checked] [ref=f6e262] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e263]
+                - generic [ref=f6e265]:
+                  - generic [ref=f6e266]:
+                    - heading "Notepad" [level=3] [ref=f6e268]
+                    - paragraph [ref=f6e270]: Show the per-thread notepad in the Environment panel.
+                  - generic [ref=f6e271]:
+                    - switch "Show the Notepad section in the Environment panel" [checked] [ref=f6e272] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e273]
+  - generic:
+    - region "Notifications"
+  - generic:
+    - region "Notifications"

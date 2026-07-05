@@ -1,0 +1,9 @@
+- generic [ref=f4e4]:
+  - paragraph [ref=f4e5]: MCode (Dev)
+  - heading "Something went wrong." [level=1] [ref=f4e6]
+  - paragraph [ref=f4e7]: Cannot read properties of undefined (reading 'length')
+  - generic [ref=f4e8]:
+    - button "Try again" [ref=f4e9] [cursor=pointer]
+    - button "Reload app" [ref=f4e10] [cursor=pointer]
+  - group [ref=f4e11]:
+    - generic "Show error details" [ref=f4e12] [cursor=pointer]

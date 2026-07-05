@@ -16,7 +16,7 @@ export function isProviderUsageSnapshotNonOk(
 export function normalizeServerProviderUsageRateLimit(
   snapshot: ServerGetProviderUsageSnapshotResult | null | undefined,
 ): ProviderRateLimit | null {
-  if (!snapshot || snapshot.limits.length === 0) {
+  if (!snapshot || !snapshot.limits || snapshot.limits.length === 0) {
     return null;
   }
 
@@ -37,7 +37,7 @@ export function normalizeServerProviderUsageRateLimit(
 export function normalizeServerProviderUsageLines(
   snapshot: ServerGetProviderUsageSnapshotResult | null | undefined,
 ): OpenUsageUsageLine[] {
-  if (!snapshot || snapshot.usageLines.length === 0) {
+  if (!snapshot || !snapshot.usageLines || snapshot.usageLines.length === 0) {
     return [];
   }
 

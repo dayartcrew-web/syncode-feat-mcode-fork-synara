@@ -1,0 +1,174 @@
+- generic [ref=f6e1]:
+  - generic [ref=f6e3]:
+    - generic [ref=f6e6]:
+      - generic [ref=f6e9]:
+        - button "Toggle thread sidebar" [ref=f6e10] [cursor=pointer]:
+          - generic [ref=f6e12]: Toggle Sidebar
+        - button "World Cup 2026" [ref=f6e13] [cursor=pointer]:
+          - img [ref=f6e14]
+      - generic [ref=f6e19]:
+        - button "Back to app" [ref=f6e21] [cursor=pointer]:
+          - generic [ref=f6e24]: Back to app
+        - textbox "Search settings" [ref=f6e28]:
+          - /placeholder: Search settings...
+        - navigation "Settings sections" [ref=f6e29]:
+          - region "App" [ref=f6e30]:
+            - heading "App" [level=2] [ref=f6e31]
+            - list [ref=f6e32]:
+              - listitem [ref=f6e33]:
+                - button "General" [ref=f6e34] [cursor=pointer]:
+                  - generic [ref=f6e37]: General
+              - listitem [ref=f6e38]:
+                - button "Profile" [ref=f6e39] [cursor=pointer]:
+                  - generic [ref=f6e42]: Profile
+              - listitem [ref=f6e43]:
+                - button "Appearance" [ref=f6e44] [cursor=pointer]:
+                  - generic [ref=f6e47]: Appearance
+              - listitem [ref=f6e48]:
+                - button "Notifications" [ref=f6e49] [cursor=pointer]:
+                  - generic [ref=f6e52]: Notifications
+              - listitem [ref=f6e53]:
+                - button "Behavior" [ref=f6e54] [cursor=pointer]:
+                  - generic [ref=f6e57]: Behavior
+              - listitem [ref=f6e58]:
+                - button "Worktrees" [ref=f6e59] [cursor=pointer]:
+                  - generic [ref=f6e62]: Worktrees
+              - listitem [ref=f6e63]:
+                - button "Archived" [ref=f6e64] [cursor=pointer]:
+                  - generic [ref=f6e67]: Archived
+          - region "MCode" [ref=f6e68]:
+            - heading "MCode" [level=2] [ref=f6e69]
+            - list [ref=f6e70]:
+              - listitem [ref=f6e71]:
+                - button "Models" [ref=f6e72] [cursor=pointer]:
+                  - generic [ref=f6e75]: Models
+              - listitem [ref=f6e76]:
+                - button "Providers" [active] [ref=f6e77] [cursor=pointer]:
+                  - generic [ref=f6e80]: Providers
+              - listitem [ref=f6e81]:
+                - button "Skills" [ref=f6e82] [cursor=pointer]:
+                  - generic [ref=f6e85]: Skills
+              - listitem [ref=f6e86]:
+                - button "Usage" [ref=f6e87] [cursor=pointer]:
+                  - generic [ref=f6e90]: Usage
+              - listitem [ref=f6e91]:
+                - button "Advanced" [ref=f6e92] [cursor=pointer]:
+                  - generic [ref=f6e95]: Advanced
+      - generic [ref=f6e96]:
+        - list:
+          - listitem
+    - generic [ref=f6e97]:
+      - button "Resize Sidebar" [ref=f6e98]
+      - main [ref=f6e100]:
+        - generic [ref=f6e105]:
+          - generic [ref=f6e106]:
+            - generic [ref=f6e107]:
+              - heading "Providers" [level=1] [ref=f6e274]
+              - paragraph [ref=f6e109]: Choose visible providers, review CLI installs, and update provider tools.
+            - button "Restore defaults" [disabled]:
+              - img
+              - text: Restore defaults
+          - generic [ref=f6e110]:
+            - generic [ref=f6e276]:
+              - heading "Updates" [level=2] [ref=f6e277]
+              - generic [ref=f6e281]:
+                - heading "Provider updates" [level=3] [ref=f6e283]
+                - paragraph [ref=f6e285]: Update installed provider tools that MCode can safely update.
+                - generic [ref=f6e286]: No provider updates detected
+            - generic [ref=f6e140]:
+              - heading "Provider picker" [level=2] [ref=f6e287]
+              - generic [ref=f6e143]:
+                - generic [ref=f6e145]:
+                  - heading "Visible providers" [level=3] [ref=f6e288]
+                  - paragraph [ref=f6e149]: Drag providers into your preferred picker order and hide the ones you don't use. The provider you're currently using on a thread always stays visible.
+                  - generic [ref=f6e289]: All providers visible
+                - generic [ref=f6e290]:
+                  - generic [ref=f6e291]:
+                    - generic [ref=f6e292]:
+                      - button "Reorder Codex" [ref=f6e293]
+                      - generic [ref=f6e295]: Codex
+                    - switch "Show Codex in the provider picker" [checked] [ref=f6e296] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e297]
+                  - generic [ref=f6e298]:
+                    - generic [ref=f6e299]:
+                      - button "Reorder Claude" [ref=f6e300]
+                      - generic [ref=f6e302]: Claude
+                    - switch "Show Claude in the provider picker" [checked] [ref=f6e303] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e304]
+                  - generic [ref=f6e305]:
+                    - generic [ref=f6e306]:
+                      - button "Reorder Cursor" [ref=f6e307]
+                      - generic [ref=f6e309]: Cursor
+                    - switch "Show Cursor in the provider picker" [checked] [ref=f6e310] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e311]
+                  - generic [ref=f6e312]:
+                    - generic [ref=f6e313]:
+                      - button "Reorder Gemini" [ref=f6e314]
+                      - generic [ref=f6e316]: Gemini
+                    - switch "Show Gemini in the provider picker" [checked] [ref=f6e317] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e318]
+                  - generic [ref=f6e319]:
+                    - generic [ref=f6e320]:
+                      - button "Reorder Grok" [ref=f6e321]
+                      - generic [ref=f6e323]: Grok
+                    - switch "Show Grok in the provider picker" [checked] [ref=f6e324] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e325]
+                  - generic [ref=f6e326]:
+                    - generic [ref=f6e327]:
+                      - button "Reorder Kilo" [ref=f6e328]
+                      - generic [ref=f6e330]: Kilo
+                    - switch "Show Kilo in the provider picker" [checked] [ref=f6e331] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e332]
+                  - generic [ref=f6e333]:
+                    - generic [ref=f6e334]:
+                      - button "Reorder OpenCode" [ref=f6e335]
+                      - generic [ref=f6e337]: OpenCode
+                    - switch "Show OpenCode in the provider picker" [checked] [ref=f6e338] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e339]
+                  - generic [ref=f6e340]:
+                    - generic [ref=f6e341]:
+                      - button "Reorder Pi" [ref=f6e342]
+                      - generic [ref=f6e344]: Pi
+                    - switch "Show Pi in the provider picker" [checked] [ref=f6e345] [cursor=pointer]
+                    - checkbox [checked] [ref=f6e346]
+                - status [ref=f6e347]
+            - generic [ref=f6e349]:
+              - heading "Provider tools" [level=2] [ref=f6e350]
+              - generic [ref=f6e352]:
+                - generic [ref=f6e353]:
+                  - generic [ref=f6e354]:
+                    - heading "Installed CLIs" [level=3] [ref=f6e356]
+                    - paragraph [ref=f6e358]: Review provider versions and update tools. Open a row only when you need binary overrides.
+                    - generic [ref=f6e359]: No provider updates detected
+                  - button "Refresh" [ref=f6e361] [cursor=pointer]:
+                    - img [ref=f6e362]
+                    - text: Refresh
+                - generic [ref=f6e366]:
+                  - button "Codex" [ref=f6e370]:
+                    - generic [ref=f6e371]: Codex
+                    - img [ref=f6e372]
+                  - button "Claude" [ref=f6e377]:
+                    - generic [ref=f6e378]: Claude
+                    - img [ref=f6e379]
+                  - button "Cursor" [ref=f6e384]:
+                    - generic [ref=f6e385]: Cursor
+                    - img [ref=f6e386]
+                  - button "Gemini" [ref=f6e391]:
+                    - generic [ref=f6e392]: Gemini
+                    - img [ref=f6e393]
+                  - button "Grok" [ref=f6e398]:
+                    - generic [ref=f6e399]: Grok
+                    - img [ref=f6e400]
+                  - button "Kilo" [ref=f6e405]:
+                    - generic [ref=f6e406]: Kilo
+                    - img [ref=f6e407]
+                  - button "OpenCode" [ref=f6e412]:
+                    - generic [ref=f6e413]: OpenCode
+                    - img [ref=f6e414]
+                  - button "Pi" [ref=f6e419]:
+                    - generic [ref=f6e420]: Pi
+                    - img [ref=f6e421]
+  - generic:
+    - region "Notifications"
+  - generic:
+    - region "Notifications"

@@ -1,0 +1,190 @@
+- generic [ref=f5e1]:
+  - generic [ref=f5e3]:
+    - generic [ref=f5e6]:
+      - generic [ref=f5e9]:
+        - button "Toggle thread sidebar" [ref=f5e10] [cursor=pointer]:
+          - generic [ref=f5e12]: Toggle Sidebar
+        - button "World Cup 2026" [ref=f5e13] [cursor=pointer]:
+          - img [ref=f5e14]
+      - generic [ref=f5e17]:
+        - list [ref=f5e19]:
+          - listitem [ref=f5e20]:
+            - button "New thread" [ref=f5e21] [cursor=pointer]:
+              - generic [ref=f5e24]: New thread
+          - listitem [ref=f5e25]:
+            - button "Search Ctrl K" [ref=f5e26] [cursor=pointer]:
+              - generic [ref=f5e29]: Search
+              - generic [ref=f5e31]:
+                - generic: Ctrl
+                - generic: K
+          - listitem [ref=f5e32]:
+            - button "Kanban" [ref=f5e33] [cursor=pointer]:
+              - generic [ref=f5e36]: Kanban
+          - listitem [ref=f5e37]:
+            - button "Automations" [ref=f5e38] [cursor=pointer]:
+              - img [ref=f5e40]
+              - generic [ref=f5e43]: Automations
+        - generic [ref=f5e44]:
+          - generic [ref=f5e45]:
+            - generic [ref=f5e47]: Projects
+            - generic:
+              - button "Collapse all projects except the active project":
+                - img
+              - button "Sort projects":
+                - img
+              - button "Add project":
+                - img
+          - list [ref=f5e48]:
+            - listitem [ref=f5e49]:
+              - generic [ref=f5e50]:
+                - generic [ref=f5e51]:
+                  - button "E2E Test Project" [ref=f5e52]:
+                    - generic [ref=f5e56]: E2E Test Project
+                  - button "Pin E2E Test Project"
+                  - generic:
+                    - button "Create new terminal thread in E2E Test Project"
+                    - button "Create disposable thread in E2E Test Project":
+                      - img
+                    - button "Create new thread in E2E Test Project"
+                - list [ref=f5e59]:
+                  - listitem [ref=f5e60]:
+                    - button "ceea4fa3-4836-4f20-b04e-8825a28c3d71 38m Pin thread Archive thread" [ref=f5e61] [cursor=pointer]:
+                      - img [ref=f5e64]
+                      - generic [ref=f5e67]: ceea4fa3-4836-4f20-b04e-8825a28c3d71
+                      - generic [ref=f5e69]:
+                        - generic [ref=f5e70]: 38m
+                        - generic [ref=f5e71]:
+                          - button "Pin thread" [ref=f5e72]
+                          - button "Archive thread" [ref=f5e74]:
+                            - img [ref=f5e75]
+          - status [ref=f5e77]
+      - generic [ref=f5e78]:
+        - generic [ref=f5e79]:
+          - generic [ref=f5e80]:
+            - button "Chats" [ref=f5e81] [cursor=pointer]:
+              - img [ref=f5e83]
+              - generic [ref=f5e86]: Chats
+            - generic [ref=f5e87]:
+              - button "Sort chats" [ref=f5e88] [cursor=pointer]:
+                - img [ref=f5e89]
+              - button "Open new chat home" [ref=f5e91] [cursor=pointer]
+          - generic [ref=f5e93]:
+            - generic:
+              - list:
+                - generic: No chats yet
+        - list [ref=f5e94]:
+          - listitem [ref=f5e95]:
+            - button "Settings" [ref=f5e98] [cursor=pointer]:
+              - img [ref=f5e100]
+              - generic [ref=f5e103]: Settings
+    - generic [ref=f5e104]:
+      - button "Resize Sidebar" [ref=f5e105]
+      - generic [ref=f5e106]:
+        - main [ref=f5e108]:
+          - generic [ref=f5e110]:
+            - generic [ref=f5e112]:
+              - generic [ref=f5e117]:
+                - generic "Codex" [ref=f5e118]:
+                  - img [ref=f5e119]
+                - heading "ceea4fa3-4836-4f20-b04e-8825a28c3d71" [level=2] [ref=f5e121]
+              - generic [ref=f5e122]:
+                - button "Hand off thread" [disabled]:
+                  - generic: Hand off
+                - button "Toggle environment panel" [ref=f5e123] [cursor=pointer]
+                - button "Toggle diff panel" [ref=f5e125] [cursor=pointer]
+            - generic [ref=f5e128]:
+              - generic [ref=f5e131]:
+                - generic [ref=f5e132]:
+                  - img "MCode logo" [ref=f5e133]
+                  - heading "What should we do in E2E Test Project?" [level=2] [ref=f5e137]
+                - generic [ref=f5e141]:
+                  - textbox [ref=f5e144]:
+                    - paragraph [ref=f5e145]: Hello, what can you do?
+                  - generic [ref=f5e146]:
+                    - generic [ref=f5e147]:
+                      - button "Choose File" [ref=f5e148]
+                      - button "Composer extras" [ref=f5e149] [cursor=pointer]:
+                        - img [ref=f5e150]
+                      - button "Full access" [ref=f5e152] [cursor=pointer]:
+                        - generic [ref=f5e153]:
+                          - generic [ref=f5e155]: Full access
+                          - img [ref=f5e156]
+                    - generic [ref=f5e158]:
+                      - button "Change model and reasoning" [ref=f5e159] [cursor=pointer]:
+                        - generic [ref=f5e160]:
+                          - img [ref=f5e161]
+                          - generic [ref=f5e163]: Codex
+                          - img [ref=f5e164]
+                      - button "Record voice note" [ref=f5e166] [cursor=pointer]
+                      - button "Send message" [active] [ref=f5e193] [cursor=pointer]
+                - generic [ref=f5e168]:
+                  - generic [ref=f5e171]: E2E Test Project
+                  - generic [ref=f5e173]:
+                    - button "Local" [ref=f5e174] [cursor=pointer]:
+                      - text: Local
+                      - img [ref=f5e176]
+                    - combobox [ref=f5e178] [cursor=pointer]:
+                      - generic [ref=f5e180]: Select branch
+                      - img [ref=f5e181]
+                    - textbox [ref=f5e183]
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - paragraph: Environment
+                        - button:
+                          - img
+                      - button:
+                        - generic: Changes
+                      - generic:
+                        - generic:
+                          - button:
+                            - generic: Local
+                            - generic:
+                              - img
+                          - combobox:
+                            - generic: Select branch
+                            - generic:
+                              - img
+                          - textbox
+                      - button:
+                        - generic: Commit and Push
+                        - generic:
+                          - img
+                      - button:
+                        - generic:
+                          - img
+                        - generic: Local Servers
+                        - generic:
+                          - generic:
+                            - generic: "0"
+                          - img
+                      - generic:
+                        - paragraph: Editor
+                        - button:
+                          - generic: Editor view
+                      - generic:
+                        - button:
+                          - generic: Project instructions
+                          - img
+                      - generic:
+                        - button [expanded]:
+                          - generic: Notepad
+                          - img
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - textbox:
+                                  - /placeholder: Type here
+        - generic [ref=f5e185]:
+          - generic [ref=f5e187]:
+            - button "Add panel" [ref=f5e188] [cursor=pointer]:
+              - img [ref=f5e189]
+            - button "Collapse panel" [ref=f5e190] [cursor=pointer]
+          - button "Toggle Sidebar"
+  - generic:
+    - region "Notifications"
+  - generic:
+    - region "Notifications"
