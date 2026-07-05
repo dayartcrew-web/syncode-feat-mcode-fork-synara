@@ -37,8 +37,8 @@ pub use opencode_server::{
 };
 pub use session::{
     FileResumeCursorStore, InMemoryResumeCursorStore, PersistedSessionCursor, RehydratedSession,
-    RehydrationOutcome, ResumeCursorStore, ResumeCursorStoreError, SessionManager, SessionState,
-    SessionStateStatus, SessionTransitionError,
+    RehydrationOutcome, ResumeCursorStore, ResumeCursorStoreError, SessionIdentity,
+    SessionManager, SessionState, SessionStateStatus, SessionTransitionError,
 };
 pub use trait_def::{
     ALL_PROVIDERS, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE, PROVIDER_CODEX, PROVIDER_CURSOR,

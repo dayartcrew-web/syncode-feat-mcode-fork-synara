@@ -12,8 +12,8 @@
 
 use syncode_core::EntityId;
 use syncode_provider::{
-    ProviderCapability, ProviderEvent, ProviderRequest, SessionContext, SessionManager,
-    SessionStateStatus,
+    ProviderCapability, ProviderEvent, ProviderRequest, SessionContext, SessionIdentity,
+    SessionManager, SessionStateStatus,
 };
 
 use crate::decider::Command;
@@ -27,6 +27,69 @@ pub struct CommandReaction {
     pub session_id: Option<String>,
     /// Provider events collected during execution (stub for now)
     pub events: Vec<ProviderEvent>,
+}
+
+/// Default working directory stamped on a provider session when the
+/// `StartTurn` command (which carries no working-dir field) flows through the
+/// reactor. Centralized here so [`ProviderCommandReactor::ensure_session_for_thread`]
+/// builds a stable [`SessionIdentity`] for the production path.
+const DEFAULT_WORKING_DIR: &str = "/tmp/syncode";
+
+/// Outcome of [`ProviderCommandReactor::ensure_session_for_thread`].
+///
+/// Mirrors mcode's `ensureSessionForThread` decision tree:
+/// - no active session for the thread → [`EnsureOutcome::Fresh`]
+/// - active session whose recorded identity matches the request →
+///   [`EnsureOutcome::Reused`]
+/// - active session whose identity differs (model/provider/working-dir
+///   changed) → [`EnsureOutcome::Restarted`]: the old session is stopped and a
+///   new one started, carrying the old session's resume cursor.
+#[derive(Debug, Clone)]
+pub enum EnsureOutcome {
+    /// No prior active session for the thread — a fresh one was started.
+    Fresh {
+        /// The newly created provider session id.
+        session_id: String,
+    },
+    /// An active session with a matching identity was reused (no restart).
+    Reused {
+        /// The reused session id.
+        session_id: String,
+    },
+    /// The prior session's identity differed — it was stopped and a new one
+    /// started, carrying the old session's resume cursor.
+    Restarted {
+        /// The stopped session id.
+        old_session_id: String,
+        /// The newly created session id.
+        new_session_id: String,
+        /// The resume cursor carried over from the old session, if any.
+        resume_cursor: Option<String>,
+    },
+}
+
+impl EnsureOutcome {
+    /// The session id the caller should target for the current turn, whatever
+    /// the outcome (freshly started, reused, or restarted).
+    pub fn session_id(&self) -> &str {
+        match self {
+            EnsureOutcome::Fresh { session_id }
+            | EnsureOutcome::Reused { session_id }
+            | EnsureOutcome::Restarted {
+                new_session_id: session_id,
+                ..
+            } => session_id,
+        }
+    }
+
+    /// Whether this outcome started a new provider session (Fresh or
+    /// Restarted). `Reused` returns `false`.
+    pub fn started_new_session(&self) -> bool {
+        matches!(
+            self,
+            EnsureOutcome::Fresh { .. } | EnsureOutcome::Restarted { .. }
+        )
+    }
 }
 
 /// The command reactor bridges domain commands to provider adapter calls.
@@ -386,6 +449,115 @@ impl ProviderCommandReactor {
             .contains(&ProviderCapability::Steering)
     }
 
+    /// Ensure an active provider session exists for `thread_id`, restarting it
+    /// lazily when the provider/model/working-dir has changed.
+    ///
+    /// This is syncode's counterpart to mcode's `ensureSessionForThread`. The
+    /// decision tree (see PRD-REMAINING-GAPS.md §1):
+    ///
+    /// 1. **No active session** for the thread → start a fresh one, record its
+    ///    identity, return [`EnsureOutcome::Fresh`].
+    /// 2. **Active session whose recorded identity matches the request** →
+    ///    reuse it (no stop/start), return [`EnsureOutcome::Reused`].
+    /// 3. **Active session whose identity differs** (provider, model, or
+    ///    working-dir changed) → stop the old session, capture its resume
+    ///    cursor, start a new one, stamp the new identity + carry the cursor
+    ///    over, return [`EnsureOutcome::Restarted`].
+    ///
+    /// The requested identity is built from the adapter's `provider_id`,
+    /// `ctx.working_dir`, and the caller-supplied `requested_model`. Only the
+    /// most recent active session for the thread is considered (older sessions
+    /// are ignored — they are typically already stopped).
+    ///
+    /// `ctx.turn_id` is used to register the new session against the current
+    /// turn in the `SessionManager`'s turn→session index.
+    pub(crate) async fn ensure_session_for_thread(
+        &self,
+        ctx: SessionContext,
+        requested_model: Option<String>,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> Result<EnsureOutcome, CommandReactorError> {
+        // Build the requested identity from the adapter's provider id + the
+        // session context's working dir + the caller's model selection.
+        let provider_id = {
+            let guard = adapter.read().await;
+            guard.provider_id().to_string()
+        };
+        let requested = SessionIdentity {
+            provider_id,
+            model: requested_model,
+            working_dir: ctx.working_dir.clone(),
+        };
+
+        // Find the most recent active session for this thread (if any). Only
+        // active sessions are candidates for reuse — completed/errored ones are
+        // treated as "no session".
+        let existing = self
+            .session_manager
+            .get_sessions_by_thread(&ctx.thread_id.as_str())
+            .await
+            .into_iter()
+            .filter(|s| s.is_active())
+            .max_by_key(|s| s.created_at.timestamp_millis());
+
+        let Some(existing) = existing else {
+            // (1) No active session → start fresh.
+            let session = self.start_and_stamp(ctx, requested, None, adapter).await?;
+            return Ok(EnsureOutcome::Fresh {
+                session_id: session.id.clone(),
+            });
+        };
+
+        // (2) Active session with matching identity → reuse.
+        if existing.identity().as_ref() == Some(&requested) {
+            return Ok(EnsureOutcome::Reused {
+                session_id: existing.id.clone(),
+            });
+        }
+
+        // (3) Identity changed → stop the old session, carry its resume cursor,
+        // and start a new one stamped with the requested identity.
+        let old_session_id = existing.id.clone();
+        let resume_cursor = existing.resume_cursor();
+        let _ = self
+            .session_manager
+            .stop_session(adapter, &old_session_id)
+            .await;
+        let session = self
+            .start_and_stamp(ctx, requested, resume_cursor.clone(), adapter)
+            .await?;
+        Ok(EnsureOutcome::Restarted {
+            old_session_id,
+            new_session_id: session.id.clone(),
+            resume_cursor,
+        })
+    }
+
+    /// Start a new session on the adapter, then stamp the requested identity
+    /// and (optionally) carry over a resume cursor from a prior session.
+    ///
+    /// Factored out of [`Self::ensure_session_for_thread`] so the Fresh and
+    /// Restarted paths share the same "start + record identity + record
+    /// cursor" bookkeeping. The returned [`SessionState`] carries the stamped
+    /// identity (so a subsequent `ensure_session_for_thread` can decide reuse
+    /// vs. restart) and, when `resume_cursor` is `Some`, the carried cursor
+    /// (so it survives rehydration per P0-4).
+    async fn start_and_stamp(
+        &self,
+        ctx: SessionContext,
+        identity: SessionIdentity,
+        resume_cursor: Option<String>,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> Result<std::sync::Arc<syncode_provider::SessionState>, CommandReactorError> {
+        let session = self
+            .session_manager
+            .start_session_with_cursor(adapter, ctx, resume_cursor)
+            .await?;
+        // Stamp the identity so a subsequent ensure call can compare against it.
+        session.set_identity(Some(identity));
+        Ok(session)
+    }
+
     /// Handle StartTurn: create a provider session and send the initial request
     async fn handle_start_turn(
         &self,
@@ -397,7 +569,7 @@ impl ProviderCommandReactor {
     ) -> Result<CommandReaction, CommandReactorError> {
         let turn_id = turn_id.unwrap_or_default();
 
-        // Check if a session already exists for this turn
+        // Check if a session already exists for this turn (idempotent retry).
         if let Some(existing) = self
             .session_manager
             .get_session_by_turn(&turn_id.as_str())
@@ -414,15 +586,21 @@ impl ProviderCommandReactor {
         let ctx = SessionContext {
             thread_id,
             turn_id,
-            working_dir: "/tmp/syncode".to_string(),
+            working_dir: DEFAULT_WORKING_DIR.to_string(),
             system_prompt: Some("You are a helpful AI coding assistant.".to_string()),
             user_input: user_input.to_string(),
             context_files: vec![],
         };
 
-        // Start the session
-        let session = self.session_manager.start_session(adapter, ctx).await?;
-        let session_id = session.id.clone();
+        // P0-5: ensure a session exists for this thread, restarting it lazily
+        // if the provider/model/working-dir changed since the last turn. The
+        // production StartTurn command carries no model field, so the requested
+        // model is `None` here — model-change restarts are exercised directly
+        // via `ensure_session_for_thread` (and its tests).
+        let outcome = self
+            .ensure_session_for_thread(ctx, None, adapter)
+            .await?;
+        let session_id = outcome.session_id().to_string();
 
         // Send the initial request to the provider
         let request = ProviderRequest::new(
@@ -1227,6 +1405,366 @@ pub(crate) mod tests {
         assert!(
             steers.lock().unwrap().is_empty(),
             "no steer_turn should fire when no session is active"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0-5: ensureSessionForThread tests
+    // -----------------------------------------------------------------------
+    //
+    // The mcode `ensureSessionForThread` decision tree, exercised directly
+    // against `ProviderCommandReactor::ensure_session_for_thread`:
+    //   (1) no prior active session → Fresh
+    //   (2) prior session with matching identity → Reused (no restart)
+    //   (3) prior session with a changed model/provider/working-dir →
+    //       Restarted (stop old, start new, carry resume cursor)
+
+    /// Build a `SessionContext` for ensure tests, parameterized by thread id
+    /// and working dir so tests can vary the identity.
+    fn ensure_ctx(thread_id: EntityId, working_dir: &str) -> SessionContext {
+        SessionContext {
+            thread_id,
+            turn_id: EntityId::new(),
+            working_dir: working_dir.to_string(),
+            system_prompt: None,
+            user_input: "hi".to_string(),
+            context_files: vec![],
+        }
+    }
+
+    /// (1) When no active session exists for the thread, ensure starts a fresh
+    /// session and stamps its identity. Exactly one session is tracked
+    /// afterwards, and `stop_session` is never called.
+    #[tokio::test]
+    async fn ensure_session_fresh_when_no_prior_session() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, stopped, _requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        let outcome = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/proj"),
+                Some("gpt-4".to_string()),
+                &adapter,
+            )
+            .await
+            .expect("ensure should succeed");
+
+        assert!(
+            matches!(outcome, EnsureOutcome::Fresh { .. }),
+            "no prior session → Fresh, got {outcome:?}"
+        );
+        let session_id = outcome.session_id().to_string();
+        assert!(!session_id.is_empty());
+
+        // Fresh path → exactly one tracked session; no stops.
+        assert_eq!(
+            reactor.session_manager().session_count().await,
+            1,
+            "fresh path must track exactly one session"
+        );
+        assert!(
+            stopped.lock().unwrap().is_empty(),
+            "fresh path must NOT stop anything"
+        );
+
+        // The freshly started session records the requested identity, so a
+        // follow-up call with the same identity reuses it.
+        let outcome2 = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/proj"),
+                Some("gpt-4".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome2, EnsureOutcome::Reused { .. }),
+            "same identity → Reused, got {outcome2:?}"
+        );
+        assert_eq!(outcome2.session_id(), session_id, "reused session id must match");
+    }
+
+    /// (2) When an active session for the thread matches the requested
+    /// identity, ensure reuses it without stopping or starting anything.
+    #[tokio::test]
+    async fn ensure_session_reused_when_identity_unchanged() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, stopped, _requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        // Seed: first ensure starts + stamps identity.
+        let first = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/repo"),
+                Some("claude-3.5".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        let seeded_id = first.session_id().to_string();
+        assert_eq!(
+            reactor.session_manager().session_count().await,
+            1,
+            "seed start tracks one session"
+        );
+
+        // Second call with the SAME identity → Reused, no new starts/stops.
+        let second = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/repo"),
+                Some("claude-3.5".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, EnsureOutcome::Reused { .. }),
+            "matching identity → Reused, got {second:?}"
+        );
+        assert_eq!(second.session_id(), seeded_id);
+
+        // Session count is unchanged — reuse must NOT start a new session.
+        assert_eq!(
+            reactor.session_manager().session_count().await,
+            1,
+            "reuse must NOT add a tracked session"
+        );
+        assert!(
+            stopped.lock().unwrap().is_empty(),
+            "reuse must NOT call stop_session"
+        );
+        assert!(
+            !second.started_new_session(),
+            "Reused outcome must report started_new_session == false"
+        );
+    }
+
+    /// (3a) When the requested MODEL differs from the prior session's, ensure
+    /// restarts: stops the old session and starts a new one.
+    #[tokio::test]
+    async fn ensure_session_restarts_on_model_change() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, stopped, _requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        // Start with model "v1".
+        let first = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/p"),
+                Some("model-v1".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        let old_id = first.session_id().to_string();
+
+        // Request model "v2" → identity differs → restart.
+        let second = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/p"),
+                Some("model-v2".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        let restarted = match &second {
+            EnsureOutcome::Restarted {
+                old_session_id,
+                new_session_id,
+                ..
+            } => {
+                assert_eq!(
+                    old_session_id, &old_id,
+                    "old session id reported in Restarted must match the prior session"
+                );
+                assert_ne!(
+                    new_session_id, &old_id,
+                    "new session id must differ from the restarted (old) one"
+                );
+                second.clone()
+            }
+            other => panic!("model change → Restarted, got {other:?}"),
+        };
+
+        // The old session was stopped; the manager now tracks two sessions
+        // (the stopped old one is still indexed, the new one added).
+        let stopped_ids = stopped.lock().unwrap().clone();
+        assert!(
+            stopped_ids.contains(&old_id),
+            "old session must be stopped on restart, got {stopped_ids:?}"
+        );
+        assert_eq!(
+            reactor.session_manager().session_count().await,
+            2,
+            "restart adds a second tracked session (old kept + new)"
+        );
+        assert!(
+            restarted.started_new_session(),
+            "Restarted must report started_new_session == true"
+        );
+    }
+
+    /// (3b) When the requested WORKING DIR differs from the prior session's,
+    /// ensure restarts. Demonstrates provider/runtime-mode change detection
+    /// (working dir is a proxy for the runtime context).
+    #[tokio::test]
+    async fn ensure_session_restarts_on_working_dir_change() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, stopped, _requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        let first = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/dir-a"),
+                Some("same-model".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        let old_id = first.session_id().to_string();
+
+        // Different working dir → identity differs → restart.
+        let second = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/dir-b"),
+                Some("same-model".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, EnsureOutcome::Restarted { .. }),
+            "working-dir change → Restarted, got {second:?}"
+        );
+        assert!(stopped.lock().unwrap().contains(&old_id));
+    }
+
+    /// (3c) On restart, the old session's resume cursor is carried over to the
+    /// new session. This is the P0-4 → P0-5 contract: a model/provider/working-
+    /// dir change does not discard the provider-side conversation position.
+    #[tokio::test]
+    async fn ensure_session_restart_carries_resume_cursor() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, _requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        // Start a session, then stamp a resume cursor on it (as a real adapter
+        // would after the provider returns a thread id).
+        let first = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/p"),
+                Some("model-a".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        let old_id = first.session_id().to_string();
+        {
+            let session = reactor
+                .session_manager()
+                .get_session(&old_id)
+                .await
+                .expect("old session tracked");
+            session.set_resume_cursor(Some("provider-thread-42".to_string()));
+        }
+
+        // Restart with a different model → cursor must carry to the new session.
+        let second = reactor
+            .ensure_session_for_thread(
+                ensure_ctx(thread_id, "/tmp/p"),
+                Some("model-b".to_string()),
+                &adapter,
+            )
+            .await
+            .unwrap();
+        let restarted = match second {
+            EnsureOutcome::Restarted {
+                new_session_id,
+                resume_cursor,
+                ..
+            } => {
+                assert_eq!(
+                    resume_cursor.as_deref(),
+                    Some("provider-thread-42"),
+                    "Restarted outcome must report the carried cursor"
+                );
+                new_session_id
+            }
+            other => panic!("expected Restarted, got {other:?}"),
+        };
+
+        // The new session in the manager carries the cursor — so it survives
+        // rehydration (P0-4) and a future ensure call won't lose the position.
+        let new_session = reactor
+            .session_manager()
+            .get_session(&restarted)
+            .await
+            .expect("new session tracked");
+        assert_eq!(
+            new_session.resume_cursor().as_deref(),
+            Some("provider-thread-42"),
+            "new session must carry the prior session's resume cursor"
+        );
+    }
+
+    /// Integration: the production `StartTurn` command path flows through
+    /// ensure_session_for_thread. Two StartTurn commands on the SAME thread
+    /// (with the reactor's constant default identity) must reuse the session —
+    /// proving ensure is wired into handle_start_turn and doesn't churn.
+    #[tokio::test]
+    async fn start_turn_routes_through_ensure_and_reuses_session() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, stopped, _requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        // First StartTurn → starts a session.
+        let first = reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id,
+                    sequence: 1,
+                    user_input: "hello".to_string(),
+                },
+                &adapter,
+                Some(EntityId::new()),
+            )
+            .await
+            .unwrap();
+        let first_session = first.session_id.clone().expect("session id");
+        assert_eq!(
+            reactor.session_manager().session_count().await,
+            1,
+            "first StartTurn tracks one session"
+        );
+
+        // Second StartTurn on the same thread → ensure reuses (same default
+        // working dir + provider_id + None model). No new start, no stop.
+        let second = reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id,
+                    sequence: 2,
+                    user_input: "again".to_string(),
+                },
+                &adapter,
+                Some(EntityId::new()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second.session_id.as_deref(),
+            Some(first_session.as_str()),
+            "second StartTurn on same thread must reuse the ensure-managed session"
+        );
+        assert_eq!(
+            reactor.session_manager().session_count().await,
+            1,
+            "reuse path must not track a second session"
+        );
+        assert!(
+            stopped.lock().unwrap().is_empty(),
+            "reuse path must not stop the session"
         );
     }
 }

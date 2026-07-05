@@ -66,6 +66,32 @@ pub enum SessionStateStatus {
     Errored = 4,
 }
 
+/// The set of attributes that define "the same session" for a thread.
+///
+/// `ensure_session_for_thread` compares the requested identity against the
+/// active session's recorded identity (see [`SessionState::identity`]): if any
+/// field differs, the session is torn down and a new one started with the old
+/// session's resume cursor. This mirrors mcode's `ensureSessionForThread`
+/// change-detection (model/provider/runtime-mode changes → restart with
+/// cursor).
+///
+/// The three tracked dimensions are:
+/// - `provider_id` — switching providers (e.g. codex → claude) invalidates
+///   the session.
+/// - `model` — a different model selection invalidates the session. `None`
+///   means "the caller has no model preference" and matches another `None`.
+/// - `working_dir` — a different working directory invalidates the session
+///   (the provider would be operating on a different project root).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIdentity {
+    /// Provider id servicing the session (e.g. "codex", "claude").
+    pub provider_id: String,
+    /// Model selection. `None` when the caller has no model preference.
+    pub model: Option<String>,
+    /// Working directory the provider runs in.
+    pub working_dir: String,
+}
+
 /// Internal state for a single provider session
 pub struct SessionState {
     /// Unique session identifier (e.g., "codex-<uuid>")
@@ -86,6 +112,13 @@ pub struct SessionState {
     pub request_count: AtomicBool, // reuse AtomicBool as a simple flag
     /// Response tokens accumulated
     pub total_output_tokens: std::sync::atomic::AtomicU32,
+    /// The provider/model/working-dir identity this session was started under.
+    ///
+    /// Recorded by `ensure_session_for_thread` when it starts (or restarts) a
+    /// session, and compared on subsequent calls to decide reuse vs. restart.
+    /// `None` for sessions started through other code paths — those have no
+    /// recorded identity to compare against.
+    identity: std::sync::RwLock<Option<SessionIdentity>>,
     /// Provider-side resume cursor (e.g. a thread id from the provider's API).
     ///
     /// When `Some`, this is the cursor the provider returned for the session —
@@ -108,6 +141,7 @@ impl std::fmt::Debug for SessionState {
             .field("working_dir", &self.working_dir)
             .field("created_at", &self.created_at)
             .field("resume_cursor", &self.resume_cursor())
+            .field("identity", &self.identity())
             .finish()
     }
 }
@@ -126,6 +160,7 @@ impl SessionState {
             request_count: AtomicBool::new(false),
             total_output_tokens: std::sync::atomic::AtomicU32::new(0),
             resume_cursor: std::sync::RwLock::new(None),
+            identity: std::sync::RwLock::new(None),
         }
     }
 
@@ -146,6 +181,24 @@ impl SessionState {
     /// previously stored cursor.
     pub fn set_resume_cursor(&self, cursor: Option<String>) {
         *self.resume_cursor.write().unwrap() = cursor;
+    }
+
+    /// Get the provider/model/working-dir identity recorded for this session,
+    /// if one was set (by `ensure_session_for_thread`).
+    ///
+    /// Returns a cloned [`SessionIdentity`] so callers can compare it against a
+    /// requested identity without holding the session's lock.
+    pub fn identity(&self) -> Option<SessionIdentity> {
+        self.identity.read().unwrap().clone()
+    }
+
+    /// Record (or clear) the session's identity.
+    ///
+    /// `ensure_session_for_thread` calls this when it starts or restarts a
+    /// session, so a subsequent call can decide reuse vs. restart by comparing
+    /// the recorded identity against the newly requested one.
+    pub fn set_identity(&self, identity: Option<SessionIdentity>) {
+        *self.identity.write().unwrap() = identity;
     }
 
     /// Get the current session status
@@ -255,6 +308,24 @@ impl SessionManager {
         adapter: &SharedAdapter,
         ctx: SessionContext,
     ) -> Result<Arc<SessionState>, ProviderAdapterError> {
+        self.start_session_with_cursor(adapter, ctx, None).await
+    }
+
+    /// Like [`Self::start_session`] but seeds the new session with a resume
+    /// cursor before returning.
+    ///
+    /// `ensure_session_for_thread` (in the command reactor) uses this on the
+    /// restart path to carry the prior session's resume cursor onto the freshly
+    /// started replacement session — so a model/provider/working-dir change
+    /// doesn't discard the provider-side conversation position (the cursor
+    /// survives rehydration per P0-4). When `resume_cursor` is `None` this is
+    /// identical to [`Self::start_session`].
+    pub async fn start_session_with_cursor(
+        &self,
+        adapter: &SharedAdapter,
+        ctx: SessionContext,
+        resume_cursor: Option<String>,
+    ) -> Result<Arc<SessionState>, ProviderAdapterError> {
         let mut guard = adapter.write().await;
         let session_id = guard.start_session(ctx.clone()).await?;
 
@@ -264,6 +335,10 @@ impl SessionManager {
             ctx.turn_id,
             ctx.working_dir,
         ));
+        // Seed the carried cursor (if any) before the session is observable.
+        if let Some(cursor) = resume_cursor.as_ref() {
+            session.set_resume_cursor(Some(cursor.clone()));
+        }
         session
             .transition(SessionStateStatus::Processing)
             .map_err(|e| ProviderAdapterError::Internal(e.to_string()))?;
@@ -289,6 +364,7 @@ impl SessionManager {
             session_id = %session_id,
             thread_id = %ctx.thread_id.as_str(),
             turn_id = %ctx.turn_id.as_str(),
+            carried_cursor = resume_cursor.is_some(),
             "Session started and tracked"
         );
 
@@ -428,6 +504,25 @@ impl SessionManager {
     /// Get total count of sessions
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
+    }
+
+    /// Record the identity on a tracked session (best-effort).
+    ///
+    /// Returns `true` if the session was found and updated. Used by
+    /// `ensure_session_for_thread` (in the command reactor) to stamp the
+    /// provider/model/working-dir trio on a freshly started session so a
+    /// subsequent call can decide reuse vs. restart.
+    pub async fn set_session_identity(
+        &self,
+        session_id: &str,
+        identity: SessionIdentity,
+    ) -> bool {
+        if let Some(session) = self.get_session(session_id).await {
+            session.set_identity(Some(identity));
+            true
+        } else {
+            false
+        }
     }
 
     /// Interrupt all active sessions (e.g., thread cancellation)
