@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use syncode_core::EntityId;
@@ -16,6 +16,35 @@ use tokio::sync::RwLock;
 
 use crate::registry::SharedAdapter;
 use crate::trait_def::*;
+
+// ---------------------------------------------------------------------------
+// Idle-stop tuning (P0-6)
+// ---------------------------------------------------------------------------
+
+/// Env var overriding the idle-stop TTL (seconds). Default [`DEFAULT_IDLE_TTL_SECS`].
+pub const ENV_IDLE_TTL_SECS: &str = "SYNCODE_SESSION_IDLE_TTL_SECS";
+
+/// Default idle-stop TTL: 10 minutes.
+pub const DEFAULT_IDLE_TTL_SECS: u64 = 600;
+
+/// How often the background idle-stop sweep runs: every 60 seconds.
+pub const IDLE_STOP_SWEEP_INTERVAL_SECS: u64 = 60;
+
+/// Read the configured idle-stop TTL from the environment, falling back to
+/// [`DEFAULT_IDLE_TTL_SECS`] when unset or unparseable.
+///
+/// Matches mcode's `idleSessionStop` tuning: a session that has sat in the
+/// `Processing` state with no new generation is auto-stopped once it exceeds
+/// the TTL. Operators can shorten the window (e.g. `30` for an aggressive
+/// dev setup) or lengthen it (e.g. `3600` for long-running eval harnesses)
+/// without a code change.
+pub fn configured_idle_ttl_secs() -> u64 {
+    std::env::var(ENV_IDLE_TTL_SECS)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_IDLE_TTL_SECS)
+}
 
 // ---------------------------------------------------------------------------
 // Session state machine
@@ -130,6 +159,16 @@ pub struct SessionState {
     ///
     /// [`ProviderAdapter::resume_session`]: crate::trait_def::ProviderAdapter::resume_session
     resume_cursor: std::sync::RwLock<Option<String>>,
+    /// The generation token in force when this session was last touched
+    /// (started or resumed). The idle-stop sweep captures the live generation
+    /// when it arms a stop and compares it here at fire time — if the counter
+    /// has advanced, fresh work arrived and the stop is cancelled. Mirrors
+    /// mcode's `generation` guard against killing a freshly-started turn.
+    last_generation: AtomicU64,
+    /// Wall-clock time this session was last touched (started or resumed).
+    /// The idle-stop sweep uses this to decide whether the session has sat
+    /// `Processing` past the TTL with no new work.
+    last_active_at: std::sync::RwLock<DateTime<Utc>>,
 }
 
 impl std::fmt::Debug for SessionState {
@@ -161,7 +200,39 @@ impl SessionState {
             total_output_tokens: std::sync::atomic::AtomicU32::new(0),
             resume_cursor: std::sync::RwLock::new(None),
             identity: std::sync::RwLock::new(None),
+            last_generation: AtomicU64::new(0),
+            last_active_at: std::sync::RwLock::new(Utc::now()),
         }
+    }
+
+    /// The generation token recorded when this session was last touched.
+    ///
+    /// The idle-stop sweep compares this against the manager's live generation
+    /// to decide whether a pending stop is stale (see [`SessionManager`]'s
+    /// generation-token guard).
+    pub fn last_generation(&self) -> u64 {
+        self.last_generation.load(Ordering::Acquire)
+    }
+
+    /// Stamp the generation token captured at touch time.
+    ///
+    /// Called by `SessionManager` whenever a session is started or resumed —
+    /// i.e. whenever fresh work is delivered to the provider. Idle-stop reads
+    /// this back at fire time: a session whose recorded generation lags the
+    /// live counter has been superseded by newer work and must NOT be killed.
+    pub fn set_last_generation(&self, generation: u64) {
+        self.last_generation.store(generation, Ordering::Release);
+    }
+
+    /// Wall-clock time of the last start/resume touch.
+    pub fn last_active_at(&self) -> DateTime<Utc> {
+        *self.last_active_at.read().unwrap()
+    }
+
+    /// Record a fresh "last touched" timestamp (start or resume). Best-effort
+    /// under the session's internal lock; never blocks the caller.
+    pub fn touch(&self, at: DateTime<Utc>) {
+        *self.last_active_at.write().unwrap() = at;
     }
 
     /// Get the provider-side resume cursor, if one has been recorded.
@@ -290,16 +361,58 @@ pub struct SessionManager {
     turn_sessions: RwLock<HashMap<String, String>>,
     /// Map from thread_id → list of session_ids
     thread_sessions: RwLock<HashMap<String, Vec<String>>>,
+    /// Monotonic generation counter — incremented on every `start_session` /
+    /// `start_session_with_cursor` / `resume_session` call. The idle-stop
+    /// sweep captures the live value when it arms a stop and compares it at
+    /// fire time: if the counter has advanced, fresh work arrived since the
+    /// timer was set, so the stop is cancelled (MCode `generation` guard).
+    generation: AtomicU64,
+    /// Configured idle-stop TTL (seconds). A `Processing` session whose
+    /// `last_active_at` is older than this is a candidate for auto-stop.
+    idle_ttl_secs: u64,
 }
 
 impl SessionManager {
-    /// Create a new empty session manager
+    /// Create a new empty session manager with the default idle-stop TTL.
     pub fn new() -> Self {
+        Self::with_idle_ttl_secs(configured_idle_ttl_secs())
+    }
+
+    /// Create a new session manager with an explicit idle-stop TTL.
+    ///
+    /// Production code reads the TTL from the environment via
+    /// [`configured_idle_ttl_secs`]; tests inject a small value here so the
+    /// sweep fires deterministically without waiting the full 10 minutes.
+    pub fn with_idle_ttl_secs(idle_ttl_secs: u64) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             turn_sessions: RwLock::new(HashMap::new()),
             thread_sessions: RwLock::new(HashMap::new()),
+            generation: AtomicU64::new(0),
+            idle_ttl_secs: idle_ttl_secs.max(1),
         }
+    }
+
+    /// The current generation token.
+    ///
+    /// Incremented on every start/resume — see [`Self::bump_generation`].
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Atomically increment the generation counter and return the new value.
+    ///
+    /// Called at the start of `start_session` / `resume_session` so the idle-
+    /// stop sweep can observe that fresh work has arrived. Returning the new
+    /// value lets the caller stamp it on the freshly-touched session in one
+    /// step.
+    pub fn bump_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The configured idle-stop TTL (seconds).
+    pub fn idle_ttl_secs(&self) -> u64 {
+        self.idle_ttl_secs
     }
 
     /// Start a new session on the given adapter
@@ -326,6 +439,12 @@ impl SessionManager {
         ctx: SessionContext,
         resume_cursor: Option<String>,
     ) -> Result<Arc<SessionState>, ProviderAdapterError> {
+        // Bump the generation counter first so the freshly-touched session
+        // records the new value — the idle-stop sweep will read it back at
+        // fire time to decide whether this session is still "fresh".
+        let generation = self.bump_generation();
+        let now = Utc::now();
+
         let mut guard = adapter.write().await;
         let session_id = guard.start_session(ctx.clone()).await?;
 
@@ -342,6 +461,12 @@ impl SessionManager {
         session
             .transition(SessionStateStatus::Processing)
             .map_err(|e| ProviderAdapterError::Internal(e.to_string()))?;
+        // Stamp the generation token + touch time so the idle-stop sweep has
+        // something to compare against. A session started under generation N
+        // is safe to stop only while generation stays N — once it advances,
+        // newer work has superseded the timer.
+        session.set_last_generation(generation);
+        session.touch(now);
 
         // Track the session
         {
@@ -365,6 +490,7 @@ impl SessionManager {
             thread_id = %ctx.thread_id.as_str(),
             turn_id = %ctx.turn_id.as_str(),
             carried_cursor = resume_cursor.is_some(),
+            generation,
             "Session started and tracked"
         );
 
@@ -386,6 +512,13 @@ impl SessionManager {
         session
             .transition(SessionStateStatus::Processing)
             .map_err(|e| ProviderAdapterError::Internal(e.to_string()))?;
+
+        // A resume is fresh work — bump the generation and re-stamp the
+        // session so an idle-stop armed against the prior Interrupted window
+        // doesn't fire on a session that is now actively Processing again.
+        let generation = self.bump_generation();
+        session.set_last_generation(generation);
+        session.touch(Utc::now());
 
         let mut guard = adapter.write().await;
         guard.resume_session(session_id).await
@@ -689,6 +822,111 @@ impl SessionManager {
             });
         }
         results
+    }
+
+    // -- Idle-stop auto-stop (P0-6) ---------------------------------------
+    //
+    // A background sweep (see [`Self::spawn_idle_stop_sweep`]) periodically
+    // looks for `Processing` sessions whose `last_active_at` is older than the
+    // configured TTL and stops them. Each stop is guarded by the generation
+    // token: a session whose recorded generation lags the manager's live
+    // counter has been superseded by newer work (a fresh start/resume bumped
+    // the counter after the timer was effectively armed) and is left alone.
+    // This mirrors mcode's `generation` guard against killing a freshly-
+    // started turn.
+
+    /// One pass of the idle-stop sweep.
+    ///
+    /// Walks every tracked session and force-stops any that are:
+    /// 1. still `Processing` (an in-flight turn that never completed),
+    /// 2. older than the TTL (last touched > `idle_ttl_secs` ago), AND
+    /// 3. **not** protected by the generation guard — i.e. their recorded
+    ///    `last_generation` equals the manager's current generation. A session
+    ///    stamped with a stale generation has been superseded by newer work
+    ///    and must NOT be killed.
+    ///
+    /// Returns the session ids that were actually stopped. The caller (the
+    /// background task) stops them through `stop_session` so the adapter is
+    /// notified; tests call this directly with a mock adapter for determinism.
+    ///
+    /// `now` is injected rather than read from the clock so tests can drive
+    /// time forward without `tokio::time::pause`.
+    pub async fn idle_stop_sweep(
+        &self,
+        adapter: &SharedAdapter,
+        now: DateTime<Utc>,
+    ) -> Vec<String> {
+        let live_generation = self.generation();
+        let ttl = chrono::Duration::seconds(self.idle_ttl_secs as i64);
+
+        // Snapshot the candidate sessions under a short-lived read lock, then
+        // stop them outside the lock so the adapter call can't deadlock
+        // against a concurrent `start_session` that needs the same lock.
+        let candidates: Vec<Arc<SessionState>> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|s| s.is_active() && s.status() == SessionStateStatus::Processing)
+                .filter(|s| now.signed_duration_since(s.last_active_at()) > ttl)
+                // Generation guard: only stop sessions whose recorded
+                // generation matches the live counter. A lagging generation
+                // means fresh work arrived after the timer was armed — cancel.
+                .filter(|s| s.last_generation() == live_generation)
+                .cloned()
+                .collect()
+        };
+
+        let mut stopped = Vec::with_capacity(candidates.len());
+        for session in candidates {
+            let session_id = session.id.clone();
+            match self.stop_session(adapter, &session_id).await {
+                Ok(()) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        ttl_secs = self.idle_ttl_secs,
+                        generation = live_generation,
+                        "idle-stop sweep stopped an expired session"
+                    );
+                    stopped.push(session_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "idle-stop sweep could not stop an expired session"
+                    );
+                }
+            }
+        }
+        stopped
+    }
+
+    /// Spawn the background idle-stop sweep task.
+    ///
+    /// Every [`IDLE_STOP_SWEEP_INTERVAL_SECS`] (60s) the task runs one pass of
+    /// [`Self::idle_stop_sweep`] against `adapter`. The returned
+    /// `JoinHandle` lets the caller (typically the server bootstrap) abort the
+    /// sweep on shutdown; dropping the handle does NOT cancel the task — call
+    /// `.abort()` on it (or drop the runtime).
+    ///
+    /// The sweep holds an `Arc<SessionManager>` (not `&self`) so it can outlive
+    /// the bootstrap call site.
+    pub fn spawn_idle_stop_sweep(
+        self: &Arc<Self>,
+        adapter: SharedAdapter,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(IDLE_STOP_SWEEP_INTERVAL_SECS));
+            // Don't fire immediately on the first tick — the first session
+            // may have just been started by the bootstrap that launched us.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let _ = manager.idle_stop_sweep(&adapter, Utc::now()).await;
+            }
+        })
     }
 }
 
@@ -1691,5 +1929,139 @@ mod tests {
         // The session id from the first manager is now tracked in the second.
         let rehydrated = mgr_b.get_session(&session.id).await.expect("tracked");
         assert_eq!(rehydrated.resume_cursor().as_deref(), Some("file-cursor"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // P0-6: Idle session auto-stop + generation-token guard tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn configured_idle_ttl_defaults_to_600() {
+        // The env-var path falls back to the documented 600s default when the
+        // var is absent. We avoid mutating process-global env state from a
+        // unit test (env reads/writes became unsafe in recent Rust and racing
+        // tests would make this flaky); the parse-positive-override branch is
+        // covered by inspection of `configured_idle_ttl_secs`.
+        let ttl = configured_idle_ttl_secs();
+        // Either the operator set a positive override, or we get the default.
+        assert!(ttl > 0, "TTL must always be positive, got {ttl}");
+        // The constant itself is the documented default.
+        assert_eq!(DEFAULT_IDLE_TTL_SECS, 600);
+        assert_eq!(IDLE_STOP_SWEEP_INTERVAL_SECS, 60);
+        assert_eq!(ENV_IDLE_TTL_SECS, "SYNCODE_SESSION_IDLE_TTL_SECS");
+    }
+
+    #[tokio::test]
+    async fn start_session_increments_generation_and_stamps_session() {
+        // Every start bumps the manager's generation counter and stamps the new
+        // value on the freshly-touched session — the idle-stop sweep reads it
+        // back at fire time to decide whether the session is still "fresh".
+        let mgr = SessionManager::new();
+        let adapter = make_shared_mock();
+        assert_eq!(mgr.generation(), 0, "fresh manager starts at generation 0");
+
+        let s1 = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let g1 = mgr.generation();
+        assert_eq!(g1, 1, "first start bumps generation to 1");
+        assert_eq!(s1.last_generation(), g1, "session stamps the live generation");
+
+        let s2 = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let g2 = mgr.generation();
+        assert_eq!(g2, 2, "second start bumps generation to 2");
+        assert_eq!(s2.last_generation(), g2);
+        assert_ne!(s1.last_generation(), s2.last_generation());
+
+        // Resume also bumps (it's fresh work) and re-stamps the session.
+        mgr.interrupt_session(&adapter, &s1.id).await.unwrap();
+        mgr.resume_session(&adapter, &s1.id).await.unwrap();
+        assert_eq!(mgr.generation(), 3, "resume bumps the generation");
+        assert_eq!(
+            s1.last_generation(),
+            3,
+            "resume re-stamps the session's generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_stop_sweep_stops_expired_processing_session() {
+        // A Processing session whose last_active_at is older than the TTL is
+        // stopped by the sweep. The TTL is injected (1s) so the test doesn't
+        // wait the full 10 minutes.
+        let mgr = SessionManager::with_idle_ttl_secs(1);
+        let adapter = make_shared_mock();
+        let session = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        assert_eq!(session.status(), SessionStateStatus::Processing);
+        assert!(session.is_active());
+
+        // Backdate the session's last-active timestamp past the 1s TTL, then
+        // run the sweep "now" (well past the TTL).
+        let stale = Utc::now() - chrono::Duration::seconds(60);
+        session.touch(stale);
+
+        let stopped = mgr.idle_stop_sweep(&adapter, Utc::now()).await;
+        assert_eq!(stopped.len(), 1, "expired session should be stopped");
+        assert_eq!(stopped[0], session.id);
+        assert!(
+            !session.is_active(),
+            "stopped session must be deactivated"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_stop_generation_guard_cancels_stop_on_fresh_work() {
+        // The generation guard: when a session is expired BUT the manager's
+        // generation has advanced since the session was last touched (fresh
+        // work arrived), the sweep must NOT stop it — it would kill a freshly-
+        // started turn.
+        let mgr = SessionManager::with_idle_ttl_secs(1);
+        let adapter = make_shared_mock();
+
+        // Start a session at generation 1.
+        let session = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let session_generation = session.last_generation();
+        assert_eq!(session_generation, 1);
+
+        // Backdate the session so it looks expired...
+        let stale = Utc::now() - chrono::Duration::seconds(60);
+        session.touch(stale);
+
+        // ...but then bump the generation (simulating a new start elsewhere).
+        // The session's recorded generation now lags the live counter.
+        let _ = mgr.bump_generation();
+        let _ = mgr.bump_generation();
+        assert_eq!(mgr.generation(), 3);
+        assert_ne!(session.last_generation(), mgr.generation());
+
+        let stopped = mgr.idle_stop_sweep(&adapter, Utc::now()).await;
+        assert!(
+            stopped.is_empty(),
+            "generation guard must cancel the stop — fresh work arrived, got {stopped:?}"
+        );
+        assert!(
+            session.is_active(),
+            "guard-protected session must remain active"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_stop_skips_non_processing_and_unexpired_sessions() {
+        // The sweep only touches Processing sessions past the TTL — Completed
+        // sessions and freshly-touched Processing sessions are left alone.
+        let mgr = SessionManager::with_idle_ttl_secs(60);
+        let adapter = make_shared_mock();
+
+        // (a) Completed session — never a candidate.
+        let completed = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        mgr.complete_session(&adapter, &completed.id).await.unwrap();
+
+        // (b) Freshly-started Processing session — not yet expired.
+        let fresh = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+
+        let stopped = mgr.idle_stop_sweep(&adapter, Utc::now()).await;
+        assert!(
+            stopped.is_empty(),
+            "no candidates: one Completed, one fresh Processing, got {stopped:?}"
+        );
+        assert!(fresh.is_active(), "fresh session must survive the sweep");
     }
 }

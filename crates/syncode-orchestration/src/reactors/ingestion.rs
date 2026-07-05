@@ -13,6 +13,7 @@ use syncode_core::{EntityId, Timestamp};
 use syncode_provider::ProviderEvent;
 
 use crate::events::DomainEvent;
+use crate::reactors::command::{CommandReactorError, ProviderCommandReactor};
 
 /// Result of ingesting a provider event
 #[derive(Debug, Clone)]
@@ -162,6 +163,53 @@ fn truncate_json(value: &serde_json::Value, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len])
     }
+}
+
+// ---------------------------------------------------------------------------
+// P0-7: Queued-turn pipeline drain
+// ---------------------------------------------------------------------------
+
+/// Drain and dispatch the next queued turn for `thread_id` after a turn on
+/// that thread completed.
+///
+/// This is the drain half of the queued-turn pipeline (P0-7). The enqueue
+/// half lives in the `DispatchQueuedTurn` arm of
+/// [`ProviderCommandReactor::react`]: when a turn arrives while the thread
+/// already has an active `Processing` session (and the provider can't steer),
+/// it is parked in the reactor's per-thread [`crate::reactors::command::TurnQueue`]
+/// rather than dispatched. Once the in-flight turn completes, the pipeline
+/// calls this to release the next parked turn — guaranteeing no two turns for
+/// the same thread run simultaneously.
+///
+/// Call this from the ingestion path whenever a `TurnCompleted` (or
+/// `TurnFailed`/`TurnCancelled`) event is observed for a thread. Returns:
+/// - `Ok(Some(session_id))` when a queued turn was drained and dispatched,
+/// - `Ok(None)` when the thread had no queued turn (the common case),
+/// - `Err(_)` when a queued turn was dequeued but the dispatch failed. The
+///   turn is NOT re-queued on failure (the caller may retry by re-issuing
+///   `DispatchQueuedTurn`).
+///
+/// `thread_id` is the owning thread of the completed turn (the same value the
+/// ingestion reactor resolves for activity-scoping). The completed `turn_id`
+/// is accepted for logging correlation only — the queue is keyed by thread.
+pub async fn dispatch_queued_turn_after_completion(
+    reactor: &ProviderCommandReactor,
+    thread_id: EntityId,
+    completed_turn_id: EntityId,
+    adapter: &syncode_provider::registry::SharedAdapter,
+) -> Result<Option<String>, CommandReactorError> {
+    // Fast path: nothing queued for this thread → no allocation, no dispatch.
+    if !reactor.turn_queue().has_queued(&thread_id.as_str()).await {
+        return Ok(None);
+    }
+    tracing::info!(
+        thread_id = %thread_id.as_str(),
+        completed_turn_id = %completed_turn_id.as_str(),
+        "draining queued turn after turn completion"
+    );
+    reactor
+        .dispatch_next_queued_turn(thread_id, adapter)
+        .await
 }
 
 // ---------------------------------------------------------------------------

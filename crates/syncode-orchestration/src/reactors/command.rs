@@ -10,6 +10,8 @@
 //! - Command::PauseThread → adapter.interrupt() all sessions
 //! - Command::CancelThread → adapter.stop_session() all sessions
 
+use std::collections::{HashMap, VecDeque};
+
 use syncode_core::EntityId;
 use syncode_provider::{
     ProviderCapability, ProviderEvent, ProviderRequest, SessionContext, SessionIdentity,
@@ -27,6 +29,100 @@ pub struct CommandReaction {
     pub session_id: Option<String>,
     /// Provider events collected during execution (stub for now)
     pub events: Vec<ProviderEvent>,
+}
+
+// ---------------------------------------------------------------------------
+// P0-7: Queued turn pipeline
+// ---------------------------------------------------------------------------
+
+/// A turn waiting for the prior in-flight turn on its thread to complete
+/// before it can be dispatched to the provider.
+///
+/// The queued-turn pipeline (P0-7) guarantees no two turns for the same
+/// thread run simultaneously: when [`Command::DispatchQueuedTurn`] arrives
+/// while the thread already has an active `Processing` session, the turn is
+/// parked here instead of dispatched, and [`crate::reactors::ingestion`]
+/// drains the next entry when the in-flight turn's `TurnCompleted` event
+/// flows through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedTurn {
+    /// The thread this turn belongs to (the queue key).
+    pub thread_id: EntityId,
+    /// The message the queued turn dispatches (faithful to mcode's
+    /// `thread.turn.dispatch-queued {messageId}`).
+    pub message_id: EntityId,
+    /// Runtime mode stamped on the dispatch.
+    pub runtime_mode: String,
+    /// Interaction mode stamped on the dispatch.
+    pub interaction_mode: String,
+    /// Dispatch mode (e.g. `"queue"`).
+    pub dispatch_mode: String,
+}
+
+/// Per-thread FIFO queue of [`QueuedTurn`]s waiting for the active turn on
+/// their thread to complete.
+///
+/// Lives on [`ProviderCommandReactor`] so the queue survives across commands
+/// and is observable to the ingestion reactor's completion drain. The queue
+/// preserves insertion order within a thread (FIFO) so turns run in the order
+/// the client submitted them.
+#[derive(Debug, Default)]
+pub struct TurnQueue {
+    queues: tokio::sync::RwLock<HashMap<String, VecDeque<QueuedTurn>>>,
+}
+
+impl TurnQueue {
+    /// Create an empty turn queue.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push `turn` onto the back of its thread's queue.
+    pub async fn enqueue(&self, turn: QueuedTurn) {
+        let mut queues = self.queues.write().await;
+        queues
+            .entry(turn.thread_id.as_str())
+            .or_default()
+            .push_back(turn);
+    }
+
+    /// Pop the next queued turn for `thread_id` (FIFO), or `None` if the
+    /// thread has no queued turns.
+    pub async fn dequeue(&self, thread_id: &str) -> Option<QueuedTurn> {
+        let mut queues = self.queues.write().await;
+        let queue = queues.get_mut(thread_id)?;
+        let next = queue.pop_front();
+        // Drop empty per-thread queues so `has_queued` / introspection stay
+        // cheap and the map doesn't accumulate empty entries.
+        if queue.is_empty() {
+            queues.remove(thread_id);
+        }
+        next
+    }
+
+    /// Whether `thread_id` has at least one queued turn waiting.
+    pub async fn has_queued(&self, thread_id: &str) -> bool {
+        self.queues
+            .read()
+            .await
+            .get(thread_id)
+            .is_some_and(|q| !q.is_empty())
+    }
+
+    /// Total queued turns across all threads (observability / tests).
+    pub async fn len(&self) -> usize {
+        self.queues
+            .read()
+            .await
+            .values()
+            .map(|q| q.len())
+            .sum()
+    }
+
+    /// Whether every thread's queue is empty.
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
 }
 
 /// Default working directory stamped on a provider session when the
@@ -94,20 +190,33 @@ impl EnsureOutcome {
 
 /// The command reactor bridges domain commands to provider adapter calls.
 ///
-/// It holds a reference to a `SessionManager` for session lifecycle.
+/// It holds a reference to a `SessionManager` for session lifecycle and a
+/// [`TurnQueue`] for the queued-turn pipeline (P0-7): turns that arrive while
+/// their thread already has an in-flight `Processing` session are parked
+/// rather than dispatched, and drained by the ingestion reactor when the
+/// in-flight turn completes.
 pub struct ProviderCommandReactor {
     session_manager: SessionManager,
+    turn_queue: TurnQueue,
 }
 
 impl ProviderCommandReactor {
     /// Create a new command reactor
     pub fn new(session_manager: SessionManager) -> Self {
-        Self { session_manager }
+        Self {
+            session_manager,
+            turn_queue: TurnQueue::new(),
+        }
     }
 
     /// Get a reference to the session manager
     pub fn session_manager(&self) -> &SessionManager {
         &self.session_manager
+    }
+
+    /// Get a reference to the per-thread turn queue (P0-7).
+    pub fn turn_queue(&self) -> &TurnQueue {
+        &self.turn_queue
     }
 
     /// React to a domain command by invoking the provider adapter.
@@ -255,25 +364,94 @@ impl ProviderCommandReactor {
                 interaction_mode,
                 dispatch_mode,
             } => {
-                // Dispatch the queued turn to the thread's active Processing
-                // session, if any (faithful to mcode
-                // `thread.turn.dispatch-queued` → provider dispatch).
+                // P0-7: queued-turn pipeline. When a session is actively
+                // `Processing` the thread, dispatching a second turn
+                // immediately would collide (two turns for the same thread
+                // running simultaneously). The collision-avoidance policy:
                 //
-                // Steering fast-path: if a session is actively Processing the
-                // thread AND the provider advertises
-                // [`ProviderCapability::Steering`], redirect the in-progress
-                // generation with the queued-turn payload via `steer_turn`
-                // instead of sending a new turn request. When no session is
-                // active or the provider can't steer, fall back to the normal
-                // session-dispatch path.
+                //  - **Steering-capable provider + active session** → redirect
+                //    the in-flight generation via `steer_turn` (P0-3). Steering
+                //    IS collision-avoidance: it redirects the same turn rather
+                //    than starting a parallel one, so the turn is handled
+                //    without queueing.
+                //  - **Non-steering provider + active session** → park the turn
+                //    in the per-thread [`TurnQueue`]. The ingestion reactor
+                //    drains it when the in-flight turn completes
+                //    (`TurnCompleted`), guaranteeing no two turns for the same
+                //    thread run at once.
+                //  - **No active session** → dispatch immediately (nothing to
+                //    collide with).
                 let payload = serde_json::json!({
                     "message_id": message_id.as_str(),
                     "runtime_mode": runtime_mode,
                     "interaction_mode": interaction_mode,
                     "dispatch_mode": dispatch_mode,
                 });
+
+                let active_session_id = self.active_session_id_for_thread(*id).await;
+                let supports_steering = match &active_session_id {
+                    Some(_) => self.provider_supports_steering(adapter).await,
+                    None => false,
+                };
+
+                if let Some(session_id) = &active_session_id
+                    && supports_steering
+                {
+                    // Steering fast-path: redirect the in-flight generation.
+                    let session_id = session_id.clone();
+                    let mut steer_params = match payload {
+                        serde_json::Value::Object(map) => map,
+                        _ => serde_json::Map::new(),
+                    };
+                    steer_params.insert(
+                        "session_id".to_string(),
+                        serde_json::Value::String(session_id.clone()),
+                    );
+                    steer_params.insert(
+                        "method".to_string(),
+                        serde_json::Value::String("turn/dispatch-queued".to_string()),
+                    );
+                    let guard = adapter.read().await;
+                    guard
+                        .steer_turn(&session_id, serde_json::Value::Object(steer_params))
+                        .await
+                        .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
+                    return Ok(CommandReaction {
+                        handled: true,
+                        session_id: Some(session_id),
+                        events: vec![],
+                    });
+                }
+
+                if active_session_id.is_some() {
+                    // Active session but no steering → queue the turn to avoid a
+                    // collision. The ingestion reactor drains it when the
+                    // in-flight turn completes.
+                    self.turn_queue
+                        .enqueue(QueuedTurn {
+                            thread_id: *id,
+                            message_id: *message_id,
+                            runtime_mode: runtime_mode.clone(),
+                            interaction_mode: interaction_mode.clone(),
+                            dispatch_mode: dispatch_mode.clone(),
+                        })
+                        .await;
+                    tracing::info!(
+                        thread_id = %id.as_str(),
+                        queued_depth = self.turn_queue.len().await,
+                        "queued turn parked behind active session"
+                    );
+                    return Ok(CommandReaction {
+                        handled: true,
+                        session_id: None,
+                        events: vec![],
+                    });
+                }
+
+                // No active session → dispatch immediately (nothing to collide
+                // with). This path starts a fresh dispatch via send_request.
                 let session_id = self
-                    .dispatch_or_steer_thread_session(*id, "turn/dispatch-queued", payload, adapter)
+                    .dispatch_to_thread_session(*id, "turn/dispatch-queued", payload, adapter)
                     .await?;
                 Ok(CommandReaction {
                     handled: session_id.is_some(),
@@ -378,64 +556,6 @@ impl ProviderCommandReactor {
             .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
 
         Ok(Some(session_id))
-    }
-
-    /// Dispatch a queued turn to a thread's active session, steering when
-    /// supported.
-    ///
-    /// Used by `DispatchQueuedTurn` to honor the mcode "steer an active turn
-    /// rather than start a new one" semantics:
-    ///
-    /// 1. If a session is actively `Processing` the thread AND the provider
-    ///    advertises [`ProviderCapability::Steering`], call `steer_turn` with
-    ///    the queued-turn payload (no new session, no new request id) — the
-    ///    in-progress generation is redirected.
-    /// 2. Otherwise fall back to [`Self::dispatch_to_thread_session`], which
-    ///    sends a new JSON-RPC request to the active session (or returns
-    ///    `None` if nothing is Processing).
-    ///
-    /// Returns the targeted session id on success, or `None` when no session
-    /// is active for the thread.
-    async fn dispatch_or_steer_thread_session(
-        &self,
-        thread_id: EntityId,
-        method: &str,
-        payload: serde_json::Value,
-        adapter: &syncode_provider::registry::SharedAdapter,
-    ) -> Result<Option<String>, CommandReactorError> {
-        // Steering only applies when a session is actively Processing the
-        // thread (i.e. a turn is in flight that can be redirected).
-        let active_session_id = self.active_session_id_for_thread(thread_id).await;
-
-        if let Some(session_id) = active_session_id
-            && self.provider_supports_steering(adapter).await
-        {
-            let mut steer_params = match payload {
-                serde_json::Value::Object(map) => map,
-                _ => serde_json::Map::new(),
-            };
-            steer_params.insert(
-                "session_id".to_string(),
-                serde_json::Value::String(session_id.clone()),
-            );
-            // Surface the dispatch method so steering-aware providers can
-            // distinguish turn dispatches from other steer sources.
-            steer_params.insert(
-                "method".to_string(),
-                serde_json::Value::String(method.to_string()),
-            );
-
-            let guard = adapter.read().await;
-            guard
-                .steer_turn(&session_id, serde_json::Value::Object(steer_params))
-                .await
-                .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
-            return Ok(Some(session_id));
-        }
-
-        // No active session, or provider can't steer → normal dispatch path.
-        self.dispatch_to_thread_session(thread_id, method, payload, adapter)
-            .await
     }
 
     /// Whether the (shared) adapter advertises [`ProviderCapability::Steering`].
@@ -701,6 +821,46 @@ impl ProviderCommandReactor {
                 events: vec![],
             })
         }
+    }
+
+    /// Drain and dispatch the next queued turn for `thread_id`, if any.
+    ///
+    /// Called by the ingestion reactor (see
+    /// [`crate::reactors::ingestion::dispatch_queued_turn_after_completion`])
+    /// when a turn's `TurnCompleted` event flows through: the in-flight turn
+    /// has finished, so the next parked turn (if one exists) is now free to
+    /// dispatch without colliding. This is the drain half of the P0-7
+    /// queued-turn pipeline — the enqueue half lives in the
+    /// `DispatchQueuedTurn` command arm.
+    ///
+    /// Returns the dispatched session id when a queued turn was drained and
+    /// dispatched, or `None` when the thread had no queued turn. Errors from
+    /// the underlying dispatch propagate; a failed dispatch does NOT re-queue
+    /// the turn (the caller may retry by re-issuing `DispatchQueuedTurn`).
+    pub async fn dispatch_next_queued_turn(
+        &self,
+        thread_id: EntityId,
+        adapter: &syncode_provider::registry::SharedAdapter,
+    ) -> Result<Option<String>, CommandReactorError> {
+        let Some(turn) = self.turn_queue.dequeue(&thread_id.as_str()).await else {
+            return Ok(None);
+        };
+        let payload = serde_json::json!({
+            "message_id": turn.message_id.as_str(),
+            "runtime_mode": turn.runtime_mode,
+            "interaction_mode": turn.interaction_mode,
+            "dispatch_mode": turn.dispatch_mode,
+        });
+        let session_id = self
+            .dispatch_to_thread_session(thread_id, "turn/dispatch-queued", payload, adapter)
+            .await?;
+        if session_id.is_none() {
+            tracing::warn!(
+                thread_id = %thread_id.as_str(),
+                "drained queued turn had no active session to dispatch to; turn dropped"
+            );
+        }
+        Ok(session_id)
     }
 }
 
@@ -1361,8 +1521,12 @@ pub(crate) mod tests {
     }
 
     /// When the provider does NOT support steering but a session is active,
-    /// `DispatchQueuedTurn` falls back to the normal `send_request` dispatch
-    /// path (faithful to the pre-steer behavior).
+    /// `DispatchQueuedTurn` parks the turn in the per-thread queue (P0-7)
+    /// instead of dispatching immediately — this is the collision-avoidance
+    /// contract: no two turns for the same thread run simultaneously. The
+    /// turn is drained and dispatched by the ingestion reactor when the
+    /// in-flight turn completes (see
+    /// `dispatch_queued_turn_after_completion`).
     #[tokio::test]
     async fn dispatch_queued_turn_falls_back_to_send_request_without_capability() {
         let reactor = ProviderCommandReactor::new(SessionManager::new());
@@ -1374,14 +1538,32 @@ pub(crate) mod tests {
 
         let result = dispatch_queued(&reactor, &adapter, thread_id).await;
 
-        assert!(result.handled, "fallback dispatch should still be handled");
-        assert!(result.session_id.is_some(), "session id returned");
+        // Handled (the turn was accepted) but NOT dispatched — it is queued.
+        assert!(
+            result.handled,
+            "queued turn should be handled (accepted into the queue)"
+        );
+        assert!(
+            result.session_id.is_none(),
+            "queued turn must NOT dispatch immediately (collision avoidance)"
+        );
 
-        // The fallback fires turn/dispatch-queued via send_request (no steer).
+        // No send_request fired for the dispatch — only the StartTurn "chat"
+        // request is present. The turn waits in the queue.
         let reqs = requests.lock().unwrap().clone();
-        // [0] = "chat" (StartTurn), [1] = "turn/dispatch-queued" (fallback)
-        assert_eq!(reqs.len(), 2, "fallback should dispatch via send_request");
-        assert_eq!(reqs[1].0, "turn/dispatch-queued");
+        assert_eq!(
+            reqs.len(),
+            1,
+            "queued turn must not fire a dispatch request, got {reqs:?}"
+        );
+        assert_eq!(reqs[0].0, "chat", "only the initial StartTurn request");
+
+        // The turn is parked in the thread's queue, waiting for completion.
+        assert!(
+            reactor.turn_queue().has_queued(&thread_id.as_str()).await,
+            "queued turn must be visible in the per-thread queue"
+        );
+        assert_eq!(reactor.turn_queue().len().await, 1);
     }
 
     /// With no active Processing session, `DispatchQueuedTurn` is not handled
@@ -1406,6 +1588,159 @@ pub(crate) mod tests {
             steers.lock().unwrap().is_empty(),
             "no steer_turn should fire when no session is active"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0-7: Queued-turn pipeline tests
+    // -----------------------------------------------------------------------
+    //
+    // Collision-avoidance contract: when a `DispatchQueuedTurn` arrives while
+    // the thread already has an active `Processing` session, the turn is parked
+    // in the per-thread `TurnQueue` instead of dispatched. The ingestion
+    // reactor drains the queue when the in-flight turn completes.
+
+    /// With an active Processing session and a non-steering provider, two
+    /// `DispatchQueuedTurn` commands on the SAME thread must NOT collide: both
+    /// are parked in the thread's queue in FIFO order, and no dispatch fires.
+    #[tokio::test]
+    async fn p0_7_queued_turns_park_behind_active_session_fifo() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        // Non-steering mock with an active Processing session.
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+        start_turn(&reactor, &adapter, thread_id).await;
+
+        // Dispatch two queued turns back-to-back while the session is busy.
+        let r1 = dispatch_queued(&reactor, &adapter, thread_id).await;
+        let r2 = dispatch_queued(&reactor, &adapter, thread_id).await;
+
+        // Both are accepted (handled) but neither dispatches — both are queued.
+        assert!(r1.handled && r2.handled);
+        assert!(r1.session_id.is_none() && r2.session_id.is_none());
+
+        // The only request on the wire is the initial StartTurn "chat".
+        assert_eq!(requests.lock().unwrap().len(), 1);
+
+        // Both turns are queued for the thread, in FIFO order. Dequeue pops
+        // the first-submitted turn first.
+        assert_eq!(reactor.turn_queue().len().await, 2);
+        let first = reactor.turn_queue().dequeue(&thread_id.as_str()).await.expect("first");
+        let second = reactor.turn_queue().dequeue(&thread_id.as_str()).await.expect("second");
+        assert_eq!(first.thread_id, thread_id);
+        assert_eq!(second.thread_id, thread_id);
+        assert_ne!(
+            first.message_id, second.message_id,
+            "the two queued turns are distinct"
+        );
+        // After draining both, the thread's queue is empty.
+        assert!(!reactor.turn_queue().has_queued(&thread_id.as_str()).await);
+        assert!(reactor.turn_queue().is_empty().await);
+    }
+
+    /// Turns queued for DIFFERENT threads don't collide — each thread has its
+    /// own queue. A turn for thread B dispatches normally (no active session)
+    /// while a turn for thread A is parked behind A's busy session.
+    #[tokio::test]
+    async fn p0_7_per_thread_isolation_no_cross_thread_collision() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+        let thread_a = EntityId::new();
+        let thread_b = EntityId::new();
+
+        // Start a turn on thread A only — A has a busy session, B has none.
+        start_turn(&reactor, &adapter, thread_a).await;
+
+        // Queued turn for A → parked (A's session is busy).
+        let ra = dispatch_queued(&reactor, &adapter, thread_a).await;
+        assert!(ra.handled);
+        assert!(ra.session_id.is_none(), "A's turn must queue");
+
+        // Queued turn for B → no active session on B, so it has nothing to
+        // dispatch to either (handled=false). The key assertion: B is NOT
+        // blocked behind A's queue.
+        let rb = reactor
+            .react(
+                &Command::DispatchQueuedTurn {
+                    id: thread_b,
+                    message_id: EntityId::new(),
+                    runtime_mode: "standard".to_string(),
+                    interaction_mode: "chat".to_string(),
+                    dispatch_mode: "queue".to_string(),
+                },
+                &adapter,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!rb.handled, "B has no session → nothing to dispatch to");
+        assert!(rb.session_id.is_none());
+
+        // Only A has a queued turn; B's queue is untouched.
+        assert!(reactor.turn_queue().has_queued(&thread_a.as_str()).await);
+        assert!(!reactor.turn_queue().has_queued(&thread_b.as_str()).await);
+        assert_eq!(reactor.turn_queue().len().await, 1);
+
+        // No dispatch request fired for either queued turn.
+        assert_eq!(requests.lock().unwrap().len(), 1, "only StartTurn's chat");
+    }
+
+    /// When the ingestion reactor observes a `TurnCompleted` for a thread with
+    /// a parked turn, it drains the queue and dispatches the next turn —
+    /// exercising `dispatch_queued_turn_after_completion` end-to-end.
+    #[tokio::test]
+    async fn p0_7_completion_drains_queued_turn_and_dispatches() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let (adapter, _stopped, requests) = make_recorded_test_mock();
+        let thread_id = EntityId::new();
+
+        // Start a turn (creates a busy Processing session) then park a queued
+        // turn behind it.
+        start_turn(&reactor, &adapter, thread_id).await;
+        let queued = dispatch_queued(&reactor, &adapter, thread_id).await;
+        assert!(queued.handled);
+        assert!(reactor.turn_queue().has_queued(&thread_id.as_str()).await);
+
+        // Simulate the ingestion reactor observing a TurnCompleted for this
+        // thread: the in-flight turn is done, so the parked turn is drained
+        // and dispatched.
+        let completed_turn_id = EntityId::new();
+        let dispatched = crate::reactors::ingestion::dispatch_queued_turn_after_completion(
+            &reactor,
+            thread_id,
+            completed_turn_id,
+            &adapter,
+        )
+        .await
+        .expect("drain should succeed");
+
+        // The drained turn dispatched to the active session.
+        assert!(
+            dispatched.is_some(),
+            "drained turn must dispatch after completion"
+        );
+
+        // The dispatch fired turn/dispatch-queued via send_request.
+        let reqs = requests.lock().unwrap().clone();
+        // [0] = "chat" (StartTurn), [1] = "turn/dispatch-queued" (drained)
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[1].0, "turn/dispatch-queued");
+
+        // The queue is now empty — the turn was drained.
+        assert!(
+            reactor.turn_queue().is_empty().await,
+            "queue must be empty after drain"
+        );
+
+        // A second completion with no queued turn is a no-op (None).
+        let again = crate::reactors::ingestion::dispatch_queued_turn_after_completion(
+            &reactor,
+            thread_id,
+            EntityId::new(),
+            &adapter,
+        )
+        .await
+        .unwrap();
+        assert!(again.is_none(), "no queued turn → no dispatch");
     }
 
     // -----------------------------------------------------------------------
