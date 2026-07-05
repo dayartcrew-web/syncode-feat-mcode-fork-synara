@@ -40,6 +40,10 @@ pub enum ProjectFsError {
     /// A read was attempted against a non-file entry (e.g. a directory).
     #[error("not a file")]
     NotAFile,
+    /// A bare/partial-name lookup ([`resolve_file_by_suffix`]) matched more
+    /// than one file — the caller must supply a more specific query.
+    #[error("ambiguous file reference: multiple matches")]
+    Ambiguous,
     /// An underlying OS I/O error (permissions, disk, etc.).
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -308,6 +312,175 @@ async fn walk_dir(
         }
     }
     Ok(())
+}
+
+// ─── PROJ-4: bare/partial-name resolution ──────────────────────────────────
+//
+// `resolve_file_by_suffix` lets callers ask for a file by a bare or partial
+// name ("project_fs.rs", or even "_fs") instead of a full path. It walks the
+// project root recursively (reusing the symlink-safe traversal discipline
+// from `walk_dir`) and matches a file when the query matches either:
+//   1. the file's full basename, OR
+//   2. a suffix of the file's path relative to root (e.g. "ws/src/project_fs"
+//      matches "crates/syncode-ws/src/project_fs.rs"), OR
+//   3. a suffix of the basename (e.g. "_fs" matches "project_fs.rs").
+// Exactly one match → the full (canonical) path is returned. Zero →
+// [`ProjectFsError::NotFound`]; two or more → [`ProjectFsError::Ambiguous`].
+
+/// Resolve a bare/partial file name to a unique file under `root`.
+///
+/// The `query` is matched against each file's name and relative path. A file
+/// matches when **any** of the following holds (all case-sensitive):
+/// - **basename exact**: `query == "project_fs.rs"` matches that file.
+/// - **path suffix**: `query == "ws/src/project_fs.rs"` matches
+///   `crates/syncode-ws/src/project_fs.rs` (the query is a tail of the
+///   file's relative path — the worktree-idiom "I want the file ending in
+///   this path", letting callers omit leading components).
+/// - **basename substring**: `query == "_fs"` matches `project_fs.rs`
+///   (the partial/bare-name fuzzy case — the query appears anywhere in the
+///   filename). This is what makes a *bare* name like `project_fs` resolve
+///   even when the extension is unknown.
+///
+/// Matching is case-sensitive on all platforms (matching [`search_files`]).
+/// Common noisy dirs (`.git`, `node_modules`) are skipped, and symlinks are
+/// not followed (same discipline as [`search_files`]).
+///
+/// # Errors
+/// - [`ProjectFsError::NotFound`] — no file matched.
+/// - [`ProjectFsError::Ambiguous`] — two or more files matched; the caller
+///   should refine the query (e.g. add a leading dir component).
+/// - [`ProjectFsError::InvalidRoot`] — `root` does not exist.
+pub async fn resolve_file_by_suffix(root: &Path, query: &str) -> Result<PathBuf, ProjectFsError> {
+    let canonical_root = resolve_within_root(root, "")?;
+    let mut matches: Vec<PathBuf> = Vec::new();
+    collect_suffix_matches(&canonical_root, &canonical_root, query, &mut matches).await?;
+    match matches.len() {
+        0 => Err(ProjectFsError::NotFound),
+        1 => Ok(matches.pop().expect("single match")),
+        _ => Err(ProjectFsError::Ambiguous),
+    }
+}
+
+/// Recursive walker that collects files matching `query` by basename or path
+/// suffix. Mirrors the symlink/`walk_dir` discipline of [`walk_dir`]: skips
+/// `.git`/`node_modules`, skips symlink entries entirely (no traversal
+/// through links → no root escape, no loops).
+async fn collect_suffix_matches(
+    root: &Path,
+    dir: &Path,
+    query: &str,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), ProjectFsError> {
+    // An empty query would substring-match every file (garbage result); refuse
+    // it up front so the caller gets NotFound rather than Ambiguous-on-everything.
+    if query.is_empty() {
+        return Ok(());
+    }
+    let mut reader = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = reader.next_entry().await? {
+        let file_name = entry.file_name();
+        let file_name_str = file_name.to_string_lossy();
+        let entry_path = entry.path();
+        // symlink_metadata so we can detect and SKIP symlinks (never follow).
+        let metadata = tokio::fs::symlink_metadata(&entry_path).await?;
+        if metadata.is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            if file_name_str == ".git" || file_name_str == "node_modules" {
+                continue;
+            }
+            Box::pin(collect_suffix_matches(root, &entry_path, query, out)).await?;
+        } else if metadata.is_file() {
+            // basename exact, OR basename substring (partial name), OR
+            // path-suffix (query is a tail of the relative path). All
+            // case-sensitive.
+            let basename_match = file_name_str == query || file_name_str.contains(query);
+            let path_suffix_match = if let Ok(rel) = entry_path.strip_prefix(root) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                rel_str == query || rel_str.ends_with(&format!("/{query}"))
+            } else {
+                false
+            };
+            if basename_match || path_suffix_match {
+                out.push(entry_path);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─── PROJ-4: managed-worktree .git pointer parsing ─────────────────────────
+//
+// A git *worktree* (linked, not the main checkout) has a `.git` **file** (not
+// directory) at its root containing a single line:
+//
+//     gitdir: /abs/path/to/main/.git/worktrees/<name>
+//
+// `parse_git_worktree_pointer` reads that file and returns the referenced
+// gitdir path. Callers use it to resolve the *real* CWD of a managed worktree
+// (the worktree's own directory is `<that gitdir path>` with the trailing
+// `/worktrees/<name>` stripped and replaced by the worktree path recorded in
+// the parent repo — but for our purposes the gitdir pointer itself is the
+// stable handle we expose; the orchestrator resolves the rest).
+
+/// Parse a git worktree `.git` pointer file and return the referenced gitdir
+/// path.
+///
+/// A linked worktree's `.git` is a *file* (not a directory) whose first line
+/// is `gitdir: <path>`. This reads the file, strips the prefix, trims
+/// surrounding whitespace, and returns the path string. Returns
+/// [`ProjectFsError::NotAFile`] if the path is a directory (e.g. a regular
+/// repo's `.git` *directory*), [`ProjectFsError::NotFound`] if the file is
+/// missing or not a valid worktree pointer, and [`ProjectFsError::Io`] for
+/// read failures.
+///
+/// See [`parse_gitdir_line`] for the pure parsing helper (unit-tested without
+/// touching the filesystem).
+pub async fn parse_git_worktree_pointer(git_file: &Path) -> Result<PathBuf, ProjectFsError> {
+    let metadata = tokio::fs::symlink_metadata(git_file)
+        .await
+        .map_err(|e| {
+            // A missing .git file is a "not a worktree" condition, not a
+            // generic IO failure — surface it as NotFound so callers can
+            // distinguish "this dir isn't a linked worktree" (NotFound) from
+            // a genuine permission/disk error (Io).
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ProjectFsError::NotFound
+            } else {
+                ProjectFsError::Io(e)
+            }
+        })?;
+    if !metadata.is_file() {
+        return Err(ProjectFsError::NotAFile);
+    }
+    let content = tokio::fs::read_to_string(git_file).await?;
+    parse_gitdir_line(&content)
+}
+
+/// Pure helper: extract the path from a `gitdir: <path>` line. Extracted so it
+/// can be unit-tested without touching the filesystem (and reused by future
+/// callers that already hold the file content, e.g. a git-status batch parser).
+///
+/// Accepts leading/trailing whitespace and a trailing newline. The first
+/// non-empty line is examined; if it does not start with `gitdir: ` the call
+/// returns [`ProjectFsError::NotFound`] (semantically: "this is not a
+/// worktree pointer file" — the most common reason being it's a regular
+/// `.git` directory or a non-worktree file).
+fn parse_gitdir_line(content: &str) -> Result<PathBuf, ProjectFsError> {
+    let first = content
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .ok_or(ProjectFsError::NotFound)?;
+    let trimmed = first.trim();
+    let Some(rest) = trimmed.strip_prefix("gitdir:") else {
+        return Err(ProjectFsError::NotFound);
+    };
+    let path_str = rest.trim();
+    if path_str.is_empty() {
+        return Err(ProjectFsError::NotFound);
+    }
+    Ok(PathBuf::from(path_str))
 }
 
 // ─── PROJ-3: script discovery + execution ─────────────────────────────────
@@ -964,5 +1137,245 @@ lint:\n\
             .await
             .expect_err("must block traversal");
         assert!(matches!(err, ProjectFsError::PathTraversal), "got {err:?}");
+    }
+
+    // ─── PROJ-4: resolve_file_by_suffix ────────────────────────────────────
+
+    async fn seed_project_tree(root: &Path) {
+        // crates/syncode-ws/src/project_fs.rs
+        // crates/syncode-ws/Cargo.toml
+        // crates/syncode-core/src/lib.rs
+        // README.md
+        tokio::fs::create_dir_all(root.join("crates/syncode-ws/src"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(root.join("crates/syncode-core/src"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            root.join("crates/syncode-ws/src/project_fs.rs"),
+            b"// ws",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(root.join("crates/syncode-ws/Cargo.toml"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("crates/syncode-core/src/lib.rs"), b"// core")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("README.md"), b"# demo").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_file_by_suffix_matches_full_basename() {
+        // AC: bare/partial name → unique file. The most common shape: caller
+        // supplies the full filename and gets back the absolute path.
+        let root = temp_root();
+        let root_path = root.path();
+        seed_project_tree(root_path).await;
+
+        let resolved = resolve_file_by_suffix(root_path, "project_fs.rs")
+            .await
+            .expect("unique match");
+        assert!(
+            resolved.ends_with("crates/syncode-ws/src/project_fs.rs"),
+            "got {resolved:?}"
+        );
+        assert!(resolved.is_absolute(), "should be canonical absolute");
+    }
+
+    #[tokio::test]
+    async fn resolve_file_by_suffix_matches_name_suffix() {
+        // AC: partial name (suffix) → unique file. "_fs" is a tail substring
+        // of "project_fs.rs" and no other file ends in "_fs".
+        let root = temp_root();
+        let root_path = root.path();
+        seed_project_tree(root_path).await;
+
+        let resolved = resolve_file_by_suffix(root_path, "_fs")
+            .await
+            .expect("unique suffix match");
+        assert!(
+            resolved.ends_with("project_fs.rs"),
+            "got {resolved:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_by_suffix_matches_path_suffix() {
+        // Path-suffix form: "ws/src/project_fs.rs" matches the full relative
+        // path "crates/syncode-ws/src/project_fs.rs" because the relative path
+        // ends with "/ws/src/project_fs.rs".
+        let root = temp_root();
+        let root_path = root.path();
+        seed_project_tree(root_path).await;
+
+        let resolved = resolve_file_by_suffix(root_path, "ws/src/project_fs.rs")
+            .await
+            .expect("unique path-suffix match");
+        assert!(
+            resolved.ends_with("crates/syncode-ws/src/project_fs.rs"),
+            "got {resolved:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_by_suffix_returns_not_found_when_no_match() {
+        let root = temp_root();
+        let root_path = root.path();
+        seed_project_tree(root_path).await;
+
+        let err = resolve_file_by_suffix(root_path, "does_not_exist.rs")
+            .await
+            .expect_err("no match");
+        assert!(
+            matches!(err, ProjectFsError::NotFound),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_by_suffix_returns_ambiguous_when_multiple_match() {
+        // AC: error if ambiguous. Seed two files whose names share a suffix.
+        let root = temp_root();
+        let root_path = root.path();
+        tokio::fs::create_dir_all(root_path.join("a")).await.unwrap();
+        tokio::fs::create_dir_all(root_path.join("b")).await.unwrap();
+        tokio::fs::write(root_path.join("a/mod.rs"), b"").await.unwrap();
+        tokio::fs::write(root_path.join("b/mod.rs"), b"").await.unwrap();
+
+        let err = resolve_file_by_suffix(root_path, "mod.rs")
+            .await
+            .expect_err("ambiguous");
+        assert!(
+            matches!(err, ProjectFsError::Ambiguous),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_by_suffix_rejects_invalid_root() {
+        let err = resolve_file_by_suffix(
+            Path::new("/nonexistent/path/that/does/not/exist"),
+            "anything.rs",
+        )
+        .await
+        .expect_err("invalid root");
+        assert!(matches!(err, ProjectFsError::InvalidRoot), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn resolve_file_by_suffix_skips_git_and_node_modules() {
+        // Noisy dirs must not leak matches. Seed a matching file inside
+        // `.git` and `node_modules`; the query must come back NotFound.
+        let root = temp_root();
+        let root_path = root.path();
+        tokio::fs::create_dir_all(root_path.join(".git/refs")).await.unwrap();
+        tokio::fs::write(root_path.join(".git/hidden.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(root_path.join("node_modules/pkg"))
+            .await
+            .unwrap();
+        tokio::fs::write(root_path.join("node_modules/pkg/hidden.rs"), b"")
+            .await
+            .unwrap();
+
+        let err = resolve_file_by_suffix(root_path, "hidden.rs")
+            .await
+            .expect_err("should skip noisy dirs");
+        assert!(
+            matches!(err, ProjectFsError::NotFound),
+            "got {err:?}"
+        );
+    }
+
+    // ─── PROJ-4: parse_git_worktree_pointer ────────────────────────────────
+
+    #[tokio::test]
+    async fn parse_git_worktree_pointer_reads_gitdir_line() {
+        // AC: parse a managed-worktree .git pointer file → resolve real path.
+        // A linked worktree's .git is a FILE containing
+        // "gitdir: /abs/path/to/main/.git/worktrees/<name>".
+        let root = temp_root();
+        let root_path = root.path();
+        let dot_git = root_path.join(".git");
+        tokio::fs::write(
+            &dot_git,
+            "gitdir: /home/user/repo/.git/worktrees/feat-a\n",
+        )
+        .await
+        .unwrap();
+
+        let parsed = parse_git_worktree_pointer(&dot_git)
+            .await
+            .expect("parse ok");
+        assert_eq!(
+            parsed.to_string_lossy(),
+            "/home/user/repo/.git/worktrees/feat-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_git_worktree_pointer_returns_not_a_file_for_directory() {
+        // A regular (non-worktree) checkout has a .git DIRECTORY. The pointer
+        // parser must refuse it (NotAFile) rather than recursing into it.
+        let root = temp_root();
+        let root_path = root.path();
+        let dot_git_dir = root_path.join(".git");
+        tokio::fs::create_dir(&dot_git_dir).await.unwrap();
+
+        let err = parse_git_worktree_pointer(&dot_git_dir)
+            .await
+            .expect_err("directory must error");
+        assert!(
+            matches!(err, ProjectFsError::NotAFile),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_git_worktree_pointer_returns_not_found_for_missing_file() {
+        let root = temp_root();
+        let err = parse_git_worktree_pointer(&root.path().join(".git"))
+            .await
+            .expect_err("missing file");
+        assert!(matches!(err, ProjectFsError::NotFound), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_gitdir_line_extracts_path_after_prefix() {
+        // Pure unit tests for the line parser (no I/O).
+        let p = parse_gitdir_line("gitdir: /x/y/z\n").unwrap();
+        assert_eq!(p.to_string_lossy(), "/x/y/z");
+    }
+
+    #[test]
+    fn parse_gitdir_line_tolerates_surrounding_whitespace() {
+        // Git sometimes writes a trailing newline; some editors add spaces.
+        let p = parse_gitdir_line("  gitdir:   /a/b  \n").unwrap();
+        assert_eq!(p.to_string_lossy(), "/a/b");
+    }
+
+    #[test]
+    fn parse_gitdir_line_rejects_non_pointer_content() {
+        // No `gitdir:` prefix → this isn't a worktree pointer file.
+        let err = parse_gitdir_line("ref: refs/heads/main\n").expect_err("must reject");
+        assert!(matches!(err, ProjectFsError::NotFound), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_gitdir_line_rejects_empty_gitdir() {
+        let err = parse_gitdir_line("gitdir:   \n").expect_err("empty path");
+        assert!(matches!(err, ProjectFsError::NotFound), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_gitdir_line_uses_first_non_empty_line() {
+        // A worktree pointer is always one line; if the file somehow has a
+        // leading blank line, the parser should still find the gitdir line.
+        let p = parse_gitdir_line("\n\ngitdir: /p/q\n").unwrap();
+        assert_eq!(p.to_string_lossy(), "/p/q");
     }
 }
