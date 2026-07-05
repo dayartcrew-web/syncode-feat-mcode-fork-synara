@@ -17,7 +17,6 @@ use syncode_core::{
     ports::{DomainEventPublisher, EventRepository, PortError},
 };
 use syncode_provider::ProviderEvent;
-use tracing::{info, instrument};
 
 use crate::decider::{Command, Decider, DeciderError};
 use crate::projector::{Projector, ReadModelStore};
@@ -198,10 +197,9 @@ fn seed_read_model_from_snapshot(
             }
         }
         None => {
-            tracing::warn!(
-                aggregate = ?id,
-                "snapshot view of unknown kind; skipping cold-start seed"
-            );
+            crate::log::warn(&format!(
+                "snapshot view of unknown kind; skipping cold-start seed (aggregate = {id:?})"
+            ));
         }
     }
 }
@@ -224,10 +222,9 @@ async fn publish_events(publisher: &Arc<dyn DomainEventPublisher>, envelopes: &[
         let data = match serde_json::to_value(&env.event) {
             Ok(value) => value,
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    event_type,
-                    "failed to serialize domain event for push; skipping"
+                crate::log::warn_err(
+                    &e,
+                    &format!("failed to serialize domain event for push; skipping ({event_type})"),
                 );
                 continue;
             }
@@ -236,10 +233,9 @@ async fn publish_events(publisher: &Arc<dyn DomainEventPublisher>, envelopes: &[
             .publish(PUSH_CHANNEL, event_type, &aggregate_id.to_string(), data)
             .await
         {
-            tracing::warn!(
-                error = %e,
-                event_type,
-                "domain-event push failed; event remains persisted"
+            crate::log::warn_err(
+                &e,
+                &format!("domain-event push failed; event remains persisted ({event_type})"),
             );
         }
     }
@@ -370,12 +366,11 @@ impl Orchestrator {
     /// 4. Persist events via EventRepository
     /// 5. Build envelopes and project to in-memory read model
     /// 6. Trigger CommandReactor side effects (if configured)
-    #[instrument(skip(self), fields(command = ?command), level = "info")]
     pub async fn handle_command(
         &self,
         command: Command,
     ) -> Result<CommandResult, OrchestrationError> {
-        info!("Processing command");
+        crate::log::info("Processing command");
 
         // 1. Optimistic-concurrency-controlled decide + append.
         //
@@ -396,7 +391,7 @@ impl Orchestrator {
                 .await
             {
                 Ok(None) => {
-                    info!("No events produced");
+                    crate::log::info("No events produced");
                     return Ok(CommandResult {
                         command,
                         events: vec![],
@@ -412,11 +407,9 @@ impl Orchestrator {
                     expected,
                     actual,
                 })) => {
-                    tracing::warn!(
-                        expected,
-                        actual,
-                        "optimistic-concurrency conflict on append; retrying decide+append"
-                    );
+                    crate::log::warn(&format!(
+                        "optimistic-concurrency conflict on append; retrying decide+append (expected = {expected}, actual = {actual})"
+                    ));
                     last_conflict = Some((expected, actual));
                 }
                 Err(other) => return Err(other),
@@ -462,7 +455,7 @@ impl Orchestrator {
                 .save_snapshot(aggregate_id, state, version)
                 .await
         {
-            tracing::warn!(error = %e, aggregate = ?aggregate_id, version, "failed to save aggregate snapshot");
+            crate::log::warn_err(&e, &format!("failed to save aggregate snapshot (aggregate = {aggregate_id:?}, version = {version})"));
         }
 
         let envelopes: Vec<Envelope> = domain_events
@@ -474,7 +467,7 @@ impl Orchestrator {
             })
             .collect();
 
-        info!(count = envelopes.len(), "Events persisted and projected");
+        crate::log::info(&format!("Events persisted and projected (count = {})", envelopes.len()));
 
         // 5b. Best-effort push of the just-appended command events to the
         //     outbound bus (e.g. WebSocket). Provider-stream events take the
@@ -533,7 +526,7 @@ impl Orchestrator {
                 if let Some(sid) = session_id
                     && let Err(e) = self.spawn_provider_stream_consumer(sid, turn_id).await
                 {
-                    tracing::warn!(error = %e, "failed to spawn provider stream consumer");
+                    crate::log::warn_err(&e, "failed to spawn provider stream consumer");
                 }
             }
         }
@@ -752,11 +745,9 @@ impl Orchestrator {
         Projector::project_many(&tail, &mut read_model);
         drop(read_model);
 
-        info!(
-            count,
-            seeded,
-            "Read model replayed (snapshot-seeded + tail)"
-        );
+        crate::log::info(&format!(
+            "Read model replayed (snapshot-seeded + tail) (count = {count}, seeded = {seeded})"
+        ));
         Ok((count, seeded))
     }
 
@@ -1086,7 +1077,7 @@ pub(crate) async fn consume_provider_stream(
     // Discard the immediate first tick so we don't flush an empty buffer right away.
     flush_timer.tick().await;
 
-    tracing::info!(%session_id, "provider stream consumer started");
+    crate::log::info(&format!("provider stream consumer started: {session_id}"));
 
     loop {
         tokio::select! {
@@ -1103,7 +1094,7 @@ pub(crate) async fn consume_provider_stream(
                 match next {
                     None => break,
                     Some(Err(e)) => {
-                        tracing::warn!(%session_id, error = %e, "provider stream error; stopping consumer");
+                        crate::log::warn_err(&e, &format!("provider stream error; stopping consumer ({session_id})"));
                         return;
                     }
                     Some(Ok(provider_event)) => {
@@ -1145,7 +1136,7 @@ pub(crate) async fn consume_provider_stream(
                         )
                         .await
                         {
-                            tracing::error!(%session_id, error = %e, "stream consumer ingest failed; stopping");
+                            crate::log::error(&format!("stream consumer ingest failed; stopping ({session_id}: {e})"));
                             return;
                         }
                     }
@@ -1159,7 +1150,7 @@ pub(crate) async fn consume_provider_stream(
     if !token_buf.is_empty() {
         ctx.flush_token_batch(token_buf).await;
     }
-    tracing::info!(%session_id, "provider stream consumer ended");
+    crate::log::info(&format!("provider stream consumer ended: {session_id}"));
 }
 
 /// Immutable handles the batching loop needs, bundled so the flush helper stays
@@ -1200,11 +1191,10 @@ impl<'a> StreamCtx<'a> {
         )
         .await
         {
-            tracing::error!(
-                session_id = self.session_id,
-                error = %e,
-                "token-batch flush failed; dropping this batch",
-            );
+            crate::log::error(&format!(
+                "token-batch flush failed; dropping this batch (session_id = {}, error = {e})",
+                self.session_id
+            ));
         }
     }
 }

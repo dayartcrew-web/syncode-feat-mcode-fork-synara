@@ -202,11 +202,11 @@ pub async fn dispatch_queued_turn_after_completion(
     if !reactor.turn_queue().has_queued(&thread_id.as_str()).await {
         return Ok(None);
     }
-    tracing::info!(
-        thread_id = %thread_id.as_str(),
-        completed_turn_id = %completed_turn_id.as_str(),
-        "draining queued turn after turn completion"
-    );
+    crate::log::info(&format!(
+        "draining queued turn after turn completion (thread_id = {}, completed_turn_id = {})",
+        thread_id.as_str(),
+        completed_turn_id.as_str()
+    ));
     reactor
         .dispatch_next_queued_turn(thread_id, adapter)
         .await

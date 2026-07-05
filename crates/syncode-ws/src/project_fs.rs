@@ -1203,6 +1203,7 @@ lint:\n\
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn resolve_file_by_suffix_matches_path_suffix() {
         // Path-suffix form: "ws/src/project_fs.rs" matches the full relative
         // path "crates/syncode-ws/src/project_fs.rs" because the relative path

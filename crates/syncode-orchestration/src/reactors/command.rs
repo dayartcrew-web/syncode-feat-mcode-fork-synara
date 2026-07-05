@@ -476,11 +476,11 @@ impl ProviderCommandReactor {
                             dispatch_mode: dispatch_mode.clone(),
                         })
                         .await;
-                    tracing::info!(
-                        thread_id = %id.as_str(),
-                        queued_depth = self.turn_queue.len().await,
-                        "queued turn parked behind active session"
-                    );
+                    let queued_depth = self.turn_queue.len().await;
+                    crate::log::info(&format!(
+                        "queued turn parked behind active session (thread_id = {}, queued_depth = {queued_depth})",
+                        id.as_str()
+                    ));
                     return Ok(CommandReaction {
                         handled: true,
                         session_id: None,
@@ -944,10 +944,10 @@ impl ProviderCommandReactor {
             .dispatch_to_thread_session(thread_id, "turn/dispatch-queued", payload, adapter)
             .await?;
         if session_id.is_none() {
-            tracing::warn!(
-                thread_id = %thread_id.as_str(),
-                "drained queued turn had no active session to dispatch to; turn dropped"
-            );
+            crate::log::warn(&format!(
+                "drained queued turn had no active session to dispatch to; turn dropped (thread_id = {})",
+                thread_id.as_str()
+            ));
         }
         Ok(session_id)
     }

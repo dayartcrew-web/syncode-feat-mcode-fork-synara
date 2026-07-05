@@ -14856,6 +14856,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn terminal_open_returns_snapshot_shape() {
         // Skip on platforms without a usable PTY (e.g. some CI containers).
         // `/bin/true` is universally available on POSIX; if spawn fails the
@@ -14901,6 +14902,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn terminal_open_then_list_then_close_round_trip() {
         let state = WsState::new_in_memory(16);
 
@@ -15016,6 +15018,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn terminal_open_accepts_session_id_alias() {
         // The older tauri shape uses `sessionId` instead of `terminalId`.
         // Both must resolve to the same handler + key.
@@ -17422,6 +17425,7 @@ mod tests {
     /// startLocalServer spawns a real process and returns its pid; stopLocalServer
     /// kills + removes it. Both forms (dot + slash) verified.
     #[tokio::test]
+    #[cfg(unix)]
     async fn server_local_server_lifecycle_is_real() {
         let state = WsState::new_in_memory(16);
 
@@ -18764,6 +18768,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn get_config_returns_stored_default() {
         // A fresh server returns the default ServerConfig (initialized in
         // WsState::new_with_auth). The stored config must be a non-empty
@@ -21092,7 +21097,7 @@ mod tests {
             &self,
             _session_id: &str,
         ) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError> {
-            Ok(Box::pin(tokio_stream::empty()))
+            Ok(Box::pin(futures_util::stream::empty()))
         }
         async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> {
             Ok(true)

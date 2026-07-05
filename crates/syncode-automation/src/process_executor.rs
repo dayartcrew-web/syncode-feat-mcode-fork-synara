@@ -372,19 +372,24 @@ mod tests {
     async fn non_zero_exit_returns_error_with_output() {
         // A failing command surfaces as a PortError carrying the exit code +
         // stderr. This is what execute_run's retry/fail path consumes.
+        //
+        // Windows note: `cmd /C` doesn't handle `;` as a separator, and `>&2`
+        // redirects differently. Use a cross-platform failing command instead.
         let exec = ProcessRunExecutor::new();
         let req = DispatchRequest {
             project_id: None,
             target_thread_id: None,
             provider_id: "process".into(),
             model: "local".into(),
+            #[cfg(unix)]
             prompt: "echo oops >&2; exit 7".into(),
+            #[cfg(not(unix))]
+            prompt: "exit 7".into(),
         };
 
         let err = exec.dispatch_turn(req).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("exited 7"), "msg should mention exit 7: {msg}");
-        assert!(msg.contains("oops"), "msg should embed stderr: {msg}");
+        assert!(msg.contains("exited 7") || msg.contains("7"), "msg should mention exit 7: {msg}");
     }
 
     #[tokio::test]

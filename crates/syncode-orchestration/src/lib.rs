@@ -9,6 +9,7 @@
 
 pub mod decider;
 pub mod events;
+pub mod log;
 pub mod pipeline;
 pub mod projector;
 pub mod reactors;
