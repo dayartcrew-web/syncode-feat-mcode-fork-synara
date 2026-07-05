@@ -20,8 +20,8 @@ pub use events::DomainEvent;
 pub use pipeline::{CommandResult, OrchestrationError, Orchestrator};
 pub use projector::{Projector, ReadModelStore};
 pub use reactors::{
-    CommandReaction, CommandReactorError, IngestionResult, ProviderCommandReactor,
-    ingest_provider_event,
+    CommandReaction, CommandReactorError, EnsureOutcome, IngestionResult,
+    ProviderCommandReactor, ingest_provider_event,
 };
 pub use read_model::{
     ActivityView, CheckpointView, MessageView, ProjectView, ThreadSessionView, ThreadView, TurnView,
