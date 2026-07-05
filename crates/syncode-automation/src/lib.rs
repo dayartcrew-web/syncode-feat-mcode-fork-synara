@@ -22,6 +22,9 @@ pub use events::{
 pub use in_memory_repo::InMemoryAutomationRepository;
 pub use policies::{CompletionPolicy, MisfirePolicy, RetryPolicy};
 pub use process_executor::ProcessRunExecutor;
-pub use run_reactor::{AutomationRunReactor, BroadcastDomainEventStream, DomainEventStream};
+pub use run_reactor::{
+    AutomationRunReactor, BroadcastDomainEventStream, DomainEventStream, RecoveryReport,
+    ThreadLivenessProbe,
+};
 pub use runner::{AutomationRun, RunStatus};
 pub use scheduler::{Scheduler, SchedulerError};

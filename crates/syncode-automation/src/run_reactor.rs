@@ -38,7 +38,7 @@ use syncode_core::domain::events::DomainEvent;
 use syncode_core::EntityId;
 use tokio::sync::{Mutex, broadcast};
 
-use crate::runner::RunStatus;
+use crate::runner::{AutomationRun, RunStatus};
 use crate::scheduler::Scheduler;
 
 // ─── Domain event stream port ─────────────────────────────────────────────
@@ -84,6 +84,26 @@ impl DomainEventStream for BroadcastDomainEventStream {
     async fn next_event(&self) -> Option<DomainEvent> {
         self.rx.lock().await.recv().await.ok()
     }
+}
+
+// ─── Thread liveness probe (crash-recovery seam) ──────────────────────────
+
+/// A port the reactor uses to ask whether a thread currently has an active
+/// turn / session — i.e. whether a non-terminal run bound to it may still be
+/// making progress and should be *retained* on crash recovery rather than
+/// failed as orphaned.
+///
+/// In production the orchestration engine implements this (e.g. by checking
+/// the thread's session state for an in-progress turn). In tests a
+/// controllable double stands in. The port is async-trait so the real impl
+/// can reach into async orchestration state without blocking.
+#[async_trait::async_trait]
+pub trait ThreadLivenessProbe: Send + Sync {
+    /// `true` if the thread exists and has an active (in-progress) turn or
+    /// session. A non-terminal run bound to a *live* thread is retained on
+    /// recovery; one bound to a thread that is gone or idle (or to no thread
+    /// at all — standalone mode) is failed as orphaned.
+    async fn is_thread_live(&self, thread_id: &str) -> bool;
 }
 
 // ─── Lifecycle event classification ───────────────────────────────────────
@@ -168,6 +188,39 @@ fn is_approval_blocked_status(status: &str) -> bool {
             | "user-input-required"
             | "awaiting-approval"
             | "waiting-for-approval"
+    )
+}
+
+// ─── Crash-recovery report (P2-4) ─────────────────────────────────────────
+
+/// Outcome of [`AutomationRunReactor::recover_pending_runs`]. Surfaces the
+/// counts a host can log on startup so operators can see how many stale runs
+/// were reconciled (and how many were failed as orphaned).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    /// Total non-terminal runs inspected.
+    pub inspected: usize,
+    /// Runs whose thread was live and were left in place (will be driven by
+    /// subsequent reactor events).
+    pub retained: usize,
+    /// Orphaned runs marked `Failed`.
+    pub failed: usize,
+    /// Per-run failures (run id, error message) for runs that errored during
+    /// the transition itself (rare — repository failure). Empty on the happy
+    /// path.
+    pub errors: Vec<(String, String)>,
+}
+
+/// Whether a run status should be considered for crash recovery (i.e. the run
+/// is not terminal and was potentially mid-flight when the previous process
+/// died). Kept as a free function so it can be unit-tested in isolation.
+fn is_recoverable_status(status: &RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Pending
+            | RunStatus::Running
+            | RunStatus::Retrying
+            | RunStatus::WaitingForApproval
     )
 }
 
@@ -341,6 +394,126 @@ impl AutomationRunReactor {
             _ => {}
         }
         run.status = target;
+    }
+
+    // ─── Crash recovery (P2-4) ──────────────────────────────────────────
+    //
+    // On startup a host calls `recover_pending_runs` BEFORE subscribing the
+    // reactor's event stream: any run left in a non-terminal status by a
+    // previous process (crash / kill) is reconciled against the current
+    // orchestration state. Runs whose target thread still has an active turn
+    // are retained (the reactor will pick them up from live events); runs
+    // whose thread is gone, idle, or was never bound (standalone mode) are
+    // failed as orphaned.
+
+    /// Reconcile every non-terminal run in the repository against the live
+    /// orchestration state via `probe`.
+    ///
+    /// Mirrors MCode's `recoverPendingRuns` (startup sweep). For each run in a
+    /// non-terminal status (`Pending`, `Running`, `Retrying`,
+    /// `WaitingForApproval`):
+    /// 1. If the run's automation targets a thread that `probe` reports as
+    ///    live, the run is **retained** (untouched — the reactor will drive it
+    ///    from subsequent events).
+    /// 2. Otherwise (thread gone / idle, or standalone run with no thread
+    ///    binding) the run is **failed** as orphaned with a descriptive error.
+    ///
+    /// A host calls this exactly once, after the scheduler is wired and
+    /// **before** `Self::run` is spawned (so the reactor starts from a clean
+    /// baseline). Safe to call when there are no non-terminal runs (no-op).
+    pub async fn recover_pending_runs(
+        &self,
+        probe: &dyn ThreadLivenessProbe,
+    ) -> RecoveryReport {
+        let mut report = RecoveryReport::default();
+        let orphan_runs = self.collect_non_terminal_runs().await;
+        report.inspected = orphan_runs.len();
+        if orphan_runs.is_empty() {
+            return report;
+        }
+
+        tracing::info!(
+            runs = orphan_runs.len(),
+            "recover_pending_runs: reconciling non-terminal runs"
+        );
+
+        for mut run in orphan_runs {
+            let run_id = run.id.clone();
+            let target_thread = self.run_target_thread(&run).await;
+
+            let live = match &target_thread {
+                Some(thread_id) => probe.is_thread_live(thread_id).await,
+                // Standalone runs (no thread binding) cannot be verified —
+                // treat as orphaned, matching MCode's "no thread to resume" path.
+                None => false,
+            };
+
+            if live {
+                report.retained += 1;
+                tracing::info!(
+                    run_id = %run_id,
+                    thread_id = %target_thread.unwrap(),
+                    "recover_pending_runs: retained live run"
+                );
+                continue;
+            }
+
+            let reason = match &target_thread {
+                Some(tid) => format!(
+                    "orphaned run: target thread {tid} has no active turn after restart"
+                ),
+                None => "orphaned run: no target thread (standalone) after restart".to_string(),
+            };
+            match self.scheduler.fail_run(&run_id, reason.clone()).await {
+                Ok(()) => {
+                    run.status = RunStatus::Failed;
+                    report.failed += 1;
+                    tracing::info!(
+                        run_id = %run_id,
+                        "recover_pending_runs: failed orphaned run"
+                    );
+                }
+                Err(e) => {
+                    report
+                        .errors
+                        .push((run_id, format!("failed to transition run: {e}")));
+                }
+            }
+        }
+
+        tracing::info!(
+            inspected = report.inspected,
+            retained = report.retained,
+            failed = report.failed,
+            errors = report.errors.len(),
+            "recover_pending_runs: complete"
+        );
+        report
+    }
+
+    /// Collect every non-terminal run across all registered automations.
+    ///
+    /// A run is non-terminal if its status is `Pending`, `Running`,
+    /// `Retrying`, or `WaitingForApproval` (i.e. it was mid-flight when the
+    /// previous process died and may need reconciliation).
+    async fn collect_non_terminal_runs(&self) -> Vec<AutomationRun> {
+        let mut out = Vec::new();
+        for def in self.scheduler.list().await {
+            for run in self.scheduler.list_runs(&def.id.as_str()).await {
+                if is_recoverable_status(&run.status) {
+                    out.push(run);
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolve the thread a run is bound to by looking up its automation
+    /// definition's `target_thread_id`. Returns `None` for standalone runs
+    /// (no thread binding) or when the automation definition is gone.
+    async fn run_target_thread(&self, run: &AutomationRun) -> Option<String> {
+        let def = self.scheduler.get(&run.automation_id).await?;
+        def.target_thread_id.clone()
     }
 }
 
@@ -764,5 +937,226 @@ mod tests {
 
         drop(tx);
         let _ = reactor_task.await;
+    }
+
+    // ── Crash-recovery tests (P2-4) ───────────────────────────────────────
+
+    /// A `ThreadLivenessProbe` whose live-set is controllable per-test.
+    struct SetProbe {
+        /// The set of thread-ids reported as live.
+        live: std::collections::HashSet<String>,
+    }
+    impl SetProbe {
+        fn new<I: IntoIterator<Item = String>>(live: I) -> Self {
+            Self {
+                live: live.into_iter().collect(),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl ThreadLivenessProbe for SetProbe {
+        async fn is_thread_live(&self, thread_id: &str) -> bool {
+            self.live.contains(thread_id)
+        }
+    }
+
+    /// Helper: persist a single run for `auto_id` with the given status. The
+    /// automation must already be registered with the scheduler.
+    async fn persist_run(scheduler: &Scheduler, auto_id: &str, status: RunStatus) -> String {
+        let mut run = AutomationRun::new(auto_id.to_string());
+        match status {
+            RunStatus::Pending => {}
+            RunStatus::Running => run.mark_started(),
+            RunStatus::Retrying => {
+                run.mark_started();
+                run.mark_retrying(1);
+            }
+            RunStatus::WaitingForApproval => {
+                run.mark_started();
+                run.mark_waiting_for_approval();
+            }
+            RunStatus::Failed => {
+                run.mark_started();
+                run.mark_failed("prior".into());
+            }
+            RunStatus::Completed => {
+                run.mark_started();
+                run.mark_completed(0, String::new(), String::new());
+            }
+            _ => run.mark_started(),
+        }
+        let run_id = run.id.clone();
+        scheduler
+            .repo
+            .save_run(serde_json::to_value(&run).unwrap())
+            .await
+            .unwrap();
+        run_id
+    }
+
+    /// Helper: register an automation with an optional `target_thread_id`
+    /// (heartbeat mode). Returns the automation id.
+    async fn register_auto(scheduler: &Scheduler, target_thread: Option<&str>) -> String {
+        let mut def = AutomationDef::new(
+            "recover-auto".to_string(),
+            "echo".into(),
+            ScheduleType::Manual,
+        );
+        def.target_thread_id = target_thread.map(String::from);
+        let auto_id = def.id.as_str().to_string();
+        scheduler.register(def).await.unwrap();
+        auto_id
+    }
+
+    /// Test 7 — `is_recoverable_status`: the four mid-flight statuses are
+    /// recoverable; terminal ones are not.
+    #[test]
+    fn is_recoverable_status_classifies_correctly() {
+        assert!(is_recoverable_status(&RunStatus::Pending));
+        assert!(is_recoverable_status(&RunStatus::Running));
+        assert!(is_recoverable_status(&RunStatus::Retrying));
+        assert!(is_recoverable_status(&RunStatus::WaitingForApproval));
+        // Terminal / not recoverable.
+        assert!(!is_recoverable_status(&RunStatus::Completed));
+        assert!(!is_recoverable_status(&RunStatus::Failed));
+        assert!(!is_recoverable_status(&RunStatus::Cancelled));
+        assert!(!is_recoverable_status(&RunStatus::TimedOut));
+        assert!(!is_recoverable_status(&RunStatus::Interrupted));
+    }
+
+    /// Test 8 — orphaned runs are failed: a non-terminal run whose target
+    /// thread is no longer live (crashed mid-flight, restart sees no active
+    /// turn) is marked `Failed`. A standalone run (no thread) is also failed.
+    #[tokio::test]
+    async fn recover_fails_orphaned_runs() {
+        let repo: Arc<dyn AutomationRepository> = Arc::new(InMemoryAutomationRepository::new());
+        let executor: Arc<dyn RunExecutor> = Arc::new(NoopExecutor);
+        let scheduler = Arc::new(Scheduler::new_with_deps(repo, executor));
+
+        // Heartbeat automation whose thread is NOT live (orphaned after crash).
+        let dead_thread = "thread-dead-0001";
+        let hb_auto = register_auto(&scheduler, Some(dead_thread)).await;
+        let hb_run = persist_run(&scheduler, &hb_auto, RunStatus::Running).await;
+
+        // Standalone automation (no target thread) — cannot be verified, fails.
+        let sa_auto = register_auto(&scheduler, None).await;
+        let sa_run = persist_run(&scheduler, &sa_auto, RunStatus::Retrying).await;
+
+        // Recovery with an empty live-set: every run should be orphaned.
+        let (_tx, stream) = MpscDomainEventStream::new();
+        let reactor = AutomationRunReactor::new(stream, scheduler.clone());
+        let probe = SetProbe::new(Vec::<String>::new());
+        let report = reactor.recover_pending_runs(&probe).await;
+
+        assert_eq!(report.inspected, 2, "both non-terminal runs inspected");
+        assert_eq!(report.failed, 2, "both orphaned runs failed");
+        assert_eq!(report.retained, 0);
+        assert!(report.errors.is_empty());
+
+        // Both runs are now Failed with descriptive error messages.
+        let hb = scheduler.get_run(&hb_run).await.unwrap();
+        assert_eq!(hb.status, RunStatus::Failed);
+        assert!(
+            hb.error.as_deref().unwrap().contains("orphaned"),
+            "orphaned run error should mention 'orphaned': {:?}",
+            hb.error
+        );
+        assert!(
+            hb.error.as_deref().unwrap().contains(dead_thread),
+            "error should mention the dead thread id"
+        );
+        let sa = scheduler.get_run(&sa_run).await.unwrap();
+        assert_eq!(sa.status, RunStatus::Failed);
+        assert!(
+            sa.error.as_deref().unwrap().contains("standalone"),
+            "standalone run error should mention 'standalone': {:?}",
+            sa.error
+        );
+    }
+
+    /// Test 9 — retained runs: a non-terminal run whose thread is still live
+    /// is left in place; terminal runs are skipped entirely.
+    #[tokio::test]
+    async fn recover_retains_live_runs_and_skips_terminal() {
+        let repo: Arc<dyn AutomationRepository> = Arc::new(InMemoryAutomationRepository::new());
+        let executor: Arc<dyn RunExecutor> = Arc::new(NoopExecutor);
+        let scheduler = Arc::new(Scheduler::new_with_deps(repo, executor));
+
+        // Live thread — its non-terminal run should be retained.
+        let live_thread = "thread-live-0002";
+        let live_auto = register_auto(&scheduler, Some(live_thread)).await;
+        let live_run = persist_run(&scheduler, &live_auto, RunStatus::Running).await;
+
+        // A Completed run for the same automation — terminal, must be skipped.
+        let done_run = persist_run(&scheduler, &live_auto, RunStatus::Completed).await;
+
+        let (_tx, stream) = MpscDomainEventStream::new();
+        let reactor = AutomationRunReactor::new(stream, scheduler.clone());
+        let probe = SetProbe::new([live_thread.to_string()]);
+        let report = reactor.recover_pending_runs(&probe).await;
+
+        // Only the Running run is inspected (the Completed one is terminal).
+        assert_eq!(report.inspected, 1);
+        assert_eq!(report.retained, 1);
+        assert_eq!(report.failed, 0);
+
+        // The live run is untouched (still Running).
+        assert_eq!(
+            scheduler.get_run(&live_run).await.unwrap().status,
+            RunStatus::Running
+        );
+        // The terminal run is untouched (still Completed).
+        assert_eq!(
+            scheduler.get_run(&done_run).await.unwrap().status,
+            RunStatus::Completed
+        );
+    }
+
+    /// Test 10 — mixed recovery: a mix of live, orphaned, and terminal runs
+    /// produces the expected counts (one retained, one failed, terminal
+    /// ignored).
+    #[tokio::test]
+    async fn recover_mixed_live_orphaned_and_terminal() {
+        let repo: Arc<dyn AutomationRepository> = Arc::new(InMemoryAutomationRepository::new());
+        let executor: Arc<dyn RunExecutor> = Arc::new(NoopExecutor);
+        let scheduler = Arc::new(Scheduler::new_with_deps(repo, executor));
+
+        let live_thread = "thread-live-0003";
+        let dead_thread = "thread-dead-0003";
+
+        let live_auto = register_auto(&scheduler, Some(live_thread)).await;
+        let dead_auto = register_auto(&scheduler, Some(dead_thread)).await;
+
+        // Non-terminal: one live (retain), one orphaned (fail).
+        let live_run = persist_run(&scheduler, &live_auto, RunStatus::WaitingForApproval).await;
+        let dead_run = persist_run(&scheduler, &dead_auto, RunStatus::Running).await;
+        // Terminal: ignored.
+        let done_run = persist_run(&scheduler, &live_auto, RunStatus::Failed).await;
+
+        let (_tx, stream) = MpscDomainEventStream::new();
+        let reactor = AutomationRunReactor::new(stream, scheduler.clone());
+        let probe = SetProbe::new([live_thread.to_string()]);
+        let report = reactor.recover_pending_runs(&probe).await;
+
+        assert_eq!(report.inspected, 2, "only non-terminal runs inspected");
+        assert_eq!(report.retained, 1, "live run retained");
+        assert_eq!(report.failed, 1, "orphaned run failed");
+        assert!(report.errors.is_empty());
+
+        assert_eq!(
+            scheduler.get_run(&live_run).await.unwrap().status,
+            RunStatus::WaitingForApproval,
+            "live run untouched"
+        );
+        assert_eq!(
+            scheduler.get_run(&dead_run).await.unwrap().status,
+            RunStatus::Failed,
+            "dead run failed"
+        );
+        assert_eq!(
+            scheduler.get_run(&done_run).await.unwrap().status,
+            RunStatus::Failed,
+            "terminal run untouched"
+        );
     }
 }
