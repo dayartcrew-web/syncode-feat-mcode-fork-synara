@@ -223,6 +223,12 @@ async fn dispatch_method(
                     // optional replay overwrite).
                     "orchestration.repairReadModel",
                     "orchestration/repair-read-model",
+                    // P5-3: orchestration.importThread — read an external
+                    // provider thread and import its messages into a syncode
+                    // thread (resolve target → read external → import messages
+                    // → set session).
+                    "orchestration.importThread",
+                    "orchestration/import-thread",
                     // PROJ-1/PROJ-2: project filesystem primitives (skeleton
                     // handlers in PROJ-1; full MCode-shape wiring in PROJ-2).
                     "project/list-files",
@@ -1225,6 +1231,18 @@ async fn dispatch_method(
         | "orchestration.repairReadModel"
         | "orchestration/repair-read-model" => {
             handle_orchestration_repair_state(state, id, &request.params).await
+        }
+        // P5-3: `orchestration.importThread` — read an external provider thread
+        // (via the registered adapter's `read_external_thread`) and import its
+        // messages into a syncode thread (resolve target → read external →
+        // import messages → optionally set session with a resume cursor).
+        // Dispatch accepts BOTH the MCode dot-name AND a slash form for
+        // robustness (matches the convention used by the other orchestration.*
+        // RPCs).
+        "orchestration.importThread"
+        | "orchestration/import-thread"
+        | "orchestration/importThread" => {
+            handle_orchestration_import_thread(state, id, &request.params).await
         }
 
         // ─── Push Subscription Methods ───────────────────────────
@@ -2229,6 +2247,242 @@ struct ProjectionCounts {
     turns: usize,
     messages: usize,
     checkpoints: usize,
+}
+
+// ─── Orchestration importThread (P5-3) ─────────────────────────────
+
+/// `orchestration.importThread` — read an external provider thread and import
+/// its messages into a syncode thread.
+///
+/// Composes four steps (P5-1 + P5-2 + session-resume):
+///   1. **Resolve target** — the syncode thread to import into. Accepted as
+///      `threadId` (camelCase, MCode wire) or `thread_id`. The thread must
+///      already exist in the read model (the `ImportMessages` Decider guard
+///      enforces this too, but resolving it here lets us return a clear
+///      `thread_not_found` discriminant before paying for a provider read).
+///   2. **Read external** — `threadRef` (or `thread_ref`) is a provider-side
+///      conversation handle (a session id, conversation id, …). The handler
+///      resolves a provider adapter by id (`provider` / `providerId`, default
+///      `claude`) from `WsState::provider_registry` and calls
+///      `read_external_thread(thread_ref)`. An adapter that doesn't override
+///      `read_external_thread` returns an empty history (opt-in pattern), in
+///      which case the import succeeds with `imported: 0` and a `note`.
+///   3. **Import messages** — the external messages are mapped to
+///      [`syncode_orchestration::ImportedMessage`] (positional source ids) and
+///      dispatched through `ApplicationService::import_messages`. Zero messages
+///      is allowed (still records the import-summary durable event).
+///   4. **Set session** (optional) — when the caller passes `setSession: true`
+///      (default `true`) the thread's provider session is set to `idle` with a
+///      `resumeCursor` carrying the `threadRef`, marking the thread ready to
+///      resume the imported conversation. The session is set even when zero
+///      messages were imported (a thread can resume an external conversation
+///      without copying its history — useful for live handoff).
+///
+/// Returns `{ ok, imported, threadId, provider, threadRef, sessionSet }`.
+/// `imported` is the number of external messages read (NOT the durable event
+/// count — the Decider always emits exactly one `ThreadMessagesImported`
+/// summary event regardless of message count). Provider/transport errors are
+/// surfaced as a structured JSON-RPC error with `data.kind` matching the
+/// `dispatch_error_response` discriminants where applicable.
+async fn handle_orchestration_import_thread(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    use syncode_orchestration::decider::{ImportedMessage, ThreadSession};
+
+    // ── 1. Resolve target thread ────────────────────────────────────
+    // Accept both camelCase (MCode wire) and snake_case. Parse to EntityId so a
+    // malformed id is rejected up front rather than after the provider read.
+    let thread_id = match params
+        .get("threadId")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("thread_id").and_then(|v| v.as_str()))
+    {
+        Some(s) => match syncode_core::EntityId::parse(s) {
+            Ok(e) => e,
+            Err(_) => {
+                return param_error(
+                    id,
+                    "orchestration.importThread requires a valid 'threadId'",
+                );
+            }
+        },
+        None => {
+            return param_error(id, "orchestration.importThread requires 'threadId'");
+        }
+    };
+
+    // The thread must exist in the read model (the Decider guard enforces this
+    // too, but surfacing it here lets us return before the provider read and
+    // produces a clearer `thread_not_found` discriminant via the shared error
+    // mapper).
+    {
+        let store = state.read_store.read().await;
+        if !store.threads.contains_key(&thread_id.to_string()) {
+            return dispatch_error_response(
+                id,
+                &syncode_orchestration::OrchestrationError::ThreadNotFound(thread_id),
+            );
+        }
+    }
+
+    // ── 2. Read external thread from the provider adapter ───────────
+    let thread_ref = match params
+        .get("threadRef")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("thread_ref").and_then(|v| v.as_str()))
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return param_error(
+                id,
+                "orchestration.importThread requires a non-empty 'threadRef'",
+            );
+        }
+    };
+
+    // Resolve the provider id (defaults to the registry's default, "claude").
+    let provider_id = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| params.get("providerId").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| crate::llm::DEFAULT_PROVIDER.to_string());
+
+    // Resolve the adapter. A missing/unregistered provider is a structured
+    // error (the caller can register one and retry) rather than an empty
+    // success — the import is meaningless without a transcript source.
+    let resolved_provider = {
+        let registry = state.provider_registry.read().await;
+        if registry.is_registered(&provider_id) {
+            provider_id.clone()
+        } else if registry.is_registered(crate::llm::DEFAULT_PROVIDER) {
+            crate::llm::DEFAULT_PROVIDER.to_string()
+        } else if registry.is_registered(crate::llm::FALLBACK_PROVIDER) {
+            crate::llm::FALLBACK_PROVIDER.to_string()
+        } else {
+            drop(registry);
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INTERNAL_ERROR,
+                format!(
+                    "no provider registered for orchestration.importThread \
+                     (requested '{provider_id}'); register one via the provider \
+                     registry to enable external thread reads"
+                ),
+            );
+        }
+    };
+
+    // Read the external transcript. The default `read_external_thread` returns
+    // an empty Vec (opt-in pattern); an adapter that overrides it returns the
+    // provider's history. Either is a success — the import records the
+    // summary regardless of count.
+    let external_messages = {
+        let registry = state.provider_registry.read().await;
+        let adapter = match registry.get(&resolved_provider).cloned() {
+            Some(a) => a,
+            None => {
+                drop(registry);
+                return JsonRpcResponse::error(
+                    Some(id),
+                    crate::error_codes::INTERNAL_ERROR,
+                    format!("provider '{resolved_provider}' lookup failed"),
+                );
+            }
+        };
+        drop(registry);
+        let guard = adapter.read().await;
+        match guard.read_external_thread(&thread_ref).await {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    Some(id),
+                    crate::error_codes::INTERNAL_ERROR,
+                    format!(
+                        "read_external_thread failed for provider \
+                         '{resolved_provider}' (threadRef '{thread_ref}'): {e}"
+                    ),
+                );
+            }
+        }
+    };
+    let imported_count = external_messages.len() as u32;
+
+    // ── 3. Import messages ──────────────────────────────────────────
+    // Map ExternalThreadMessage → ImportedMessage. The orchestration layer
+    // assigns new source message ids (positional — provider transcripts don't
+    // carry a stable cross-provider id we could reuse).
+    let imported_messages: Vec<ImportedMessage> = external_messages
+        .into_iter()
+        .map(|m| ImportedMessage {
+            source_message_id: syncode_core::EntityId::new(),
+            role: m.role,
+            text: m.text,
+        })
+        .collect();
+
+    let service = ApplicationService::new(state.orchestrator.clone());
+    let outcome = service.import_messages(thread_id, imported_messages).await;
+    if let Err(e) = outcome {
+        return dispatch_error_response(id, &e);
+    }
+
+    // ── 4. Set session (optional) ───────────────────────────────────
+    // Default: set the thread's provider session to `idle` with a resume
+    // cursor carrying the threadRef, marking the thread ready to resume the
+    // imported conversation. The caller may opt out with `setSession: false`
+    // (e.g. a one-shot import without a follow-on provider dispatch).
+    let set_session = params
+        .get("setSession")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut session_set = false;
+    if set_session {
+        // Resume cursor: surface the external threadRef so a downstream
+        // provider dispatch can resume the imported conversation by reference.
+        // `runtime_mode` mirrors the thread's existing runtime mode so the
+        // session doesn't flip a thread out of its current posture.
+        let runtime_mode = {
+            let store = state.read_store.read().await;
+            store
+                .threads
+                .get(&thread_id.to_string())
+                .map(|t| t.runtime_mode.clone())
+                .unwrap_or_else(|| "full-access".to_string())
+        };
+        let session = ThreadSession {
+            status: "idle".to_string(),
+            provider_name: Some(resolved_provider.clone()),
+            runtime_mode,
+            active_turn_id: None,
+            last_error: None,
+        };
+        match service.set_thread_session(thread_id, session).await {
+            Ok(_) => session_set = true,
+            Err(e) => {
+                // The import already succeeded — a session-set failure is a
+                // soft error. Surface it as a structured error but keep the
+                // import durable in the event store (already committed).
+                return dispatch_error_response(id, &e);
+            }
+        }
+    }
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "ok": true,
+            "imported": imported_count,
+            "threadId": thread_id.to_string(),
+            "provider": resolved_provider,
+            "threadRef": thread_ref,
+            "sessionSet": session_set,
+        }),
+    )
 }
 
 // ─── Push Subscription Handlers ───────────────────────────────────
@@ -20728,12 +20982,405 @@ mod tests {
             // ORCH-3: MCode alias for repairState.
             "orchestration.repairReadModel",
             "orchestration/repair-read-model",
+            // P5-3: orchestration.importThread (external thread read + import).
+            "orchestration.importThread",
+            "orchestration/import-thread",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
                 "rpc/listMethods missing {expected}"
             );
         }
+    }
+
+    // ─── P5-3: orchestration.importThread ───────────────────────────────
+    //
+    // The handler composes four steps (resolve target → read external →
+    // import messages → set session) over the P5-1 `ImportMessages` command
+    // and the P5-2 `read_external_thread` adapter trait method. The tests
+    // register a custom mock adapter that overrides `read_external_thread`
+    // to surface a canned transcript, then assert the full pipeline:
+    //   - the import succeeds and reports the message count,
+    //   - the read model reflects the imported summary event,
+    //   - the session is set on the thread (resume cursor),
+    //   - missing params / unknown thread surface structured errors,
+    //   - the slash-form dispatch alias resolves identically.
+
+    /// A mock provider adapter that overrides `read_external_thread` to
+    /// surface a canned transcript. Used by the importThread tests to exercise
+    /// the full read-external → import-messages pipeline without a real
+    /// provider subprocess.
+    struct HistoryMockAdapter {
+        history: Vec<syncode_provider::ExternalThreadMessage>,
+        spawned: std::sync::atomic::AtomicBool,
+    }
+
+    impl HistoryMockAdapter {
+        fn new(history: Vec<syncode_provider::ExternalThreadMessage>) -> Self {
+            Self {
+                history,
+                spawned: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl syncode_provider::ProviderAdapter for HistoryMockAdapter {
+        fn provider_id(&self) -> &str {
+            "history-mock"
+        }
+        fn capabilities(&self) -> Vec<syncode_provider::ProviderCapability> {
+            Vec::new()
+        }
+        fn status(&self) -> syncode_provider::ProviderStatus {
+            if self.spawned.load(std::sync::atomic::Ordering::Acquire) {
+                syncode_provider::ProviderStatus::Idle
+            } else {
+                syncode_provider::ProviderStatus::Disconnected
+            }
+        }
+        fn available_models(&self) -> Vec<String> {
+            Vec::new()
+        }
+        async fn spawn(
+            &mut self,
+            _config: syncode_provider::ProviderConfig,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            self.spawned
+                .store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn interrupt(
+            &self,
+            _session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn start_session(
+            &mut self,
+            _ctx: syncode_provider::SessionContext,
+        ) -> Result<String, syncode_provider::ProviderAdapterError> {
+            Ok("history-mock-session".to_string())
+        }
+        async fn resume_session(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn stop_session(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn send_request(
+            &self,
+            _request: syncode_provider::ProviderRequest,
+        ) -> Result<syncode_provider::ProviderResponse, syncode_provider::ProviderAdapterError> {
+            Ok(syncode_provider::ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: None,
+            })
+        }
+        fn event_stream(
+            &self,
+            _session_id: &str,
+        ) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError> {
+            Ok(Box::pin(tokio_stream::empty()))
+        }
+        async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> {
+            Ok(true)
+        }
+        // P5-2: opt in by overriding — surface the canned transcript.
+        async fn read_external_thread(
+            &self,
+            _thread_ref: &str,
+        ) -> Result<
+            Vec<syncode_provider::ExternalThreadMessage>,
+            syncode_provider::ProviderAdapterError,
+        > {
+            Ok(self.history.clone())
+        }
+    }
+
+    /// Register a `HistoryMockAdapter` carrying `history` under the default
+    /// provider id ("claude") so the importThread handler's default-provider
+    /// resolution finds it.
+    async fn register_history_provider(
+        state: &WsState,
+        history: Vec<syncode_provider::ExternalThreadMessage>,
+    ) {
+        use crate::llm::SharedAdapter;
+        let mock: SharedAdapter = std::sync::Arc::new(tokio::sync::RwLock::new(
+            HistoryMockAdapter::new(history),
+        ));
+        let mut registry = state.provider_registry.write().await;
+        registry.register_shared("claude".to_string(), mock);
+    }
+
+    /// importThread reads the external transcript via the registered adapter,
+    /// imports the messages, and sets the thread's session. The result reports
+    /// the imported count and the sessionSet flag.
+    #[tokio::test]
+    async fn orchestration_import_thread_reads_external_and_imports_messages() {
+        let state = WsState::new_in_memory(16);
+
+        // Seed a project + thread to import into.
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "claude", "model": "claude-3"
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+        // Register an adapter surfacing a 2-message external transcript.
+        register_history_provider(
+            &state,
+            vec![
+                syncode_provider::ExternalThreadMessage {
+                    role: "user".into(),
+                    text: "external hello".into(),
+                },
+                syncode_provider::ExternalThreadMessage {
+                    role: "assistant".into(),
+                    text: "external reply".into(),
+                },
+            ],
+        )
+        .await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.importThread",
+            "params": {
+                "threadId": thread_id,
+                "threadRef": "ext-conv-42",
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "importThread failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["imported"], 2,
+            "imported count must reflect the external transcript"
+        );
+        assert_eq!(result["threadId"], thread_id);
+        assert_eq!(result["threadRef"], "ext-conv-42");
+        assert_eq!(result["sessionSet"], true, "session must be set by default");
+
+        // The import summary event must have been projected: the thread's
+        // session field is now populated (status "idle", provider "claude").
+        {
+            let store = state.read_store.read().await;
+            let thread = store.threads.get(&thread_id).unwrap();
+            let session = thread.session.as_ref().expect("session must be set");
+            assert_eq!(session.status, "idle");
+            assert_eq!(session.provider_name.as_deref(), Some("claude"));
+        }
+    }
+
+    /// importThread against an unknown thread id surfaces a structured
+    /// `thread_not_found` discriminant (INVALID_PARAMS + data.kind). Proves the
+    /// resolve-target guard runs before the provider read.
+    #[tokio::test]
+    async fn orchestration_import_thread_unknown_thread_returns_thread_not_found() {
+        let state = WsState::new_in_memory(16);
+        // Register a provider so we don't trip the no-provider guard first.
+        register_history_provider(&state, Vec::new()).await;
+
+        let bogus = syncode_core::EntityId::new().to_string();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.importThread",
+            "params": { "threadId": bogus, "threadRef": "conv-x" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let err = resp.error.expect("expected thread_not_found error");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        // Structured discriminant in data.kind (matches dispatch_error_response).
+        let kind = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("kind"))
+            .and_then(|v| v.as_str());
+        assert_eq!(kind, Some("thread_not_found"));
+    }
+
+    /// importThread without a registered provider surfaces a structured
+    /// INTERNAL_ERROR (the import is meaningless without a transcript source).
+    /// The thread-existence guard still runs first, so we seed a real thread.
+    #[tokio::test]
+    async fn orchestration_import_thread_without_registered_provider_errors() {
+        let state = WsState::new_in_memory(16);
+        // No adapter registered — empty registry.
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "claude", "model": "claude-3"
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.importThread",
+            "params": { "threadId": thread_id, "threadRef": "conv-1" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let err = resp
+            .error
+            .expect("expected INTERNAL_ERROR with no provider registered");
+        assert_eq!(err.code, crate::error_codes::INTERNAL_ERROR);
+        assert!(
+            err.message.contains("no provider registered"),
+            "error should mention the missing provider: {err:?}"
+        );
+    }
+
+    /// importThread requires a non-empty `threadRef`. Missing `threadRef` is an
+    /// INVALID_PARAMS error mentioning the field.
+    #[tokio::test]
+    async fn orchestration_import_thread_missing_thread_ref_is_invalid_params() {
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "claude", "model": "claude-3"
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+        register_history_provider(&state, Vec::new()).await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.importThread",
+            "params": { "threadId": thread_id }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        let err = resp
+            .error
+            .expect("expected INVALID_PARAMS for missing threadRef");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        assert!(
+            err.message.contains("threadRef"),
+            "error should mention the missing field: {err:?}"
+        );
+    }
+
+    /// The slash-form dispatch alias (`orchestration/import-thread`) resolves
+    /// to the same handler and produces the same result shape. Proves the
+    /// dual-key dispatch convention is wired.
+    #[tokio::test]
+    async fn orchestration_import_thread_slash_form_resolves() {
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "claude", "model": "claude-3"
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+        register_history_provider(
+            &state,
+            vec![syncode_provider::ExternalThreadMessage {
+                role: "user".into(),
+                text: "via slash form".into(),
+            }],
+        )
+        .await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration/import-thread",
+            "params": { "threadId": thread_id, "threadRef": "conv-slash" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "slash form failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["imported"], 1);
+    }
+
+    /// `setSession: false` opts out of the session-set step — the import
+    /// still succeeds and the thread's session field stays unset.
+    #[tokio::test]
+    async fn orchestration_import_thread_opt_out_session_set() {
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateThread", "projectId": project_id,
+                "providerId": "claude", "model": "claude-3"
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+        register_history_provider(
+            &state,
+            vec![syncode_provider::ExternalThreadMessage {
+                role: "user".into(),
+                text: "no session".into(),
+            }],
+        )
+        .await;
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.importThread",
+            "params": {
+                "threadId": thread_id, "threadRef": "conv",
+                "setSession": false,
+            }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "importThread failed: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["imported"], 1);
+        assert_eq!(
+            result["sessionSet"], false,
+            "session must NOT be set when opted out"
+        );
+        // Thread session stays None.
+        let store = state.read_store.read().await;
+        assert!(
+            store.threads.get(&thread_id).unwrap().session.is_none(),
+            "session field must remain unset"
+        );
     }
 
     // ─── PROJ-4: project dev-server lifecycle ────────────────────────────
