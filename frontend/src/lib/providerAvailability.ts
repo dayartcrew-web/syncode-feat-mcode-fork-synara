@@ -4,6 +4,80 @@ import {
   type ServerProviderStatus,
 } from "@t3tools/contracts";
 
+/**
+ * The full set of {@link ProviderKind} union values as a runtime set.
+ *
+ * The server's provider registry emits statuses for 10 providers
+ * (`syncode_provider::ALL_PROVIDERS`), but only the 8 in the `ProviderKind`
+ * union are real composer providers — `anthropic` and `openai` are upstream
+ * model hosts surfaced inside other providers' model lists, not standalone
+ * picker entries. This set is the runtime gate used by
+ * {@link normalizeServerProviderStatuses} to filter them out.
+ */
+const PICKER_PROVIDER_KINDS: ReadonlySet<string> = new Set<ProviderKind>([
+  "codex",
+  "claudeAgent",
+  "cursor",
+  "gemini",
+  "grok",
+  "kilo",
+  "opencode",
+  "pi",
+]);
+
+/**
+ * Map a raw server-side provider id to the frontend {@link ProviderKind}.
+ *
+ * The server registry uses `"claude"` as the provider id
+ * (`PROVIDER_CLAUDE = "claude"`), but the frontend contract uses
+ * `"claudeAgent"` (the MCode `ProviderKind` union). Every other id is
+ * already identical on both sides. Centralizing this mapping here means the
+ * picker keeps working regardless of which server path emitted the statuses
+ * (`getConfig`, the snapshot, or `refreshProviders`) — defensive against any
+ * path that forgets the mapping.
+ */
+function toPickerProviderKind(rawProvider: string): ProviderKind | null {
+  if (rawProvider === "claude") {
+    return "claudeAgent";
+  }
+  if (PICKER_PROVIDER_KINDS.has(rawProvider)) {
+    return rawProvider as ProviderKind;
+  }
+  // Unknown provider ids (e.g. "anthropic", "openai" — upstream model hosts
+  // that are not standalone picker entries) are dropped.
+  return null;
+}
+
+/**
+ * Normalize a raw server provider-statuses array for picker consumption.
+ *
+ * - Maps `"claude"` → `"claudeAgent"` (the server ↔ frontend id gap).
+ * - Drops entries whose provider id is not a real picker {@link ProviderKind}
+ *   (e.g. `"anthropic"` / `"openai"`, which the server emits but the picker
+ *   has no entry for — they show up inside other providers' model lists).
+ *
+ * Returns a new array; the input is not mutated. Safe to call on every render
+ * (the work is O(n) over the ≤10 statuses).
+ */
+export function normalizeServerProviderStatuses(
+  statuses: readonly ServerProviderStatus[],
+): ServerProviderStatus[] {
+  const result: ServerProviderStatus[] = [];
+  for (const status of statuses) {
+    const pickerKind = toPickerProviderKind(status.provider);
+    if (pickerKind === null) {
+      continue;
+    }
+    if (pickerKind === status.provider) {
+      result.push(status);
+    } else {
+      // Rewrite the provider id to the frontend kind (claude → claudeAgent).
+      result.push({ ...status, provider: pickerKind });
+    }
+  }
+  return result;
+}
+
 export interface ProviderSendAvailability {
   readonly provider: ProviderKind;
   readonly status: ServerProviderStatus | null;
