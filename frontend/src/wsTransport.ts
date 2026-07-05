@@ -143,21 +143,13 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "orchestration.subscribeShell": "orchestration/subscribe-shell",
   "orchestration.getTurnDiff": "orchestration/get-turn-diff",
   "orchestration.getFullThreadDiff": "orchestration/get-full-thread-diff",
-  "orchestration.replayEvents": "orchestration/replay-events",
   "orchestration.repairState": "orchestration/repair-state",
-  // ORCH-3: MCode's `orchestration.repairReadModel` is an alias for the
-  // repairState handler (drift detection + optional replay overwrite). The
-  // backend's dispatch arms accept both forms.
+  // ORCH-3: repairReadModel is an alias for repairState (drift detection + replay)
   "orchestration.repairReadModel": "orchestration/repair-state",
 
   // Orchestration subscribe (ORCH-4): `wsNativeApi.ts` calls these dot-strings
-  // (`subscribeShell` / `subscribeEvents`) to register on the `orchestration`
-  // push channel + receive the initial ShellSnapshot. They map to the served
-  // `orchestration/subscribeShell` / `orchestration/subscribeEvents` handlers,
-  // which register the connection and emit the snapshot baseline. Without this
-  // remap the calls would fall through to the `null` branch and the UI would
-  // never receive live orchestration push frames.
-  "orchestration.subscribeShell": "orchestration/subscribeShell",
+  // to register on the `orchestration` push channel. They map to served
+  // slash-form dispatch keys.
   "orchestration.subscribeEvents": "orchestration/subscribeEvents",
 
   // Git RPCs (T6c-3): the cloned MCode GitPanel calls `git.*` dot-strings
