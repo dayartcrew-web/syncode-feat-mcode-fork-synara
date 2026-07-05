@@ -2854,7 +2854,8 @@ fn project_fs_error_response(
         ProjectFsError::PathTraversal => -32001,
         ProjectFsError::InvalidRoot
         | ProjectFsError::NotFound
-        | ProjectFsError::NotAFile => crate::error_codes::INVALID_PARAMS,
+        | ProjectFsError::NotAFile
+        | ProjectFsError::Ambiguous => crate::error_codes::INVALID_PARAMS,
         ProjectFsError::Io(_) => crate::error_codes::INTERNAL_ERROR,
     };
     JsonRpcResponse::error(Some(id), code, err.to_string())
