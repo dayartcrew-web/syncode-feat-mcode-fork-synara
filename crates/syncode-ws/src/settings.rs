@@ -211,10 +211,7 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
 
     // Build provider status objects for all known providers so the frontend's
     // `subscribeConfig` snapshot (which includes a `providers` array) matches
-    // the `subscribeProviderStatuses` snapshot. Without this, the config
-    // snapshot sends `providers: []` which overwrites the real statuses the
-    // provider-statuses snapshot just delivered, causing "Provider status is
-    // still loading." toast.
+    // the `subscribeProviderStatuses` snapshot.
     let now = chrono::Utc::now().to_rfc3339();
     let default_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
         .iter()
@@ -230,14 +227,43 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
         })
         .collect();
 
+    // Default keybindings: the MCode frontend ships a set of default
+    // ResolvedKeybindingRule entries. We emit a minimal functional set
+    // (command → shortcut) that the UI recognizes. The frontend merges
+    // these with its own internal defaults.
+    let default_keybindings: Vec<Value> = vec![
+        serde_json::json!({"command": "sidebar.toggle", "shortcut": "meta+b"}),
+        serde_json::json!({"command": "chat.send", "shortcut": "meta+enter"}),
+        serde_json::json!({"command": "chat.new", "shortcut": "meta+l"}),
+        serde_json::json!({"command": "search.open", "shortcut": "meta+k"}),
+        serde_json::json!({"command": "terminal.toggle", "shortcut": "meta+`"}),
+    ];
+
+    // Available editors: probe common editors on the system. The frontend
+    // uses this list to populate the "Open in editor" picker.
+    let default_editors: Vec<Value> = {
+        let mut editors = Vec::new();
+        // Probe for common editors via which/where
+        for cmd in &["code", "cursor", "zed", "subl", "idea", "webstorm", "windsurf"] {
+            if which::which(cmd).is_ok() {
+                editors.push(Value::String(cmd.to_string()));
+            }
+        }
+        // Always include terminal as fallback
+        if !editors.contains(&Value::String("terminal".to_string())) {
+            editors.push(Value::String("terminal".to_string()));
+        }
+        editors
+    };
+
     let mut cfg = serde_json::json!({
         "cwd": cwd,
         "worktreesDir": worktrees_dir,
         "keybindingsConfigPath": keybindings_path,
-        "keybindings": [],
+        "keybindings": default_keybindings,
         "issues": [],
         "providers": default_providers,
-        "availableEditors": [],
+        "availableEditors": default_editors,
         "authMode": auth_mode_str,
     });
     // Insert `homeDir` only when HOME was resolvable (the field is optional in
