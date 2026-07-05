@@ -187,7 +187,9 @@ impl ServerSettingsState {
 /// - `issues`: empty array (no keybinding-config validation runs)
 /// - `providers`: empty array (no provider-availability probe)
 /// - `availableEditors`: empty array (no editor detection)
-/// - `homeDir`: `Option<HOME>` (omitted when unset; optional in schema)
+/// - `homeDir`: always populated — `$HOME`/`$USERPROFILE`/`$HOMEDRIVE$HOMEPATH`,
+///   falling back to `cwd` when none are set (the MCode frontend requires a
+///   non-empty `homeDir` for "New chat" / project-picker flows)
 /// - `authMode`: syncode auth mode surfaced from `WsAuthConfig`
 ///   (`unsafe-no-auth` | `remote-reachable` | ...). Not part of the MCode
 ///   `ServerConfig` schema, but harmless as an extra field and useful for
@@ -266,11 +268,19 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
         "availableEditors": default_editors,
         "authMode": auth_mode_str,
     });
-    // Insert `homeDir` only when HOME was resolvable (the field is optional in
-    // the MCode schema; absence deserializes as `undefined`). Single-level
-    // guard — clippy-clean (no collapsible-if nesting).
-    if let (Some(h), Some(obj)) = (home, cfg.as_object_mut()) {
-        obj.insert("homeDir".into(), Value::String(h));
+    // Always populate `homeDir`. When HOME/USERPROFILE are resolvable we use
+    // the real value; otherwise we fall back to `cwd` so the field is never
+    // absent. The MCode frontend treats `homeDir` as required for the
+    // "New chat" / project-picker flows (`useHandleNewChat` errors with
+    // "Home folder is not available yet" when it is null/empty), so omitting
+    // it causes a blank splash screen. Falling back to `cwd` is safe: the
+    // frontend uses `homeDir` only to anchor the project tree root, and the
+    // process cwd is the most reasonable anchor when no home is set.
+    if let Some(obj) = cfg.as_object_mut() {
+        obj.insert(
+            "homeDir".into(),
+            Value::String(home.unwrap_or_else(|| cwd.clone())),
+        );
     }
     cfg
 }
@@ -321,15 +331,49 @@ pub(crate) fn server_cwd() -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
-/// Resolve the user's home directory from `$HOME` (POSIX) or `$USERPROFILE`
-/// (Windows). Returns `None` when neither is set or both are empty/blank —
-/// the `homeDir` field is optional in the MCode schema and is omitted in
-/// that case.
+/// Resolve the user's home directory from the environment, in priority order:
+///   1. `$HOME`            — POSIX (and Windows shells like Git Bash / MSYS2).
+///   2. `$USERPROFILE`     — Windows (e.g. `C:\Users\name`).
+///   3. `$HOMEDRIVE$HOMEPATH` — Windows legacy combo (e.g. `C:` + `\Users\name`).
+///
+/// Returns `None` only when none of these yield a non-empty string. Callers
+/// that must always have a value (e.g. `build_default_server_config`) fall back
+/// to the process cwd on `None`.
 pub(crate) fn server_home_dir() -> Option<String> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    home_dir_from_env(
+        std::env::var("HOME").ok(),
+        std::env::var("USERPROFILE").ok(),
+        std::env::var("HOMEDRIVE").ok(),
+        std::env::var("HOMEPATH").ok(),
+    )
+}
+
+/// Pure resolution logic extracted from [`server_home_dir`] so it can be tested
+/// without mutating the process environment (which is `unsafe` on edition
+/// 2024). Same priority order: HOME → USERPROFILE → HOMEDRIVE+HOMEPATH.
+fn home_dir_from_env(
+    home: Option<String>,
+    userprofile: Option<String>,
+    home_drive: Option<String>,
+    home_path: Option<String>,
+) -> Option<String> {
+    if let Some(h) = home.filter(|s| !s.trim().is_empty()) {
+        return Some(h);
+    }
+    if let Some(p) = userprofile.filter(|s| !s.trim().is_empty()) {
+        return Some(p);
+    }
+    // Windows legacy: `HOMEDRIVE` (e.g. "C:") + `HOMEPATH` (e.g. "\Users\name").
+    // Some launch contexts set these even when `USERPROFILE` is absent. Both
+    // halves must be present and non-empty for a usable path.
+    match (home_drive, home_path) {
+        (Some(drive), Some(path))
+            if !drive.trim().is_empty() && !path.trim().is_empty() =>
+        {
+            Some(format!("{drive}{path}"))
+        }
+        _ => None,
+    }
 }
 
 /// Recursively deep-merge `patch` into `target` (in place).
@@ -404,6 +448,96 @@ mod tests {
         let cfg = build_default_server_config("unsafe-no-auth");
         assert!(!cfg["cwd"].as_str().unwrap().is_empty());
         assert!(cfg["worktreesDir"].as_str().unwrap().contains(".synara"));
+    }
+
+    // ─── PR-4-1: homeDir must always be populated ───────────────────
+    //
+    // The MCode frontend's `useHandleNewChat` errors with "Home folder is
+    // not available yet" when `homeDir` is null/empty, leaving the splash
+    // screen stuck. `build_default_server_config` must therefore always
+    // emit a non-empty `homeDir`, falling back to `cwd` when no home env
+    // var is set.
+
+    #[test]
+    fn default_config_always_has_non_empty_homedir() {
+        // Regardless of the host's env, the field must exist and be non-empty.
+        let cfg = build_default_server_config("unsafe-no-auth");
+        let home_dir = cfg
+            .get("homeDir")
+            .and_then(|v| v.as_str())
+            .expect("homeDir must always be present in the config");
+        assert!(
+            !home_dir.trim().is_empty(),
+            "homeDir must be non-empty: {home_dir:?}"
+        );
+    }
+
+    #[test]
+    fn home_dir_from_env_prefers_home_over_userprofile() {
+        // POSIX HOME wins even when USERPROFILE is also set.
+        let resolved = home_dir_from_env(
+            Some("/posix/home/tester".into()),
+            Some("C:\\win\\tester".into()),
+            None,
+            None,
+        );
+        assert_eq!(resolved.as_deref(), Some("/posix/home/tester"));
+    }
+
+    #[test]
+    fn home_dir_from_env_falls_back_to_userprofile() {
+        // No HOME → USERPROFILE is used (typical native Windows launch).
+        let resolved = home_dir_from_env(
+            None,
+            Some("C:\\Users\\tester".into()),
+            Some("C:".into()),
+            Some("\\Users\\tester".into()),
+        );
+        assert_eq!(resolved.as_deref(), Some("C:\\Users\\tester"));
+    }
+
+    #[test]
+    fn home_dir_from_env_uses_homedrive_homepath_combo() {
+        // No HOME/USERPROFILE → legacy HOMEDRIVE+HOMEPATH combo is joined.
+        // This is the Windows context that previously produced a missing
+        // homeDir (PR-4-1 root cause).
+        let resolved = home_dir_from_env(
+            None,
+            None,
+            Some("C:".into()),
+            Some("\\Users\\tester".into()),
+        );
+        assert_eq!(resolved.as_deref(), Some("C:\\Users\\tester"));
+    }
+
+    #[test]
+    fn home_dir_from_env_returns_none_when_all_absent() {
+        // No env vars at all → None (caller falls back to cwd).
+        let resolved = home_dir_from_env(None, None, None, None);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn home_dir_from_env_ignores_blank_values() {
+        // Whitespace-only / empty strings are treated as unset, so we don't
+        // surface a bogus "   " homeDir to the frontend.
+        let resolved =
+            home_dir_from_env(Some("   ".into()), Some("".into()), Some(" ".into()), None);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn home_dir_from_env_requires_both_halves_of_drive_path_combo() {
+        // Only HOMEDRIVE (no HOMEPATH) is not a usable path → None.
+        assert_eq!(
+            home_dir_from_env(None, None, Some("C:".into()), None),
+            None
+        );
+        // Only HOMEPATH (no HOMEDRIVE) is not a usable path → None.
+        assert_eq!(
+            home_dir_from_env(None, None, None, Some("\\Users\\x".into())),
+            None
+        );
     }
 
     #[test]
