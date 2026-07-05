@@ -1,0 +1,77 @@
+# docker-compose.yml — local orchestration for the Syncode WebSocket server.
+#
+# Brings up the `syncode-ws` server (built by the repo-root Dockerfile) with a
+# bind-mounted data volume so the SQLite DB / resume cursors survive container
+# restarts. Port 3000 is published for the WS + HTTP listener.
+#
+# Usage:
+#   docker compose up --build      # build + run (foreground)
+#   docker compose up -d --build   # build + run (detached)
+#   docker compose logs -f         # tail server logs
+#   docker compose down            # stop + remove the container (keeps ./data)
+#
+# Copy .env.example → .env and adjust before the first `up` if you need to
+# override the defaults documented there. Values set in .env are read by Compose
+# and substituted into the `environment:` block below via ${VAR:-default}.
+#
+# The data volume (./data) holds the SQLite DB and session resume cursors. It is
+# created on first run; nothing here deletes it.
+
+services:
+  syncode-ws:
+    # Build the image from the repo-root Dockerfile (multi-stage Rust + frontend
+    # build → slim runtime image exposing port 3000).
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: syncode-ws
+
+    # Publish the WS + HTTP listener. HOST:CONTAINER.
+    ports:
+      - "3000:3000"
+
+    # Bind-mount the data directory so the SQLite DB and resume cursors persist
+    # across container recreations. The server writes here under /app/data
+    # (SYNCODE_DB=/app/data/syncode.db, set in the Dockerfile).
+    volumes:
+      - ./data:/app/data
+
+    # Environment variables. Each uses ${VAR:-default} so an unset variable in
+    # .env (or the shell) falls back to the documented default rather than
+    # surfacing a Compose "empty" warning. See .env.example for the full docs.
+    environment:
+      SYNCODE_WS_HOST: ${SYNCODE_WS_HOST:-0.0.0.0}
+      SYNCODE_WS_PORT: ${SYNCODE_WS_PORT:-3000}
+      SYNCODE_DB: ${SYNCODE_DB:-/app/data/syncode.db}
+      SYNCODE_DEFAULT_PROVIDER: ${SYNCODE_DEFAULT_PROVIDER:-claude}
+      RUST_LOG: ${RUST_LOG:-syncode_ws=info,info}
+      # Optional directory overrides for skills / plugins (mounted separately
+      # when needed). Left unset, the server resolves them under its own config
+      # dir inside the container.
+      SYNCODE_SKILLS_DIR: ${SYNCODE_SKILLS_DIR:-}
+      SYNCODE_PLUGINS_DIR: ${SYNCODE_PLUGINS_DIR:-}
+
+    # Restart on crash / host reboot; the resume-cursor rehydration path makes
+    # this safe (in-flight sessions are best-effort reattached on startup).
+    restart: unless-stopped
+
+    # Surface structured logs via docker logs.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Process-level liveness: the runtime image (Debian slim) does not ship curl
+    # or wget, so we can't issue an HTTP probe here. `true` just verifies that
+    # PID 1 (tini → server) is still running; Compose marks the container
+    # unhealthy after 5 consecutive probe failures (i.e. the server has exited).
+    # To upgrade to an HTTP healthcheck, add curl/wget to the Dockerfile runtime
+    # stage and switch this to e.g. ["CMD-SHELL", "curl -f http://localhost:3000/ || exit 1"].
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
