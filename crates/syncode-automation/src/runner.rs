@@ -23,6 +23,17 @@ pub enum RunStatus {
     TimedOut,
     /// Retrying after failure
     Retrying,
+    /// The underlying turn is blocked waiting for a human approval / user
+    /// input. Set by the [`AutomationRunReactor`](crate::run_reactor) when it
+    /// observes an approval-requested / user-input-requested lifecycle event
+    /// for the run's target thread. Mirrors MCode's
+    /// `RunStatus.WaitingForApproval`. Resumes to `Running` once the
+    /// approval is responded to.
+    WaitingForApproval,
+    /// The underlying turn was interrupted (user pressed stop) while still
+    /// running. Mirrors MCode's `RunStatus.Interrupted`. Considered terminal
+    /// (the run will not silently resume).
+    Interrupted,
 }
 
 impl RunStatus {
@@ -30,7 +41,11 @@ impl RunStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled | RunStatus::TimedOut
+            RunStatus::Completed
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::TimedOut
+                | RunStatus::Interrupted
         )
     }
 
@@ -50,6 +65,8 @@ impl std::fmt::Display for RunStatus {
             RunStatus::Cancelled => write!(f, "cancelled"),
             RunStatus::TimedOut => write!(f, "timed_out"),
             RunStatus::Retrying => write!(f, "retrying"),
+            RunStatus::WaitingForApproval => write!(f, "waiting_for_approval"),
+            RunStatus::Interrupted => write!(f, "interrupted"),
         }
     }
 }
@@ -158,6 +175,34 @@ impl AutomationRun {
     pub fn mark_retrying(&mut self, attempt: u32) {
         self.attempt = attempt;
         self.status = RunStatus::Retrying;
+    }
+
+    /// Mark the run as blocked waiting for a human approval / user input on
+    /// its target thread. Idempotent — re-marking an already-waiting run is a
+    /// no-op. Set by the [`AutomationRunReactor`](crate::run_reactor) on
+    /// `ApprovalRequested` / `UserInputRequested` lifecycle events.
+    pub fn mark_waiting_for_approval(&mut self) {
+        if self.status != RunStatus::WaitingForApproval {
+            self.status = RunStatus::WaitingForApproval;
+        }
+    }
+
+    /// Resume a previously-blocked run back to `Running` after the pending
+    /// approval / user input was responded to. Only transitions from
+    /// [`RunStatus::WaitingForApproval`]; a no-op for any other status (avoids
+    /// clobbering a run that already reached a terminal state).
+    pub fn resume_from_approval(&mut self) {
+        if self.status == RunStatus::WaitingForApproval {
+            self.status = RunStatus::Running;
+        }
+    }
+
+    /// Mark the run as interrupted (user pressed stop on the underlying turn).
+    /// Terminal — a run that was interrupted does not silently resume.
+    pub fn mark_interrupted(&mut self) {
+        self.status = RunStatus::Interrupted;
+        self.ended_at = Some(chrono::Utc::now().to_rfc3339());
+        self.compute_duration();
     }
 
     /// Mark the run as read (seen) by the user. Idempotent — flipping an
