@@ -4,6 +4,7 @@ import type { ServerProviderStatus } from "@t3tools/contracts";
 import {
   isProviderUsable,
   normalizeProviderStatusForLocalConfig,
+  normalizeServerProviderStatuses,
   providerUnavailableReason,
 } from "./providerAvailability";
 
@@ -136,5 +137,104 @@ describe("providerUnavailableReason", () => {
       "Gemini is not authenticated yet.",
     );
     expect(providerUnavailableReason(BASE_STATUS)).toBe(BASE_STATUS.message);
+  });
+});
+
+describe("normalizeServerProviderStatuses", () => {
+  // PR-4-2: the server registry uses "claude" as the provider id
+  // (PROVIDER_CLAUDE = "claude"), but the frontend contract uses
+  // "claudeAgent". This is the claude → claudeAgent mapping the picker
+  // depends on; without it, Claude shows as "Checking" (no live status).
+  it("maps the server-side claude id to the frontend claudeAgent kind", () => {
+    const input = {
+      provider: "claude",
+      status: "ready",
+      available: true,
+      authStatus: "authenticated",
+      checkedAt: "2026-07-05T10:00:00.000Z",
+    } as unknown as ServerProviderStatus;
+    const result = normalizeServerProviderStatuses([input]);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.provider).toBe("claudeAgent");
+    // Non-provider fields are preserved.
+    expect(result[0]?.available).toBe(true);
+    expect(result[0]?.authStatus).toBe("authenticated");
+  });
+
+  it("drops non-picker providers (anthropic, openai) the server emits", () => {
+    // The server's ALL_PROVIDERS emits 10 entries; the frontend ProviderKind
+    // union only covers 8. anthropic/openai are upstream model hosts surfaced
+    // inside other providers' model lists, not standalone picker entries.
+    // The cast mirrors the runtime reality: the server emits provider ids the
+    // TS union doesn't cover, and normalizeServerProviderStatuses is the gate
+    // that filters them out.
+    const statuses = [
+      {
+        provider: "codex",
+        status: "ready",
+        available: true,
+        authStatus: "authenticated",
+        checkedAt: "2026-07-05T10:00:00.000Z",
+      },
+      {
+        provider: "claude",
+        status: "ready",
+        available: true,
+        authStatus: "authenticated",
+        checkedAt: "2026-07-05T10:00:00.000Z",
+      },
+      {
+        provider: "anthropic",
+        status: "ready",
+        available: true,
+        authStatus: "authenticated",
+        checkedAt: "2026-07-05T10:00:00.000Z",
+      },
+      {
+        provider: "openai",
+        status: "ready",
+        available: true,
+        authStatus: "authenticated",
+        checkedAt: "2026-07-05T10:00:00.000Z",
+      },
+    ] as unknown as ServerProviderStatus[];
+    const result = normalizeServerProviderStatuses(statuses);
+    expect(result.map((s) => s.provider)).toEqual(["codex", "claudeAgent"]);
+  });
+
+  it("passes already-correct frontend ids through unchanged", () => {
+    const statuses: ServerProviderStatus[] = [
+      {
+        provider: "gemini",
+        status: "ready",
+        available: true,
+        authStatus: "authenticated",
+        checkedAt: "2026-07-05T10:00:00.000Z",
+      },
+      {
+        provider: "claudeAgent",
+        status: "ready",
+        available: true,
+        authStatus: "authenticated",
+        checkedAt: "2026-07-05T10:00:00.000Z",
+      },
+    ];
+    const result = normalizeServerProviderStatuses(statuses);
+    expect(result).toEqual(statuses);
+  });
+
+  it("does not mutate the input array", () => {
+    const input = [
+      {
+        provider: "claude",
+        status: "ready",
+        available: true,
+        authStatus: "authenticated",
+        checkedAt: "2026-07-05T10:00:00.000Z",
+      },
+    ] as unknown as ServerProviderStatus[];
+    const snapshot = input.map((s) => ({ ...s }));
+    normalizeServerProviderStatuses(input);
+    expect(input).toEqual(snapshot);
   });
 });

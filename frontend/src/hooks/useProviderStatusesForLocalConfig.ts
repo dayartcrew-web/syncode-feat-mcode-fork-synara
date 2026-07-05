@@ -8,7 +8,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import { getCustomBinaryPathForProvider, useAppSettings } from "../appSettings";
-import { normalizeProviderStatusForLocalConfig } from "../lib/providerAvailability";
+import {
+  normalizeProviderStatusForLocalConfig,
+  normalizeServerProviderStatuses,
+} from "../lib/providerAvailability";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 
 const EMPTY_PROVIDER_STATUSES: ServerProviderStatus[] = [];
@@ -19,7 +22,12 @@ export function useProviderStatusesForLocalConfig(): readonly ServerProviderStat
 
   return useMemo(
     () =>
-      (serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES)
+      // PR-4-2: normalize the raw server statuses first — map "claude" →
+      // "claudeAgent" and drop non-picker providers (anthropic/openai) — so the
+      // downstream per-provider lookup by ProviderKind always matches.
+      normalizeServerProviderStatuses(
+        serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES,
+      )
         .map((status) =>
           normalizeProviderStatusForLocalConfig({
             provider: status.provider,

@@ -99,6 +99,7 @@ import {
   isProviderUsable,
   normalizeCustomBinaryPath,
   normalizeProviderStatusForLocalConfig,
+  normalizeServerProviderStatuses,
   resolveProviderSendAvailability,
 } from "~/lib/providerAvailability";
 import {
@@ -3192,7 +3193,15 @@ export default function ChatView({
   }, [confirmedCustomBinaryPathsByProvider]);
   const providerStatuses = useMemo(
     () =>
-      (serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES)
+      // PR-4-2: normalize the raw server statuses first — map "claude" →
+      // "claudeAgent" and drop non-picker providers (anthropic/openai) — so the
+      // downstream per-provider lookup by ProviderKind always matches. This is
+      // the same normalization useProviderStatusesForLocalConfig applies; the
+      // composer path inlines its own because it also threads confirmed
+      // custom-binary paths.
+      normalizeServerProviderStatuses(
+        serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES,
+      )
         .map((status) => {
           const customBinaryPath = getCustomBinaryPathForProvider(settings, status.provider);
           return normalizeProviderStatusForLocalConfig({
