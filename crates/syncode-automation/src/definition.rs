@@ -82,6 +82,24 @@ pub struct AutomationDef {
     /// How to determine whether a run completed successfully.
     #[serde(default)]
     pub completion_policy: CompletionPolicy,
+    /// Monotonic version counter — bumped on every mutation of the def.
+    ///
+    /// Mirrors MCode's policy-versioning guard: the AI-evaluated completion
+    /// check reloads the def after the (slow) LLM round trip and discards the
+    /// verdict if the version changed while the call was in flight (the
+    /// `stop_when` condition the evaluator read may no longer be the active
+    /// one — re-evaluating against a stale prompt would be misleading). New
+    /// defs start at `1`; consumers that pre-date this field deserialize to
+    /// the default (`1`) via `#[serde(default)]`.
+    #[serde(default = "default_version")]
+    pub version: u64,
+}
+
+/// Default value for [`AutomationDef::version`] — `1` (the first revision).
+/// Used by serde for backward compatibility with payloads serialized before
+/// the `version` field existed.
+fn default_version() -> u64 {
+    1
 }
 
 impl AutomationDef {
@@ -113,6 +131,7 @@ impl AutomationDef {
             next_run_at: None,
             target_thread_id: None,
             completion_policy: CompletionPolicy::default(),
+            version: 1,
         }
     }
 
@@ -162,6 +181,17 @@ impl AutomationDef {
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = Some(secs);
         self
+    }
+
+    /// Record a mutation: bump the version counter and refresh `updated_at`.
+    ///
+    /// Consumers that edit a def in place (e.g. an editor RPC changing the
+    /// `stop_when` condition) should call this so the AI-evaluated completion
+    /// stale-check can detect the change. The version is monotonic and never
+    /// resets.
+    pub fn bump_version(&mut self) {
+        self.version = self.version.saturating_add(1);
+        self.updated_at = chrono::Utc::now().to_rfc3339();
     }
 }
 
@@ -278,5 +308,68 @@ mod tests {
         assert!(json.contains("completionPolicy"));
         let back: AutomationDef = serde_json::from_str(&json).unwrap();
         assert_eq!(back.completion_policy, def.completion_policy);
+    }
+
+    #[test]
+    fn automation_def_version_defaults_to_one() {
+        let def = AutomationDef::new(
+            "v".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        );
+        assert_eq!(def.version, 1, "new defs start at version 1");
+    }
+
+    #[test]
+    fn automation_def_bump_version_is_monotonic() {
+        let mut def = AutomationDef::new(
+            "v".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        );
+        assert_eq!(def.version, 1);
+        def.bump_version();
+        assert_eq!(def.version, 2);
+        def.bump_version();
+        assert_eq!(def.version, 3);
+    }
+
+    #[test]
+    fn automation_def_version_roundtrip_and_legacy_default() {
+        // A def with an explicit version round-trips the value.
+        let mut def = AutomationDef::new(
+            "v".to_string(),
+            "echo".to_string(),
+            ScheduleType::Manual,
+        );
+        def.version = 7;
+        let json = serde_json::to_string(&def).unwrap();
+        let back: AutomationDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, 7);
+
+        // A legacy payload (serialized before `version` existed) deserializes
+        // to the default (1) — no breaking change for existing stored defs.
+        // We omit `version` (the field under test) but include all other
+        // required fields so deserialization succeeds.
+        let legacy = serde_json::json!({
+            "id": def.id.as_str(),
+            "name": "x",
+            "description": "",
+            "enabled": true,
+            "schedule": "manual",
+            "command": "y",
+            "args": [],
+            "env": {},
+            "maxRetries": 3,
+            "retryDelaySecs": 30,
+            "tags": [],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "checkpointBefore": false,
+            "autoCommitAfter": false,
+        });
+        let legacy_def: AutomationDef =
+            serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy_def.version, 1, "legacy defs default to version 1");
     }
 }
