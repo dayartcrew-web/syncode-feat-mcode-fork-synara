@@ -9,6 +9,7 @@ Structured map of the `syncode-feat-mcode-fork-synara` Rust workspace. Read the 
 - [01-architecture-and-deps.md](01-architecture-and-deps.md) — CQRS/ES architecture + crate layering + dependency graph
 - [02-api-surface.md](02-api-surface.md) — WS JSON-RPC methods, Tauri IPC commands, port traits, trait methods
 - [03-test-coverage.md](03-test-coverage.md) — per-crate test counts + coverage gaps
+- [04-frontend-wiring.md](04-frontend-wiring.md) — **REAL LIVE** frontend↔backend wiring map (transport, 113+ RPCs, push events, chat flow, LLM via provider CLI — NOT mock/stub)
 
 ## Per-crate (by layer)
 **L0 kernel:** [syncode-core](crates/syncode-core.md) · [syncode-contracts](crates/syncode-contracts.md)
