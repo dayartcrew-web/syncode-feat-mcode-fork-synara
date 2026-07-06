@@ -15,13 +15,11 @@
  *    DTOs in `../types/*` and the Tier-3 domain types. Calling these succeeds
  *    at runtime (T5 wires the transport).
  *
- * 2. **`UNSERVED_RPC`** — MCode RPC methods Syncode does NOT serve (currently
- *    EMPTY — every actively-called UI RPC reaches a backend handler; see the
- *    per-domain comments below for what each handler returns)
- *    (git ops, terminal, server-meta, provider-discovery, automation, …).
- *    These return `MethodNotFound (-32601)` at runtime (the T5 transport layer
- *    enforces this). They're enumerated here so the cloned UI's imports of
- *    their method names resolve to a typed `string` literal rather than `any`.
+ * 2. **`UNSERVED_RPC`** — MCode RPC methods Syncode does NOT serve. Currently
+ *    EMPTY: every actively-called UI RPC reaches a backend handler (see the
+ *    per-domain comments below for what each handler returns). The union is
+ *    kept so the cloned UI's imports of any MCode method name resolve to a
+ *    typed `string` literal rather than `any`.
  *
  * ## Type-level registry trick
  *
