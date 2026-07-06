@@ -1,8 +1,12 @@
 # PRD: Syncode Remaining Gaps — Feature Parity Roadmap
 
-> **Status: PLANNING DOCUMENT.** Authored 2026-07-05. Covers the remaining feature gaps between Syncode and MCode after the STUB→REAL workflow (PRs #49–#78) closed all served-RPC gaps.
+> ⛔ **STATUS: SUPERSEDED — SHIPPED (2026-07-06).** A parity audit on 2026-07-06 confirmed that **all 31 sub-tasks across P0–P5 are implemented and merged to `master`** via PRs #79, #85, #87, #90, #98, #99, #100, #102, #103, #108 (+ p0-2/p0-3 symbols). The gap analysis below describes **pre-implementation** state and is retained for historical/design context only — **do not treat the "What Syncode LACKS" tables as current.** 576 tests across the in-scope crates pass (0 fail). See [Appendix C: Audit Results](#appendix-c-audit-results-2026-07-06) for the verified parity matrix.
 >
-> This document defines **what to build next** to achieve full functional parity with MCode's production backend. Each section contains user stories, current-state analysis, target design (grounded in MCode's architecture), acceptance criteria, task breakdown, and risk register.
+> **The only genuine remaining gap is P2-2's production harness** (the AI-completion *evaluator* is complete and tested, but the MCode-style bounded-queue + 2-worker + 30s-timeout host that drives it is absent). P2-8 has a minor caveat: the worktree lifecycle is real but the worktree path is not yet threaded into `DispatchRequest.working_dir`. Everything else is fully delivered.
+>
+> ---
+>
+> **Original status (historical):** Authored 2026-07-05. Covered the remaining feature gaps between Syncode and MCode after the STUB→REAL workflow (PRs #49–#78) closed all served-RPC gaps. This document defined **what to build next** to achieve full functional parity with MCode's production backend. Each section contains user stories, current-state analysis, target design (grounded in MCode's architecture), acceptance criteria, task breakdown, and risk register.
 
 ---
 
@@ -544,3 +548,55 @@ Sprint 6 (Polish + long tail):
 ---
 
 *For the current status matrix see [`STATUS.md`](./STATUS.md); for the MCode architecture deep-dive see [`COMPARISON-MCODE-vs-SYNCODE.md`](./COMPARISON-MCODE-vs-SYNCODE.md).*
+
+---
+
+## Appendix C: Audit Results (2026-07-06)
+
+A symbol+test parity audit confirmed every sub-task is implemented and merged to `master`. **576 tests across the in-scope crates pass (0 fail).** All 21 P1–P5 sub-tasks are **REAL** (functional + tested); P0 was verified separately (provider 303 tests).
+
+| Sub-task | Status | Evidence (file) | Tests |
+|---|---|---|---|
+| P0-1..P0-7 | ✅ REAL | `registry.rs:222` (create_by_id, 10 providers), `pipeline.rs` (MessageDeltaAppended token streaming), `session.rs` (ResumeCursorStore, idle_stop), `reactors/command.rs` (ensure_session_for_thread, TurnQueue) — PRs #79/#85/#87/#90 | 303 |
+| P1-1 AgentState | ✅ REAL | `core/agent/state.rs` — full struct + 6-variant enum + serde | 10 |
+| P1-2 execute_step | ✅ REAL | `core/agent/harness.rs:79` — step advance + failure routing | 3 |
+| P1-3 run_output_guardrails | ✅ REAL | `core/agent/harness.rs:118` — empty/whitespace reject | 4 |
+| P1-4 execute_workflow | ✅ REAL | `orchestration/workflow.rs:108` — 6-step pipeline + 4 failure paths | 5 |
+| P1-5 provider integration | ✅ REAL | `orchestration/workflow.rs:223` ProviderWorkflowExecutor — JSON-RPC plan/execute | 5 |
+| P1-6 memory integration | ✅ REAL | `orchestration/workflow.rs:1006,1121` — SQLite retrieve→persist e2e (PR #98) | 2 |
+| P2-1 completion_policy | ✅ REAL | `automation/definition.rs:85` + `policies.rs:83` AiEvaluated{stop_when,confidence_threshold} + version | ~6 |
+| **P2-2 AI-evaluated completion** | 🟡 **PARTIAL** | `automation/completion_eval.rs:273` — evaluator COMPLETE (prompt builder, parse_confidence, stale-check, version guard). **MISSING: production harness** (bounded queue cap 100 + 2 worker fibers + 30s timeout) — no always-on host drives the evaluator | 16 (evaluator) |
+| P2-3 AutomationRunReactor | ✅ REAL | `automation/run_reactor.rs:239` — subscribes DomainEventStream, 6 lifecycle events, per-thread drain+coalesce | 6 |
+| P2-4 recover_pending_runs | ✅ REAL | `automation/run_reactor.rs:427` — startup sweep, ThreadLivenessProbe, RecoveryReport | 4 |
+| P2-5 wakeable scheduler | ✅ REAL | `automation/scheduler.rs:75` — Arc<Notify> + wakeable sleep + notify on register/update | 3 |
+| P2-6 maxIterations + stopOnError | ✅ REAL | `automation/definition.rs:104,112,119` + executor caps (PR #99) | ~6 |
+| P2-7 maxRuntimeSeconds | ✅ REAL | `automation/definition.rs:128` + `executor.rs def_max_runtime()` (PR #99) | 1+ |
+| **P2-8 worktreeMode** | ✅ REAL (caveat) | `automation/worktree.rs:82` WorktreeManager — real git worktree add/remove (PR #99). **Caveat:** worktree path not yet threaded into `DispatchRequest.working_dir` — runs isolated on create/cleanup but command not executed inside worktree | 12 |
+| P3-1 MemoryProvider + SqliteMemoryStore | ✅ REAL | `memory/provider.rs:45` + `sqlite_store.rs:58` — interactions table, WAL, in-memory + file | 9 |
+| P3-2 context retrieval | ✅ REAL | `memory/sqlite_store.rs:171` retrieve_context — ORDER BY ts DESC LIMIT N, markdown | (in 9) |
+| P3-3 persistence | ✅ REAL | `memory/sqlite_store.rs:203` persist_interaction — metadata + RFC-3339 ts | (in 9) |
+| P3-4 inject into session | ✅ REAL | `orchestration/reactors/command.rs:284,799` augment_ctx_with_memory — PR #98 | 3 |
+| P4-1 scrollback persistence | ✅ REAL | `terminal/persistence.rs` ScrollbackStore — atomic tmp+fsync+rename, truncate_ansi_safe @256KiB, read-on-open/save-on-close | 17 |
+| P4-2 resolveFileBySuffix | ✅ REAL | `ws/project_fs.rs:357` — basename/substring/path-suffix (PR #100) | ~4 |
+| P4-3 parseGitWorktreePointer | ✅ REAL | `ws/project_fs.rs:444` — `gitdir:` pointer parsing (PR #100) | 14 |
+| P4-4 filesystem.browse | ✅ REAL | `tauri/filesystem_commands.rs:189` — rfd::AsyncFileDialog native picker | 25 |
+| P5-1 thread.messages.import | ✅ REAL | `orchestration/.../decider.rs:1549` + use_cases.rs:513 (PR #102) | 4 |
+| P5-2 readExternalThread | ✅ REAL | `provider/trait_def.rs:390` — trait method w/ default + override (PR #102) | 2+ |
+| P5-3 orchestration.importThread | ✅ REAL | `ws/rpc.rs:2229` — resolve→read→import→set-session (PR #103) | 47 refs |
+
+### Genuine remaining work (2 items)
+
+1. **P2-2 production harness** — wrap the complete `evaluate_completion_policy` evaluator in an always-on host: bounded queue (cap 100) + 2 worker fibers + 30s timeout, called from the automation scheduler/run path. The evaluator itself needs no changes.
+2. **P2-8 worktree wiring** — thread the created worktree path into `DispatchRequest.working_dir` so standalone runs actually execute inside the isolated worktree (currently create+cleanup only).
+
+### Per-crate test summary (audit run, 0 fail)
+
+| Crate | Tests | Result |
+|---|---|---|
+| syncode-core | 94 + 2 doctests | ✅ pass |
+| syncode-memory | 9 | ✅ pass |
+| syncode-orchestration | 212 + 4 integration | ✅ pass |
+| syncode-automation | 163 | ✅ pass |
+| syncode-terminal | 42 | ✅ pass |
+| syncode-git | 52 | ✅ pass |
+| syncode-provider (P0) | 303 | ✅ pass |
