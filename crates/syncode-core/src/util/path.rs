@@ -217,8 +217,10 @@ pub fn canonicalize_lexical(path: &Path) -> PathBuf {
             s.push(std::ffi::OsStr::new(sep));
             result = PathBuf::from(s);
         } else {
-            // Unix root, or Windows UNC root without a prefix.
-            result.push("");
+            // Unix absolute root: start from "/" so the leading separator is
+            // preserved. `PathBuf::push("")` after `PathBuf::new()` yields an
+            // empty path (no separator), which drops the root on Linux.
+            result = PathBuf::from(if cfg!(windows) { "\\" } else { "/" });
         }
     }
     for part in stack {
@@ -559,9 +561,15 @@ mod lexical_tests {
     fn relative_goes_above_root_absolute_escapes() {
         assert!(relative_goes_above_root("/etc/passwd"));
         assert!(relative_goes_above_root("/"));
-        // Windows-style absolute (the component parser recognizes Prefix).
-        assert!(relative_goes_above_root("C:/Windows"));
-        assert!(relative_goes_above_root("C:\\Windows"));
+        // Windows-style absolute paths are only recognized as absolute on
+        // Windows (the component parser produces Component::Prefix). On Unix,
+        // `C:/Windows` parses as Normal("C:") + Normal("Windows") — a relative
+        // path — so we only assert this where the parser agrees with us.
+        #[cfg(windows)]
+        {
+            assert!(relative_goes_above_root("C:/Windows"));
+            assert!(relative_goes_above_root("C:\\Windows"));
+        }
     }
 
     #[test]
