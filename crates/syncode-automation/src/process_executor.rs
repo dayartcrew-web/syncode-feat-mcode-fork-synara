@@ -389,7 +389,10 @@ mod tests {
 
         let err = exec.dispatch_turn(req).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("exited 7") || msg.contains("7"), "msg should mention exit 7: {msg}");
+        assert!(
+            msg.contains("exited 7") || msg.contains("7"),
+            "msg should mention exit 7: {msg}"
+        );
     }
 
     #[tokio::test]

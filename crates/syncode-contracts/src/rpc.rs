@@ -398,7 +398,10 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"projects\""), "ProjectListResult: {json}");
-        assert!(json.contains("\"rootPath\""), "ProjectSummary camelCase: {json}");
+        assert!(
+            json.contains("\"rootPath\""),
+            "ProjectSummary camelCase: {json}"
+        );
         let back: ProjectListResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.projects.len(), 1);
     }
@@ -455,7 +458,10 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"threads\""), "{json}");
-        assert!(json.contains("\"projectId\""), "ThreadSummary camelCase: {json}");
+        assert!(
+            json.contains("\"projectId\""),
+            "ThreadSummary camelCase: {json}"
+        );
         let back: ThreadListResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.threads.len(), 1);
     }
@@ -493,7 +499,10 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"turns\""), "{json}");
-        assert!(json.contains("\"threadId\""), "TurnSummary camelCase: {json}");
+        assert!(
+            json.contains("\"threadId\""),
+            "TurnSummary camelCase: {json}"
+        );
         let back: TurnListResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.turns.len(), 1);
     }
@@ -704,7 +713,10 @@ mod tests {
             duration_ms: None,
         })
         .unwrap();
-        assert!(json.contains("\"assistantOutput\""), "TurnCompleteParams: {json}");
+        assert!(
+            json.contains("\"assistantOutput\""),
+            "TurnCompleteParams: {json}"
+        );
         assert!(json.contains("\"durationMs\""));
 
         // ThreadCreateParams: project_id, provider_id
@@ -728,7 +740,10 @@ mod tests {
             expires_at: None,
         })
         .unwrap();
-        assert!(json.contains("\"sessionToken\""), "AuthBootstrapResult: {json}");
+        assert!(
+            json.contains("\"sessionToken\""),
+            "AuthBootstrapResult: {json}"
+        );
         assert!(json.contains("\"expiresAt\""));
 
         // AuthStatusResult: requires_authentication
@@ -762,7 +777,10 @@ mod tests {
             snapshot_emitted: false,
         })
         .unwrap();
-        assert!(json.contains("\"snapshotEmitted\""), "PushSubscribeResult: {json}");
+        assert!(
+            json.contains("\"snapshotEmitted\""),
+            "PushSubscribeResult: {json}"
+        );
     }
 
     // ── Sample builders (mirror the snapshot test helpers) ──────────────

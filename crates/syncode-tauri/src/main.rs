@@ -97,8 +97,8 @@ fn main() {
                 default_provider = %ws_config.default_provider,
                 "Booting in-process WS server",
             );
-            let ws_handle = tauri::async_runtime::block_on(ws_setup::boot(&ws_config))
-                .map_err(|e| {
+            let ws_handle =
+                tauri::async_runtime::block_on(ws_setup::boot(&ws_config)).map_err(|e| {
                     // Wrap as a Box<dyn Error> — Tauri's setup expects that.
                     Box::<dyn std::error::Error>::from(e)
                 })?;

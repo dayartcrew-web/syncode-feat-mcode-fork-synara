@@ -21,8 +21,8 @@ pub use authenticator::{
 };
 pub use config::{AuthMode, WsAuthConfig};
 pub use pairing::{
-    InMemoryPairingLinkStore, PairingLink, PairingLinkStore, PairingStoreError,
-    SqlitePairingLinkStore, DEFAULT_PAIRING_TTL,
+    DEFAULT_PAIRING_TTL, InMemoryPairingLinkStore, PairingLink, PairingLinkStore,
+    PairingStoreError, SqlitePairingLinkStore,
 };
 pub use principal::{Principal, Role};
 pub use session::{SessionRegistry, SessionToken};

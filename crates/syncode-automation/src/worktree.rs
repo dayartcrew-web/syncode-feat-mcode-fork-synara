@@ -390,7 +390,9 @@ mod tests {
         );
 
         // Remove it.
-        mgr.remove(&path).await.expect("worktree remove should succeed");
+        mgr.remove(&path)
+            .await
+            .expect("worktree remove should succeed");
         assert!(!path.exists(), "worktree dir should be gone after remove");
 
         cleanup(&repo);
@@ -415,7 +417,10 @@ mod tests {
         // Writing a file in one does not appear in the other.
         std::fs::write(p1.join("marker.txt"), "from-a").unwrap();
         assert!(p1.join("marker.txt").exists());
-        assert!(!p2.join("marker.txt").exists(), "worktrees must be isolated");
+        assert!(
+            !p2.join("marker.txt").exists(),
+            "worktrees must be isolated"
+        );
 
         // Cleanup both.
         mgr.remove(&p1).await.unwrap();

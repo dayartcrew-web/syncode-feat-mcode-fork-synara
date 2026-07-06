@@ -17,8 +17,8 @@ pub mod scheduler;
 pub mod worktree;
 
 pub use completion_eval::{
-    CompletionLlmCall, CompletionResult, CompletionVerdict, NoMatchReason,
-    build_prompt, build_system_and_prompt, evaluate_completion_policy, parse_confidence,
+    CompletionLlmCall, CompletionResult, CompletionVerdict, NoMatchReason, build_prompt,
+    build_system_and_prompt, evaluate_completion_policy, parse_confidence,
 };
 pub use definition::{AutomationDef, AutomationId, ScheduleType};
 pub use events::{

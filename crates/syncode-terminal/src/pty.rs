@@ -222,19 +222,20 @@ impl PtyHandle {
         // `read_output_blocking` directly to avoid it.
         let cap = buf.len();
         let reader = self.reader.clone();
-        let join_result = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, usize), PtyError> {
-            let mut local = vec![0u8; cap];
-            let mut guard = reader
-                .lock()
-                .map_err(|e| PtyError::Io(format!("reader mutex poisoned: {e}")))?;
-            let n = guard
-                .read(&mut local)
-                .map_err(|e| PtyError::Io(e.to_string()))?;
-            local.truncate(n);
-            Ok((local, n))
-        })
-        .await
-        .map_err(|e| PtyError::Io(format!("blocking task failed: {e}")))?;
+        let join_result =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, usize), PtyError> {
+                let mut local = vec![0u8; cap];
+                let mut guard = reader
+                    .lock()
+                    .map_err(|e| PtyError::Io(format!("reader mutex poisoned: {e}")))?;
+                let n = guard
+                    .read(&mut local)
+                    .map_err(|e| PtyError::Io(e.to_string()))?;
+                local.truncate(n);
+                Ok((local, n))
+            })
+            .await
+            .map_err(|e| PtyError::Io(format!("blocking task failed: {e}")))?;
         let (bytes, n) = join_result?;
         buf[..n].copy_from_slice(&bytes);
         Ok(n)

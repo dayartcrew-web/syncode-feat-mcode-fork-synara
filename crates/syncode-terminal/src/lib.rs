@@ -10,6 +10,6 @@ pub mod pty;
 pub mod session;
 
 pub use output::{OutputBuffer, OutputChunk};
-pub use persistence::{ScrollbackStore, MAX_SCROLLBACK_BYTES, truncate_ansi_safe};
+pub use persistence::{MAX_SCROLLBACK_BYTES, ScrollbackStore, truncate_ansi_safe};
 pub use pty::{PtyError, PtyHandle, PtyProcessInfo};
 pub use session::{SessionInfo, SessionManager, TerminalSession};

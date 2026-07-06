@@ -335,7 +335,9 @@ fn str_to_role(s: &str) -> Role {
 }
 
 /// Map a decoded row into a [`PairingLink`].
-fn row_to_link((id, credential, expires_at_str, role_str): (String, String, String, String)) -> PairingLink {
+fn row_to_link(
+    (id, credential, expires_at_str, role_str): (String, String, String, String),
+) -> PairingLink {
     let expires_at = DateTime::parse_from_rfc3339(&expires_at_str)
         .map(|dt| Timestamp::from_datetime(dt.with_timezone(&Utc)))
         .unwrap_or_else(|_| Timestamp::from_datetime(Utc::now()));
@@ -382,7 +384,10 @@ mod tests {
         let store = InMemoryPairingLinkStore::new();
         let link = store.create(Role::Client).await.unwrap();
 
-        assert!(store.revoke(&link.id).await.unwrap(), "first revoke removes");
+        assert!(
+            store.revoke(&link.id).await.unwrap(),
+            "first revoke removes"
+        );
         assert!(
             !store.revoke(&link.id).await.unwrap(),
             "second revoke is a no-op"
@@ -426,11 +431,13 @@ mod tests {
         assert_eq!(resolved.unwrap().id, link.id);
 
         // Bogus credential does not.
-        assert!(store
-            .get_by_credential("nope", now())
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .get_by_credential("nope", now())
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // After expiry, the same credential no longer resolves.
         let expired = store
@@ -496,20 +503,24 @@ mod tests {
 
         // Both present now.
         assert_eq!(store.list(now()).await.unwrap().len(), 2);
-        assert!(store
-            .get_by_credential(&short.credential, now())
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .get_by_credential(&short.credential, now())
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // Advance clock: short link drops out of list + credential lookup.
         let future = now() + Duration::seconds(3);
         assert_eq!(store.list(future).await.unwrap().len(), 1);
-        assert!(store
-            .get_by_credential(&short.credential, future)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .get_by_credential(&short.credential, future)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

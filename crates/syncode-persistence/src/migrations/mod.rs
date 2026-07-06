@@ -45,14 +45,18 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         run(&pool).await.expect("migrations should run clean");
 
-        for table in ["domain_events", "snapshots", "server_config", "server_settings"] {
-            let row: Option<(i64,)> = sqlx::query_as(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-            )
-            .bind(table)
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
+        for table in [
+            "domain_events",
+            "snapshots",
+            "server_config",
+            "server_settings",
+        ] {
+            let row: Option<(i64,)> =
+                sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                    .bind(table)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
             assert!(row.is_some(), "{table} row should exist");
             assert_eq!(row.unwrap().0, 1, "{table} table should be created");
         }

@@ -264,7 +264,10 @@ mod tests {
             thread_count: 0,
         })
         .unwrap();
-        assert!(json.contains("\"rootPath\""), "ProjectSummary camelCase: {json}");
+        assert!(
+            json.contains("\"rootPath\""),
+            "ProjectSummary camelCase: {json}"
+        );
         assert!(json.contains("\"providerId\""));
         assert!(json.contains("\"defaultModel\""));
         assert!(json.contains("\"threadCount\""));
@@ -272,7 +275,10 @@ mod tests {
 
         // TurnSummary: thread_id, user_input, duration_ms, files_modified
         let json = serde_json::to_string(&turn_summary("t1")).unwrap();
-        assert!(json.contains("\"threadId\""), "TurnSummary camelCase: {json}");
+        assert!(
+            json.contains("\"threadId\""),
+            "TurnSummary camelCase: {json}"
+        );
         assert!(json.contains("\"userInput\""));
         assert!(json.contains("\"durationMs\""));
         assert!(json.contains("\"filesModified\""));
@@ -280,7 +286,10 @@ mod tests {
 
         // MessageSummary: turn_id, content_type, token_count, tool_call_id, is_streaming
         let json = serde_json::to_string(&message_summary("m1")).unwrap();
-        assert!(json.contains("\"turnId\""), "MessageSummary camelCase: {json}");
+        assert!(
+            json.contains("\"turnId\""),
+            "MessageSummary camelCase: {json}"
+        );
         assert!(json.contains("\"contentType\""));
         assert!(json.contains("\"tokenCount\""));
         assert!(json.contains("\"toolCallId\""));
@@ -294,7 +303,10 @@ mod tests {
             snapshot_at: "t".into(),
         };
         let json = serde_json::to_string(&snap).unwrap();
-        assert!(json.contains("\"snapshotAt\""), "ShellSnapshot camelCase: {json}");
+        assert!(
+            json.contains("\"snapshotAt\""),
+            "ShellSnapshot camelCase: {json}"
+        );
 
         // ActivitySummary: activity_type
         let act = ActivitySummary {
@@ -307,7 +319,10 @@ mod tests {
             created_at: "t".into(),
         };
         let json = serde_json::to_string(&act).unwrap();
-        assert!(json.contains("\"activityType\""), "ActivitySummary camelCase: {json}");
+        assert!(
+            json.contains("\"activityType\""),
+            "ActivitySummary camelCase: {json}"
+        );
     }
 
     fn thread_summary(id: &str) -> ThreadSummary {

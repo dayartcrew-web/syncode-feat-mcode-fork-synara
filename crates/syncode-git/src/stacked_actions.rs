@@ -196,9 +196,11 @@ impl StackedPipeline {
         // single "done" so subscribers see a clean completion signal.
         let any_failed = all_results.iter().any(|r| !r.success);
         let final_msg = if any_failed {
-            format!("Completed with failures ({} of {} stages failed)",
+            format!(
+                "Completed with failures ({} of {} stages failed)",
                 all_results.iter().filter(|r| !r.success).count(),
-                total)
+                total
+            )
         } else {
             format!("Completed all {total} stages")
         };
@@ -272,10 +274,7 @@ fn execute_action(
                         set_upstream,
                     } => {
                         if *set_upstream {
-                            format!(
-                                "Pushed {} (set upstream to {})",
-                                branch, upstream_branch
-                            )
+                            format!("Pushed {} (set upstream to {})", branch, upstream_branch)
                         } else {
                             format!("Pushed {} to {}", branch, upstream_branch)
                         }
@@ -347,7 +346,11 @@ fn stage_starting_message(action: &StackedAction) -> String {
             format!("Pushing {branch} to {remote}")
         }
         StackedAction::CreatePR { title, base, .. } => {
-            format!("Creating PR '{}' against {}", truncate_to_chars(title, 60), base)
+            format!(
+                "Creating PR '{}' against {}",
+                truncate_to_chars(title, 60),
+                base
+            )
         }
     }
 }
@@ -572,10 +575,33 @@ mod tests {
     #[test]
     fn stage_label_and_starting_message_cover_all_variants() {
         let cases = [
-            (StackedAction::Stage { paths: vec!["a".into()] }, "stage"),
-            (StackedAction::Commit { message: "m".into() }, "commit"),
-            (StackedAction::Push { remote: "origin".into(), branch: "b".into() }, "push"),
-            (StackedAction::CreatePR { title: "t".into(), body: "x".into(), base: "main".into() }, "create_pr"),
+            (
+                StackedAction::Stage {
+                    paths: vec!["a".into()],
+                },
+                "stage",
+            ),
+            (
+                StackedAction::Commit {
+                    message: "m".into(),
+                },
+                "commit",
+            ),
+            (
+                StackedAction::Push {
+                    remote: "origin".into(),
+                    branch: "b".into(),
+                },
+                "push",
+            ),
+            (
+                StackedAction::CreatePR {
+                    title: "t".into(),
+                    body: "x".into(),
+                    base: "main".into(),
+                },
+                "create_pr",
+            ),
         ];
         for (action, expected_label) in cases {
             assert_eq!(stage_label(&action), expected_label);
@@ -628,7 +654,10 @@ mod tests {
         // This call must NOT panic (the core regression check).
         let t = truncate_to_chars(&msg, 60);
         // Result is valid UTF-8 (slice of a valid String) and ≤60 chars.
-        assert!(t.chars().count() <= 60, "truncated result must be ≤60 chars");
+        assert!(
+            t.chars().count() <= 60,
+            "truncated result must be ≤60 chars"
+        );
         // The first 58 ASCII chars are always preserved (they're all 1 byte).
         assert!(t.starts_with(&"a".repeat(58)));
     }
@@ -690,8 +719,12 @@ mod tests {
             });
 
         let mut pipeline = StackedPipeline::new();
-        pipeline.add(StackedAction::Stage { paths: vec!["a.rs".into()] });
-        pipeline.add(StackedAction::Commit { message: "t".into() });
+        pipeline.add(StackedAction::Stage {
+            paths: vec!["a.rs".into()],
+        });
+        pipeline.add(StackedAction::Commit {
+            message: "t".into(),
+        });
 
         let mut events: Vec<ActionProgress> = Vec::new();
         // Drive the future synchronously (execute_with_progress has no real
@@ -739,7 +772,12 @@ mod tests {
         // Percent must be non-decreasing across the sequence.
         let mut prev = 0u8;
         for ev in &events {
-            assert!(ev.percent >= prev, "percent regressed: {:?} after prev {}", ev, prev);
+            assert!(
+                ev.percent >= prev,
+                "percent regressed: {:?} after prev {}",
+                ev,
+                prev
+            );
             prev = ev.percent;
         }
     }

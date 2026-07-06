@@ -359,10 +359,7 @@ impl Scheduler {
                 // 1. Drive a tick now.
                 let dispatched = scheduler.tick(Utc::now()).await;
                 if !dispatched.is_empty() {
-                    tracing::debug!(
-                        count = dispatched.len(),
-                        "scheduler loop tick dispatched"
-                    );
+                    tracing::debug!(count = dispatched.len(), "scheduler loop tick dispatched");
                 }
 
                 // 2. Wakeable sleep: wait for the interval OR a wakeup signal,
@@ -579,10 +576,7 @@ impl Scheduler {
     ///
     /// Used by the [`AutomationRunReactor`](crate::run_reactor) to locate the
     /// run to reconcile when a lifecycle event arrives for a thread.
-    pub async fn find_active_run_for_thread(
-        &self,
-        thread_id: &str,
-    ) -> Option<AutomationRun> {
+    pub async fn find_active_run_for_thread(&self, thread_id: &str) -> Option<AutomationRun> {
         for def in self.list().await {
             if def.target_thread_id.as_deref() == Some(thread_id) {
                 let runs = self.list_runs(&def.id.as_str()).await;

@@ -4,7 +4,7 @@
 
 use chrono::{Duration, Utc};
 use std::sync::Arc;
-use syncode_auth::authenticator::{Authenticator, AuthError, SharedSecretAuthenticator};
+use syncode_auth::authenticator::{Authenticator, SharedSecretAuthenticator};
 use syncode_auth::secret_store::{InMemorySecretStore, SecretStore};
 use syncode_auth::session::SessionRegistry;
 
@@ -23,30 +23,56 @@ fn build_auth(ttl: Duration) -> (SharedSecretAuthenticator, Arc<SessionRegistry>
 
 #[tokio::test]
 async fn auth_real_clock_session_expiry() {
-    if !e2e_enabled() { eprintln!("[skip] auth e2e: set SYNICODE_AUTH_E2E=1"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] auth e2e: set SYNICODE_AUTH_E2E=1");
+        return;
+    }
     let (auth, _sessions) = build_auth(Duration::milliseconds(200));
 
-    let session = auth.authenticate("my-secret-key", Utc::now()).await.expect("authenticate");
-    assert!(auth.validate_session(&session.token, Utc::now()).await.is_ok());
+    let session = auth
+        .authenticate("my-secret-key", Utc::now())
+        .await
+        .expect("authenticate");
+    assert!(
+        auth.validate_session(&session.token, Utc::now())
+            .await
+            .is_ok()
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-    assert!(auth.validate_session(&session.token, Utc::now()).await.is_err());
+    assert!(
+        auth.validate_session(&session.token, Utc::now())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
 async fn auth_real_clock_wrong_secret_fails() {
-    if !e2e_enabled() { eprintln!("[skip] auth e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] auth e2e");
+        return;
+    }
     let (auth, _) = build_auth(Duration::hours(24));
     assert!(auth.authenticate("wrong-key", Utc::now()).await.is_err());
 }
 
 #[tokio::test]
 async fn auth_real_clock_session_revocation() {
-    if !e2e_enabled() { eprintln!("[skip] auth e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] auth e2e");
+        return;
+    }
     let (auth, sessions) = build_auth(Duration::hours(24));
 
-    let s1 = auth.authenticate("my-secret-key", Utc::now()).await.unwrap();
-    let s2 = auth.authenticate("my-secret-key", Utc::now()).await.unwrap();
+    let s1 = auth
+        .authenticate("my-secret-key", Utc::now())
+        .await
+        .unwrap();
+    let s2 = auth
+        .authenticate("my-secret-key", Utc::now())
+        .await
+        .unwrap();
 
     assert!(sessions.revoke(&s1.token));
     assert!(auth.validate_session(&s1.token, Utc::now()).await.is_err());
@@ -55,13 +81,23 @@ async fn auth_real_clock_session_revocation() {
 
 #[tokio::test]
 async fn auth_real_clock_purge_expired() {
-    if !e2e_enabled() { eprintln!("[skip] auth e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] auth e2e");
+        return;
+    }
     let (auth, sessions) = build_auth(Duration::milliseconds(100));
 
-    let session = auth.authenticate("my-secret-key", Utc::now()).await.unwrap();
+    let session = auth
+        .authenticate("my-secret-key", Utc::now())
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let purged = sessions.purge_expired(Utc::now());
     assert!(purged >= 1);
-    assert!(auth.validate_session(&session.token, Utc::now()).await.is_err());
+    assert!(
+        auth.validate_session(&session.token, Utc::now())
+            .await
+            .is_err()
+    );
 }

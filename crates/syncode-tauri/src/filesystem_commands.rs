@@ -254,7 +254,10 @@ pub fn shape_multi(picked: Option<Vec<FileHandle>>) -> BrowseResult {
 /// Kept as a separate helper so `browse()` can short-circuit on a backend
 /// error (`Err`) and emit [`BrowseResult::platform_limited`] without
 /// duplicating the mapping logic.
-pub fn shape_result<T>(outcome: Result<T, String>, map: impl Fn(T) -> BrowseResult) -> BrowseResult {
+pub fn shape_result<T>(
+    outcome: Result<T, String>,
+    map: impl Fn(T) -> BrowseResult,
+) -> BrowseResult {
     match outcome {
         Ok(value) => map(value),
         Err(message) => BrowseResult {
@@ -479,10 +482,9 @@ mod tests {
 
     #[test]
     fn shape_result_err_yields_platform_limited() {
-        let res: BrowseResult =
-            shape_result::<()>(Err("no display server".to_string()), |_| {
-                BrowseResult::empty()
-            });
+        let res: BrowseResult = shape_result::<()>(Err("no display server".to_string()), |_| {
+            BrowseResult::empty()
+        });
         assert!(res.selections.is_empty());
         assert!(!res.completed);
         let note = res.note.expect("note");

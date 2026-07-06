@@ -49,13 +49,13 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, oneshot};
 
 use super::super::trait_def::*;
 use crate::session::SessionState;
@@ -921,18 +921,22 @@ mod tests {
 
     #[test]
     fn stream_event_empty_text_emits_nothing() {
-        assert!(map_stream_event(
-            &json!({ "type": "content_block_delta", "delta": { "text": "" } }),
-            "s1"
-        )
-        .is_empty());
+        assert!(
+            map_stream_event(
+                &json!({ "type": "content_block_delta", "delta": { "text": "" } }),
+                "s1"
+            )
+            .is_empty()
+        );
         // Non-text deltas (e.g. tool input streaming) are ignored here.
-        assert!(map_stream_event(
-            &json!({ "type": "content_block_delta",
+        assert!(
+            map_stream_event(
+                &json!({ "type": "content_block_delta",
                 "delta": { "type": "input_json_delta", "partial_json": "{" } }),
-            "s1"
-        )
-        .is_empty());
+                "s1"
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1263,17 +1267,20 @@ mod tests {
         assert_eq!(argv[0], "claude");
         assert!(argv.iter().any(|a| a == "-p"));
         assert!(argv.windows(2).any(|w| w[0] == "-p" && w[1] == "hello"));
-        assert!(argv
-            .windows(2)
-            .any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--output-format" && w[1] == "stream-json")
+        );
         // stream-json under --print REQUIRES --verbose (Claude CLI enforces it).
         assert!(argv.iter().any(|a| a == "--verbose"));
-        assert!(argv
-            .windows(2)
-            .any(|w| w[0] == "--model" && w[1] == "sonnet"));
-        assert!(argv
-            .windows(2)
-            .any(|w| w[0] == "--append-system-prompt" && w[1] == "Be terse."));
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "sonnet")
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--append-system-prompt" && w[1] == "Be terse.")
+        );
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 

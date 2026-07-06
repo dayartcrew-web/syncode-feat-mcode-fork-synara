@@ -50,15 +50,8 @@ async fn terminal_real_pty_write_and_read() {
         return;
     }
 
-    let handle = syncode_terminal::PtyHandle::spawn(
-        "test-cat".into(),
-        "cat",
-        &[],
-        None,
-        80,
-        24,
-    )
-    .expect("spawn cat");
+    let handle = syncode_terminal::PtyHandle::spawn("test-cat".into(), "cat", &[], None, 80, 24)
+        .expect("spawn cat");
 
     // Write input to cat (which echoes it back)
     handle.write_str("test input\n").await.expect("write");
@@ -85,15 +78,8 @@ async fn terminal_real_pty_resize() {
         return;
     }
 
-    let handle = syncode_terminal::PtyHandle::spawn(
-        "test-resize".into(),
-        "cat",
-        &[],
-        None,
-        80,
-        24,
-    )
-    .expect("spawn");
+    let handle = syncode_terminal::PtyHandle::spawn("test-resize".into(), "cat", &[], None, 80, 24)
+        .expect("spawn");
 
     // Resize
     handle.resize(120, 40).await.expect("resize");

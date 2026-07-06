@@ -273,34 +273,33 @@ pub async fn replay_all_events(
     since_sequence: Option<u64>,
     limit: u32,
 ) -> Result<Vec<PersistedEvent>, EventStoreError> {
-    let rows: Vec<EventRow> =
-        if let Some(since) = since_sequence {
-            sqlx::query_as(
-                r#"
+    let rows: Vec<EventRow> = if let Some(since) = since_sequence {
+        sqlx::query_as(
+            r#"
             SELECT id, aggregate_id, event_type, sequence, data, timestamp, metadata, created_at
             FROM domain_events
             WHERE id > ?
             ORDER BY id ASC
             LIMIT ?
             "#,
-            )
-            .bind(since as i64)
-            .bind(limit as i64)
-            .fetch_all(pool)
-            .await?
-        } else {
-            sqlx::query_as(
-                r#"
+        )
+        .bind(since as i64)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
             SELECT id, aggregate_id, event_type, sequence, data, timestamp, metadata, created_at
             FROM domain_events
             ORDER BY id ASC
             LIMIT ?
             "#,
-            )
-            .bind(limit as i64)
-            .fetch_all(pool)
-            .await?
-        };
+        )
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(rows
         .into_iter()
