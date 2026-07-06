@@ -40,8 +40,8 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use serde_json::{Value, json};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use serde_json::{json, Value};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 use super::super::trait_def::*;
 use crate::codex_app_server::{CodexAppServerClient, TurnStatus};
@@ -71,7 +71,11 @@ impl Default for CodexConfig {
             bin_path: "codex".to_string(),
             extra_args: Vec::new(),
             full_auto: true,
-            model: "gpt-5.1".to_string(),
+            // Empty → let `codex` pick its own default from ~/.codex/config.toml.
+            // Hardcoding a model here breaks ChatGPT-account auth (which forbids
+            // the API-only `gpt-5-codex` family) and goes stale as OpenAI ships
+            // new models. The CLI knows its own default best.
+            model: String::new(),
             sandbox: "workspace-write".to_string(),
         }
     }
@@ -89,9 +93,10 @@ impl CodexConfig {
 
     /// Build the subprocess spec for `codex app-server [<extra_args>]`.
     fn spec(&self, cwd: &str) -> SubprocessSpec {
+        let resolved = crate::bin_resolver::resolve_binary(&self.bin_path);
         let mut args = vec!["app-server".to_string()];
         args.extend(self.extra_args.iter().cloned());
-        SubprocessSpec::new(&self.bin_path)
+        SubprocessSpec::new(&resolved)
             .args(args)
             .cwd(cwd)
             // Codex self-authenticates from its own config / env; inherit the

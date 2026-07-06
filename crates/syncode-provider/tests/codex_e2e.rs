@@ -35,6 +35,11 @@ use tokio_stream::StreamExt;
 
 /// Gate: only run when the operator opted in AND the `codex` CLI is on PATH.
 ///
+/// We use [`syncode_provider::resolve_binary`] (which on Windows prefers the
+/// native `codex.exe` over the npm `codex.cmd` shim and honours PATHEXT)
+/// rather than `std::process::Command::new("codex")`, because the latter does
+/// not resolve `.cmd` wrappers on Windows and would falsely skip the test.
+///
 /// `Command::status` succeeds (returns `Ok`) whenever the process *spawns*,
 /// regardless of its exit code — so an unknown `--version` flag still confirms
 /// the binary exists, while a missing binary yields `Err(NotFound)` → skip.
@@ -42,7 +47,8 @@ fn e2e_enabled() -> bool {
     if std::env::var("SYNICODE_CODEX_E2E").as_deref() != Ok("1") {
         return false;
     }
-    std::process::Command::new("codex")
+    let resolved = syncode_provider::resolve_binary("codex");
+    std::process::Command::new(&resolved)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -61,10 +67,14 @@ async fn codex_real_binary_one_turn_completes() {
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     let mut extra = std::collections::HashMap::new();
     extra.insert("cwd".to_string(), serde_json::json!(cwd));
+    // Honour an explicit model override; otherwise leave empty so Codex picks
+    // its own default from ~/.codex/config.toml (works with both API-key and
+    // ChatGPT auth, which forbid different model sets).
+    let model = std::env::var("SYNICODE_CODEX_MODEL").unwrap_or_default();
     provider
         .spawn(ProviderConfig {
             provider_id: PROVIDER_CODEX.to_string(),
-            model: "gpt-5.1-codex".to_string(),
+            model,
             api_key: None,
             base_url: None,
             max_tokens: Some(256),

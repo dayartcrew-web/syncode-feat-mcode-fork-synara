@@ -25,13 +25,15 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::Child;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::trait_def::{ProviderAdapterError, ProviderError, ProviderRequest, ProviderResponse};
 
 /// Default per-request timeout for [`JsonRpcTransport::send_request`].
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// 120s — generous enough for `codex app-server` initialize (which starts
+/// MCP servers sequentially) and for AI turn completion on slow connections.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Spawn specification for a subprocess, mirroring MCode's `AcpSpawnInput`
 /// `{ command, args, cwd?, env? }`.
@@ -138,8 +140,34 @@ impl JsonRpcTransport {
     pub async fn spawn(
         spec: &SubprocessSpec,
     ) -> Result<(Self, mpsc::Receiver<IncomingMessage>), ProviderAdapterError> {
-        let mut cmd = tokio::process::Command::new(&spec.command);
-        cmd.args(&spec.args).envs(spec.env.iter().cloned());
+        // On Windows, `.cmd` / `.bat` wrappers need to be run via `cmd /C`
+        // for stdio pipes to work correctly. Rust's `Command::new` doesn't
+        // auto-resolve PATHEXT and batch wrappers break pipe inheritance.
+        #[cfg(windows)]
+        let mut cmd = {
+            let resolved = crate::bin_resolver::resolve_binary(&spec.command);
+            let mut c = if resolved.ends_with(".cmd") || resolved.ends_with(".bat") {
+                let mut c = tokio::process::Command::new("cmd");
+                c.arg("/C").arg(&resolved);
+                c
+            } else {
+                tokio::process::Command::new(&resolved)
+            };
+            for a in &spec.args {
+                c.arg(a);
+            }
+            c.envs(spec.env.iter().cloned());
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = tokio::process::Command::new(&spec.command);
+            for a in &spec.args {
+                c.arg(a);
+            }
+            c.envs(spec.env.iter().cloned());
+            c
+        };
         if let Some(cwd) = &spec.cwd {
             cmd.current_dir(cwd);
         }
