@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Tauri Linux system dependencies
         run: |
@@ -68,7 +68,7 @@ jobs:
             patchelf \
             xvfb
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: "npm"
