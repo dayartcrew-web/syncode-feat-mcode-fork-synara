@@ -602,6 +602,178 @@ mod tests {
         matches!(deserialized, ProviderCapability::Streaming);
     }
 
+    // ─── P0-3: ProviderCapability::Steering + steer_turn default fallback ──
+    //
+    // The PRD calls out the graceful-fallback contract: providers that don't
+    // support steering must fall back to a clear UnsupportedOperation error
+    // (rather than panic or silently no-op) so the reactor can route to
+    // send_request instead. These three tests lock in that trait-level
+    // contract independent of any reactor/adapter.
+
+    #[test]
+    fn provider_capability_steering_serialization_roundtrip() {
+        // The Steering capability must round-trip through serde as "steering"
+        // (snake_case) so the reactor's `capabilities().contains(...)` check
+        // and any wire-format surface stay stable.
+        let cap = ProviderCapability::Steering;
+        let json = serde_json::to_string(&cap).expect("serialize");
+        assert_eq!(json, "\"steering\"");
+        let back: ProviderCapability = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(back, ProviderCapability::Steering),
+            "round-trip must yield Steering"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_steer_turn_returns_unsupported_operation() {
+        // An adapter that does NOT override `steer_turn` must surface the
+        // graceful-fallback error rather than panic or silently succeed. The
+        // reactor uses this error to decide whether to fall back to
+        // `send_request` (or queue the turn). `NoHistoryAdapter` only
+        // implements the required trait methods, so it exercises the default
+        // `steer_turn` body.
+        let adapter = NoHistoryAdapter;
+        let result = adapter
+            .steer_turn("any-session", serde_json::json!({"text": "also do X"}))
+            .await;
+        let err = result.expect_err("default steer_turn must error");
+        match err {
+            ProviderAdapterError::UnsupportedOperation(msg) => {
+                // The error must mention the provider id ("no-history") so the
+                // caller can log which provider lacked the capability.
+                assert!(
+                    msg.contains("no-history"),
+                    "error must reference the provider id, got: {msg}"
+                );
+                assert!(
+                    msg.contains("steering"),
+                    "error must mention steering, got: {msg}"
+                );
+            }
+            other => panic!("expected UnsupportedOperation, got {other:?}"),
+        }
+    }
+
+    /// An adapter that opts into steering by overriding `steer_turn`.
+    struct SteeringAdapter {
+        /// Recorded `(session_id, payload)` pairs from each `steer_turn` call.
+        /// Inspected by the test to prove the override (not the default) ran.
+        recorded: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderAdapter for SteeringAdapter {
+        fn provider_id(&self) -> &str {
+            "steering-mock"
+        }
+        fn capabilities(&self) -> Vec<ProviderCapability> {
+            // Advertising the capability is what tells the reactor to take the
+            // steer fast-path in the first place.
+            vec![ProviderCapability::Steering]
+        }
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus::Idle
+        }
+        fn available_models(&self) -> Vec<String> {
+            Vec::new()
+        }
+        async fn spawn(&mut self, _config: ProviderConfig) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn interrupt(&self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, ProviderAdapterError> {
+            Ok("s".to_string())
+        }
+        async fn resume_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn stop_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
+            Ok(())
+        }
+        async fn send_request(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<ProviderResponse, ProviderAdapterError> {
+            Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: None,
+            })
+        }
+        fn event_stream(
+            &self,
+            _session_id: &str,
+        ) -> Result<ProviderStream, ProviderAdapterError> {
+            Ok(Box::pin(tokio_stream::empty()))
+        }
+        async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
+            Ok(true)
+        }
+
+        // The opt-in: a real steer implementation. Records the call so the
+        // test can prove the override ran (and the default did not).
+        async fn steer_turn(
+            &self,
+            session_id: &str,
+            payload: serde_json::Value,
+        ) -> Result<ProviderResponse, ProviderAdapterError> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((session_id.to_string(), payload));
+            Ok(ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(42),
+                result: Some(serde_json::json!({"steered": true})),
+                error: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn overridden_steer_turn_is_invoked_and_advertises_capability() {
+        // An adapter that opts into steering must (a) advertise the capability
+        // so the reactor routes to steer_turn, and (b) actually run the
+        // override (not the default UnsupportedOperation body). This locks in
+        // both halves of the capability-gated contract.
+        let adapter = SteeringAdapter {
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+
+        // (a) Capability advertised — reactor's entry condition.
+        assert!(
+            adapter
+                .capabilities()
+                .contains(&ProviderCapability::Steering),
+            "SteeringAdapter must advertise ProviderCapability::Steering"
+        );
+
+        // (b) Override runs: steer_turn returns the override's Ok response
+        // (id=42, {"steered":true}), NOT the default's UnsupportedOperation.
+        let resp = adapter
+            .steer_turn("sess-active", serde_json::json!({"text": "more"}))
+            .await
+            .expect("override must succeed");
+        assert_eq!(resp.id, Some(42));
+        assert_eq!(resp.result.as_ref().and_then(|v| v.get("steered")), Some(&serde_json::json!(true)));
+
+        // The override recorded exactly one call with the right session + payload.
+        let recorded = adapter.recorded.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "exactly one steer_turn call");
+        assert_eq!(recorded[0].0, "sess-active");
+        assert_eq!(recorded[0].1["text"], "more");
+    }
+
     #[test]
     fn session_context_serialization() {
         let ctx = SessionContext {
