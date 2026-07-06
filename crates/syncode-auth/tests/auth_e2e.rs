@@ -4,7 +4,7 @@
 
 use chrono::{Duration, Utc};
 use std::sync::Arc;
-use syncode_auth::authenticator::{AuthError, Authenticator, SharedSecretAuthenticator};
+use syncode_auth::authenticator::{Authenticator, SharedSecretAuthenticator};
 use syncode_auth::secret_store::{InMemorySecretStore, SecretStore};
 use syncode_auth::session::SessionRegistry;
 

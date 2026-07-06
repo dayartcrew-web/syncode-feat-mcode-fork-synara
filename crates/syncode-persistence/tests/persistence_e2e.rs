@@ -3,8 +3,7 @@
 //!
 //! Gating: `SYNICODE_PERSISTENCE_E2E=1`.
 
-use syncode_core::{DomainEvent, EntityId, Timestamp, ports::ReadModelRepository};
-use syncode_orchestration::{Projector, ReadModelStore};
+use syncode_core::{DomainEvent, EntityId, Timestamp};
 use tempfile::TempDir;
 
 fn e2e_enabled() -> bool {
@@ -33,23 +32,19 @@ async fn persistence_real_db_event_append_and_replay() {
 
     let aggregate_id = EntityId::new();
     let event = DomainEvent::ProjectCreated {
-        id: aggregate_id.clone(),
+        id: aggregate_id,
         name: "e2e-project".into(),
         root_path: "/tmp/e2e".into(),
         created_at: Timestamp::now(),
     };
 
-    let envelopes = syncode_persistence::event_store::append_domain_events(
-        &pool,
-        aggregate_id.clone(),
-        vec![event],
-        0,
-    )
-    .await
-    .expect("append_domain_events");
+    let envelopes =
+        syncode_persistence::event_store::append_domain_events(&pool, aggregate_id, vec![event], 0)
+            .await
+            .expect("append_domain_events");
     assert_eq!(envelopes.len(), 1);
 
-    let replayed = syncode_persistence::event_store::replay_envelopes(&pool, aggregate_id.clone())
+    let replayed = syncode_persistence::event_store::replay_envelopes(&pool, aggregate_id)
         .await
         .expect("replay_envelopes");
     assert_eq!(replayed.len(), 1);
@@ -73,9 +68,9 @@ async fn persistence_real_db_survives_reopen() {
     let aggregate_id = EntityId::new();
     syncode_persistence::event_store::append_domain_events(
         &pool,
-        aggregate_id.clone(),
+        aggregate_id,
         vec![DomainEvent::ProjectCreated {
-            id: aggregate_id.clone(),
+            id: aggregate_id,
             name: "survive".into(),
             root_path: "/tmp".into(),
             created_at: Timestamp::now(),
@@ -86,9 +81,9 @@ async fn persistence_real_db_survives_reopen() {
     .expect("append e1");
     syncode_persistence::event_store::append_domain_events(
         &pool,
-        aggregate_id.clone(),
+        aggregate_id,
         vec![DomainEvent::ProjectUpdated {
-            id: aggregate_id.clone(),
+            id: aggregate_id,
             provider_id: Some("test-provider".into()),
             default_model: None,
             updated_at: Timestamp::now(),
@@ -106,7 +101,7 @@ async fn persistence_real_db_survives_reopen() {
         .await
         .expect("reopen pool");
 
-    let events = syncode_persistence::event_store::replay_envelopes(&pool2, aggregate_id.clone())
+    let events = syncode_persistence::event_store::replay_envelopes(&pool2, aggregate_id)
         .await
         .expect("replay");
     assert_eq!(events.len(), 2);
@@ -133,7 +128,7 @@ async fn persistence_real_db_projection_end_to_end() {
 
     let env1 = syncode_core::Envelope::new(
         DomainEvent::ProjectCreated {
-            id: project_id.clone(),
+            id: project_id,
             name: "proj-e2e".into(),
             root_path: "/tmp/proj".into(),
             created_at: Timestamp::now(),
@@ -142,8 +137,8 @@ async fn persistence_real_db_projection_end_to_end() {
     );
     let env2 = syncode_core::Envelope::new(
         DomainEvent::ThreadCreated {
-            id: thread_id.clone(),
-            project_id: project_id.clone(),
+            id: thread_id,
+            project_id,
             provider_id: "test".into(),
             model: "default".into(),
             created_at: Timestamp::now(),
@@ -186,11 +181,11 @@ async fn persistence_real_db_snapshot_save_load() {
     let aggregate_id = EntityId::new();
     let state_json = serde_json::json!({"counter": 42});
 
-    syncode_persistence::snapshot::save_snapshot(&pool, aggregate_id.clone(), &state_json, 5)
+    syncode_persistence::snapshot::save_snapshot(&pool, aggregate_id, &state_json, 5)
         .await
         .expect("save_snapshot");
 
-    let loaded = syncode_persistence::snapshot::load_snapshot(&pool, aggregate_id.clone())
+    let loaded = syncode_persistence::snapshot::load_snapshot(&pool, aggregate_id)
         .await
         .expect("load_snapshot");
     assert!(loaded.is_some());
@@ -214,7 +209,7 @@ async fn persistence_real_db_read_model_adapter() {
     let project_id = EntityId::new();
     let env = syncode_core::Envelope::new(
         DomainEvent::ProjectCreated {
-            id: project_id.clone(),
+            id: project_id,
             name: "adapter-test".into(),
             root_path: "/tmp".into(),
             created_at: Timestamp::now(),
@@ -223,10 +218,9 @@ async fn persistence_real_db_read_model_adapter() {
     );
     proj_mgr.project_many(&[env]).await.expect("project");
 
-    let project =
-        syncode_core::ports::ReadModelRepository::get_project(&rm_repo, project_id.clone())
-            .await
-            .expect("get_project");
+    let project = syncode_core::ports::ReadModelRepository::get_project(&rm_repo, project_id)
+        .await
+        .expect("get_project");
     assert!(project.is_some());
     assert_eq!(project.unwrap()["name"], "adapter-test");
 }
