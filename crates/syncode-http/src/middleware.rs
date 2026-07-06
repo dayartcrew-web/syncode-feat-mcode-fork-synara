@@ -26,9 +26,9 @@ pub fn cors_layer() -> CorsLayer {
 }
 
 /// A `tracing`-backed HTTP layer that spans every request with method + URI.
-pub fn trace_layer() -> TraceLayer<
-    tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
-> {
+pub fn trace_layer()
+-> TraceLayer<tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>>
+{
     TraceLayer::new_for_http()
 }
 
@@ -102,12 +102,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&bytes[..], b"ok");
     }
 

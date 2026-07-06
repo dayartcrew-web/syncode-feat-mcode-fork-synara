@@ -122,10 +122,7 @@ mod tests {
         let uptime = json["uptime_secs"]
             .as_f64()
             .expect("uptime_secs must be a number");
-        assert!(
-            uptime >= 0.0,
-            "uptime must be non-negative, got {uptime}"
-        );
+        assert!(uptime >= 0.0, "uptime must be non-negative, got {uptime}");
     }
 
     #[tokio::test]
@@ -155,7 +152,10 @@ mod tests {
             .to_bytes();
         // PNG magic bytes — sanity check the payload is a real PNG.
         assert!(bytes.len() > 8, "favicon body must be non-trivial");
-        assert_eq!(&bytes[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
     }
 
     #[tokio::test]
