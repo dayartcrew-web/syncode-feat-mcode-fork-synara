@@ -78,9 +78,30 @@ jobs:
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      # Cache cargo target/ + registry (replaces Swatinem/rust-cache, avoiding
+      # its Node punycode deprecation noise). Target key includes the rustc
+      # version hash so a toolchain bump invalidates compiled artifacts.
+      - name: Get rustc version
+        id: rustc
+        run: echo "hash=$(rustc -V | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo registry + git
+        uses: actions/cache@v6
         with:
-          workspaces: "."
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Cache cargo target dir
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-
 
       - name: Build frontend (dist for tauri::generate_context!)
         working-directory: frontend

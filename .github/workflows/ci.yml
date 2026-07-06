@@ -44,10 +44,17 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # PR-3-2: warm cargo caches. Swatinem/rust-cache keys on Cargo.lock +
-      # rustc version (the right granularity for compiled deps), and we also add
-      # an explicit actions/cache for ~/.cargo/registry so the index + download
-      # cache survive even when the compiled-target key changes (faster fetches).
+      # Capture the rustc version hash so the target-dir cache key invalidates
+      # on toolchain bumps (replaces the granularity Swatinem/rust-cache gave).
+      - name: Get rustc version
+        id: rustc
+        run: echo "hash=$(rustc -V | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Warm cargo caches. The registry cache keys on Cargo.lock+toml; the
+      # target-dir cache keys on OS + rustc version + Cargo.lock so a toolchain
+      # bump or dependency change invalidates compiled artifacts without
+      # dropping the registry index (faster fetches). Replaces Swatinem/rust-cache
+      # (whose Node punycode deprecation noise is gone with stock actions/cache).
       - name: Cache cargo registry + git
         uses: actions/cache@v6
         with:
@@ -62,11 +69,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: target
-          key: cargo-target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-target-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             cargo-target-${{ runner.os }}-
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
