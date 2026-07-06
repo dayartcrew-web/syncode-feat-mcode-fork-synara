@@ -73,6 +73,16 @@ pub struct Scheduler {
     /// of waiting for the next interval tick. See [`Scheduler::notify_wakeup`]
     /// and [`Scheduler::spawn_scheduler_loop`].
     wakeup: Arc<tokio::sync::Notify>,
+    /// P2-8: repo root for git-worktree isolation. When `Some`, a standalone
+    /// run whose def opts into `WorktreeMode::Worktree`/`Auto` executes inside
+    /// a fresh worktree. Wired by the host (WS layer) via
+    /// [`Scheduler::with_repo_root`].
+    repo_root: Option<std::path::PathBuf>,
+    /// P2-2: optional AI-completion harness. When `Some`, successful
+    /// AI-evaluated runs submit a [`crate::completion_harness::CompletionJob`]
+    /// for off-band LLM evaluation. Wired by the host via
+    /// [`Scheduler::with_completion_harness`].
+    completion_harness: Option<Arc<crate::completion_harness::CompletionHarness>>,
 }
 
 impl Scheduler {
@@ -99,7 +109,41 @@ impl Scheduler {
             default_completion: CompletionPolicy::default(),
             default_misfire: MisfirePolicy::default(),
             wakeup: Arc::new(tokio::sync::Notify::new()),
+            repo_root: None,
+            completion_harness: None,
         }
+    }
+
+    /// Builder (P2-8): set the repo root for git-worktree isolation. When the
+    /// host supplies this, standalone runs whose def opts into worktree mode
+    /// execute inside a fresh worktree at `<repo_root>/automation/<name>/<run>`.
+    pub fn with_repo_root(mut self, repo_root: impl Into<std::path::PathBuf>) -> Self {
+        self.repo_root = Some(repo_root.into());
+        self
+    }
+
+    /// Builder (P2-2): set the AI-completion harness. Successful AI-evaluated
+    /// runs submit a completion job for off-band LLM evaluation.
+    pub fn with_completion_harness(
+        mut self,
+        harness: Arc<crate::completion_harness::CompletionHarness>,
+    ) -> Self {
+        self.completion_harness = Some(harness);
+        self
+    }
+
+    /// Build a [`RunDeps`] from the scheduler's optional cross-cutting fields,
+    /// forwarding them into each dispatch call. `None` fields → the feature is
+    /// inactive (preserves the historical behavior).
+    fn run_deps(&self) -> crate::executor::RunDeps {
+        let mut deps = crate::executor::RunDeps::default();
+        if let Some(root) = self.repo_root.as_ref() {
+            deps = deps.with_repo_root(root.clone());
+        }
+        if let Some(h) = self.completion_harness.as_ref() {
+            deps = deps.with_completion_harness(Arc::clone(h));
+        }
+        deps
     }
 
     /// Register an automation definition
@@ -199,13 +243,14 @@ impl Scheduler {
             .ok_or_else(|| SchedulerError::NotFound(automation_id.to_string()))?;
 
         let now = Utc::now();
-        let outcome = executor::execute_run(
+        let outcome = executor::execute_run_with_deps(
             &def,
             self.executor.as_ref(),
             self.repo.as_ref(),
             &self.default_completion,
             delay,
             now,
+            &self.run_deps(),
         )
         .await;
 
@@ -257,7 +302,7 @@ impl Scheduler {
             .ok_or_else(|| SchedulerError::NotFound(automation_id.to_string()))?;
 
         let now = Utc::now();
-        let outcome = executor::execute_run_with_events(
+        let outcome = executor::execute_run_with_events_and_deps(
             &def,
             self.executor.as_ref(),
             self.repo.as_ref(),
@@ -265,6 +310,7 @@ impl Scheduler {
             delay,
             now,
             sink,
+            &self.run_deps(),
         )
         .await;
 

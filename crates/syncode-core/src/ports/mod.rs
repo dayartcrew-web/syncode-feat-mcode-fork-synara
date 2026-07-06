@@ -297,6 +297,25 @@ pub struct DispatchRequest {
     pub model: String,
     /// The prompt / user message for the turn.
     pub prompt: String,
+    /// Optional working directory the turn should execute inside (P2-8).
+    ///
+    /// `None` (the default) means "run in the host process's CWD" — the
+    /// historical behavior. When an automation def opts into worktree
+    /// isolation (`WorktreeMode::Worktree` / `Auto`) and the host supplies a
+    /// `repo_root`, [`syncode_automation::executor`] sets this to the freshly
+    /// created worktree path so the dispatched command actually runs there.
+    /// Executors that honor it (e.g. `ProcessRunExecutor`) `chdir` into the
+    /// directory before spawning the child; executors that ignore it are
+    /// unaffected (the field is advisory, not a hard contract).
+    pub working_dir: Option<String>,
+}
+
+impl DispatchRequest {
+    /// Builder: set the working directory the turn should run in.
+    pub fn with_working_dir(mut self, dir: impl Into<String>) -> Self {
+        self.working_dir = Some(dir.into());
+        self
+    }
 }
 
 /// The outcome of dispatching a turn.

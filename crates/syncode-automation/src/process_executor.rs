@@ -17,11 +17,11 @@
 //! this executor does NOT evaluate; it runs them as shell commands, matching
 //! the legacy-field semantics established in [`dispatch_request_for`]).
 //!
-//! The request does NOT carry `working_dir`/`env`/`timeout_secs` (those live on
-//! `AutomationDef`, which is not visible at the port boundary). A follow-up that
-//! needs per-run isolation would extend `DispatchRequest` with an optional
-//! `command`/`env`/`working_dir` block; for now the executor runs the prompt as
-//! a shell command in the host process's CWD with its environment.
+//! The request now carries an optional `working_dir` (P2-8): when set, the
+//! executor `chdir`s into that directory before spawning the child — this is
+//! what makes worktree isolation take effect for process-backed runs. `env` /
+//! `timeout_secs` still live on `AutomationDef` (not visible at the port
+//! boundary); the executor's own `timeout` covers the per-command cap.
 //!
 //! ## Outcome mapping
 //!
@@ -109,11 +109,17 @@ impl RunExecutor for ProcessRunExecutor {
             ));
         }
 
+        // P2-8: honor the worktree working directory when the request carries
+        // one. `None` keeps the historical host-CWD behavior.
+        let working_dir = req.working_dir.clone();
+
         // PUSH-1: pick the live-push path when a run context is active on this
         // task; otherwise fall back to the original capture-all path (preserves
         // the synchronous trigger contract + all existing tests).
         if crate::events::current_run_context().is_some() {
-            return self.dispatch_turn_live(command).await;
+            return self
+                .dispatch_turn_live(command, working_dir.as_deref())
+                .await;
         }
 
         // Build the shell invocation. Unix uses `sh -c`; Windows uses `cmd /C`.
@@ -121,6 +127,7 @@ impl RunExecutor for ProcessRunExecutor {
         // future is dropped (the timeout wraps the entire spawn+wait).
         let mut cmd = shell_command(command);
         cmd.kill_on_drop(true);
+        apply_working_dir(&mut cmd, working_dir.as_deref());
 
         let fut = async {
             let output = cmd
@@ -180,7 +187,11 @@ impl ProcessRunExecutor {
     /// Outcome mapping matches the synchronous path: exit 0 → synthesized
     /// `DispatchOutcome`; non-zero / timeout → `Err(PortError::Internal(..))`
     /// embedding exit code + truncated output.
-    async fn dispatch_turn_live(&self, command: &str) -> Result<DispatchOutcome, PortError> {
+    async fn dispatch_turn_live(
+        &self,
+        command: &str,
+        working_dir: Option<&str>,
+    ) -> Result<DispatchOutcome, PortError> {
         use tokio::io::AsyncReadExt;
 
         // Emit run-started (best-effort).
@@ -193,6 +204,7 @@ impl ProcessRunExecutor {
         // piped too (captured for the error message; not streamed as progress).
         let mut cmd = shell_command(command);
         cmd.kill_on_drop(true);
+        apply_working_dir(&mut cmd, working_dir);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
@@ -333,6 +345,16 @@ fn shell_command(cmd: &str) -> tokio::process::Command {
     }
 }
 
+/// Apply `working_dir` to a Command when `Some`. P2-8: this is what makes the
+/// worktree's isolated checkout actually take effect for `ProcessRunExecutor`
+/// runs — the child `chdir`s into the worktree path before exec'ing. `None` is
+/// a no-op (host-CWD behavior).
+fn apply_working_dir(cmd: &mut tokio::process::Command, working_dir: Option<&str>) {
+    if let Some(dir) = working_dir.filter(|d| !d.is_empty()) {
+        cmd.current_dir(dir);
+    }
+}
+
 /// Truncate `s` to at most `max` chars, appending an ellipsis if cut.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -358,6 +380,7 @@ mod tests {
             provider_id: "process".into(),
             model: "local".into(),
             prompt: "echo hello".into(),
+            working_dir: None,
         };
 
         let outcome = exec.dispatch_turn(req).await;
@@ -385,6 +408,7 @@ mod tests {
             prompt: "echo oops >&2; exit 7".into(),
             #[cfg(not(unix))]
             prompt: "exit 7".into(),
+            working_dir: None,
         };
 
         let err = exec.dispatch_turn(req).await.unwrap_err();
@@ -404,6 +428,7 @@ mod tests {
             provider_id: "process".into(),
             model: "local".into(),
             prompt: "   ".into(),
+            working_dir: None,
         };
         let err = exec.dispatch_turn(req).await.unwrap_err();
         assert!(err.to_string().contains("empty command"));
@@ -419,6 +444,7 @@ mod tests {
             provider_id: "process".into(),
             model: "local".into(),
             prompt: "sleep 30".into(),
+            working_dir: None,
         };
         let err = exec.dispatch_turn(req).await.unwrap_err();
         assert!(
@@ -437,6 +463,7 @@ mod tests {
             provider_id: "process".into(),
             model: "local".into(),
             prompt: "echo done".into(),
+            working_dir: None,
         };
         assert!(exec.dispatch_turn(req).await.is_ok());
     }
@@ -502,6 +529,7 @@ mod tests {
             provider_id: "process".into(),
             model: "local".into(),
             prompt: "echo hello".into(),
+            working_dir: None,
         };
         let sink = RecordingSink::new();
         let ctx = RunContext {
@@ -571,6 +599,7 @@ mod tests {
             provider_id: "process".into(),
             model: "local".into(),
             prompt: prompt.into(),
+            working_dir: None,
         };
         let sink = RecordingSink::new();
         let ctx = RunContext {
@@ -608,6 +637,7 @@ mod tests {
             provider_id: "process".into(),
             model: "local".into(),
             prompt: "echo sync".into(),
+            working_dir: None,
         };
         // No with_run_context — must use the capture-all path, return Ok.
         let outcome = exec.dispatch_turn(req).await;
