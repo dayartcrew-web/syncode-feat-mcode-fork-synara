@@ -52,8 +52,8 @@ fn default_model() -> String {
 /// `bin/server.rs::build_orchestrator` minus session rehydration (not needed
 /// for a fresh test run).
 async fn build_orchestrator_with_real_provider() -> syncode_orchestration::Orchestrator {
-    use syncode_persistence::{adapters::SqliteEventRepository, init_database};
     use std::path::PathBuf;
+    use syncode_persistence::{adapters::SqliteEventRepository, init_database};
 
     let db_path = PathBuf::from(format!("/tmp/provider-e2e-{}.db", std::process::id()));
     // Clean any stale DB from a previous run.
@@ -64,10 +64,9 @@ async fn build_orchestrator_with_real_provider() -> syncode_orchestration::Orche
         .expect("init_database for provider e2e");
     let repo: Arc<dyn EventRepository> = Arc::new(SqliteEventRepository::new(pool));
 
-    let read_model: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>> =
-        Arc::new(tokio::sync::RwLock::new(
-            syncode_orchestration::ReadModelStore::new(),
-        ));
+    let read_model: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>> = Arc::new(
+        tokio::sync::RwLock::new(syncode_orchestration::ReadModelStore::new()),
+    );
 
     let session_manager = SessionManager::new();
     let reactor = Arc::new(
@@ -170,16 +169,10 @@ async fn rpc_call(stream: &mut WsStream, method: &str, params: Value) -> Value {
 /// under `params.data` that looks like text.
 fn extract_push_text(msg: &Value) -> Option<String> {
     // Common shape: { params: { type: "turn.token_received", data: { content } } }
-    if let Some(content) = msg
-        .pointer("/params/data/content")
-        .and_then(Value::as_str)
-    {
+    if let Some(content) = msg.pointer("/params/data/content").and_then(Value::as_str) {
         return Some(content.to_string());
     }
-    if let Some(text) = msg
-        .pointer("/params/data/text")
-        .and_then(Value::as_str)
-    {
+    if let Some(text) = msg.pointer("/params/data/text").and_then(Value::as_str) {
         return Some(text.to_string());
     }
     None
@@ -233,9 +226,7 @@ async fn real_provider_chat_e2e() {
         caps_resp["error"]
     );
     let supports_skill = caps_resp["result"]["supportsSkillDiscovery"].as_bool();
-    eprintln!(
-        "[provider-e2e] supportsSkillDiscovery = {supports_skill:?} (claude expected true)"
-    );
+    eprintln!("[provider-e2e] supportsSkillDiscovery = {supports_skill:?} (claude expected true)");
 
     // 3. provider/list-options — reasoningEffort should be present for claude.
     let opts_resp = rpc_call(
@@ -249,7 +240,9 @@ async fn real_provider_chat_e2e() {
         "list-options error: {:?}",
         opts_resp["error"]
     );
-    let has_reasoning = opts_resp["result"]["reasoningEffort"].get("options").is_some();
+    let has_reasoning = opts_resp["result"]["reasoningEffort"]
+        .get("options")
+        .is_some();
     eprintln!(
         "[provider-e2e] reasoningEffort options present = {has_reasoning} (claude expected true)"
     );
@@ -298,12 +291,7 @@ async fn real_provider_chat_e2e() {
     eprintln!("[provider-e2e] created thread {thread_id}");
 
     // 6. push/subscribe — opt in to ALL channels so token + completion events arrive.
-    let sub_resp = rpc_call(
-        &mut stream,
-        "push/subscribe",
-        json!({ "channels": ["*"] }),
-    )
-    .await;
+    let sub_resp = rpc_call(&mut stream, "push/subscribe", json!({ "channels": ["*"] })).await;
     assert!(
         sub_resp.get("error").is_none(),
         "push/subscribe error: {:?}",
@@ -420,7 +408,9 @@ async fn real_provider_chat_e2e() {
     // Tolerate both `completed` and any terminal state naming.
     let lower_status = status.to_ascii_lowercase();
     assert!(
-        lower_status.contains("complete") || lower_status.contains("finish") || lower_status == "done",
+        lower_status.contains("complete")
+            || lower_status.contains("finish")
+            || lower_status == "done",
         "expected terminal turn status, got `{status}`"
     );
 

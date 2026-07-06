@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# syncode pre-commit hook — enforce `cargo fmt` before a commit lands.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass for one commit:   git commit --no-verify
+#
+# Runs `cargo fmt --all -- --check` when Rust files are staged and rejects
+# the commit if anything is unformatted — so CI's fmt gate
+# (.github/workflows/ci.yml) stays green and violations are caught locally.
+set -euo pipefail
+
+# Only engage when at least one staged path is a Rust file.
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not on PATH — skipping fmt check (install the Rust toolchain to enable)" >&2
+  exit 0
+fi
+
+if ! cargo fmt --all -- --check; then
+  cat >&2 <<'EOF'
+
+❌ pre-commit: `cargo fmt --all -- --check` failed.
+
+   Fix and re-stage with:
+       cargo fmt --all
+       git add -u
+
+   (Bypass once with `git commit --no-verify` — but CI will still fail the fmt gate.)
+EOF
+  exit 1
+fi
+
+exit 0
