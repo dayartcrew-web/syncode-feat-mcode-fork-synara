@@ -26,6 +26,11 @@ syncode-git = { path = "../syncode-git" }
 syncode-terminal = { workspace = true }
 syncode-automation = { workspace = true }
 syncode-provider = { workspace = true }
+# `syncode-http` owns the stateless REST routes (`/health`,
+# `/api/project-favicon`) and reusable middleware. Merged into the WS app via
+# `build_app` so the standalone server exposes one Axum app for both
+# transports. L1 leaf depended on by this L4 crate (direction-correct).
+syncode-http = { path = "../syncode-http" }
 # git2 is used directly for the advanced git RPCs (stash, fetch, init,
 # removeIndexLock) that syncode-git's `GitService` trait does not expose.
 # Stash uses `Repository::stash_save2`/`stash_foreach`/`stash_drop`/

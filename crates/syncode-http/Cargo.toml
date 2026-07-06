@@ -16,3 +16,10 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# `tower` with `util` provides `ServiceExt::oneshot` for routing unit tests.
+tower = { version = "0.5", features = ["util"] }
+# `http-body-util` provides `BodyExt::collect` to read response bodies in tests.
+http-body-util = "0.1"
+tokio = { workspace = true }
