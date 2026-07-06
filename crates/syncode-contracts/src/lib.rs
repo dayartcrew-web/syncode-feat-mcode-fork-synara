@@ -300,7 +300,10 @@ mod tests {
             temperature: None,
         })
         .unwrap();
-        assert!(json.contains("\"apiKey\""), "ProviderConfig camelCase: {json}");
+        assert!(
+            json.contains("\"apiKey\""),
+            "ProviderConfig camelCase: {json}"
+        );
         assert!(json.contains("\"baseUrl\""));
         assert!(json.contains("\"maxTokens\""));
 
@@ -313,7 +316,10 @@ mod tests {
             behind: 0,
         })
         .unwrap();
-        assert!(json.contains("\"headDetached\""), "GitStatusView camelCase: {json}");
+        assert!(
+            json.contains("\"headDetached\""),
+            "GitStatusView camelCase: {json}"
+        );
 
         // GitFileStatusView: index_status, working_tree_status
         let json = serde_json::to_string(&GitFileStatusView {
@@ -322,7 +328,10 @@ mod tests {
             working_tree_status: FileStatusKind::Unmodified,
         })
         .unwrap();
-        assert!(json.contains("\"indexStatus\""), "GitFileStatusView camelCase: {json}");
+        assert!(
+            json.contains("\"indexStatus\""),
+            "GitFileStatusView camelCase: {json}"
+        );
         assert!(json.contains("\"workingTreeStatus\""));
 
         // CreateSessionRequest: provider_id, working_directory
@@ -332,7 +341,10 @@ mod tests {
             working_directory: None,
         })
         .unwrap();
-        assert!(json.contains("\"providerId\""), "CreateSessionRequest camelCase: {json}");
+        assert!(
+            json.contains("\"providerId\""),
+            "CreateSessionRequest camelCase: {json}"
+        );
 
         // PushEvent: event_type
         let json = serde_json::to_string(&PushEvent {
@@ -342,7 +354,10 @@ mod tests {
             timestamp: Timestamp("t".into()),
         })
         .unwrap();
-        assert!(json.contains("\"eventType\""), "PushEvent camelCase: {json}");
+        assert!(
+            json.contains("\"eventType\""),
+            "PushEvent camelCase: {json}"
+        );
 
         // JsonRpcRequestView: no snake fields, but check jsonrpc field stays
         // (it's a single word, no rename needed — sanity only).

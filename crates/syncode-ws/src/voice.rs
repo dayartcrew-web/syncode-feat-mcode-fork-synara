@@ -52,8 +52,7 @@ pub(crate) const STT_NOT_CONFIGURED_REASON: &str = "STT not configured";
 
 /// The longer error surfaced in `transcribeVoice`'s `error` field. Mentions
 /// both `whisper` and `ffmpeg` since either may be the missing piece.
-pub(crate) const STT_NOT_CONFIGURED_ERROR: &str =
-    "STT not configured — install whisper + ffmpeg (or configure a STT provider) \
+pub(crate) const STT_NOT_CONFIGURED_ERROR: &str = "STT not configured — install whisper + ffmpeg (or configure a STT provider) \
      to enable voice transcription";
 
 /// Name of the CLI binary we shell out to. Kept as a constant so the probe
@@ -120,9 +119,9 @@ fn extract_audio_bytes(params: &Value) -> Result<Vec<u8>, String> {
         Value::Array(arr) => {
             let mut bytes = Vec::with_capacity(arr.len());
             for (i, v) in arr.iter().enumerate() {
-                let n = v.as_u64().ok_or_else(|| {
-                    format!("audio array element {i} is not a number")
-                })?;
+                let n = v
+                    .as_u64()
+                    .ok_or_else(|| format!("audio array element {i} is not a number"))?;
                 if n > 255 {
                     return Err(format!("audio byte {i} out of range: {n}"));
                 }
@@ -240,7 +239,11 @@ async fn transcribe_with_whisper(params: &Value) -> Result<String, String> {
         .map_err(|e| format!("failed to flush temp audio file: {e}"))?;
 
     let path = tmp.path().to_path_buf();
-    debug!("transcribeVoice: whisper {} ({} bytes)", path.display(), bytes.len());
+    debug!(
+        "transcribeVoice: whisper {} ({} bytes)",
+        path.display(),
+        bytes.len()
+    );
 
     // Spawn whisper. Args target the OpenAI Python `whisper` CLI:
     //   whisper <audio> --model tiny --output_format txt --output_dir <tmp>
@@ -276,13 +279,13 @@ async fn transcribe_with_whisper(params: &Value) -> Result<String, String> {
     }
 
     // The Python CLI writes <stem>.txt next to the input; read it back.
-    let stem = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
-        "temp audio file has no valid stem".to_string()
-    })?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "temp audio file has no valid stem".to_string())?;
     let txt_path = parent.join(format!("{stem}.txt"));
-    let transcript = std::fs::read_to_string(&txt_path).map_err(|e| {
-        format!("failed to read whisper output {}: {e}", txt_path.display())
-    })?;
+    let transcript = std::fs::read_to_string(&txt_path)
+        .map_err(|e| format!("failed to read whisper output {}: {e}", txt_path.display()))?;
 
     // Clean up the generated txt (the temp audio is auto-removed on drop).
     let _ = std::fs::remove_file(&txt_path);
@@ -381,7 +384,11 @@ mod tests {
         // not-configured branch. If whisper IS installed (dev machine, feature
         // on), the ok:true branch fires — so we assert the shape conditionally.
         if !stt_available() {
-            assert_eq!(result["ok"], json!(false), "ok should be false without whisper");
+            assert_eq!(
+                result["ok"],
+                json!(false),
+                "ok should be false without whisper"
+            );
             assert_eq!(result["listening"], json!(false));
             assert_eq!(
                 result["reason"].as_str().unwrap_or(""),
@@ -432,8 +439,8 @@ mod tests {
             );
             return;
         }
-        let wav_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/hello.wav");
+        let wav_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.wav");
         let bytes = std::fs::read(&wav_path).unwrap_or_else(|e| {
             panic!(
                 "fixture wav missing at {}: {e}. Generate one: \
@@ -448,12 +455,13 @@ mod tests {
         // succeeds (no error field) and returns SOME string (even if empty).
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let resp = handle_transcribe_voice(
-            json!(1),
-            &json!({ "audio": b64, "format": "wav" }),
-        )
-        .await;
-        assert!(resp.error.is_none(), "RPC itself must not error: {:?}", resp.error);
+        let resp =
+            handle_transcribe_voice(json!(1), &json!({ "audio": b64, "format": "wav" })).await;
+        assert!(
+            resp.error.is_none(),
+            "RPC itself must not error: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         // On a successful transcription `text` is present (possibly empty for
         // a silent clip). The key assertion: no `error` field when whisper ran.

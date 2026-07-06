@@ -34,8 +34,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use syncode_core::domain::events::DomainEvent;
 use syncode_core::EntityId;
+use syncode_core::domain::events::DomainEvent;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::runner::{AutomationRun, RunStatus};
@@ -160,15 +160,15 @@ impl LifecycleEvent {
             DomainEvent::TurnInterrupted { id, .. } => {
                 Some(Self::TurnInterrupted { thread_id: *id })
             }
-            DomainEvent::TurnDiffCompleted { thread_id, .. } => {
-                Some(Self::TurnDiffCompleted { thread_id: *thread_id })
-            }
+            DomainEvent::TurnDiffCompleted { thread_id, .. } => Some(Self::TurnDiffCompleted {
+                thread_id: *thread_id,
+            }),
             DomainEvent::ThreadApprovalResponded { id, .. } => {
                 Some(Self::ApprovalResponded { thread_id: *id })
             }
-            DomainEvent::ThreadUserInputResponded { id, .. } => Some(Self::ApprovalResponded {
-                thread_id: *id,
-            }),
+            DomainEvent::ThreadUserInputResponded { id, .. } => {
+                Some(Self::ApprovalResponded { thread_id: *id })
+            }
             DomainEvent::ThreadSessionSet { id, status, .. } => Some(Self::SessionSet {
                 thread_id: *id,
                 status: status.clone(),
@@ -184,10 +184,7 @@ impl LifecycleEvent {
 fn is_approval_blocked_status(status: &str) -> bool {
     matches!(
         status,
-        "approval-required"
-            | "user-input-required"
-            | "awaiting-approval"
-            | "waiting-for-approval"
+        "approval-required" | "user-input-required" | "awaiting-approval" | "waiting-for-approval"
     )
 }
 
@@ -350,7 +347,10 @@ impl AutomationRunReactor {
     /// reconciled) or when the run already has the target status.
     async fn reconcile_thread(&self, thread_id: EntityId, target: RunStatus) {
         let thread_id_str = thread_id.to_string();
-        let Some(mut run) = self.scheduler.find_active_run_for_thread(&thread_id_str).await
+        let Some(mut run) = self
+            .scheduler
+            .find_active_run_for_thread(&thread_id_str)
+            .await
         else {
             return; // No automation run for this thread.
         };
@@ -378,7 +378,10 @@ impl AutomationRunReactor {
                     .await;
             }
             RunStatus::Failed => {
-                let _ = self.scheduler.fail_run(&run_id, "turn failed".to_string()).await;
+                let _ = self
+                    .scheduler
+                    .fail_run(&run_id, "turn failed".to_string())
+                    .await;
             }
             RunStatus::Interrupted => {
                 let _ = self.scheduler.interrupt_run(&run_id).await;
@@ -421,10 +424,7 @@ impl AutomationRunReactor {
     /// A host calls this exactly once, after the scheduler is wired and
     /// **before** `Self::run` is spawned (so the reactor starts from a clean
     /// baseline). Safe to call when there are no non-terminal runs (no-op).
-    pub async fn recover_pending_runs(
-        &self,
-        probe: &dyn ThreadLivenessProbe,
-    ) -> RecoveryReport {
+    pub async fn recover_pending_runs(&self, probe: &dyn ThreadLivenessProbe) -> RecoveryReport {
         let mut report = RecoveryReport::default();
         let orphan_runs = self.collect_non_terminal_runs().await;
         report.inspected = orphan_runs.len();
@@ -459,9 +459,9 @@ impl AutomationRunReactor {
             }
 
             let reason = match &target_thread {
-                Some(tid) => format!(
-                    "orphaned run: target thread {tid} has no active turn after restart"
-                ),
+                Some(tid) => {
+                    format!("orphaned run: target thread {tid} has no active turn after restart")
+                }
                 None => "orphaned run: no target thread (standalone) after restart".to_string(),
             };
             match self.scheduler.fail_run(&run_id, reason.clone()).await {
@@ -522,9 +522,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use syncode_core::PortError;
     use syncode_core::domain::primitives::Timestamp;
     use syncode_core::ports::{AutomationRepository, RunExecutor};
-    use syncode_core::PortError;
 
     use crate::definition::{AutomationDef, ScheduleType};
     use crate::in_memory_repo::InMemoryAutomationRepository;
@@ -713,7 +713,13 @@ mod tests {
         // Give the reactor a moment to reconcile.
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            if scheduler.get_run(&run_id).await.unwrap().status.is_terminal() {
+            if scheduler
+                .get_run(&run_id)
+                .await
+                .unwrap()
+                .status
+                .is_terminal()
+            {
                 break;
             }
         }
@@ -743,11 +749,8 @@ mod tests {
         let mut auto_ids = Vec::new();
         let mut run_ids = Vec::new();
         for tid in [thread_a, thread_b] {
-            let mut def = AutomationDef::new(
-                format!("auto-{tid}"),
-                "echo".into(),
-                ScheduleType::Manual,
-            );
+            let mut def =
+                AutomationDef::new(format!("auto-{tid}"), "echo".into(), ScheduleType::Manual);
             def.target_thread_id = Some(tid.to_string());
             let auto_id = def.id.as_str().to_string();
             auto_ids.push(auto_id.clone());
@@ -904,9 +907,7 @@ mod tests {
         .unwrap();
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            if scheduler.get_run(&run_id).await.unwrap().status
-                == RunStatus::WaitingForApproval
-            {
+            if scheduler.get_run(&run_id).await.unwrap().status == RunStatus::WaitingForApproval {
                 break;
             }
         }

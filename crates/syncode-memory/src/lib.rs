@@ -31,7 +31,7 @@ pub mod provider;
 pub mod sqlite_store;
 
 pub use provider::{MemoryProvider, MemoryProviderError, NO_PRIOR_CONTEXT};
-pub use sqlite_store::{SqliteMemoryStore, DEFAULT_CONTEXT_LIMIT};
+pub use sqlite_store::{DEFAULT_CONTEXT_LIMIT, SqliteMemoryStore};
 
 /// Default project identifier used when no project scope is supplied.
 ///

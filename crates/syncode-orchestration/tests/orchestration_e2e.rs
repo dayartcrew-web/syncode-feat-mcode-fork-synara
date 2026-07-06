@@ -17,9 +17,11 @@ async fn setup_orchestrator() -> (Orchestrator, sqlx::SqlitePool, TempDir) {
     let path_str = db_path.to_str().expect("db path");
 
     syncode_persistence::init_database(std::path::Path::new(path_str))
-        .await.expect("init_database");
+        .await
+        .expect("init_database");
     let pool = syncode_persistence::get_pool(std::path::Path::new(path_str))
-        .await.expect("get_pool");
+        .await
+        .expect("get_pool");
 
     let event_repo = syncode_persistence::adapters::SqliteEventRepository::new(pool.clone());
     let orch = Orchestrator::new(Arc::new(event_repo));
@@ -34,10 +36,12 @@ async fn orchestration_real_db_project_lifecycle() {
     }
     let (orch, _pool, _dir) = setup_orchestrator().await;
 
-    let result = orch.handle_command(Command::CreateProject {
-        name: "orch-e2e-proj".into(),
-        root_path: "/tmp/orch-e2e".into(),
-    }).await;
+    let result = orch
+        .handle_command(Command::CreateProject {
+            name: "orch-e2e-proj".into(),
+            root_path: "/tmp/orch-e2e".into(),
+        })
+        .await;
     assert!(result.is_ok(), "CreateProject failed: {:?}", result.err());
 
     // Hold the Arc, then the guard
@@ -51,26 +55,41 @@ async fn orchestration_real_db_project_lifecycle() {
     drop(rm);
     drop(rm_arc);
 
-    let result = orch.handle_command(Command::UpdateProjectConfig {
-        id: project_id,
-        provider_id: Some("test-provider".into()),
-        default_model: None,
-    }).await;
-    assert!(result.is_ok(), "UpdateProjectConfig failed: {:?}", result.err());
+    let result = orch
+        .handle_command(Command::UpdateProjectConfig {
+            id: project_id,
+            provider_id: Some("test-provider".into()),
+            default_model: None,
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "UpdateProjectConfig failed: {:?}",
+        result.err()
+    );
 
     let rm_arc = orch.read_model_ref();
     let rm = rm_arc.read().await;
-    assert_eq!(rm.projects[&project_id_str].provider_id.as_deref(), Some("test-provider"));
+    assert_eq!(
+        rm.projects[&project_id_str].provider_id.as_deref(),
+        Some("test-provider")
+    );
 }
 
 #[tokio::test]
 async fn orchestration_real_db_thread_lifecycle() {
-    if !e2e_enabled() { eprintln!("[skip] orchestration e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] orchestration e2e");
+        return;
+    }
     let (orch, _pool, _dir) = setup_orchestrator().await;
 
     orch.handle_command(Command::CreateProject {
-        name: "thread-proj".into(), root_path: "/tmp".into(),
-    }).await.expect("create project");
+        name: "thread-proj".into(),
+        root_path: "/tmp".into(),
+    })
+    .await
+    .expect("create project");
 
     let rm_arc = orch.read_model_ref();
     let rm = rm_arc.read().await;
@@ -79,11 +98,13 @@ async fn orchestration_real_db_thread_lifecycle() {
     drop(rm);
     drop(rm_arc);
 
-    let result = orch.handle_command(Command::CreateThread {
-        project_id,
-        provider_id: "test".into(),
-        model: "default".into(),
-    }).await;
+    let result = orch
+        .handle_command(Command::CreateThread {
+            project_id,
+            provider_id: "test".into(),
+            model: "default".into(),
+        })
+        .await;
     assert!(result.is_ok(), "CreateThread failed: {:?}", result.err());
 
     let rm_arc = orch.read_model_ref();
@@ -94,11 +115,14 @@ async fn orchestration_real_db_thread_lifecycle() {
     drop(rm_arc);
 
     orch.handle_command(Command::PauseThread { id: thread_id })
-        .await.expect("PauseThread");
+        .await
+        .expect("PauseThread");
     orch.handle_command(Command::ResumeThread { id: thread_id })
-        .await.expect("ResumeThread");
+        .await
+        .expect("ResumeThread");
     orch.handle_command(Command::CompleteThread { id: thread_id })
-        .await.expect("CompleteThread");
+        .await
+        .expect("CompleteThread");
 
     let rm_arc = orch.read_model_ref();
     let rm = rm_arc.read().await;
@@ -107,12 +131,18 @@ async fn orchestration_real_db_thread_lifecycle() {
 
 #[tokio::test]
 async fn orchestration_real_db_events_persisted_to_sqlite() {
-    if !e2e_enabled() { eprintln!("[skip] orchestration e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] orchestration e2e");
+        return;
+    }
     let (orch, pool, _dir) = setup_orchestrator().await;
 
     orch.handle_command(Command::CreateProject {
-        name: "persist-proj".into(), root_path: "/tmp".into(),
-    }).await.expect("create project");
+        name: "persist-proj".into(),
+        root_path: "/tmp".into(),
+    })
+    .await
+    .expect("create project");
 
     let rm_arc = orch.read_model_ref();
     let rm = rm_arc.read().await;
@@ -121,8 +151,12 @@ async fn orchestration_real_db_events_persisted_to_sqlite() {
     drop(rm_arc);
 
     let row: Option<(i64, String)> = sqlx::query_as(
-        "SELECT sequence, event_type FROM events WHERE aggregate_id = ? ORDER BY sequence"
-    ).bind(&project_id_str).fetch_optional(&pool).await.expect("query events");
+        "SELECT sequence, event_type FROM events WHERE aggregate_id = ? ORDER BY sequence",
+    )
+    .bind(&project_id_str)
+    .fetch_optional(&pool)
+    .await
+    .expect("query events");
 
     assert!(row.is_some(), "no events found in SQLite");
     let (seq, et) = row.unwrap();
@@ -132,12 +166,18 @@ async fn orchestration_real_db_events_persisted_to_sqlite() {
 
 #[tokio::test]
 async fn orchestration_real_db_replay_rebuilds_read_model() {
-    if !e2e_enabled() { eprintln!("[skip] orchestration e2e"); return; }
+    if !e2e_enabled() {
+        eprintln!("[skip] orchestration e2e");
+        return;
+    }
     let (orch, _pool, _dir) = setup_orchestrator().await;
 
     orch.handle_command(Command::CreateProject {
-        name: "replay-proj".into(), root_path: "/tmp".into(),
-    }).await.expect("create project");
+        name: "replay-proj".into(),
+        root_path: "/tmp".into(),
+    })
+    .await
+    .expect("create project");
 
     let rm_arc = orch.read_model_ref();
     let rm = rm_arc.read().await;

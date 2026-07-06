@@ -112,11 +112,7 @@ impl ScrollbackStore {
     ///
     /// Returns `Ok(None)` when no file exists (first open of a pane). Returns
     /// `Ok(Some(s))` with the file contents otherwise.
-    pub fn load(
-        &self,
-        thread_id: &str,
-        terminal_id: &str,
-    ) -> std::io::Result<Option<String>> {
+    pub fn load(&self, thread_id: &str, terminal_id: &str) -> std::io::Result<Option<String>> {
         let path = self.path_for(thread_id, terminal_id);
         match fs::read_to_string(&path) {
             Ok(s) => Ok(Some(s)),
@@ -261,9 +257,7 @@ mod tests {
     fn save_then_load_roundtrip() {
         let (store, _dir) = tmp_store();
         let scrollback = "hello scrollback\nline two\n";
-        store
-            .save("thread-1", "term-1", scrollback)
-            .expect("save");
+        store.save("thread-1", "term-1", scrollback).expect("save");
         let loaded = store.load("thread-1", "term-1").expect("load");
         assert_eq!(loaded.as_deref(), Some(scrollback));
     }
@@ -301,9 +295,18 @@ mod tests {
         store.save("thread-a", "term-1", "A1").expect("save");
         store.save("thread-a", "term-2", "A2").expect("save");
         store.save("thread-b", "term-1", "B1").expect("save");
-        assert_eq!(store.load("thread-a", "term-1").unwrap().as_deref(), Some("A1"));
-        assert_eq!(store.load("thread-a", "term-2").unwrap().as_deref(), Some("A2"));
-        assert_eq!(store.load("thread-b", "term-1").unwrap().as_deref(), Some("B1"));
+        assert_eq!(
+            store.load("thread-a", "term-1").unwrap().as_deref(),
+            Some("A1")
+        );
+        assert_eq!(
+            store.load("thread-a", "term-2").unwrap().as_deref(),
+            Some("A2")
+        );
+        assert_eq!(
+            store.load("thread-b", "term-1").unwrap().as_deref(),
+            Some("B1")
+        );
     }
 
     #[test]

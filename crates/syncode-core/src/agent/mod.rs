@@ -14,5 +14,7 @@
 pub mod harness;
 pub mod state;
 
-pub use harness::{execute_step, handle_workflow_failure, run_output_guardrails, StepResult, WorkflowError};
+pub use harness::{
+    StepResult, WorkflowError, execute_step, handle_workflow_failure, run_output_guardrails,
+};
 pub use state::{AgentMemory, AgentState, WorkflowStep};

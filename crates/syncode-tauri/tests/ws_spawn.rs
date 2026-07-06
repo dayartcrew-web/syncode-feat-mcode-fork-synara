@@ -56,7 +56,10 @@ async fn ws_boot_full_path_boots_and_serves() {
         .expect("connect")
         .0;
     let resp = rpc_call(&mut stream, "ping", json!({})).await;
-    assert!(resp.get("error").is_none(), "boot() server should answer ping");
+    assert!(
+        resp.get("error").is_none(),
+        "boot() server should answer ping"
+    );
 
     let _ = stream.close(None).await;
     handle.serve_task.abort();
@@ -202,9 +205,7 @@ async fn ws_spawn_disconnect_removes_connection() {
         db_path: String::new(),
         default_provider: "claude".into(),
     };
-    let handle = spawn_with_state(state, &config)
-        .await
-        .expect("boot");
+    let handle = spawn_with_state(state, &config).await.expect("boot");
 
     let mut stream = tokio_tungstenite::connect_async(&handle.endpoint)
         .await

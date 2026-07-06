@@ -37,7 +37,15 @@ impl TerminalSession {
         cols: u16,
         rows: u16,
     ) -> Result<Self, PtyError> {
-        Self::new_with_thread_id(String::new(), session_id, command, args, working_dir, cols, rows)
+        Self::new_with_thread_id(
+            String::new(),
+            session_id,
+            command,
+            args,
+            working_dir,
+            cols,
+            rows,
+        )
     }
 
     /// Create a new terminal session with an explicit MCode `threadId`.

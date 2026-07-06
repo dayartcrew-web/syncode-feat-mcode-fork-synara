@@ -376,9 +376,9 @@ async fn increment_def_iterations(repo: &dyn AutomationRepository, def: &Automat
     // Load the freshest stored def so we increment the persisted count (not a
     // potentially-stale in-memory snapshot).
     let current = match repo.get_def(&id).await {
-        Ok(Some(payload)) => {
-            serde_json::from_value::<AutomationDef>(payload).map(|d| d.iteration_count).ok()
-        }
+        Ok(Some(payload)) => serde_json::from_value::<AutomationDef>(payload)
+            .map(|d| d.iteration_count)
+            .ok(),
         _ => None,
     };
     let new_count = match current {
@@ -960,7 +960,9 @@ mod tests {
     /// Read the persisted iteration_count for a def from the TestRepo.
     async fn persisted_iteration_count(repo: &Arc<TestRepo>, def: &AutomationDef) -> u32 {
         let p = repo.get_def(&def.id.as_str()).await.unwrap().unwrap();
-        serde_json::from_value::<AutomationDef>(p).unwrap().iteration_count
+        serde_json::from_value::<AutomationDef>(p)
+            .unwrap()
+            .iteration_count
     }
 
     #[tokio::test]

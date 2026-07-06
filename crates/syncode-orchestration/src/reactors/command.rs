@@ -113,12 +113,7 @@ impl TurnQueue {
 
     /// Total queued turns across all threads (observability / tests).
     pub async fn len(&self) -> usize {
-        self.queues
-            .read()
-            .await
-            .values()
-            .map(|q| q.len())
-            .sum()
+        self.queues.read().await.values().map(|q| q.len()).sum()
     }
 
     /// Whether every thread's queue is empty.
@@ -689,9 +684,7 @@ impl ProviderCommandReactor {
         adapter: &syncode_provider::registry::SharedAdapter,
     ) -> bool {
         let guard = adapter.read().await;
-        guard
-            .capabilities()
-            .contains(&ProviderCapability::Steering)
+        guard.capabilities().contains(&ProviderCapability::Steering)
     }
 
     /// Ensure an active provider session exists for `thread_id`, restarting it
@@ -902,9 +895,7 @@ impl ProviderCommandReactor {
         // production StartTurn command carries no model field, so the requested
         // model is `None` here — model-change restarts are exercised directly
         // via `ensure_session_for_thread` (and its tests).
-        let outcome = self
-            .ensure_session_for_thread(ctx, None, adapter)
-            .await?;
+        let outcome = self.ensure_session_for_thread(ctx, None, adapter).await?;
         let session_id = outcome.session_id().to_string();
 
         // Send the initial request to the provider
@@ -1440,7 +1431,10 @@ pub(crate) mod tests {
             user_input: "hello".to_string(),
         };
 
-        let result = reactor.react(&command, &adapter, Some(turn_id)).await.unwrap();
+        let result = reactor
+            .react(&command, &adapter, Some(turn_id))
+            .await
+            .unwrap();
         assert!(result.handled, "StartTurn should be handled");
 
         // Exactly one session was started, and its working dir is the fallback.
@@ -1511,7 +1505,10 @@ pub(crate) mod tests {
             user_input: "hello".to_string(),
         };
 
-        let result = reactor.react(&command, &adapter, Some(turn_id)).await.unwrap();
+        let result = reactor
+            .react(&command, &adapter, Some(turn_id))
+            .await
+            .unwrap();
         assert!(result.handled, "StartTurn should be handled");
 
         let dirs = working_dirs.lock().unwrap().clone();
@@ -1900,7 +1897,10 @@ pub(crate) mod tests {
         // the active session, carrying the queued-turn payload.
         let steers = steers.lock().unwrap().clone();
         assert_eq!(steers.len(), 1, "exactly one steer_turn call expected");
-        assert_eq!(steers[0].0, session_id, "steer must target the active session");
+        assert_eq!(
+            steers[0].0, session_id,
+            "steer must target the active session"
+        );
         let payload = &steers[0].1;
         assert_eq!(
             payload["method"].as_str(),
@@ -1921,7 +1921,10 @@ pub(crate) mod tests {
             1,
             "no extra send_request should fire when steering; got {reqs:?}"
         );
-        assert_eq!(reqs[0].0, "chat", "only the initial StartTurn request expected");
+        assert_eq!(
+            reqs[0].0, "chat",
+            "only the initial StartTurn request expected"
+        );
     }
 
     /// When the provider does NOT support steering but a session is active,
@@ -1980,7 +1983,10 @@ pub(crate) mod tests {
 
         let result = dispatch_queued(&reactor, &adapter, EntityId::new()).await;
 
-        assert!(!result.handled, "nothing to dispatch to without an active session");
+        assert!(
+            !result.handled,
+            "nothing to dispatch to without an active session"
+        );
         assert!(result.session_id.is_none());
 
         // Neither path should have fired any provider call.
@@ -2028,8 +2034,16 @@ pub(crate) mod tests {
         // Both turns are queued for the thread, in FIFO order. Dequeue pops
         // the first-submitted turn first.
         assert_eq!(reactor.turn_queue().len().await, 2);
-        let first = reactor.turn_queue().dequeue(&thread_id.as_str()).await.expect("first");
-        let second = reactor.turn_queue().dequeue(&thread_id.as_str()).await.expect("second");
+        let first = reactor
+            .turn_queue()
+            .dequeue(&thread_id.as_str())
+            .await
+            .expect("first");
+        let second = reactor
+            .turn_queue()
+            .dequeue(&thread_id.as_str())
+            .await
+            .expect("second");
         assert_eq!(first.thread_id, thread_id);
         assert_eq!(second.thread_id, thread_id);
         assert_ne!(
@@ -2221,7 +2235,11 @@ pub(crate) mod tests {
             matches!(outcome2, EnsureOutcome::Reused { .. }),
             "same identity → Reused, got {outcome2:?}"
         );
-        assert_eq!(outcome2.session_id(), session_id, "reused session id must match");
+        assert_eq!(
+            outcome2.session_id(),
+            session_id,
+            "reused session id must match"
+        );
     }
 
     /// (2) When an active session for the thread matches the requested
@@ -2559,8 +2577,7 @@ pub(crate) mod tests {
             context: "## Prior Context\n### Interaction 1\nQ: prior question\nA: prior answer"
                 .to_string(),
         });
-        let reactor =
-            ProviderCommandReactor::new(SessionManager::new()).with_memory(memory);
+        let reactor = ProviderCommandReactor::new(SessionManager::new()).with_memory(memory);
         let (adapter, _stopped, _requests, prompts) = make_prompt_recording_mock();
         let thread_id = EntityId::new();
 
@@ -2622,8 +2639,7 @@ pub(crate) mod tests {
         let memory: Arc<dyn MemoryProvider> = Arc::new(StubMemory {
             context: NO_PRIOR_CONTEXT.to_string(),
         });
-        let reactor =
-            ProviderCommandReactor::new(SessionManager::new()).with_memory(memory);
+        let reactor = ProviderCommandReactor::new(SessionManager::new()).with_memory(memory);
         let (adapter, _stopped, _requests, prompts) = make_prompt_recording_mock();
         let thread_id = EntityId::new();
 
@@ -2657,11 +2673,11 @@ pub(crate) mod tests {
         // Now restart with a changed model — the Restarted path re-runs
         // augmentation. Replace the stub memory with one that returns real
         // context to prove augmentation fires on restart too.
-        let reactor2 = ProviderCommandReactor::new(SessionManager::new())
-            .with_memory(Arc::new(StubMemory {
-                context: "## Prior Context\nQ: earlier\nA: earlier-answer".to_string(),
-            })
-                as Arc<dyn MemoryProvider>);
+        let reactor2 =
+            ProviderCommandReactor::new(SessionManager::new())
+                .with_memory(Arc::new(StubMemory {
+                    context: "## Prior Context\nQ: earlier\nA: earlier-answer".to_string(),
+                }) as Arc<dyn MemoryProvider>);
         let (adapter2, _stopped2, _requests2, prompts2) = make_prompt_recording_mock();
 
         // Seed a session first so the second call takes the Restarted path.

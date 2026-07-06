@@ -93,14 +93,12 @@ impl Default for WsConfig {
 impl WsConfig {
     /// Resolve config from `SYNCODE_WS_*` env vars, falling back to defaults.
     pub fn from_env() -> Self {
-        let host =
-            std::env::var("SYNCODE_WS_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());
+        let host = std::env::var("SYNCODE_WS_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());
         let port = std::env::var("SYNCODE_WS_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_PORT);
-        let db_path =
-            std::env::var("SYNCODE_DB").unwrap_or_else(|_| DEFAULT_DB_PATH.to_string());
+        let db_path = std::env::var("SYNCODE_DB").unwrap_or_else(|_| DEFAULT_DB_PATH.to_string());
         let default_provider = std::env::var("SYNCODE_DEFAULT_PROVIDER")
             .unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
         Self {
@@ -174,10 +172,7 @@ pub async fn boot(config: &WsConfig) -> Result<WsHandle, String> {
 /// Tests use this to boot a server backed by an in-memory state (no SQLite) so
 /// they can run hermetically without touching the filesystem. Production
 /// (`main.rs`) uses [`boot`] which builds the state first.
-pub async fn spawn_with_state(
-    state: WsState,
-    config: &WsConfig,
-) -> Result<WsHandle, String> {
+pub async fn spawn_with_state(state: WsState, config: &WsConfig) -> Result<WsHandle, String> {
     // Bind the listener BEFORE spawning so a bind failure surfaces to the
     // caller (rather than panicking the detached serve task where it would be
     // swallowed). Bind to the requested port; if the caller passed port 0 the
@@ -257,8 +252,7 @@ fn build_orchestrator(repo: Arc<dyn EventRepository>, default_provider: &str) ->
     let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
         Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
     let reactor = Arc::new(
-        ProviderCommandReactor::new(SessionManager::new())
-            .with_read_model(Arc::clone(&read_model)),
+        ProviderCommandReactor::new(SessionManager::new()).with_read_model(Arc::clone(&read_model)),
     );
 
     match syncode_provider::registry::create_by_id(default_provider) {
@@ -333,6 +327,5 @@ pub fn endpoint_from_app<AppT>(app: &AppT) -> Option<String>
 where
     AppT: Manager<tauri::Wry>,
 {
-    app.try_state::<WsRuntimeState>()
-        .and_then(|s| s.endpoint())
+    app.try_state::<WsRuntimeState>().and_then(|s| s.endpoint())
 }

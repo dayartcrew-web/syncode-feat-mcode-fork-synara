@@ -153,9 +153,7 @@ pub fn check_for_updates(
 /// absent, we surface a graceful not-configured reason so the UI can show a
 /// "restart to update" hint only when there's truly something to apply.
 #[tauri::command]
-pub fn apply_update(
-    updater: tauri::State<'_, UpdaterState>,
-) -> Result<ApplyUpdateResult, String> {
+pub fn apply_update(updater: tauri::State<'_, UpdaterState>) -> Result<ApplyUpdateResult, String> {
     let status = updater.status();
     let version = match &status {
         UpdateStatus::Available { version, .. } | UpdateStatus::Ready { version } => version,
@@ -163,9 +161,7 @@ pub fn apply_update(
             return Ok(ApplyUpdateResult {
                 installed: false,
                 version: None,
-                reason: Some(format!(
-                    "no update pending (status: {status})"
-                )),
+                reason: Some(format!("no update pending (status: {status})")),
             });
         }
     };
@@ -306,10 +302,7 @@ mod tests {
         state.set_status(UpdateStatus::Installed {
             version: version.clone(),
         });
-        assert!(matches!(
-            state.status(),
-            UpdateStatus::Installed { .. }
-        ));
+        assert!(matches!(state.status(), UpdateStatus::Installed { .. }));
     }
 
     #[test]
@@ -317,11 +310,7 @@ mod tests {
         let opener = default_opener();
         assert!(!opener.is_empty());
         // Cross-platform sanity: one of the three known openers.
-        assert!(
-            opener == "open"
-                || opener == "explorer"
-                || opener == "xdg-open"
-        );
+        assert!(opener == "open" || opener == "explorer" || opener == "xdg-open");
     }
 
     #[test]

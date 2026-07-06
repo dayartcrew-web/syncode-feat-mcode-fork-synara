@@ -64,7 +64,7 @@ use tokio_tungstenite::tungstenite::Message;
 async fn boot_and_manage() -> (String, std::sync::Arc<tokio::task::JoinHandle<()>>) {
     let config = WsConfig {
         host: "127.0.0.1".into(),
-        port: 0, // ephemeral → no port collision across tests
+        port: 0,                // ephemeral → no port collision across tests
         db_path: String::new(), // in-memory → hermetic, no filesystem
         default_provider: "claude".into(),
     };
@@ -150,8 +150,15 @@ async fn ws_setup_boot_wiring_e2e() {
 
     // ping — server dispatches JSON-RPC.
     let ping = rpc_call(&mut stream, "ping", json!({})).await;
-    assert!(ping.get("error").is_none(), "ping error: {:?}", ping["error"]);
-    assert!(ping.get("result").is_some(), "ping must return a result: {ping}");
+    assert!(
+        ping.get("error").is_none(),
+        "ping error: {:?}",
+        ping["error"]
+    );
+    assert!(
+        ping.get("result").is_some(),
+        "ping must return a result: {ping}"
+    );
 
     // project/create + project/list — exercises the shared WsState's
     // orchestrator through the booted server (proves the managed WsState is the
@@ -202,7 +209,10 @@ async fn ws_setup_boot_wiring_e2e() {
 ///   the manual procedure in the module docs to run it for real.
 #[tokio::test]
 async fn desktop_binary_boot_connects_ws() {
-    let Some(url) = std::env::var("DESKTOP_E2E_WS_URL").ok().filter(|s| !s.is_empty()) else {
+    let Some(url) = std::env::var("DESKTOP_E2E_WS_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
         eprintln!(
             "skip: DESKTOP_E2E_WS_URL unset — desktop binary not running. \
              See tests/boot_e2e.rs module docs for the xvfb-run procedure."
@@ -245,7 +255,10 @@ async fn desktop_binary_boot_connects_ws() {
         "desktop binary WS ping returned an error: {:?}",
         ping["error"]
     );
-    assert!(ping.get("result").is_some(), "ping must return a result: {ping}");
+    assert!(
+        ping.get("result").is_some(),
+        "ping must return a result: {ping}"
+    );
 
     let _ = stream.close(None).await;
 }

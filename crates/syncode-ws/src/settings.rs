@@ -153,9 +153,7 @@ impl ServerSettingsState {
         let Some(pool) = self.pool.as_ref() else {
             return;
         };
-        if let Err(e) =
-            syncode_persistence::settings_store::save_config(pool, &self.config).await
-        {
+        if let Err(e) = syncode_persistence::settings_store::save_config(pool, &self.config).await {
             tracing::warn!(error = %e, "failed to persist server_config to disk");
         }
     }
@@ -218,7 +216,11 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
     let default_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
         .iter()
         .map(|pid| {
-            let mcode_kind = if *pid == "claude" { "claudeAgent" } else { *pid as &str };
+            let mcode_kind = if *pid == "claude" {
+                "claudeAgent"
+            } else {
+                *pid as &str
+            };
             serde_json::json!({
                 "provider": mcode_kind,
                 "status": "ready",
@@ -246,7 +248,9 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
     let default_editors: Vec<Value> = {
         let mut editors = Vec::new();
         // Probe for common editors via which/where
-        for cmd in &["code", "cursor", "zed", "subl", "idea", "webstorm", "windsurf"] {
+        for cmd in &[
+            "code", "cursor", "zed", "subl", "idea", "webstorm", "windsurf",
+        ] {
             if which::which(cmd).is_ok() {
                 editors.push(Value::String(cmd.to_string()));
             }
@@ -367,9 +371,7 @@ fn home_dir_from_env(
     // Some launch contexts set these even when `USERPROFILE` is absent. Both
     // halves must be present and non-empty for a usable path.
     match (home_drive, home_path) {
-        (Some(drive), Some(path))
-            if !drive.trim().is_empty() && !path.trim().is_empty() =>
-        {
+        (Some(drive), Some(path)) if !drive.trim().is_empty() && !path.trim().is_empty() => {
             Some(format!("{drive}{path}"))
         }
         _ => None,
@@ -529,10 +531,7 @@ mod tests {
     #[test]
     fn home_dir_from_env_requires_both_halves_of_drive_path_combo() {
         // Only HOMEDRIVE (no HOMEPATH) is not a usable path → None.
-        assert_eq!(
-            home_dir_from_env(None, None, Some("C:".into()), None),
-            None
-        );
+        assert_eq!(home_dir_from_env(None, None, Some("C:".into()), None), None);
         // Only HOMEPATH (no HOMEDRIVE) is not a usable path → None.
         assert_eq!(
             home_dir_from_env(None, None, None, Some("\\Users\\x".into())),

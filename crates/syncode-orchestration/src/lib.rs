@@ -23,11 +23,11 @@ pub use events::DomainEvent;
 pub use pipeline::{CommandResult, OrchestrationError, Orchestrator};
 pub use projector::{Projector, ReadModelStore};
 pub use reactors::{
-    CommandReaction, CommandReactorError, EnsureOutcome, IngestionResult,
-    ProviderCommandReactor, ingest_provider_event,
+    CommandReaction, CommandReactorError, EnsureOutcome, IngestionResult, ProviderCommandReactor,
+    ingest_provider_event,
 };
 pub use read_model::{
     ActivityView, CheckpointView, MessageView, ProjectView, ThreadSessionView, ThreadView, TurnView,
 };
 pub use use_cases::{ApplicationService, ProjectDashboard, ThreadDetail};
-pub use workflow::{execute_workflow, ProviderWorkflowExecutor, WorkflowExecutor};
+pub use workflow::{ProviderWorkflowExecutor, WorkflowExecutor, execute_workflow};

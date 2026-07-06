@@ -17,6 +17,8 @@
 /// that a real `.exe` always wins over the npm `.cmd` shim.
 ///
 /// Each entry is a function mapping a "home-ish" env var to a candidate path.
+/// Only used on Windows — gated so non-Windows builds don't flag it as dead code.
+#[cfg(windows)]
 const KNOWN_LOCATIONS: &[(&str, &[&str])] = &[
     // OpenAI Codex native installer (Windows): %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
     ("LOCALAPPDATA", &["Programs", "OpenAI", "Codex", "bin"]),
@@ -38,60 +40,57 @@ const KNOWN_LOCATIONS: &[(&str, &[&str])] = &[
 /// 3. `which::which(name)` — honours PATHEXT; usually returns the npm `.cmd`.
 /// 4. `%APPDATA%/npm/<name>.cmd` — last-resort npm shim.
 /// 5. The bare name (let the OS try and surface a clear error if it fails).
+#[cfg(not(windows))]
 pub fn resolve_binary(name: &str) -> String {
     // On Unix, PATH resolution works natively — no intervention needed.
-    #[cfg(not(windows))]
-    {
-        return name.to_string();
-    }
+    name.to_string()
+}
 
-    // On Windows, prefer a real .exe over the npm .cmd shim.
-    #[cfg(windows)]
-    {
-        // 1. Known native-install directories (prefer .exe)
-        for (env_key, parts) in KNOWN_LOCATIONS {
-            if let Ok(base) = std::env::var(env_key) {
-                for ext in &["exe", "cmd", "bat"] {
-                    let mut candidate = std::path::PathBuf::from(&base);
-                    for p in parts.iter() {
-                        candidate.push(p);
-                    }
-                    candidate.push(format!("{name}.{ext}"));
-                    if candidate.exists() {
-                        return candidate.to_string_lossy().into_owned();
-                    }
-                }
-            }
-        }
-
-        // 2. ~/.local/bin/<name>.exe  (Rust/Go cargo install location)
-        if let Ok(home) = std::env::var("USERPROFILE") {
+#[cfg(windows)]
+pub fn resolve_binary(name: &str) -> String {
+    // 1. Known native-install directories (prefer .exe)
+    for (env_key, parts) in KNOWN_LOCATIONS {
+        if let Ok(base) = std::env::var(env_key) {
             for ext in &["exe", "cmd", "bat"] {
-                let candidate = format!("{home}/.local/bin/{name}.{ext}");
-                if std::path::Path::new(&candidate).exists() {
-                    return candidate;
+                let mut candidate = std::path::PathBuf::from(&base);
+                for p in parts.iter() {
+                    candidate.push(p);
+                }
+                candidate.push(format!("{name}.{ext}"));
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
                 }
             }
         }
-
-        // 3. which::which (honours PATHEXT — usually returns the npm .cmd shim)
-        if let Ok(path) = which::which(name) {
-            return path.to_string_lossy().into_owned();
-        }
-
-        // 4. npm global location fallback
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            for ext in &["cmd", "exe", "bat"] {
-                let candidate = format!("{appdata}/npm/{name}.{ext}");
-                if std::path::Path::new(&candidate).exists() {
-                    return candidate;
-                }
-            }
-        }
-
-        // 5. Fall back — let the OS try (may fail, but gives a clear error)
-        name.to_string()
     }
+
+    // 2. ~/.local/bin/<name>.exe  (Rust/Go cargo install location)
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        for ext in &["exe", "cmd", "bat"] {
+            let candidate = format!("{home}/.local/bin/{name}.{ext}");
+            if std::path::Path::new(&candidate).exists() {
+                return candidate;
+            }
+        }
+    }
+
+    // 3. which::which (honours PATHEXT — usually returns the npm .cmd shim)
+    if let Ok(path) = which::which(name) {
+        return path.to_string_lossy().into_owned();
+    }
+
+    // 4. npm global location fallback
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        for ext in &["cmd", "exe", "bat"] {
+            let candidate = format!("{appdata}/npm/{name}.{ext}");
+            if std::path::Path::new(&candidate).exists() {
+                return candidate;
+            }
+        }
+    }
+
+    // 5. Fall back — let the OS try (may fail, but gives a clear error)
+    name.to_string()
 }
 
 #[cfg(test)]

@@ -89,12 +89,12 @@ pub fn required_permission(method: &str) -> Option<Permission> {
         "auth.createPairingCredential"
         | "auth/create-pairing-credential"
         | "auth/createPairingCredential" => Some(Permission::Write),
-        "auth.revokePairingLink"
-        | "auth/revoke-pairing-link"
-        | "auth/revokePairingLink" => Some(Permission::Write),
-        "auth.listPairingLinks"
-        | "auth/list-pairing-links"
-        | "auth/listPairingLinks" => Some(Permission::Write),
+        "auth.revokePairingLink" | "auth/revoke-pairing-link" | "auth/revokePairingLink" => {
+            Some(Permission::Write)
+        }
+        "auth.listPairingLinks" | "auth/list-pairing-links" | "auth/listPairingLinks" => {
+            Some(Permission::Write)
+        }
 
         // ─── Client-session management (AUTH-2) ───────────────────────────
         //
@@ -121,18 +121,18 @@ pub fn required_permission(method: &str) -> Option<Permission> {
         // Both dot-name AND slash form resolve here (matches AUTH-1 + the
         // git.*/server.* convention) so the authz gate behaves identically
         // regardless of which form the client sends.
-        "auth.listClientSessions"
-        | "auth/list-client-sessions"
-        | "auth/listClientSessions" => Some(Permission::Write),
-        "auth.revokeClientSession"
-        | "auth/revoke-client-session"
-        | "auth/revokeClientSession" => Some(Permission::Write),
-        "auth.getWebSocketToken"
-        | "auth/get-web-socket-token"
-        | "auth/getWebSocketToken" => Some(Permission::Write),
-        "auth.getSessionState"
-        | "auth/get-session-state"
-        | "auth/getSessionState" => Some(Permission::Write),
+        "auth.listClientSessions" | "auth/list-client-sessions" | "auth/listClientSessions" => {
+            Some(Permission::Write)
+        }
+        "auth.revokeClientSession" | "auth/revoke-client-session" | "auth/revokeClientSession" => {
+            Some(Permission::Write)
+        }
+        "auth.getWebSocketToken" | "auth/get-web-socket-token" | "auth/getWebSocketToken" => {
+            Some(Permission::Write)
+        }
+        "auth.getSessionState" | "auth/get-session-state" | "auth/getSessionState" => {
+            Some(Permission::Write)
+        }
 
         // Unknown method → no permission gate here; the dispatcher will
         // return METHOD_NOT_FOUND downstream. We don't pre-reject so the
