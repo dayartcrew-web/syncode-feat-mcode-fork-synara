@@ -1,4 +1,5 @@
-//! Production wiring for the AI-completion harness (P2-2 host side).
+//! Production wiring for the AI-completion harness (P2-2 host side) and the
+//! orchestration-backed automation run executor.
 //!
 //! The automation crate's [`syncode_automation::completion_harness`] provides a
 //! bounded-queue + worker-pool harness that evaluates whether an automation's
@@ -17,6 +18,11 @@
 //!   same provider-CLI one-shot path the LLM-backed RPCs use).
 //! - [`WsCompletionDisableFn`] flips `enabled = false` and persists the def via
 //!   the shared [`AutomationRepository`].
+//! - [`OrchestrationRunExecutor`] (constructed here, lives in
+//!   [`crate::orchestration_executor`]) is the `RunExecutor` impl that
+//!   dispatches automation turns through [`ApplicationService`] — driving the
+//!   provider adapter via the chat pipeline, capturing the assistant output
+//!   into the run record. This is the MCode `dispatchRun` parity path.
 //!
 //! See [`build_automation_scheduler`] for the graceful-degradation + repo-root
 //! decisions.
@@ -26,12 +32,14 @@ use std::sync::Arc;
 use syncode_automation::completion_harness::{CompletionDisableFn, LlmFn};
 use syncode_automation::{
     AutomationDef, CompletionHarness, CompletionResult, CompletionVerdict,
-    InMemoryAutomationRepository, ProcessRunExecutor, ProviderCompletionLlm, Scheduler,
+    InMemoryAutomationRepository, ProviderCompletionLlm, Scheduler,
 };
 use syncode_core::ports::AutomationRepository;
+use syncode_orchestration::{ApplicationService, Orchestrator};
 use syncode_provider::registry::create_by_id;
 
 use crate::llm::{SharedAdapter, invoke_llm_oneshot};
+use crate::orchestration_executor::OrchestrationRunExecutor;
 
 /// Default provider id when `SYNCODE_DEFAULT_PROVIDER` is unset. Mirrors the
 /// standalone server binary ([`crate::bin::server`]) so the library and the
@@ -155,21 +163,33 @@ impl CompletionDisableFn for WsCompletionDisableFn {
 // ─── Scheduler wiring ──────────────────────────────────────────────────────
 
 /// Build the automation [`Scheduler`] for [`crate::WsState`], wiring the
-/// AI-completion harness when the default provider is armable.
+/// [`OrchestrationRunExecutor`] (automation runs dispatch through the chat
+/// pipeline) and — when the default provider is armable — the AI-completion
+/// harness.
 ///
 /// The [`InMemoryAutomationRepository`] is constructed once and shared between
 /// the scheduler, the harness, and the disable fn — so a disable lands in the
 /// store the scheduler reads on its next due-evaluation cycle.
+///
+/// # `orchestrator` handle
+///
+/// The orchestrator built by [`crate::bin::server`] (or `WsState::new_in_memory`
+/// for tests) is wrapped in an [`ApplicationService`] and handed to the
+/// [`OrchestrationRunExecutor`]. This is what makes `automation.runNow`
+/// dispatch a real provider turn: the executor calls
+/// `ApplicationService::create_thread` + `start_turn`, which routes through
+/// the same pipeline as the chat path (`ProviderCommandReactor` → adapter →
+/// stream → `TurnCompleted`). The finalized assistant text is captured into
+/// the run record's `stdout`.
 ///
 /// # Graceful degradation
 ///
 /// If [`create_by_id`] returns `None` (the default provider id is not armable —
 /// e.g. `SYNCODE_DEFAULT_PROVIDER` is set to an unknown id), the scheduler is
 /// constructed WITHOUT the completion harness. Completion checks are simply
-/// skipped; automations still run on schedule, they just never auto-disable on
-/// an AI verdict. A `WARN` is logged so the operator knows. This mirrors the
-/// chat pipeline's fallback in [`crate::bin::server`] — a missing provider
-/// never prevents the server from booting.
+/// skipped; automations still run on schedule (and through the provider via
+/// the orchestration executor when a provider is wired), they just never
+/// auto-disable on an AI verdict. A `WARN` is logged so the operator knows.
 ///
 /// Note: `create_by_id` only returns `None` for an *unknown* provider id. A
 /// known id whose CLI binary is absent still returns `Some(adapter)` — the
@@ -187,9 +207,15 @@ impl CompletionDisableFn for WsCompletionDisableFn {
 /// stays off by default; the P2-8 code path is still exercised in the
 /// automation crate's own tests. A future caller holding a known project root
 /// can rebuild the scheduler via `WsState::automation_scheduler` if needed.
-pub fn build_automation_scheduler() -> Arc<Scheduler> {
+pub fn build_automation_scheduler(orchestrator: Arc<Orchestrator>) -> Arc<Scheduler> {
     let repo: Arc<dyn AutomationRepository> = Arc::new(InMemoryAutomationRepository::new());
-    let executor = Arc::new(ProcessRunExecutor::new());
+    // Orchestration-backed executor: drives each automation turn through the
+    // chat pipeline (ApplicationService → ProviderCommandReactor → provider
+    // adapter → stream → TurnCompleted). Captures the assistant output into
+    // the run record's stdout. MCode `dispatchRun` parity.
+    let service = Arc::new(ApplicationService::new(orchestrator));
+    let executor: Arc<dyn syncode_core::ports::RunExecutor> =
+        Arc::new(OrchestrationRunExecutor::new(service));
 
     let default_provider =
         std::env::var("SYNCODE_DEFAULT_PROVIDER").unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());

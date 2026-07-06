@@ -325,6 +325,33 @@ pub struct DispatchOutcome {
     pub thread_id: EntityId,
     /// The created turn id.
     pub turn_id: EntityId,
+    /// The assistant's finalized text output captured during the turn, when the
+    /// executor has access to it (e.g. an orchestration-backed executor that
+    /// drives the provider through `ApplicationService::start_turn` and observes
+    /// `DomainEvent::TurnCompleted`). `None` for executors that don't surface
+    /// the assistant text (e.g. `ProcessRunExecutor`, which only knows the
+    /// process exit code). When `Some`, the automation run loop records this as
+    /// the run's `stdout` so the AI reply is visible in the run record.
+    pub assistant_output: Option<String>,
+}
+
+impl DispatchOutcome {
+    /// Construct a new outcome with the given thread/turn ids and no assistant
+    /// output. Use [`DispatchOutcome::with_assistant_output`] to attach the
+    /// finalized assistant text.
+    pub fn new(thread_id: EntityId, turn_id: EntityId) -> Self {
+        Self {
+            thread_id,
+            turn_id,
+            assistant_output: None,
+        }
+    }
+
+    /// Builder: attach the assistant's finalized text to this outcome.
+    pub fn with_assistant_output(mut self, output: impl Into<String>) -> Self {
+        self.assistant_output = Some(output.into());
+        self
+    }
 }
 
 /// Port for executing an automation run by dispatching a turn into the

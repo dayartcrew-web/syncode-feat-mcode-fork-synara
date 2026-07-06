@@ -108,6 +108,84 @@ impl DomainEventPublisher for WsDomainEventPublisher {
     }
 }
 
+/// A composite [`DomainEventPublisher`] that fans every published event out to
+/// both the WS push bus (for browser clients) AND a typed
+/// `broadcast::Sender<DomainEvent>` (for in-process consumers like the
+/// [`AutomationRunReactor`]).
+///
+/// The orchestration pipeline serializes each event to JSON before invoking
+/// the publisher (see `pipeline::publish_events`), so the typed-event bus
+/// receives a deserialized `DomainEvent` — the reactor can pattern-match on
+/// variants directly, no wire-shape parsing required. Deserialization failures
+/// are logged and swallowed (best-effort: the WS bus still receives the JSON
+/// form; only the typed bus misses the event).
+///
+/// [`AutomationRunReactor`]: syncode_automation::run_reactor::AutomationRunReactor
+#[derive(Clone)]
+pub struct FanoutDomainEventPublisher {
+    /// The WS push-bus publisher (browser clients).
+    ws: WsDomainEventPublisher,
+    /// Typed-event bus for in-process reactors. Best-effort fan-out: no
+    /// receivers is fine (broadcast::send returns Err and we ignore it).
+    typed_tx: tokio::sync::broadcast::Sender<syncode_core::DomainEvent>,
+}
+
+impl FanoutDomainEventPublisher {
+    /// Construct a fan-out publisher over the given WS push sender and typed
+    /// broadcast sender.
+    pub fn new(
+        push_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
+        typed_tx: tokio::sync::broadcast::Sender<syncode_core::DomainEvent>,
+    ) -> Self {
+        Self {
+            ws: WsDomainEventPublisher::new(push_tx),
+            typed_tx,
+        }
+    }
+
+    /// Borrow the typed-event broadcast sender (for consumers like the
+    /// automation run reactor to call `.subscribe()`).
+    pub fn typed_sender(&self) -> &tokio::sync::broadcast::Sender<syncode_core::DomainEvent> {
+        &self.typed_tx
+    }
+}
+
+#[async_trait::async_trait]
+impl DomainEventPublisher for FanoutDomainEventPublisher {
+    async fn publish(
+        &self,
+        channel: &str,
+        event_type: &str,
+        aggregate_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), PortError> {
+        // Forward to WS bus first (existing behavior) — preserves push
+        // delivery to subscribed browser clients.
+        self.ws
+            .publish(channel, event_type, aggregate_id, data.clone())
+            .await?;
+        // Rehydrate the typed event and forward to in-process consumers. The
+        // pipeline pre-serializes via serde_json::to_value(&env.event), so this
+        // round-trip is exact for every DomainEvent variant. Best-effort: a
+        // deserialization failure (impossible in practice — same Serialize
+        // impl) or a receiver-less bus is logged + swallowed.
+        match serde_json::from_value::<syncode_core::DomainEvent>(data) {
+            Ok(ev) => {
+                let _ = self.typed_tx.send(ev);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    event_type,
+                    "fanout publisher: failed to rehydrate typed DomainEvent; \
+                     ws bus still delivered the JSON form"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Subscription registry — maps connection IDs to their channel subscriptions
 #[derive(Debug, Clone, Default)]
 pub struct SubscriptionRegistry {

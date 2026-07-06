@@ -157,10 +157,10 @@ impl RunExecutor for ProcessRunExecutor {
             // Exit 0 → synthesize thread/turn ids. The orchestration layer is
             // not involved (this executor is a standalone process runner), so
             // fresh opaque ids are sufficient for the run record.
-            Ok(DispatchOutcome {
-                thread_id: syncode_core::EntityId::new(),
-                turn_id: syncode_core::EntityId::new(),
-            })
+            Ok(DispatchOutcome::new(
+                syncode_core::EntityId::new(),
+                syncode_core::EntityId::new(),
+            ))
         } else {
             // Non-zero exit (or signal). Embed exit code + truncated output so
             // the failure is diagnosable in the run record.
@@ -311,10 +311,10 @@ impl ProcessRunExecutor {
         .await;
 
         if status.success() {
-            Ok(DispatchOutcome {
-                thread_id: syncode_core::EntityId::new(),
-                turn_id: syncode_core::EntityId::new(),
-            })
+            Ok(DispatchOutcome::new(
+                syncode_core::EntityId::new(),
+                syncode_core::EntityId::new(),
+            ))
         } else {
             let code = exit_code.unwrap_or(-1);
             Err(PortError::Internal(format!(
@@ -385,7 +385,9 @@ mod tests {
 
         let outcome = exec.dispatch_turn(req).await;
         assert!(outcome.is_ok(), "echo should succeed: {:?}", outcome.err());
-        let DispatchOutcome { thread_id, turn_id } = outcome.unwrap();
+        let DispatchOutcome {
+            thread_id, turn_id, ..
+        } = outcome.unwrap();
         // Synthesized ids are non-empty.
         assert!(!thread_id.to_string().is_empty());
         assert!(!turn_id.to_string().is_empty());
