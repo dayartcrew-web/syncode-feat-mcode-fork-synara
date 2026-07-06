@@ -15,12 +15,13 @@
 //! backoffs.
 
 use chrono::{DateTime, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use syncode_core::ports::{AutomationRepository, DispatchRequest, RunExecutor};
 
+use crate::completion_harness::{CompletionHarness, CompletionJob, completion_run_context};
 use crate::definition::AutomationDef;
 use crate::events::{RunContext, RunEventSink, with_run_context};
 use crate::policies::{CompletionPolicy, RetryPolicy};
@@ -44,6 +45,44 @@ impl Delay {
         if matches!(self, Delay::Real) {
             tokio::time::sleep(dur).await;
         }
+    }
+}
+
+/// Cross-cutting run dependencies that are OPTIONAL for the basic retry loop.
+///
+/// Both fields feed follow-up features layered on top of the core dispatch
+/// loop and are absent by default (so the historical `execute_run` behavior is
+/// preserved when callers pass [`RunDeps::default`]):
+///
+/// - `repo_root` (P2-8): when `Some` and the def's [`WorktreeMode`] requests
+///   isolation, the run executes inside a freshly-created git worktree rooted
+///   here. The path is set on [`DispatchRequest::working_dir`] so a
+///   participating executor (e.g. `ProcessRunExecutor`) runs the command there.
+/// - `completion_harness` (P2-2): when `Some` and the def's completion policy
+///   is [`AiEvaluated`](CompletionPolicy::AiEvaluated) and the run succeeded,
+///   a [`CompletionJob`] is submitted for off-band LLM evaluation.
+///
+/// [`WorktreeMode`]: crate::worktree::WorktreeMode
+#[derive(Clone, Default)]
+pub struct RunDeps {
+    /// Repo root for git-worktree isolation (P2-8). `None` = never isolate.
+    pub repo_root: Option<PathBuf>,
+    /// The completion harness to receive AI-evaluated completion jobs (P2-2).
+    /// `None` = completion checks are skipped (the run outcome stands as-is).
+    pub completion_harness: Option<Arc<CompletionHarness>>,
+}
+
+impl RunDeps {
+    /// Builder: set the repo root for worktree isolation.
+    pub fn with_repo_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.repo_root = Some(root.into());
+        self
+    }
+
+    /// Builder: set the completion harness for AI-evaluated completion checks.
+    pub fn with_completion_harness(mut self, harness: Arc<CompletionHarness>) -> Self {
+        self.completion_harness = Some(harness);
+        self
     }
 }
 
@@ -112,6 +151,9 @@ pub fn dispatch_request_for(def: &AutomationDef) -> DispatchRequest {
         provider_id,
         model,
         prompt,
+        // P2-8: worktree isolation, when active, overrides this after the
+        // request is built (see `execute_run_inner`). Default: host CWD.
+        working_dir: None,
     }
 }
 
@@ -131,6 +173,10 @@ pub fn dispatch_request_for(def: &AutomationDef) -> DispatchRequest {
 ///   via [`increment_def_iterations`].
 ///
 /// `now` is injected (not read from the system clock) so tests are deterministic.
+///
+/// This entry point delegates with [`RunDeps::default`] — no worktree isolation
+/// and no AI-completion harness. To opt into the P2-2 / P2-8 features, use
+/// [`execute_run_with_deps`].
 pub async fn execute_run(
     def: &AutomationDef,
     executor: &dyn RunExecutor,
@@ -139,7 +185,32 @@ pub async fn execute_run(
     delay: Delay,
     now: DateTime<Utc>,
 ) -> RunOutcome {
-    execute_run_inner(def, executor, repo, completion, delay, now, None).await
+    execute_run_inner(
+        def,
+        executor,
+        repo,
+        completion,
+        delay,
+        now,
+        None,
+        &RunDeps::default(),
+    )
+    .await
+}
+
+/// Execute a run with the full set of optional cross-cutting [`RunDeps`] — the
+/// entry point that activates P2-2 (AI-completion harness) and P2-8 (worktree
+/// isolation). Behavior matches [`execute_run`] when `deps` is default.
+pub async fn execute_run_with_deps(
+    def: &AutomationDef,
+    executor: &dyn RunExecutor,
+    repo: &dyn AutomationRepository,
+    completion: &CompletionPolicy,
+    delay: Delay,
+    now: DateTime<Utc>,
+    deps: &RunDeps,
+) -> RunOutcome {
+    execute_run_inner(def, executor, repo, completion, delay, now, None, deps).await
 }
 
 /// Execute a single automation run **with live event push** (PUSH-1).
@@ -174,7 +245,43 @@ pub async fn execute_run_with_events(
     now: DateTime<Utc>,
     sink: Arc<dyn RunEventSink>,
 ) -> RunOutcome {
-    execute_run_inner(def, executor, repo, completion, delay, now, Some(sink)).await
+    execute_run_inner(
+        def,
+        executor,
+        repo,
+        completion,
+        delay,
+        now,
+        Some(sink),
+        &RunDeps::default(),
+    )
+    .await
+}
+
+/// Execute a run with live event push **and** the full [`RunDeps`] — the
+/// live-push variant of [`execute_run_with_deps`]. Activates P2-2 / P2-8.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_run_with_events_and_deps(
+    def: &AutomationDef,
+    executor: &dyn RunExecutor,
+    repo: &dyn AutomationRepository,
+    completion: &CompletionPolicy,
+    delay: Delay,
+    now: DateTime<Utc>,
+    sink: Arc<dyn RunEventSink>,
+    deps: &RunDeps,
+) -> RunOutcome {
+    execute_run_inner(
+        def,
+        executor,
+        repo,
+        completion,
+        delay,
+        now,
+        Some(sink),
+        deps,
+    )
+    .await
 }
 
 /// Shared retry loop backing both [`execute_run`] and [`execute_run_with_events`].
@@ -187,6 +294,7 @@ pub async fn execute_run_with_events(
 /// auto-disable condition is computed into [`RunOutcome::should_disable`].
 /// P2-7: the dispatch+retry loop is wrapped in `tokio::time::timeout(
 /// max_runtime_seconds)` when the def sets that cap.
+#[allow(clippy::too_many_arguments)]
 async fn execute_run_inner(
     def: &AutomationDef,
     executor: &dyn RunExecutor,
@@ -195,16 +303,54 @@ async fn execute_run_inner(
     delay: Delay,
     now: DateTime<Utc>,
     sink: Option<Arc<dyn RunEventSink>>,
+    deps: &RunDeps,
 ) -> RunOutcome {
     let policy = retry_policy_for(def);
     let mut attempt: u32 = 0;
-    let req = dispatch_request_for(def);
+    let mut req = dispatch_request_for(def);
 
     // Create + persist the initial run record.
     let mut run = AutomationRun::new(def.id.as_str().to_string());
     run.attempt = attempt;
     run.mark_started();
     persist_run(repo, &run).await;
+
+    // P2-8: worktree isolation. When the host supplied a repo_root and the
+    // def opts into isolation, create a worktree before dispatch and route the
+    // command into it via `req.working_dir`. A creation failure is fatal —
+    // isolation was requested and we must NOT silently fall back to the repo
+    // root (the command could then mutate the user's working tree).
+    let worktree: Option<(PathBuf, PathBuf)> = match deps.repo_root.as_deref() {
+        Some(root) => match setup_worktree_for_run(def, root, &run.id).await {
+            Some(Ok(path)) => {
+                req.working_dir = Some(path.to_string_lossy().into_owned());
+                Some((root.to_path_buf(), path))
+            }
+            Some(Err(e)) => {
+                // Isolation requested but unavailable → fail the run with a
+                // clear error. Do NOT fall back to the repo root.
+                tracing::warn!(
+                    automation_id = %def.id,
+                    run_id = %run.id,
+                    error = %e,
+                    "worktree isolation requested but unavailable; failing run"
+                );
+                run.mark_failed(format!("worktree isolation requested but unavailable: {e}"));
+                persist_run(repo, &run).await;
+                let final_status = run.status.clone();
+                advance_schedule(repo, def, &final_status, now).await;
+                let new_count = increment_def_iterations(repo, def).await;
+                let should_disable = should_disable_after(def, new_count, &final_status);
+                return RunOutcome {
+                    final_status,
+                    attempts: attempt + 1,
+                    should_disable,
+                };
+            }
+            None => None, // Local mode or heartbeat run — no isolation.
+        },
+        None => None, // No repo_root supplied — isolation impossible.
+    };
 
     // P2-7: optional wall-clock cap on the entire dispatch+retry loop. The
     // retry delays count against the budget — correct, since
@@ -247,16 +393,56 @@ async fn execute_run_inner(
         }
     };
 
+    // P2-8: cleanup the worktree on run end (success OR failure). Best-effort
+    // — a failure is logged by `cleanup_worktree`. MCode leaves the worktree
+    // in place on success for inspection; we remove unconditionally to avoid
+    // accumulating `automation/<slug>/<run-id>` dirs across many runs. Callers
+    // that want to preserve a run's worktree can re-`git worktree add` it.
+    if let Some((root, path)) = worktree.as_ref() {
+        cleanup_worktree(root, path).await;
+    }
+
     advance_schedule(repo, def, &final_status, now).await;
 
     // P2-6: increment iteration_count + persist, then decide auto-disable.
     let new_count = increment_def_iterations(repo, def).await;
     let should_disable = should_disable_after(def, new_count, &final_status);
 
+    // P2-2: submit an AI-evaluated completion job when the def asks for one and
+    // the run reached a success state. Off-band (non-blocking); the harness's
+    // worker pool does the slow LLM call + disable. The assistant text is the
+    // run's recorded output (the orchestration layer's richer turn text isn't
+    // visible at this layer) — adequate for the evaluator's evidence channel.
+    if matches!(def.completion_policy, CompletionPolicy::AiEvaluated { .. })
+        && final_status.is_success()
+        && let Some(harness) = deps.completion_harness.as_ref()
+    {
+        let assistant_text = assistant_text_for_completion(&run);
+        let job = CompletionJob {
+            def: Arc::new(def.clone()),
+            run: completion_run_context(&run.id, &def.id.as_str()),
+            assistant_text,
+        };
+        let _ = harness.submit(job); // best-effort; outcome logged inside submit
+    }
+
     RunOutcome {
         final_status,
         attempts: attempt + 1,
         should_disable,
+    }
+}
+
+/// P2-2: derive the assistant text evidence for the completion evaluator from
+/// the run record. Uses `stdout` (the dispatch summary / captured output);
+/// falls back to `error` and then a placeholder when the run produced no text.
+fn assistant_text_for_completion(run: &AutomationRun) -> String {
+    if !run.stdout.is_empty() {
+        run.stdout.clone()
+    } else if let Some(e) = run.error.as_ref().filter(|s| !s.is_empty()) {
+        e.clone()
+    } else {
+        "(run produced no output)".to_string()
     }
 }
 
@@ -450,10 +636,23 @@ pub async fn setup_worktree_for_run(
 /// P2-8: remove a worktree on run failure (cleanup). Best-effort — logs on
 /// error. Called by the host/scheduler after a run that used worktree
 /// isolation ends in failure.
+///
+/// Kept for backward compatibility with external callers; the run loop now
+/// uses [`cleanup_worktree`] (unconditional) on every run end. This wrapper is
+/// a thin alias.
 pub async fn cleanup_worktree_on_failure(
     repo_root: &std::path::Path,
     worktree_path: &std::path::Path,
 ) {
+    cleanup_worktree(repo_root, worktree_path).await;
+}
+
+/// P2-8: remove a worktree on run end (success OR failure). Best-effort — a
+/// removal failure is logged (never propagated). The run loop calls this for
+/// every isolated run regardless of outcome; a host that wants to preserve a
+/// successful run's worktree should bypass the run-loop isolation and manage
+/// the worktree itself.
+pub async fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) {
     let mgr = WorktreeManager::new(repo_root);
     if let Err(e) = mgr.remove(worktree_path).await {
         tracing::warn!(error = %e, path = %worktree_path.display(), "failed to clean up worktree");
@@ -1287,5 +1486,449 @@ mod tests {
             result.is_none(),
             "heartbeat run → no worktree (standalone-only)"
         );
+    }
+
+    // ─── P2-8: worktree working-dir wiring (run loop integration) ────
+    //
+    // These mirror the real-git harness in worktree.rs::tests: they spin up a
+    // throwaway git repo, run `execute_run_with_deps` with `repo_root` set, and
+    // assert the dispatched request carries the worktree path AND the worktree
+    // is cleaned up on run end.
+
+    fn git_is_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Create a throwaway git repo with one (empty) commit so worktrees can be
+    /// attached. Returns the repo path. Caller cleans up.
+    fn make_temp_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "syncode-exec-p2-8-{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init failed");
+        for (k, v) in &[("user.name", "test"), ("user.email", "t@t.test")] {
+            let _ = std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&dir)
+                .output();
+        }
+        let out = std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        dir
+    }
+
+    fn cleanup_repo(dir: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Build a def whose worktree_mode is Worktree (standalone run).
+    fn worktree_def() -> AutomationDef {
+        let mut def = AutomationDef::new(
+            "ci-build".into(),
+            "echo".into(),
+            crate::definition::ScheduleType::Manual,
+        );
+        def.worktree_mode = crate::worktree::WorktreeMode::Worktree;
+        def
+    }
+
+    #[tokio::test]
+    async fn p2_8_worktree_mode_run_dispatches_into_worktree_dir() {
+        // Standalone Worktree-mode run → the DispatchRequest handed to
+        // dispatch_turn carries working_dir == Some(<worktree path>).
+        if !git_is_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let repo_root = make_temp_repo();
+        let repo = repo();
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let def = worktree_def();
+        register_def(&repo, &def).await;
+        let deps = RunDeps::default().with_repo_root(repo_root.clone());
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            &deps,
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        let reqs = executor.requests();
+        assert_eq!(reqs.len(), 1, "one dispatch (no retries)");
+        let wd = reqs[0]
+            .working_dir
+            .as_ref()
+            .expect("working_dir must be set");
+        assert!(
+            wd.contains("automation/ci-build/"),
+            "working_dir should be the worktree path, got {wd}"
+        );
+        assert!(
+            wd.starts_with(repo_root.to_str().unwrap()),
+            "worktree path should be under repo_root, got {wd}"
+        );
+        // Cleanup ran — the worktree dir is gone after the run ends.
+        assert!(
+            !std::path::Path::new(wd).exists(),
+            "worktree dir should be removed after run end, still exists: {wd}"
+        );
+        cleanup_repo(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn p2_8_local_mode_run_leaves_working_dir_unset() {
+        // Local-mode def (default) → no worktree; working_dir on the request
+        // is None (unchanged), even when a repo_root is supplied.
+        if !git_is_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let repo_root = make_temp_repo();
+        let repo = repo();
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        // Default def → worktree_mode = Local.
+        let def = def_with_retries(0, 0);
+        register_def(&repo, &def).await;
+        let deps = RunDeps::default().with_repo_root(repo_root.clone());
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            &deps,
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        let reqs = executor.requests();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            reqs[0].working_dir.is_none(),
+            "Local mode must not set working_dir (got {:?})",
+            reqs[0].working_dir
+        );
+        // No automation/ dir created either.
+        assert!(
+            !repo_root.join("automation").exists(),
+            "Local mode must not create any worktree dir"
+        );
+        cleanup_repo(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn p2_8_heartbeat_run_leaves_working_dir_unset() {
+        // Worktree-mode def BUT target_thread_id set (heartbeat) → no worktree.
+        if !git_is_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let repo_root = make_temp_repo();
+        let repo = repo();
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let mut def = worktree_def();
+        def.target_thread_id = Some("00000000-0000-0000-0000-000000000001".into());
+        register_def(&repo, &def).await;
+        let deps = RunDeps::default().with_repo_root(repo_root.clone());
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            &deps,
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        let reqs = executor.requests();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            reqs[0].working_dir.is_none(),
+            "heartbeat run must not isolate (got {:?})",
+            reqs[0].working_dir
+        );
+        assert!(
+            !repo_root.join("automation").exists(),
+            "heartbeat run must not create a worktree"
+        );
+        cleanup_repo(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn p2_8_worktree_cleaned_up_on_failed_run() {
+        // A run whose dispatch fails still cleans up the worktree (cleanup is
+        // unconditional on run end). With RetryPolicy::None the failure is
+        // terminal after one attempt.
+        if !git_is_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let repo_root = make_temp_repo();
+        let repo = repo();
+        let executor = RecordedExecutor::new(vec![Err(PortError::Internal("boom".into()))]);
+        let mut def = worktree_def();
+        def.max_retries = 0; // RetryPolicy::None → fail immediately
+        register_def(&repo, &def).await;
+        let deps = RunDeps::default().with_repo_root(repo_root.clone());
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            &deps,
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Failed);
+        let reqs = executor.requests();
+        assert_eq!(reqs.len(), 1, "one (failed) dispatch");
+        let wd = reqs[0].working_dir.as_ref().expect("worktree was set");
+        // The worktree WAS created (dispatch ran inside it)...
+        assert!(
+            wd.contains("automation/ci-build/"),
+            "failed run should still have dispatched into the worktree, got {wd}"
+        );
+        // ...and cleaned up despite the failure.
+        assert!(
+            !std::path::Path::new(wd).exists(),
+            "worktree must be removed on failure too, still exists: {wd}"
+        );
+        cleanup_repo(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn p2_8_worktree_creation_failure_fails_run_with_clear_error() {
+        // repo_root points somewhere that is NOT a git repo → `git worktree
+        // add` fails → the run fails with a clear error mentioning worktree,
+        // and dispatch is NEVER called (no silent fallback to repo root).
+        let non_repo = std::env::temp_dir().join(format!(
+            "syncode-exec-notrepo-{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        std::fs::create_dir_all(&non_repo).unwrap();
+
+        let repo = repo();
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let def = worktree_def();
+        register_def(&repo, &def).await;
+        let deps = RunDeps::default().with_repo_root(non_repo.clone());
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            &deps,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.final_status,
+            RunStatus::Failed,
+            "worktree creation failure must fail the run"
+        );
+        // No dispatch happened — the run failed at the isolation step.
+        assert!(
+            executor.requests().is_empty(),
+            "dispatch must NOT run when worktree isolation requested but unavailable"
+        );
+        // The persisted run record carries a clear error mentioning worktree.
+        let runs = repo.runs.read().await.clone();
+        let last = runs.last().expect("run persisted");
+        let err = last.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            err.contains("worktree"),
+            "run error should mention worktree isolation, got: {err}"
+        );
+        cleanup_repo(&non_repo);
+    }
+
+    #[tokio::test]
+    async fn p2_8_no_repo_root_skips_isolation_entirely() {
+        // Default RunDeps (no repo_root) → no isolation attempt even when the
+        // def requests Worktree mode. Preserves the historical behavior.
+        let repo = repo();
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+        let def = worktree_def();
+        register_def(&repo, &def).await;
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &CompletionPolicy::ExitCodeZero,
+            Delay::Immediate,
+            Utc::now(),
+            &RunDeps::default(),
+        )
+        .await;
+
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        let reqs = executor.requests();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            reqs[0].working_dir.is_none(),
+            "no repo_root → no isolation, working_dir must stay None"
+        );
+    }
+
+    // ─── P2-2: completion harness integration (run loop) ──────────────
+
+    #[tokio::test]
+    async fn p2_2_ai_evaluated_success_submits_completion_job_and_disables() {
+        use crate::completion_harness::{
+            CompletionDisableFn, CompletionHarness, HarnessConfig, LlmFn,
+        };
+        use std::time::Duration;
+
+        // End-to-end through the run loop: an AiEvaluated def that succeeds →
+        // execute_run_with_deps submits a CompletionJob → the harness's worker
+        // evaluates (canned LLM returns a confident Match) → disable_fn fires.
+        let mut def = AutomationDef::new(
+            "ai-loop".into(),
+            "echo".into(),
+            crate::definition::ScheduleType::Manual,
+        );
+        def.completion_policy = CompletionPolicy::AiEvaluated {
+            stop_when: "all tests pass".to_string(),
+            confidence_threshold: 0.8,
+        };
+        let def_id = def.id.as_str().to_string();
+        let repo = repo();
+        register_def(&repo, &def).await;
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+
+        // Canned LLM that returns a confident Match.
+        struct MatchLlm;
+        #[async_trait::async_trait]
+        impl LlmFn for MatchLlm {
+            async fn call(&self, _p: &str) -> Result<String, String> {
+                Ok("CONFIDENCE: 0.95".into())
+            }
+        }
+        let llm: Arc<dyn crate::completion_eval::CompletionLlmCall> = Arc::new(
+            crate::completion_harness::ProviderCompletionLlm::new(Arc::new(MatchLlm)),
+        );
+
+        struct RecDisable {
+            ids: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl CompletionDisableFn for RecDisable {
+            async fn disable(
+                &self,
+                def: &AutomationDef,
+                _r: &crate::completion_eval::CompletionResult,
+            ) {
+                self.ids.lock().unwrap().push(def.id.as_str().to_string());
+            }
+        }
+        let ids: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let disable: Arc<dyn CompletionDisableFn> = Arc::new(RecDisable { ids: ids.clone() });
+
+        let harness = Arc::new(CompletionHarness::start_with(
+            repo.clone(),
+            llm,
+            disable,
+            HarnessConfig {
+                capacity: 8,
+                workers: 1,
+                eval_timeout: Duration::from_secs(5),
+            },
+        ));
+        let deps = RunDeps::default().with_completion_harness(harness.clone());
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &def.completion_policy,
+            Delay::Immediate,
+            Utc::now(),
+            &deps,
+        )
+        .await;
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+
+        // Poll for the worker to process the job + disable.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if !ids.lock().unwrap().is_empty() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("disable_fn never fired — completion job not submitted/processed");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(ids.lock().unwrap().clone(), vec![def_id]);
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn p2_2_no_harness_skips_completion_submission() {
+        // Default RunDeps (no harness) → even an AiEvaluated def that succeeds
+        // does not submit a job. Behavior is unchanged (the run completes).
+        let mut def = AutomationDef::new(
+            "ai-noharness".into(),
+            "echo".into(),
+            crate::definition::ScheduleType::Manual,
+        );
+        def.completion_policy = CompletionPolicy::AiEvaluated {
+            stop_when: "done".to_string(),
+            confidence_threshold: 0.9,
+        };
+        let repo = repo();
+        register_def(&repo, &def).await;
+        let executor = RecordedExecutor::new(vec![ok_outcome()]);
+
+        let outcome = execute_run_with_deps(
+            &def,
+            &executor,
+            repo.as_ref(),
+            &def.completion_policy,
+            Delay::Immediate,
+            Utc::now(),
+            &RunDeps::default(),
+        )
+        .await;
+        assert_eq!(outcome.final_status, RunStatus::Completed);
+        // No panic / no submission — the run completed normally.
+        assert_eq!(executor.requests().len(), 1);
     }
 }

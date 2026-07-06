@@ -14,13 +14,13 @@
 //! 3. **On success** — the worktree is left in place (available for
 //!    inspection / follow-up commits).
 //!
-//! ## Port-shape limitation
+//! ## Working-directory wiring (P2-8)
 //!
-//! The current [`syncode_core::ports::DispatchRequest`] does not carry a
-//! `working_dir`, so the command is not yet *executed* inside the worktree by
-//! [`crate::process_executor::ProcessRunExecutor`]. The worktree is created +
-//! cleaned up around the run (the isolation contract's setup/teardown); wiring
-//! the path into dispatch is a follow-up that extends the port.
+//! [`syncode_core::ports::DispatchRequest`] now carries an optional
+//! `working_dir`; [`crate::executor`] sets it to the worktree path before
+//! dispatch when isolation applies, and [`crate::process_executor::ProcessRunExecutor`]
+//! honors it (the child `chdir`s into the worktree before exec'ing). The
+//! create/cleanup lifecycle below is the setup/teardown around that.
 
 use std::path::{Path, PathBuf};
 

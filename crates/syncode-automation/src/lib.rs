@@ -4,6 +4,7 @@
 //! retry/misfire/completion policies, heartbeat mode, and AI-evaluated completion.
 
 pub mod completion_eval;
+pub mod completion_harness;
 pub mod definition;
 pub mod events;
 pub mod executor;
@@ -19,6 +20,10 @@ pub mod worktree;
 pub use completion_eval::{
     CompletionLlmCall, CompletionResult, CompletionVerdict, NoMatchReason, build_prompt,
     build_system_and_prompt, evaluate_completion_policy, parse_confidence,
+};
+pub use completion_harness::{
+    CompletionDisableFn, CompletionHarness, CompletionJob, HarnessConfig, LlmFn,
+    ProviderCompletionLlm, SubmitOutcome,
 };
 pub use definition::{AutomationDef, AutomationId, ScheduleType};
 pub use events::{
