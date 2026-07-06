@@ -164,9 +164,4 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: buildSourcemap,
   },
-  test: {
-    // Polyfill navigator.userAgent for vendored deps (e.g. @pierre/diffs
-    // CodeView) that read it at module-load time in the Node test environment.
-    setupFiles: ["./src/test/setup.ts"],
-  },
 });
