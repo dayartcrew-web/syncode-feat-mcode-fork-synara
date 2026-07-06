@@ -17,6 +17,13 @@ vi.mock("../hooks/useTheme", () => ({
   useTheme: () => ({ resolvedTheme: "light" }),
 }));
 
+// Pre-warm the ChatMarkdown module (KaTeX + markdown-it + shiki) at top level
+// so the first test doesn't pay the ~4s cold-import cost inside its bounded
+// timeout. Top-level await runs in vitest's module-evaluation phase, which is
+// not billed against testTimeout/hookTimeout. (Same fix as
+// MessagesTimeline.test.tsx — 2026-07-07 flake root-cause.)
+await import("./ChatMarkdown");
+
 async function renderMarkdown(
   text: string,
   cwd = "C:\\Users\\LENOVO\\dpcode",
