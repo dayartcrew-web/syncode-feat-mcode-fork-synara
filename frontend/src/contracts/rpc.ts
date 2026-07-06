@@ -15,7 +15,9 @@
  *    DTOs in `../types/*` and the Tier-3 domain types. Calling these succeeds
  *    at runtime (T5 wires the transport).
  *
- * 2. **`UNSERVED_RPC`** — the ~60 MCode RPC methods Syncode does NOT serve
+ * 2. **`UNSERVED_RPC`** — MCode RPC methods Syncode does NOT serve (currently
+ *    EMPTY — every actively-called UI RPC reaches a backend handler; see the
+ *    per-domain comments below for what each handler returns)
  *    (git ops, terminal, server-meta, provider-discovery, automation, …).
  *    These return `MethodNotFound (-32601)` at runtime (the T5 transport layer
  *    enforces this). They're enumerated here so the cloned UI's imports of
@@ -819,7 +821,10 @@ export const SERVED_RPC = {
   //   - `server.getConfig` returns empty `providers`/`availableEditors`/
   //     `keybindings`/`issues` (no provider probe / editor detection).
   //   - `server.getDiagnostics` zeroes memory counters (no stable probe).
-  //   - `server.subscribe*` are stubs (no push delivery — T6c-future).
+  //   - `server.subscribeConfig`/`subscribeSettings` push REAL as of T6c-18
+  //     (ServerSettingsState write-through); `subscribeProviderStatuses`/
+  //     `subscribeLifecycle` register + emit an initial snapshot but have no
+  //     live producer yet (no push on change).
   "server/getConfig": { request: null as unknown as null, result: null as unknown as ServerConfig },
   "server/getSettings": {
     request: null as unknown as null,
@@ -1186,7 +1191,7 @@ export const SERVED_RPC = {
     result: null as unknown as GitWorktreeRemoveResult,
   },
 
-  // ─── Server write-side stubs (T6c-10) ─────────────────────────────────
+  // ─── Server write-side — REAL persistence as of T6c-18 (ServerSettingsState) ───────────
   // The cloned MCode UI persists user edits via these `server.*` write RPCs
   // (Settings panel "Apply"/"Reset", provider re-probe buttons, keybinding
   // editor). The transport remaps the MCode dot-strings (`server.setConfig`,
@@ -1590,8 +1595,9 @@ export const UNSERVED_RPC = [
   // the four `server.subscribe*` stubs are SERVED — see SERVED_RPC. The
   // write-side RPCs (`server.setConfig`, `server.updateSettings`,
   // `server.refreshProviders`, `server.updateProvider`,
-  // `server.upsertKeybinding`) are ALSO SERVED as of T6c-10 (stubs that echo
-  // the default read-side payload — no persistence). The advanced server
+  // `server.upsertKeybinding`) are SERVED with REAL persistence as of T6c-18
+  // (ServerSettingsState — deep-merge + write-through to SQLite when a pool is
+  // attached; the T6c-10 "stubs that echo" note above is superseded). The advanced server
   // RPCs below remain unserved (MethodNotFound):
   // NOTE: `server.generateThreadRecap` was SERVED in T6c-13 (LLM-backed recap).
   // NOTE: the 5 legacy `server.*` aliases (`server.listProviders`,
@@ -1613,16 +1619,16 @@ export const UNSERVED_RPC = [
   // all server.* RPCs are served (legacy aliases via SRV-5 thin dispatch arms;
   // list-only/process-list RPCs via SRV-6); no remaining unserved entries.
 
-  // ─── Provider discovery (no backend surface) — ~9 ───────────────────
-  "provider.listSkills",
-  "provider.readSkill",
-  "provider.listPlugins",
-  "provider.readPlugin",
-  "provider.listCommands",
-  "provider.listModels",
-  "provider.listAgents",
-  "provider.listOptions",
-  "provider.listSkillsCatalog",
+  // ─── Provider discovery — SERVED as of T6c-7 ────────────────────────
+  // `provider.listSkills`, `provider.readSkill`, `provider.listPlugins`,
+  // `provider.readPlugin`, `provider.listCommands`, `provider.listModels`,
+  // `provider.listAgents`, `provider.listOptions`, `provider.listSkillsCatalog`
+  // are ALL SERVED — mapped via MCODE_TO_SERVED to `provider/list-skills`,
+  // `provider/list-plugins`, … (see wsTransport.ts + rpc.rs handle_provider_*).
+  // The handlers return empty arrays / null descriptors because Syncode has no
+  // skill/plugin discovery subsystem yet — but the transport + backend arms
+  // exist, so these are NOT unserved. This block is intentionally empty (kept
+  // as a marker for the domain).
 
   // ─── Automation ──────────────────────────────────────────────────────
   // The core automation CRUD + run RPCs (`automation.list`, `automation.create`,
@@ -1631,7 +1637,8 @@ export const UNSERVED_RPC = [
   // are NOW SERVED as of T6c-6 (mapped via MCODE_TO_SERVED to `automation/list`,
   // `automation/create`, …; subscribe/unsubscribe share a stub arm returning
   // `{subscribed:true}`). `automation.runNow`/`markRunRead`/`archiveRun` are
-  // also served (markRunRead/archiveRun are no-op stubs).
+  // also served — markRunRead/archiveRun are REAL as of T6c-20
+  // (`AutomationRun.unread` + `archived_at` fields, persisted via `save_run`).
 
   // ─── Project file ops — all served as of PROJ-2 + PROJ-3 ──────────────
   // PROJ-2: `project.readFile`, `project.writeFile`, `project.listDirectories`,
