@@ -8,9 +8,9 @@
 //!   - A large scrollback containing ANSI escapes is capped without
 //!     splitting a multi-byte char or an escape sequence.
 
+use syncode_terminal::OutputBuffer;
 use syncode_terminal::ScrollbackStore;
 use syncode_terminal::truncate_ansi_safe;
-use syncode_terminal::OutputBuffer;
 
 // ── OutputBuffer scrollback / restore ────────────────────────────────────
 
@@ -109,7 +109,10 @@ fn ansi_cap_preserves_tail_and_does_not_split_escape() {
     // Never longer than the cap (modulo advancing to the boundary).
     assert!(out.len() <= data.len());
     // The most recent marker survives (tail is preserved).
-    assert!(out.ends_with(body), "tail body must survive cap; got: {out:?}");
+    assert!(
+        out.ends_with(body),
+        "tail body must survive cap; got: {out:?}"
+    );
     // The cut lands at the ESC (replay-safe), not mid-escape.
     assert!(
         out.starts_with('\x1b') || out.starts_with('\n') || out.starts_with('g'),

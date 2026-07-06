@@ -98,8 +98,8 @@ async fn save_document(
     table: &'static str,
     value: &Value,
 ) -> Result<(), SettingsStoreError> {
-    let data =
-        serde_json::to_string(value).map_err(|e| SettingsStoreError::Serialization(e.to_string()))?;
+    let data = serde_json::to_string(value)
+        .map_err(|e| SettingsStoreError::Serialization(e.to_string()))?;
     let query = format!(
         "INSERT INTO {table} (key, value) VALUES (?, ?) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value"

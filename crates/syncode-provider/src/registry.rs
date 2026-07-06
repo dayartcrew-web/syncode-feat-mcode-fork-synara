@@ -220,7 +220,9 @@ impl Default for ProviderRegistry {
 /// channel; no I/O, no subprocess), so this is safe to call from a request
 /// handler. Each branch returns the provider's real adapter.
 pub fn create_by_id(provider_id: &str) -> Option<SharedAdapter> {
-    use crate::adapters::{anthropic, claude, codex, cursor, gemini, grok, kilo, openai, opencode, pi};
+    use crate::adapters::{
+        anthropic, claude, codex, cursor, gemini, grok, kilo, openai, opencode, pi,
+    };
 
     // Each branch constructs the provider's real (un-spawned) adapter and
     // wraps it directly in the shared `Arc<RwLock<dyn ProviderAdapter>>` shape
@@ -350,56 +352,59 @@ impl ProviderOptionInfo {
     /// for provider ids that have no adapter constructor (defensive — every id
     /// in [`ALL_PROVIDERS`] is covered).
     fn from_provider_id(provider_id: &str) -> Option<Self> {
-        use crate::adapters::{anthropic, claude, codex, cursor, gemini, grok, kilo, openai, opencode, pi};
+        use crate::adapters::{
+            anthropic, claude, codex, cursor, gemini, grok, kilo, openai, opencode, pi,
+        };
         use crate::trait_def::ProviderAdapter;
 
         // The capability flags + model list are read from a freshly-constructed
         // (un-spawned) adapter. `new()` only allocates a broadcast channel and
         // atomic state — no I/O, no subprocess — so this is safe to call from a
         // request handler. Each branch returns the adapter's real data.
-        let (caps, models, max_tokens): (Vec<ProviderCapability>, Vec<String>, u32) = match provider_id {
-            PROVIDER_CODEX => {
-                let a = codex::CodexAdapter::new();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_CLAUDE => {
-                let a = claude::ClaudeAdapter::new();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_CURSOR => {
-                let a = cursor::create();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_GEMINI => {
-                let a = gemini::create();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_GROK => {
-                let a = grok::create();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_KILO => {
-                let a = kilo::KiloAdapter::new();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_OPENCODE => {
-                let a = opencode::OpenCodeAdapter::new();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_PI => {
-                let a = pi::PiAdapter::new();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_ANTHROPIC => {
-                let a = anthropic::AnthropicAdapter::new();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            PROVIDER_OPENAI => {
-                let a = openai::OpenAIAdapter::new();
-                (a.capabilities(), a.available_models(), 4096)
-            }
-            _ => return None,
-        };
+        let (caps, models, max_tokens): (Vec<ProviderCapability>, Vec<String>, u32) =
+            match provider_id {
+                PROVIDER_CODEX => {
+                    let a = codex::CodexAdapter::new();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_CLAUDE => {
+                    let a = claude::ClaudeAdapter::new();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_CURSOR => {
+                    let a = cursor::create();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_GEMINI => {
+                    let a = gemini::create();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_GROK => {
+                    let a = grok::create();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_KILO => {
+                    let a = kilo::KiloAdapter::new();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_OPENCODE => {
+                    let a = opencode::OpenCodeAdapter::new();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_PI => {
+                    let a = pi::PiAdapter::new();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_ANTHROPIC => {
+                    let a = anthropic::AnthropicAdapter::new();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                PROVIDER_OPENAI => {
+                    let a = openai::OpenAIAdapter::new();
+                    (a.capabilities(), a.available_models(), 4096)
+                }
+                _ => return None,
+            };
 
         Some(Self {
             provider: provider_id.to_string(),
@@ -675,14 +680,11 @@ mod tests {
     #[tokio::test]
     async fn create_by_id_returns_some_for_all_known_providers() {
         for id in ALL_PROVIDERS {
-            let adapter = create_by_id(id)
-                .unwrap_or_else(|| panic!("create_by_id({id}) returned None — must cover all 10 providers"));
+            let adapter = create_by_id(id).unwrap_or_else(|| {
+                panic!("create_by_id({id}) returned None — must cover all 10 providers")
+            });
             let guard = adapter.read().await;
-            assert_eq!(
-                guard.provider_id(),
-                *id,
-                "identity mismatch for {id}"
-            );
+            assert_eq!(guard.provider_id(), *id, "identity mismatch for {id}");
             assert_eq!(
                 guard.status(),
                 ProviderStatus::Disconnected,
@@ -714,8 +716,14 @@ mod tests {
             "codex models should include gpt-family entries, got {models:?}"
         );
         let caps = guard.capabilities();
-        assert!(caps.contains(&ProviderCapability::Streaming), "codex streams");
-        assert!(caps.contains(&ProviderCapability::ToolUse), "codex does tool use");
+        assert!(
+            caps.contains(&ProviderCapability::Streaming),
+            "codex streams"
+        );
+        assert!(
+            caps.contains(&ProviderCapability::ToolUse),
+            "codex does tool use"
+        );
     }
 
     /// Claude must round-trip through the factory and surface its real adapter
@@ -733,7 +741,10 @@ mod tests {
             "claude models should include claude-family entries, got {models:?}"
         );
         let caps = guard.capabilities();
-        assert!(caps.contains(&ProviderCapability::Streaming), "claude streams");
+        assert!(
+            caps.contains(&ProviderCapability::Streaming),
+            "claude streams"
+        );
         assert!(
             caps.contains(&ProviderCapability::SystemPrompt),
             "claude supports system prompts"
@@ -755,7 +766,10 @@ mod tests {
             "anthropic adapter must surface a real model list, got {models:?}"
         );
         let caps = guard.capabilities();
-        assert!(!caps.is_empty(), "anthropic adapter must advertise capabilities");
+        assert!(
+            !caps.is_empty(),
+            "anthropic adapter must advertise capabilities"
+        );
         assert!(
             caps.contains(&ProviderCapability::Streaming),
             "anthropic streams"
@@ -841,10 +855,7 @@ mod tests {
             codex.supports_system_prompt,
             "codex supports system prompts"
         );
-        assert!(
-            !codex.supports_vision,
-            "codex does not advertise vision"
-        );
+        assert!(!codex.supports_vision, "codex does not advertise vision");
         // Temperature is universally supported by the LLM endpoints we front.
         assert!(codex.supports_temperature);
         // max_tokens defaults to 4096 for every current adapter.

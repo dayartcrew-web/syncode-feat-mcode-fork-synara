@@ -302,9 +302,7 @@ async fn dispatch_method(
         // transport remap (MCODE_TO_SERVED) also routes them here via the slash
         // keys below. Both forms are accepted so dispatch is robust whether the
         // caller used the slash key directly or the dot-string.
-        "project/search-entries"
-        | "project/searchEntries"
-        | "project.searchEntries" => {
+        "project/search-entries" | "project/searchEntries" | "project.searchEntries" => {
             handle_project_search_entries(state, id, &request.params).await
         }
         "project/search-local-entries"
@@ -338,19 +336,13 @@ async fn dispatch_method(
         // `WsState::dev_servers` HashSet tags which `local_servers` ids are
         // dev servers; `listDevServers` intersects the set with
         // `LocalServerManager::list()`. Both forms (dot + slash) accepted.
-        "project.start-dev-server"
-        | "project.startDevServer"
-        | "project/start-dev-server" => {
+        "project.start-dev-server" | "project.startDevServer" | "project/start-dev-server" => {
             handle_project_start_dev_server(state, id, &request.params).await
         }
-        "project.stop-dev-server"
-        | "project.stopDevServer"
-        | "project/stop-dev-server" => {
+        "project.stop-dev-server" | "project.stopDevServer" | "project/stop-dev-server" => {
             handle_project_stop_dev_server(state, id, &request.params).await
         }
-        "project.list-dev-servers"
-        | "project.listDevServers"
-        | "project/list-dev-servers" => {
+        "project.list-dev-servers" | "project.listDevServers" | "project/list-dev-servers" => {
             handle_project_list_dev_servers(state, id).await
         }
 
@@ -468,7 +460,9 @@ async fn dispatch_method(
         //     the `WsDomainEventPublisher`; there is no separate per-session
         //     reader task (unlike the terminal PTY), so this mirrors the shell
         //     subscribe + emits the same initial snapshot.
-        "orchestration.subscribeShell" | "orchestration/subscribeShell" | "orchestration/subscribe-shell" => {
+        "orchestration.subscribeShell"
+        | "orchestration/subscribeShell"
+        | "orchestration/subscribe-shell" => {
             handle_orchestration_subscribe_shell(state, conn_id, id).await
         }
         "orchestration.subscribeEvents"
@@ -886,10 +880,10 @@ async fn dispatch_method(
         //     distinctly).
         //   - worktree reuses `syncode_git::worktree::{list,add,remove}_worktree`.
         //
-// `git.stashAndCheckout` is REAL (GIT-1): it composes a `stash_save2` then a
-// `checkout_tree` on a single git2 handle, with a best-effort `stash_apply`
-// rollback if the checkout fails after a real stash. See
-// `handle_git_stash_and_checkout` below.
+        // `git.stashAndCheckout` is REAL (GIT-1): it composes a `stash_save2` then a
+        // `checkout_tree` on a single git2 handle, with a best-effort `stash_apply`
+        // rollback if the checkout fails after a real stash. See
+        // `handle_git_stash_and_checkout` below.
         //
         // Deferred / unserved (still in `UNSERVED_RPC`): `git.runStackedAction`
         // (LLM-backed multi-phase commit/push/PR — would need provider wiring),
@@ -1132,9 +1126,7 @@ async fn dispatch_method(
         // from `LocalServerManager::list()`. Returns the MCode
         // `ServerLocalServerProcess[]` shape (camelCase fields). Empty when
         // no servers are running.
-        "server.listLocalServers"
-        | "server/list-local-servers"
-        | "server/listLocalServers" => {
+        "server.listLocalServers" | "server/list-local-servers" | "server/listLocalServers" => {
             handle_server_list_local_servers(state, id).await
         }
         // SRV-6 REAL: a more detailed per-process view of tracked local
@@ -1152,9 +1144,9 @@ async fn dispatch_method(
         // to the existing `handle_git_worktree_list` handler (same git2
         // listing). Accepts an optional `cwd`/`projectPath` param (defaults
         // to "." — same as the git.* form). Returns `{ worktrees: [...] }`.
-        "server.listWorktrees"
-        | "server/list-worktrees"
-        | "server/listWorktrees" => handle_git_worktree_list(id, &request.params),
+        "server.listWorktrees" | "server/list-worktrees" | "server/listWorktrees" => {
+            handle_git_worktree_list(id, &request.params)
+        }
 
         // ─── Server legacy aliases (SRV-5 — thin dispatch to served equivalents) ──
         //
@@ -1178,9 +1170,7 @@ async fn dispatch_method(
         //     (per-provider usage snapshots aggregated from the in-memory log)
         //   - `server.getRecap`                 → `generateThreadRecap`
         //     (LLM-backed thread recap; requires non-empty `threadId`)
-        "server.listProviders" | "server/list-providers" => {
-            handle_provider_list_agents(id)
-        }
+        "server.listProviders" | "server/list-providers" => handle_provider_list_agents(id),
         "server.getProviderStatuses" | "server/get-provider-statuses" => {
             handle_server_subscribe_provider_statuses(state, conn_id, id).await
         }
@@ -1223,7 +1213,9 @@ async fn dispatch_method(
         "orchestration.getFullThreadDiff" | "orchestration/get-full-thread-diff" => {
             handle_orchestration_get_full_thread_diff(state, id, &request.params).await
         }
-        "orchestration.replayEvents" | "orchestration/replay-events" | "orchestration/replayEvents" => {
+        "orchestration.replayEvents"
+        | "orchestration/replay-events"
+        | "orchestration/replayEvents" => {
             handle_orchestration_replay_events(state, id, &request.params).await
         }
         "orchestration.repairState"
@@ -1272,14 +1264,12 @@ async fn dispatch_method(
         | "auth/createPairingCredential" => {
             handle_auth_create_pairing_credential(state, id, &request.params).await
         }
-        "auth.revokePairingLink"
-        | "auth/revoke-pairing-link"
-        | "auth/revokePairingLink" => {
+        "auth.revokePairingLink" | "auth/revoke-pairing-link" | "auth/revokePairingLink" => {
             handle_auth_revoke_pairing_link(state, id, &request.params).await
         }
-        "auth.listPairingLinks"
-        | "auth/list-pairing-links"
-        | "auth/listPairingLinks" => handle_auth_list_pairing_links(state, id).await,
+        "auth.listPairingLinks" | "auth/list-pairing-links" | "auth/listPairingLinks" => {
+            handle_auth_list_pairing_links(state, id).await
+        }
 
         // ─── Client-session management (AUTH-2) ───────────────────────────
         //
@@ -1298,24 +1288,16 @@ async fn dispatch_method(
         //
         // Dispatch accepts BOTH the MCode dot-name AND a slash form (matches
         // AUTH-1 + git.*/server.* convention).
-        "auth.listClientSessions"
-        | "auth/list-client-sessions"
-        | "auth/listClientSessions" => {
+        "auth.listClientSessions" | "auth/list-client-sessions" | "auth/listClientSessions" => {
             handle_auth_list_client_sessions(state, id).await
         }
-        "auth.revokeClientSession"
-        | "auth/revoke-client-session"
-        | "auth/revokeClientSession" => {
+        "auth.revokeClientSession" | "auth/revoke-client-session" | "auth/revokeClientSession" => {
             handle_auth_revoke_client_session(state, id, &request.params).await
         }
-        "auth.getWebSocketToken"
-        | "auth/get-web-socket-token"
-        | "auth/getWebSocketToken" => {
+        "auth.getWebSocketToken" | "auth/get-web-socket-token" | "auth/getWebSocketToken" => {
             handle_auth_get_web_socket_token(state, conn_id, id, &request.params).await
         }
-        "auth.getSessionState"
-        | "auth/get-session-state"
-        | "auth/getSessionState" => {
+        "auth.getSessionState" | "auth/get-session-state" | "auth/getSessionState" => {
             handle_auth_get_session_state(state, conn_id, id).await
         }
 
@@ -1385,212 +1367,186 @@ async fn handle_orchestration_dispatch_command(
     let service = ApplicationService::new(state.orchestrator.clone());
 
     // Resolve params → call the matching ApplicationService method.
-    let outcome: Result<syncode_orchestration::CommandResult, syncode_orchestration::OrchestrationError> =
-        match cmd_type {
-            // ── Project lifecycle ────────────────────────────────────────
-            "CreateProject" => {
-                let name = match pctx.require_str("name", "CreateProject") {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                let root_path = match pctx.require_str_any(
-                    &["rootPath", "root_path"],
-                    "CreateProject",
-                ) {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                service.create_project(name, root_path).await
-            }
-            "DeleteProject" => {
-                let project_id =
-                    match pctx.require_id_any(&["id", "projectId"], "DeleteProject") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                service.delete_project(project_id).await
-            }
-            "UpdateProjectConfig" => {
-                let project_id = match pctx
-                    .require_id_any(&["id", "projectId"], "UpdateProjectConfig")
-                {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                let provider_id = pctx.optional_str_any(&["providerId", "provider_id"]);
-                let default_model = pctx.optional_str_any(&["defaultModel", "default_model"]);
-                service
-                    .update_project_config(project_id, provider_id, default_model)
-                    .await
-            }
+    let outcome: Result<
+        syncode_orchestration::CommandResult,
+        syncode_orchestration::OrchestrationError,
+    > = match cmd_type {
+        // ── Project lifecycle ────────────────────────────────────────
+        "CreateProject" => {
+            let name = match pctx.require_str("name", "CreateProject") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let root_path = match pctx.require_str_any(&["rootPath", "root_path"], "CreateProject")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.create_project(name, root_path).await
+        }
+        "DeleteProject" => {
+            let project_id = match pctx.require_id_any(&["id", "projectId"], "DeleteProject") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.delete_project(project_id).await
+        }
+        "UpdateProjectConfig" => {
+            let project_id = match pctx.require_id_any(&["id", "projectId"], "UpdateProjectConfig")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let provider_id = pctx.optional_str_any(&["providerId", "provider_id"]);
+            let default_model = pctx.optional_str_any(&["defaultModel", "default_model"]);
+            service
+                .update_project_config(project_id, provider_id, default_model)
+                .await
+        }
 
-            // ── Thread lifecycle ─────────────────────────────────────────
-            "CreateThread" => {
-                let project_id = match pctx.require_id_any(
-                    &["projectId", "project_id"],
-                    "CreateThread",
-                ) {
+        // ── Thread lifecycle ─────────────────────────────────────────
+        "CreateThread" => {
+            let project_id = match pctx.require_id_any(&["projectId", "project_id"], "CreateThread")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let provider_id =
+                match pctx.require_str_any(&["providerId", "provider_id"], "CreateThread") {
                     Ok(v) => v,
                     Err(r) => return *r,
                 };
-                let provider_id = match pctx.require_str_any(
-                    &["providerId", "provider_id"],
-                    "CreateThread",
-                ) {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                let model = match pctx.require_str("model", "CreateThread") {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                service
-                    .create_thread(project_id, provider_id, model)
-                    .await
-            }
-            "PauseThread" => {
-                let thread_id =
-                    match pctx.require_id_any(&["id", "threadId"], "PauseThread") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                service.pause_thread(thread_id).await
-            }
-            "ResumeThread" => {
-                let thread_id =
-                    match pctx.require_id_any(&["id", "threadId"], "ResumeThread") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                service.resume_thread(thread_id).await
-            }
-            "CancelThread" => {
-                let thread_id =
-                    match pctx.require_id_any(&["id", "threadId"], "CancelThread") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                service.cancel_thread(thread_id).await
-            }
-            "CompleteThread" => {
-                let thread_id = match pctx.require_id_any(
-                    &["id", "threadId"],
-                    "CompleteThread",
-                ) {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                service.complete_thread(thread_id).await
-            }
-            "ArchiveThread" => {
-                let thread_id =
-                    match pctx.require_id_any(&["id", "threadId"], "ArchiveThread") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                service.archive_thread(thread_id).await
-            }
-            "SetThreadTitle" => {
-                let thread_id =
-                    match pctx.require_id_any(&["id", "threadId"], "SetThreadTitle") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                let title = match pctx.require_str("title", "SetThreadTitle") {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                service.set_thread_title(thread_id, title).await
-            }
-            "DeleteThread" => {
-                let thread_id =
-                    match pctx.require_id_any(&["id", "threadId"], "DeleteThread") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                service.delete_thread(thread_id).await
-            }
+            let model = match pctx.require_str("model", "CreateThread") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.create_thread(project_id, provider_id, model).await
+        }
+        "PauseThread" => {
+            let thread_id = match pctx.require_id_any(&["id", "threadId"], "PauseThread") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.pause_thread(thread_id).await
+        }
+        "ResumeThread" => {
+            let thread_id = match pctx.require_id_any(&["id", "threadId"], "ResumeThread") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.resume_thread(thread_id).await
+        }
+        "CancelThread" => {
+            let thread_id = match pctx.require_id_any(&["id", "threadId"], "CancelThread") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.cancel_thread(thread_id).await
+        }
+        "CompleteThread" => {
+            let thread_id = match pctx.require_id_any(&["id", "threadId"], "CompleteThread") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.complete_thread(thread_id).await
+        }
+        "ArchiveThread" => {
+            let thread_id = match pctx.require_id_any(&["id", "threadId"], "ArchiveThread") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.archive_thread(thread_id).await
+        }
+        "SetThreadTitle" => {
+            let thread_id = match pctx.require_id_any(&["id", "threadId"], "SetThreadTitle") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let title = match pctx.require_str("title", "SetThreadTitle") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.set_thread_title(thread_id, title).await
+        }
+        "DeleteThread" => {
+            let thread_id = match pctx.require_id_any(&["id", "threadId"], "DeleteThread") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.delete_thread(thread_id).await
+        }
 
-            // ── Turn lifecycle ───────────────────────────────────────────
-            "StartTurn" => {
-                let thread_id =
-                    match pctx.require_id_any(&["threadId", "thread_id"], "StartTurn") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                let sequence = pctx
-                    .params
-                    .get("sequence")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                let user_input = match pctx.require_str_any(
-                    &["userInput", "user_input"],
-                    "StartTurn",
-                ) {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                service
-                    .start_turn(thread_id, sequence, user_input)
-                    .await
-            }
-            "CompleteTurn" => {
-                let turn_id =
-                    match pctx.require_id_any(&["id", "turnId"], "CompleteTurn") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                let assistant_output = match pctx.require_str_any(
-                    &["assistantOutput", "assistant_output"],
-                    "CompleteTurn",
-                ) {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                let duration_ms = pctx
-                    .params
-                    .get("durationMs")
-                    .and_then(|v| v.as_u64())
-                    .or_else(|| pctx.params.get("duration_ms").and_then(|v| v.as_u64()))
-                    .unwrap_or(0);
-                service
-                    .complete_turn(turn_id, assistant_output, duration_ms)
-                    .await
-            }
-            "FailTurn" => {
-                let turn_id = match pctx.require_id_any(&["id", "turnId"], "FailTurn") {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                let error = match pctx.require_str_any(&["error"], "FailTurn") {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                service.fail_turn(turn_id, error).await
-            }
-            "CancelTurn" => {
-                let turn_id = match pctx.require_id_any(&["id", "turnId"], "CancelTurn") {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
-                service.cancel_turn(turn_id).await
-            }
-            "InterruptTurn" => {
-                let turn_id =
-                    match pctx.require_id_any(&["id", "turnId"], "InterruptTurn") {
-                        Ok(v) => v,
-                        Err(r) => return *r,
-                    };
-                service.interrupt_turn(turn_id).await
-            }
-            other => {
-                return JsonRpcResponse::error(
-                    Some(id),
-                    crate::error_codes::INVALID_PARAMS,
-                    format!("Unsupported command type: {other}"),
-                );
-            }
-        };
+        // ── Turn lifecycle ───────────────────────────────────────────
+        "StartTurn" => {
+            let thread_id = match pctx.require_id_any(&["threadId", "thread_id"], "StartTurn") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let sequence = pctx
+                .params
+                .get("sequence")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let user_input = match pctx.require_str_any(&["userInput", "user_input"], "StartTurn") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.start_turn(thread_id, sequence, user_input).await
+        }
+        "CompleteTurn" => {
+            let turn_id = match pctx.require_id_any(&["id", "turnId"], "CompleteTurn") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let assistant_output = match pctx
+                .require_str_any(&["assistantOutput", "assistant_output"], "CompleteTurn")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let duration_ms = pctx
+                .params
+                .get("durationMs")
+                .and_then(|v| v.as_u64())
+                .or_else(|| pctx.params.get("duration_ms").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            service
+                .complete_turn(turn_id, assistant_output, duration_ms)
+                .await
+        }
+        "FailTurn" => {
+            let turn_id = match pctx.require_id_any(&["id", "turnId"], "FailTurn") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let error = match pctx.require_str_any(&["error"], "FailTurn") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.fail_turn(turn_id, error).await
+        }
+        "CancelTurn" => {
+            let turn_id = match pctx.require_id_any(&["id", "turnId"], "CancelTurn") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.cancel_turn(turn_id).await
+        }
+        "InterruptTurn" => {
+            let turn_id = match pctx.require_id_any(&["id", "turnId"], "InterruptTurn") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.interrupt_turn(turn_id).await
+        }
+        other => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                format!("Unsupported command type: {other}"),
+            );
+        }
+    };
 
     match outcome {
         Ok(result) => Ok(result).dispatch_success(id),
@@ -1626,7 +1582,12 @@ impl<'a> DispatchParams<'a> {
     /// is boxed to satisfy `clippy::result_large_err` (`JsonRpcResponse` is
     /// ~152 bytes); callers dereference with `*`.
     fn require_str(&self, key: &str, cmd: &str) -> Result<String, Box<JsonRpcResponse>> {
-        match self.params.get(key).and_then(|v| v.as_str()).map(String::from) {
+        match self
+            .params
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+        {
             Some(v) => Ok(v),
             None => Err(Box::new(param_error(
                 self.id.clone(),
@@ -1675,11 +1636,7 @@ impl<'a> DispatchParams<'a> {
         }
         Err(Box::new(param_error(
             self.id.clone(),
-            format!(
-                "{cmd} requires '{}' (tried: {})",
-                keys[0],
-                keys.join(", ")
-            ),
+            format!("{cmd} requires '{}' (tried: {})", keys[0], keys.join(", ")),
         )))
     }
 }
@@ -1702,9 +1659,9 @@ fn dispatch_error_response(
         E::Decider(_) | E::NoState(_) | E::ProjectNotFound(_) | E::ThreadNotFound(_) => {
             crate::error_codes::INVALID_PARAMS
         }
-        E::ConcurrencyConflictRetried { .. }
-        | E::EventRepository(_)
-        | E::CommandReactor(_) => crate::error_codes::INTERNAL_ERROR,
+        E::ConcurrencyConflictRetried { .. } | E::EventRepository(_) | E::CommandReactor(_) => {
+            crate::error_codes::INTERNAL_ERROR
+        }
     };
 
     // Stable discriminant string for programmatic branching.
@@ -1729,7 +1686,10 @@ fn dispatch_error_response(
 /// stable across all command types: `{ dispatched, aggregateId, eventsAppended,
 /// eventTypes }` — the UI's optimistic update converges from these fields
 /// without needing command-type-specific shapes.
-fn dispatch_success_envelope(id: Value, result: syncode_orchestration::CommandResult) -> JsonRpcResponse {
+fn dispatch_success_envelope(
+    id: Value,
+    result: syncode_orchestration::CommandResult,
+) -> JsonRpcResponse {
     let aggregate_id = result.events.first().map(|e| e.event.aggregate_id());
     let event_types: Vec<String> = result
         .events
@@ -1754,7 +1714,9 @@ trait DispatchOutcomeExt {
     fn dispatch_success(self, id: Value) -> JsonRpcResponse;
 }
 
-impl DispatchOutcomeExt for Result<syncode_orchestration::CommandResult, syncode_orchestration::OrchestrationError> {
+impl DispatchOutcomeExt
+    for Result<syncode_orchestration::CommandResult, syncode_orchestration::OrchestrationError>
+{
     fn dispatch_success(self, id: Value) -> JsonRpcResponse {
         match self {
             Ok(result) => dispatch_success_envelope(id, result),
@@ -1791,10 +1753,7 @@ async fn handle_orchestration_get_turn_diff(
         Some(s) => s.to_string(),
         None => return param_error(id, "Missing 'threadId' parameter"),
     };
-    let cwd = params
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
     // Collect the thread's ordered checkpoints. The read model's `checkpoints`
     // map is keyed `thread_id:turn_id`; one `CheckpointView` per turn. Clone to
@@ -1835,9 +1794,7 @@ async fn handle_orchestration_get_turn_diff(
         let from_ref = cps[target_idx].checkpoint_ref.clone();
         // `to_ref` is the next checkpoint after the target, else None (= HEAD /
         // working-tree — `compute_diff` treats `None` as the current state).
-        let to_ref = cps
-            .get(target_idx + 1)
-            .map(|c| c.checkpoint_ref.clone());
+        let to_ref = cps.get(target_idx + 1).map(|c| c.checkpoint_ref.clone());
         (count, target_idx, from_ref, to_ref)
     };
     // `count`/`target_idx` are surfaced in debug builds via `note` only when
@@ -1863,11 +1820,7 @@ async fn handle_orchestration_get_turn_diff(
     // Compute the diff via the canonical `syncode_git::diff::compute_diff`
     // helper: `from_ref` is the turn's checkpoint (before-state); `to_ref`
     // (Option) is the next checkpoint or None (= HEAD / working tree).
-    let summary = match syncode_git::diff::compute_diff(
-        &svc,
-        Some(&from_ref),
-        to_ref.as_deref(),
-    ) {
+    let summary = match syncode_git::diff::compute_diff(&svc, Some(&from_ref), to_ref.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return JsonRpcResponse::success(
@@ -1889,10 +1842,8 @@ async fn handle_orchestration_get_turn_diff(
     // can distinguish "no changes" from "checkpoint exists but git returned
     // nothing" — keeps the `{ diff: string }` contract intact while aiding UX.
     if diff_text.is_empty() {
-        result["note"] = serde_json::json!(format!(
-            "no changes ({} checkpoint(s) for thread)",
-            count
-        ));
+        result["note"] =
+            serde_json::json!(format!("no changes ({} checkpoint(s) for thread)", count));
     }
     JsonRpcResponse::success(id, result)
 }
@@ -1930,10 +1881,7 @@ async fn handle_orchestration_get_full_thread_diff(
         Some(s) => s.to_string(),
         None => return param_error(id, "Missing 'threadId' parameter"),
     };
-    let cwd = params
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
     // Collect the thread's ordered checkpoints under a short-lived read lock.
     // The map is keyed `thread_id:turn_id`; one `CheckpointView` per turn. Sort
@@ -2003,28 +1951,22 @@ async fn handle_orchestration_get_full_thread_diff(
         let from_ref = cp.checkpoint_ref.clone();
         // The "next" turn's checkpoint (if any) is the after-state; else HEAD.
         let to_ref = cps.get(idx + 1).map(|n| n.checkpoint_ref.clone());
-        let (diff_text, note) = match syncode_git::diff::compute_diff(
-            &svc,
-            Some(&from_ref),
-            to_ref.as_deref(),
-        ) {
-            Ok(summary) => {
-                // Render the `DiffSummary` entries with the SAME format used by
-                // ORCH-6's `handle_orchestration_get_turn_diff` so the two RPCs
-                // produce byte-identical per-turn patches.
-                let patch = render_diff_summary(&summary);
-                let note = if patch.is_empty() {
-                    Some("no changes".to_string())
-                } else {
-                    None
-                };
-                (patch, note)
-            }
-            Err(e) => (
-                String::new(),
-                Some(format!("git diff failed: {e}")),
-            ),
-        };
+        let (diff_text, note) =
+            match syncode_git::diff::compute_diff(&svc, Some(&from_ref), to_ref.as_deref()) {
+                Ok(summary) => {
+                    // Render the `DiffSummary` entries with the SAME format used by
+                    // ORCH-6's `handle_orchestration_get_turn_diff` so the two RPCs
+                    // produce byte-identical per-turn patches.
+                    let patch = render_diff_summary(&summary);
+                    let note = if patch.is_empty() {
+                        Some("no changes".to_string())
+                    } else {
+                        None
+                    };
+                    (patch, note)
+                }
+                Err(e) => (String::new(), Some(format!("git diff failed: {e}"))),
+            };
         total_diff.push_str(&diff_text);
         let mut entry = serde_json::json!({
             "turnId": cp.turn_id,
@@ -2302,10 +2244,7 @@ async fn handle_orchestration_import_thread(
         Some(s) => match syncode_core::EntityId::parse(s) {
             Ok(e) => e,
             Err(_) => {
-                return param_error(
-                    id,
-                    "orchestration.importThread requires a valid 'threadId'",
-                );
+                return param_error(id, "orchestration.importThread requires a valid 'threadId'");
             }
         },
         None => {
@@ -2940,9 +2879,7 @@ async fn handle_auth_get_web_socket_token(
     // shorter TTL, honor the request's TTL by re-issuing a fresh principal
     // (same subject + role) bound to `ttl`. The shared registry then validates
     // the new token against its own (longer) expiry.
-    let minted = if principal.expires_at.as_datetime()
-        <= &(chrono::Utc::now() + ttl)
-    {
+    let minted = if principal.expires_at.as_datetime() <= &(chrono::Utc::now() + ttl) {
         // Bound principal expires sooner than the requested TTL — keep the
         // existing (shorter) expiry so we never mint a token that outlives the
         // principal it represents.
@@ -3096,10 +3033,7 @@ async fn handle_project_create(state: &WsState, id: Value, params: &Value) -> Js
 /// Path traversal is surfaced with a `-32001` (UNAUTHORIZED-shaped) code —
 /// it's a security violation, not a generic invalid-param — so clients can
 /// distinguish "you tried to escape the sandbox" from "missing field".
-fn project_fs_error_response(
-    id: Value,
-    err: crate::project_fs::ProjectFsError,
-) -> JsonRpcResponse {
+fn project_fs_error_response(id: Value, err: crate::project_fs::ProjectFsError) -> JsonRpcResponse {
     use crate::project_fs::ProjectFsError;
     // Traversal is a security violation → use the authz error code (-32001);
     // other mapping/param errors use INVALID_PARAMS; genuine IO failures use
@@ -3118,12 +3052,12 @@ fn project_fs_error_response(
 /// `project/list-files` (PROJ-1 skeleton). Returns directory entries under
 /// `cwd / path` (or `cwd` when `path` is absent). PROJ-2 will add filtering
 /// by extension/ignore-globs and pagination.
-async fn handle_project_list_files(
-    _state: &WsState,
-    id: Value,
-    params: &Value,
-) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+async fn handle_project_list_files(_state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3160,12 +3094,12 @@ async fn handle_project_list_files(
 /// `truncated` is `false` here (PROJ-1 primitives read the whole file; PROJ-4
 /// may add size limits). Accepts both `path` (legacy) and `relativePath`
 /// (MCode Tier-3) param keys — `relativePath` wins when both are present.
-async fn handle_project_read_file(
-    _state: &WsState,
-    id: Value,
-    params: &Value,
-) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+async fn handle_project_read_file(_state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3215,12 +3149,12 @@ async fn handle_project_read_file(
 /// both `content` (legacy) and `contents` (MCode) for the body. The MCode form
 /// wins in each pair when both are present. Traversal is blocked by the
 /// `project_fs::write_file` guard (inherited from [`resolve_for_write`]).
-async fn handle_project_write_file(
-    _state: &WsState,
-    id: Value,
-    params: &Value,
-) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+async fn handle_project_write_file(_state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3259,10 +3193,7 @@ async fn handle_project_write_file(
         }
     };
     match crate::project_fs::write_file(Path::new(cwd), relative, &content).await {
-        Ok(()) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "relativePath": relative }),
-        ),
+        Ok(()) => JsonRpcResponse::success(id, serde_json::json!({ "relativePath": relative })),
         Err(e) => project_fs_error_response(id, e),
     }
 }
@@ -3286,7 +3217,11 @@ async fn handle_project_list_directories(
     id: Value,
     params: &Value,
 ) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3361,7 +3296,11 @@ async fn handle_project_search_files(
     id: Value,
     params: &Value,
 ) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3410,7 +3349,11 @@ async fn handle_project_search_entries(
     id: Value,
     params: &Value,
 ) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3446,9 +3389,7 @@ async fn handle_project_search_entries(
                 .into_iter()
                 .take(limit)
                 .filter(|_| kind_filter.is_none() || kind_filter == Some("file"))
-                .map(|p| {
-                    serde_json::json!({ "path": p, "kind": "file" })
-                })
+                .map(|p| serde_json::json!({ "path": p, "kind": "file" }))
                 .collect();
             JsonRpcResponse::success(
                 id,
@@ -3545,7 +3486,11 @@ async fn handle_project_discover_scripts(
     id: Value,
     params: &Value,
 ) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3588,12 +3533,12 @@ async fn handle_project_discover_scripts(
 ///   `"Makefile"` → `make <name>`; anything else / absent → run `command`
 ///   (or `name` if `command` absent) verbatim through the shell.
 /// - `command` (optional) — raw command string for the "direct" path.
-async fn handle_project_run_script(
-    _state: &WsState,
-    id: Value,
-    params: &Value,
-) -> JsonRpcResponse {
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+async fn handle_project_run_script(_state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = match params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             return JsonRpcResponse::error(
@@ -3604,7 +3549,11 @@ async fn handle_project_run_script(
         }
     };
     let relative = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let name = match params.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let name = match params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(n) => n,
         None => {
             return JsonRpcResponse::error(
@@ -3811,7 +3760,10 @@ async fn handle_project_list_dev_servers(state: &WsState, id: Value) -> JsonRpcR
     let mgr = state.local_servers.read().await;
     let all = mgr.list();
     let dev_ids = state.dev_servers.read().await;
-    let filtered: Vec<_> = all.into_iter().filter(|p| dev_ids.contains(&p.id)).collect();
+    let filtered: Vec<_> = all
+        .into_iter()
+        .filter(|p| dev_ids.contains(&p.id))
+        .collect();
     let result = serde_json::to_value(&filtered).unwrap_or(serde_json::json!([]));
     JsonRpcResponse::success(id, result)
 }
@@ -3820,7 +3772,6 @@ async fn handle_project_list_dev_servers(state: &WsState, id: Value) -> JsonRpcR
 /// the UI's `DEFAULT_SEARCH_ENTRIES_LIMIT` (80) so the skeleton never returns a
 /// list large enough to stall the autocomplete dropdown.
 const DEFAULT_SEARCH_LIMIT: usize = 80;
-
 
 // ─── Thread Handlers ───────────────────────────────────────────────────
 
@@ -4781,12 +4732,7 @@ async fn handle_server_subscribe_lifecycle(
 /// `aggregate_id` carries the affected entity id (or `Null`), and `data`
 /// holds the event-specific details. Best-effort: no subscribers is not an
 /// error (matches the `WsDomainEventPublisher` convention).
-fn broadcast_lifecycle_event(
-    state: &WsState,
-    event: &str,
-    aggregate_id: Value,
-    data: Value,
-) {
+fn broadcast_lifecycle_event(state: &WsState, event: &str, aggregate_id: Value, data: Value) {
     let _ = state.push_tx.send((
         crate::channels::CHANNEL_SERVER_LIFECYCLE.to_string(),
         serde_json::json!({
@@ -4923,21 +4869,29 @@ async fn emit_server_config_snapshot(
                 // to have { provider, status, available, authStatus, checkedAt }
                 // otherwise it shows "Provider status is still loading." toast.
                 let now = chrono::Utc::now().to_rfc3339();
-                let providers_json = store.config["providers"].as_array()
+                let providers_json = store.config["providers"]
+                    .as_array()
                     .filter(|arr| !arr.is_empty())
                     .cloned()
                     .unwrap_or_else(|| {
                         let all_providers = syncode_provider::ALL_PROVIDERS;
-                        all_providers.iter().map(|pid| {
-                            let mcode_kind = if *pid == "claude" { "claudeAgent" } else { *pid as &str };
-                            serde_json::json!({
-                                "provider": mcode_kind,
-                                "status": "ready",
-                                "available": true,
-                                "authStatus": "authenticated",
-                                "checkedAt": now,
+                        all_providers
+                            .iter()
+                            .map(|pid| {
+                                let mcode_kind = if *pid == "claude" {
+                                    "claudeAgent"
+                                } else {
+                                    *pid as &str
+                                };
+                                serde_json::json!({
+                                    "provider": mcode_kind,
+                                    "status": "ready",
+                                    "available": true,
+                                    "authStatus": "authenticated",
+                                    "checkedAt": now,
+                                })
                             })
-                        }).collect()
+                            .collect()
                     });
                 serde_json::json!({
                     "eventType": "snapshot",
@@ -5133,12 +5087,7 @@ async fn handle_server_refresh_providers(state: &WsState, id: Value) -> JsonRpcR
     // SRV-3: broadcast a `providers-refreshed` lifecycle event so
     // `server.subscribeLifecycle` subscribers learn provider statuses were
     // re-emitted.
-    broadcast_lifecycle_event(
-        state,
-        "providers-refreshed",
-        Value::Null,
-        payload.clone(),
-    );
+    broadcast_lifecycle_event(state, "providers-refreshed", Value::Null, payload.clone());
     JsonRpcResponse::success(id, payload)
 }
 
@@ -5470,10 +5419,7 @@ async fn handle_server_list_provider_usage(
 /// `authMode` string (mirrors how `build_server_welcome_payload` serializes
 /// the mode) plus the `authRequired` boolean. This matches the shape the
 /// cloned MCode UI reads to decide whether to render the auth/login surface.
-async fn handle_server_get_provider_auth_status(
-    state: &WsState,
-    id: Value,
-) -> JsonRpcResponse {
+async fn handle_server_get_provider_auth_status(state: &WsState, id: Value) -> JsonRpcResponse {
     let auth_mode = serde_json::to_value(state.auth_config.mode)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
@@ -6568,21 +6514,21 @@ fn handle_git_stash_and_checkout(id: Value, params: &Value) -> JsonRpcResponse {
     // returns a Stash/NotFound error ("nothing to stash") when the tree is
     // clean; older versions return the zero oid. Both become stashed=false so
     // phase 2 proceeds on a clean tree.
-    let stashed: bool = match repo.stash_save2(&sig, message, Some(git2::StashFlags::INCLUDE_UNTRACKED))
-    {
-        Ok(oid) => !oid.is_zero(),
-        Err(e) => {
-            if e.class() == git2::ErrorClass::Stash && e.code() == git2::ErrorCode::NotFound {
-                false
-            } else {
-                return git_error(
-                    id,
-                    crate::error_codes::INTERNAL_ERROR,
-                    format!("git stash_save: {e}"),
-                );
+    let stashed: bool =
+        match repo.stash_save2(&sig, message, Some(git2::StashFlags::INCLUDE_UNTRACKED)) {
+            Ok(oid) => !oid.is_zero(),
+            Err(e) => {
+                if e.class() == git2::ErrorClass::Stash && e.code() == git2::ErrorCode::NotFound {
+                    false
+                } else {
+                    return git_error(
+                        id,
+                        crate::error_codes::INTERNAL_ERROR,
+                        format!("git stash_save: {e}"),
+                    );
+                }
             }
-        }
-    };
+        };
 
     // ── Phase 2: checkout ────────────────────────────────────────────
     // Mirror Git2Service::checkout (revparse → checkout_tree → set_head) so
@@ -6609,9 +6555,7 @@ fn handle_git_stash_and_checkout(id: Value, params: &Value) -> JsonRpcResponse {
         // so the user's working tree is restored. If the apply also fails,
         // surface both errors so the user can recover manually (the stash is
         // still in the stash reflog at stash@{0}).
-        if stashed
-            && let Err(apply_err) = repo.stash_apply(0, None)
-        {
+        if stashed && let Err(apply_err) = repo.stash_apply(0, None) {
             return git_error(
                 id,
                 crate::error_codes::INTERNAL_ERROR,
@@ -7274,7 +7218,9 @@ async fn handle_git_run_stacked_action(
     use std::task::{Context, Poll};
     let has_git_subscribers = {
         let subs = state.subscriptions.read().await;
-        !subs.subscribers_for(crate::channels::CHANNEL_GIT).is_empty()
+        !subs
+            .subscribers_for(crate::channels::CHANNEL_GIT)
+            .is_empty()
     };
     let results = if has_git_subscribers {
         // Progress-emitting path: clone the push_tx once, forward each event.
@@ -7286,9 +7232,7 @@ async fn handle_git_run_stacked_action(
             });
             let _ = push_tx.send((crate::channels::CHANNEL_GIT.to_string(), payload));
         }));
-        match Pin::new(&mut fut)
-            .poll(&mut Context::from_waker(&futures_util::task::noop_waker()))
-        {
+        match Pin::new(&mut fut).poll(&mut Context::from_waker(&futures_util::task::noop_waker())) {
             Poll::Ready(r) => r,
             Poll::Pending => {
                 return git_error(
@@ -7301,9 +7245,7 @@ async fn handle_git_run_stacked_action(
     } else {
         // Default sync path (no subscribers) — unchanged from pre-GIT-4.
         let mut fut = Box::pin(pipeline.execute(&svc));
-        match Pin::new(&mut fut)
-            .poll(&mut Context::from_waker(&futures_util::task::noop_waker()))
-        {
+        match Pin::new(&mut fut).poll(&mut Context::from_waker(&futures_util::task::noop_waker())) {
             Poll::Ready(r) => r,
             Poll::Pending => {
                 return git_error(
@@ -9309,9 +9251,7 @@ fn handle_provider_list_skills_catalog(id: Value, params: &Value) -> JsonRpcResp
 /// "local" marketplace. Missing dir → graceful empty marketplaces list.
 /// Remote marketplace sync (OAuth, remote catalog) is out of scope.
 fn handle_provider_list_plugins(id: Value, params: &Value) -> JsonRpcResponse {
-    let manifest_override = params
-        .get("pluginsManifestPath")
-        .and_then(|v| v.as_str());
+    let manifest_override = params.get("pluginsManifestPath").and_then(|v| v.as_str());
     let dir = resolve_plugins_dir(params);
     let marketplaces: Vec<Value> = match dir {
         Some(d) => {
@@ -9350,9 +9290,7 @@ fn handle_provider_list_plugins(id: Value, params: &Value) -> JsonRpcResponse {
 /// `SYNCODE_PLUGINS_MANIFEST`). Returns `{ plugin: {...} }` with the full
 /// descriptor shape or `{ plugin: null }` when missing/unreadable/out-of-bounds.
 fn handle_provider_read_plugin(id: Value, params: &Value) -> JsonRpcResponse {
-    let manifest_override = params
-        .get("pluginsManifestPath")
-        .and_then(|v| v.as_str());
+    let manifest_override = params.get("pluginsManifestPath").and_then(|v| v.as_str());
     let raw_path = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
         _ => return JsonRpcResponse::success(id, serde_json::json!({ "plugin": Value::Null })),
@@ -9620,7 +9558,10 @@ fn handle_provider_list_options(id: Value, params: &Value) -> JsonRpcResponse {
             if !reasoning_options.is_empty()
                 && let Some(map) = obj.as_object_mut()
             {
-                map.insert("reasoningOptions".to_string(), Value::Array(reasoning_options));
+                map.insert(
+                    "reasoningOptions".to_string(),
+                    Value::Array(reasoning_options),
+                );
             }
             obj
         })
@@ -9763,9 +9704,7 @@ fn resolve_plugins_manifest_path(override_path: Option<&str>) -> Option<PathBuf>
     if let Some(p) = override_path.filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    if let Some(p) = std::env::var_os("SYNCODE_PLUGINS_MANIFEST")
-        .filter(|p| !p.is_empty())
-    {
+    if let Some(p) = std::env::var_os("SYNCODE_PLUGINS_MANIFEST").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
     let home = std::env::var("HOME")
@@ -10576,18 +10515,13 @@ async fn handle_git_handoff_thread(id: Value, params: &Value) -> JsonRpcResponse
     // failure so it's surfaced in `message`.
     let gh_outcome = run_gh_pr_create(&cwd, &title, &body, &base, &head).await;
     let (message, pr_url): (String, Option<String>) = match gh_outcome {
-        Ok(url) => (
-            format!("Created PR: {url}"),
-            Some(url),
-        ),
+        Ok(url) => (format!("Created PR: {url}"), Some(url)),
         Err(reason) => {
             if target_mode == "worktree" {
                 // Worktree succeeded; PR creation failed but the handoff is
                 // still useful locally. Surface the gh failure reason.
                 (
-                    format!(
-                        "Worktree created for {pr_branch}; PR creation skipped ({reason})"
-                    ),
+                    format!("Worktree created for {pr_branch}; PR creation skipped ({reason})"),
                     None,
                 )
             } else {
@@ -10639,12 +10573,7 @@ async fn run_gh_pr_create(
     base: &str,
     head: &str,
 ) -> GhPrOutcome {
-    let mut args: Vec<String> = vec![
-        "pr".into(),
-        "create".into(),
-        "--title".into(),
-        title.into(),
-    ];
+    let mut args: Vec<String> = vec!["pr".into(), "create".into(), "--title".into(), title.into()];
     if !base.is_empty() {
         args.push("--base".into());
         args.push(base.into());
@@ -10717,7 +10646,7 @@ fn create_handoff_worktree(
                 id,
                 crate::error_codes::INTERNAL_ERROR,
                 format!("git.handoffThread worktree: open repo failed: {e}"),
-            )))
+            )));
         }
     };
 
@@ -10749,7 +10678,7 @@ fn create_handoff_worktree(
                 id,
                 crate::error_codes::INTERNAL_ERROR,
                 format!("git.handoffThread worktree: resolve HEAD: {e}"),
-            )))
+            )));
         }
     };
     if !branch_preexisted
@@ -10801,7 +10730,7 @@ fn create_handoff_worktree(
                 id,
                 crate::error_codes::INTERNAL_ERROR,
                 format!("git.handoffThread worktree: resolve branch '{branch}': {e}"),
-            )))
+            )));
         }
     };
     let mut opts = git2::WorktreeAddOptions::new();
@@ -10813,7 +10742,7 @@ fn create_handoff_worktree(
                 id,
                 crate::error_codes::INTERNAL_ERROR,
                 format!("git.handoffThread worktree: add worktree: {e}"),
-            )))
+            )));
         }
     };
 
@@ -11545,7 +11474,9 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "project/create",
             "params": { "name": "LT Project", "rootPath": "/tmp/lt" }
         });
-        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp = handle_rpc(&state, 1, &create_proj.to_string())
+            .await
+            .unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         let project_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -11553,9 +11484,15 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "thread/create",
             "params": { "projectId": project_id, "providerId": "codex", "model": "gpt-5" }
         });
-        let resp = handle_rpc(&state, 1, &create_thread.to_string()).await.unwrap();
+        let resp = handle_rpc(&state, 1, &create_thread.to_string())
+            .await
+            .unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
-        assert!(resp.error.is_none(), "thread/create failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "thread/create failed: {:?}",
+            resp.error
+        );
         let thread_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
         // Start three turns with increasing sequences (1, 2, 3).
@@ -11570,7 +11507,12 @@ mod tests {
             });
             let resp = handle_rpc(&state, 1, &req.to_string()).await.unwrap();
             let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
-            assert!(resp.error.is_none(), "turn/start seq={} failed: {:?}", seq, resp.error);
+            assert!(
+                resp.error.is_none(),
+                "turn/start seq={} failed: {:?}",
+                seq,
+                resp.error
+            );
         }
 
         // getLatestTurn must return the turn with sequence 3 (highest).
@@ -11598,7 +11540,9 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "project/create",
             "params": { "name": "Empty Project", "rootPath": "/tmp/empty" }
         });
-        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp = handle_rpc(&state, 1, &create_proj.to_string())
+            .await
+            .unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         let project_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -11606,7 +11550,9 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "thread/create",
             "params": { "projectId": project_id, "providerId": "codex", "model": "gpt-5" }
         });
-        let resp = handle_rpc(&state, 1, &create_thread.to_string()).await.unwrap();
+        let resp = handle_rpc(&state, 1, &create_thread.to_string())
+            .await
+            .unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         let thread_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -11681,7 +11627,9 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "project/create",
             "params": { "name": "Replay Project", "rootPath": "/tmp/replay" }
         });
-        let resp = handle_rpc(&state, 1, &create_proj.to_string()).await.unwrap();
+        let resp = handle_rpc(&state, 1, &create_proj.to_string())
+            .await
+            .unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         assert!(resp.error.is_none(), "{:?}", resp.error);
 
@@ -11706,7 +11654,10 @@ mod tests {
         let result = resp.result.unwrap();
         // At least one event (ProjectCreated) was replayed.
         let replayed = result["replayed"].as_u64().expect("replayed is u64");
-        assert!(replayed > 0, "expected non-zero replayed count, got {replayed}");
+        assert!(
+            replayed > 0,
+            "expected non-zero replayed count, got {replayed}"
+        );
         // No snapshots were written by a bare create → seeded is 0.
         assert_eq!(result["seeded"].as_u64(), Some(0));
 
@@ -12135,7 +12086,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let links = resp.result.unwrap()["links"].as_array().unwrap().clone();
         assert_eq!(links.len(), 1);
-        assert!(links[0].get("credential").is_none(), "credential must be redacted from list");
+        assert!(
+            links[0].get("credential").is_none(),
+            "credential must be redacted from list"
+        );
         assert!(links[0].get("id").is_some());
         assert_eq!(links[0]["role"], "owner");
     }
@@ -12167,7 +12121,8 @@ mod tests {
         assert_eq!(resp.result.unwrap()["hadLink"], false);
 
         // list now empty.
-        let list = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "auth.listPairingLinks" });
+        let list =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "auth.listPairingLinks" });
         let resp = rpc(&state, 1, &list).await;
         assert_eq!(resp.result.unwrap()["links"].as_array().unwrap().len(), 0);
     }
@@ -12211,14 +12166,19 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "auth/create-pairing-credential"
         });
         let resp = rpc(&state, 1, &slash).await;
-        assert!(resp.error.is_none(), "slash form should dispatch: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "slash form should dispatch: {:?}",
+            resp.error
+        );
         assert!(
             resp.result.unwrap()["credential"].as_str().is_some(),
             "slash form returns a credential"
         );
 
         // list slash form
-        let list = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "auth/list-pairing-links" });
+        let list =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "auth/list-pairing-links" });
         let resp = rpc(&state, 1, &list).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
     }
@@ -12264,7 +12224,8 @@ mod tests {
             )
             .await;
 
-        let list = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "auth.listPairingLinks" });
+        let list =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "auth.listPairingLinks" });
         let resp = rpc(&state, 2, &list).await;
         assert_eq!(
             resp.error.unwrap().code,
@@ -12308,10 +12269,7 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         assert_eq!(
-            resp.result.unwrap()["sessions"]
-                .as_array()
-                .unwrap()
-                .len(),
+            resp.result.unwrap()["sessions"].as_array().unwrap().len(),
             0
         );
     }
@@ -12395,7 +12353,10 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "auth.listClientSessions"
         });
         let resp = rpc(&state, 2, &list).await;
-        assert!(resp.error.is_none(), "conn 2 should be authorized pre-revoke");
+        assert!(
+            resp.error.is_none(),
+            "conn 2 should be authorized pre-revoke"
+        );
 
         // conn 1 (admin) revokes conn 2's session.
         let revoke = serde_json::json!({
@@ -12459,7 +12420,10 @@ mod tests {
             principal.is_some(),
             "issued token must validate against the shared SessionRegistry"
         );
-        assert_eq!(principal.unwrap().role, syncode_auth::principal::Role::Owner);
+        assert_eq!(
+            principal.unwrap().role,
+            syncode_auth::principal::Role::Owner
+        );
     }
 
     #[tokio::test]
@@ -13264,7 +13228,8 @@ mod tests {
             // (it was stashed away). A stash entry should exist.
             assert!(
                 !repo.join("dirty.txt").exists(),
-                "{}: dirty file should be stashed away", method
+                "{}: dirty file should be stashed away",
+                method
             );
             let stash_list = std::process::Command::new("git")
                 .args(["stash", "list"])
@@ -13272,8 +13237,11 @@ mod tests {
                 .output()
                 .expect("git stash list");
             assert!(
-                !String::from_utf8_lossy(&stash_list.stdout).trim().is_empty(),
-                "{}: expected at least one stash entry", method
+                !String::from_utf8_lossy(&stash_list.stdout)
+                    .trim()
+                    .is_empty(),
+                "{}: expected at least one stash entry",
+                method
             );
             // Clear the stash so the next iteration starts clean.
             std::process::Command::new("git")
@@ -13318,7 +13286,9 @@ mod tests {
             .output()
             .expect("git stash list");
         assert!(
-            String::from_utf8_lossy(&stash_list.stdout).trim().is_empty(),
+            String::from_utf8_lossy(&stash_list.stdout)
+                .trim()
+                .is_empty(),
             "expected no stash entries on a clean tree"
         );
     }
@@ -13375,9 +13345,9 @@ mod tests {
             "params": { "cwd": repo.to_string_lossy() }
         });
         let resp = rpc(&state, 1, &req).await;
-        let err = resp.error.unwrap_or_else(|| {
-            panic!("expected INVALID_PARAMS, got success: {:?}", resp.result)
-        });
+        let err = resp
+            .error
+            .unwrap_or_else(|| panic!("expected INVALID_PARAMS, got success: {:?}", resp.result));
         assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
     }
 
@@ -13732,7 +13702,10 @@ mod tests {
             "method": "git.unsubscribeActionProgress", "params": {}
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "idempotent unsubscribe must not error");
+        assert!(
+            resp.error.is_none(),
+            "idempotent unsubscribe must not error"
+        );
         let result = resp.result.expect("result present");
         assert_eq!(result["unsubscribed"], true);
         assert_eq!(
@@ -13958,7 +13931,10 @@ mod tests {
             .write()
             .await
             .unsubscribe(1, crate::channels::CHANNEL_GIT);
-        assert!(removed, "unsubscribe must report removed=true for an active sub");
+        assert!(
+            removed,
+            "unsubscribe must report removed=true for an active sub"
+        );
 
         // Conn 1 must no longer be in the subscriber set.
         assert!(
@@ -14181,10 +14157,7 @@ mod tests {
             // PR-4-1: `homeDir` must always be present and non-empty — the
             // frontend's `useHandleNewChat` blocks "New chat" with "Home
             // folder is not available yet" when this field is null/empty.
-            let home_dir = result
-                .get("homeDir")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let home_dir = result.get("homeDir").and_then(|v| v.as_str()).unwrap_or("");
             assert!(
                 !home_dir.trim().is_empty(),
                 "{}: homeDir must be non-empty: {:?}",
@@ -16001,9 +15974,11 @@ mod tests {
         );
         assert_eq!(options[0]["provider"], "codex");
         assert!(
-            options[0]["models"].as_array().unwrap().iter().any(|m| {
-                m.as_str().unwrap_or("").contains("gpt")
-            }),
+            options[0]["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| { m.as_str().unwrap_or("").contains("gpt") }),
             "codex descriptor should surface gpt-family models"
         );
         assert_eq!(options[0]["supportsTemperature"], true);
@@ -16095,10 +16070,7 @@ mod tests {
                 "missing supportsSystemPrompt"
             );
             assert!(opt["maxTokens"].is_number(), "missing maxTokens");
-            assert!(
-                opt["capabilities"].is_array(),
-                "missing capabilities field"
-            );
+            assert!(opt["capabilities"].is_array(), "missing capabilities field");
         }
 
         // codex filter → single descriptor with gpt-family models, capability
@@ -16505,7 +16477,6 @@ mod tests {
         assert_eq!(plugin["enabled"], false);
         assert_eq!(plugin["installPolicy"], "AVAILABLE");
     }
-
 
     /// getComposerCapabilities must echo the requested `provider` and return
     /// the per-provider capability matrix (T6c-23): claude/codex full, gemini
@@ -17064,10 +17035,7 @@ mod tests {
         let state = WsState::new_in_memory(16);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         state.register(1, tx).await;
-        for method in [
-            "server.getProviderStatuses",
-            "server/get-provider-statuses",
-        ] {
+        for method in ["server.getProviderStatuses", "server/get-provider-statuses"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method
             });
@@ -17609,10 +17577,7 @@ mod tests {
         let state = WsState::new_in_memory(16);
 
         // Empty before any start (both forms).
-        for method in [
-            "server.listLocalServers",
-            "server/list-local-servers",
-        ] {
+        for method in ["server.listLocalServers", "server/list-local-servers"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method
             });
@@ -17708,11 +17673,7 @@ mod tests {
             let procs = result["processes"]
                 .as_array()
                 .expect("{method}: processes is an array");
-            assert_eq!(
-                procs.len(),
-                1,
-                "{method}: exactly one tracked process"
-            );
+            assert_eq!(procs.len(), 1, "{method}: exactly one tracked process");
             let entry = &procs[0];
             assert_eq!(entry["id"], "proc-1");
             assert_eq!(entry["command"], "sleep");
@@ -17737,11 +17698,7 @@ mod tests {
                 "params": { "cwd": env!("CARGO_MANIFEST_DIR") }
             });
             let resp = rpc(&state, 1, &req).await;
-            assert!(
-                resp.error.is_none(),
-                "{method} failed: {:?}",
-                resp.error
-            );
+            assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
             let result = resp.result.unwrap();
             let worktrees = result["worktrees"]
                 .as_array()
@@ -18016,11 +17973,7 @@ mod tests {
             });
             let resp = rpc(&state, 1, &req).await;
             // Every form must reach the handler (no MethodNotFound=-32601).
-            let code = resp
-                .error
-                .as_ref()
-                .map(|e| e.code)
-                .unwrap_or(0);
+            let code = resp.error.as_ref().map(|e| e.code).unwrap_or(0);
             assert_ne!(
                 code, -32601,
                 "{method}: must not be MethodNotFound (dispatch table regression)"
@@ -18074,7 +18027,10 @@ mod tests {
         let result = resp.result.expect("result envelope");
         // MCode GitPreparePullRequestThreadResult shape.
         let pr = &result["pullRequest"];
-        assert!(pr.is_object(), "pullRequest must be an object, got {result}");
+        assert!(
+            pr.is_object(),
+            "pullRequest must be an object, got {result}"
+        );
         assert!(
             pr["number"].as_i64().is_some(),
             "pullRequest.number must be populated"
@@ -18084,10 +18040,7 @@ mod tests {
             "pullRequest.headBranch must be non-empty"
         );
         let branch = result["branch"].as_str().expect("branch string");
-        assert!(
-            !branch.is_empty(),
-            "branch must echo the head branch name"
-        );
+        assert!(!branch.is_empty(), "branch must echo the head branch name");
         assert_eq!(
             branch,
             pr["headBranch"].as_str().unwrap(),
@@ -18153,7 +18106,11 @@ mod tests {
         // handler. targetMode absent → defaults to "branch". gh pr create
         // will fail (no origin remote on the temp repo) → handler returns
         // the `{ ok:false, reason }` envelope rather than erroring.
-        for method in ["git.handoffThread", "git/handoff-thread", "git/handoffThread"] {
+        for method in [
+            "git.handoffThread",
+            "git/handoff-thread",
+            "git/handoffThread",
+        ] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
                 "params": {
@@ -18980,33 +18937,49 @@ mod tests {
         // check relative growth, not absolute count.
         let state = WsState::new_in_memory(16);
         let baseline_resp = rpc_success(&state, "server.getConfig", serde_json::json!({})).await;
-        let baseline_len = baseline_resp.result.unwrap()["keybindings"].as_array().unwrap().len();
+        let baseline_len = baseline_resp.result.unwrap()["keybindings"]
+            .as_array()
+            .unwrap()
+            .len();
 
         let rule_a = serde_json::json!({ "id": "kb1", "key": "cmd+a", "command": "A" });
         let resp = rpc_success(&state, "server.upsertKeybinding", rule_a).await;
         assert!(resp.error.is_none(), "upsert failed: {:?}", resp.error);
         let returned = resp.result.unwrap();
-        assert_eq!(returned["keybindings"].as_array().unwrap().len(), baseline_len + 1);
+        assert_eq!(
+            returned["keybindings"].as_array().unwrap().len(),
+            baseline_len + 1
+        );
 
         // Second rule with a different id → append.
         let rule_b = serde_json::json!({ "id": "kb2", "key": "cmd+b", "command": "B" });
         let resp = rpc_success(&state, "server.upsertKeybinding", rule_b).await;
         let returned = resp.result.unwrap();
-        assert_eq!(returned["keybindings"].as_array().unwrap().len(), baseline_len + 2);
+        assert_eq!(
+            returned["keybindings"].as_array().unwrap().len(),
+            baseline_len + 2
+        );
 
         // Replace kb1 by id.
         let rule_a_v2 = serde_json::json!({ "id": "kb1", "key": "cmd+shift+a", "command": "A2" });
         let resp = rpc_success(&state, "server.upsertKeybinding", rule_a_v2).await;
         let returned = resp.result.unwrap();
         let kbs = returned["keybindings"].as_array().unwrap();
-        assert_eq!(kbs.len(), baseline_len + 2, "replace must not grow the array");
+        assert_eq!(
+            kbs.len(),
+            baseline_len + 2,
+            "replace must not grow the array"
+        );
         let kb1 = kbs.iter().find(|k| k["id"] == "kb1").unwrap();
         assert_eq!(kb1["key"], "cmd+shift+a");
 
         // The stored config reflects the upserts (read back via getConfig).
         let resp = rpc_success(&state, "server.getConfig", serde_json::json!({})).await;
         let config = resp.result.unwrap();
-        assert_eq!(config["keybindings"].as_array().unwrap().len(), baseline_len + 2);
+        assert_eq!(
+            config["keybindings"].as_array().unwrap().len(),
+            baseline_len + 2
+        );
     }
 
     #[tokio::test]
@@ -19632,9 +19605,7 @@ mod tests {
         });
         let response = handle_rpc(&state, 1, &request.to_string()).await;
         let resp: JsonRpcResponse = serde_json::from_str(&response.unwrap()).unwrap();
-        let methods: Vec<String> = resp
-            .result
-            .unwrap()["methods"]
+        let methods: Vec<String> = resp.result.unwrap()["methods"]
             .as_array()
             .unwrap()
             .iter()
@@ -19772,16 +19743,9 @@ mod tests {
             .await
             .unwrap();
 
-        let resp = proj_rpc(
-            "project/listDirectories",
-            serde_json::json!({ "cwd": cwd }),
-        )
-        .await;
+        let resp = proj_rpc("project/listDirectories", serde_json::json!({ "cwd": cwd })).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
-        let entries = resp.result.unwrap()["entries"]
-            .as_array()
-            .unwrap()
-            .clone();
+        let entries = resp.result.unwrap()["entries"].as_array().unwrap().clone();
         // Two entries: file.txt + subdir (sorted by name).
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["name"], "file.txt");
@@ -19819,7 +19783,10 @@ mod tests {
         assert_eq!(entries.len(), 2, "two .rs files: {entries:?}");
         assert!(entries.iter().all(|e| e["kind"] == "file"));
         assert_eq!(result["truncated"], false);
-        let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
+        let paths: Vec<&str> = entries
+            .iter()
+            .map(|e| e["path"].as_str().unwrap())
+            .collect();
         assert!(paths.contains(&"foo.rs"));
         assert!(paths.contains(&"bar.rs"));
     }
@@ -19884,19 +19851,13 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::fs::write(
-            dir.path().join("Makefile"),
-            b"lint:\n\tcargo clippy\n",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(dir.path().join("Makefile"), b"lint:\n\tcargo clippy\n")
+            .await
+            .unwrap();
 
         let resp = proj_discover_scripts(&cwd, None).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
-        let scripts = resp.result.unwrap()["scripts"]
-            .as_array()
-            .unwrap()
-            .clone();
+        let scripts = resp.result.unwrap()["scripts"].as_array().unwrap().clone();
         // 2 package.json + 1 Makefile = 3.
         assert_eq!(scripts.len(), 3, "got {scripts:?}");
         // Each entry must carry name + command + source.
@@ -19927,10 +19888,7 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["exitCode"], 0, "stderr={}", result["stderr"]);
         assert!(
-            result["stdout"]
-                .as_str()
-                .unwrap()
-                .contains("proj3-works"),
+            result["stdout"].as_str().unwrap().contains("proj3-works"),
             "stdout was: {}",
             result["stdout"]
         );
@@ -20212,10 +20170,7 @@ mod tests {
 
     /// Helper: dispatch a command via `orchestration.dispatchCommand` and
     /// return the JSON-RPC response.
-    async fn dispatch(
-        state: &WsState,
-        params: serde_json::Value,
-    ) -> JsonRpcResponse {
+    async fn dispatch(state: &WsState, params: serde_json::Value) -> JsonRpcResponse {
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
             "params": params,
@@ -20232,7 +20187,11 @@ mod tests {
             }),
         )
         .await;
-        assert!(resp.error.is_none(), "seed CreateProject failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "seed CreateProject failed: {:?}",
+            resp.error
+        );
         resp.result.unwrap()["aggregateId"]
             .as_str()
             .unwrap_or_default()
@@ -20261,7 +20220,11 @@ mod tests {
             }),
         )
         .await;
-        assert!(resp.error.is_none(), "CreateThread failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "CreateThread failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["dispatched"], true);
         assert_eq!(result["eventsAppended"], 1);
@@ -20271,10 +20234,7 @@ mod tests {
         // Read model reflects the thread.
         let store = state.read_store.read().await;
         assert_eq!(store.threads.len(), 1, "thread should be projected");
-        assert_eq!(
-            store.threads.values().next().unwrap().provider_id,
-            "openai"
-        );
+        assert_eq!(store.threads.values().next().unwrap().provider_id, "openai");
     }
 
     #[tokio::test]
@@ -20296,9 +20256,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Pause.
         let resp = dispatch(
@@ -20309,10 +20269,7 @@ mod tests {
         assert!(resp.error.is_none(), "PauseThread failed: {:?}", resp.error);
         {
             let store = state.read_store.read().await;
-            assert_eq!(
-                store.threads.get(&thread_id).unwrap().status,
-                "paused"
-            );
+            assert_eq!(store.threads.get(&thread_id).unwrap().status, "paused");
         }
 
         // Resume.
@@ -20321,13 +20278,14 @@ mod tests {
             serde_json::json!({ "type": "ResumeThread", "id": thread_id }),
         )
         .await;
-        assert!(resp.error.is_none(), "ResumeThread failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "ResumeThread failed: {:?}",
+            resp.error
+        );
         {
             let store = state.read_store.read().await;
-            assert_eq!(
-                store.threads.get(&thread_id).unwrap().status,
-                "active"
-            );
+            assert_eq!(store.threads.get(&thread_id).unwrap().status, "active");
         }
 
         // Archive (also exercises the threadId alias key).
@@ -20336,12 +20294,13 @@ mod tests {
             serde_json::json!({ "type": "ArchiveThread", "threadId": thread_id }),
         )
         .await;
-        assert!(resp.error.is_none(), "ArchiveThread failed: {:?}", resp.error);
-        let store = state.read_store.read().await;
-        assert_eq!(
-            store.threads.get(&thread_id).unwrap().status,
-            "archived"
+        assert!(
+            resp.error.is_none(),
+            "ArchiveThread failed: {:?}",
+            resp.error
         );
+        let store = state.read_store.read().await;
+        assert_eq!(store.threads.get(&thread_id).unwrap().status, "archived");
     }
 
     #[tokio::test]
@@ -20361,9 +20320,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // StartTurn.
         let turn_id = dispatch(
@@ -20376,9 +20335,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // FailTurn (using the `turnId` alias key).
         let resp = dispatch(
@@ -20391,10 +20350,7 @@ mod tests {
         assert!(resp.error.is_none(), "FailTurn failed: {:?}", resp.error);
 
         let store = state.read_store.read().await;
-        assert_eq!(
-            store.turns.get(&turn_id).unwrap().status,
-            "error"
-        );
+        assert_eq!(store.turns.get(&turn_id).unwrap().status, "error");
     }
 
     #[tokio::test]
@@ -20413,7 +20369,9 @@ mod tests {
             }),
         )
         .await;
-        let err = resp.error.expect("expected INVALID_PARAMS for missing model");
+        let err = resp
+            .error
+            .expect("expected INVALID_PARAMS for missing model");
         assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
         assert!(
             err.message.contains("CreateThread"),
@@ -20467,9 +20425,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Archive, then attempt Pause (invalid from archived state).
         dispatch(
@@ -20506,7 +20464,11 @@ mod tests {
             }),
         )
         .await;
-        assert!(resp.error.is_none(), "UpdateProjectConfig failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "UpdateProjectConfig failed: {:?}",
+            resp.error
+        );
 
         let store = state.read_store.read().await;
         let project = store.projects.get(&project_id).unwrap();
@@ -20529,7 +20491,9 @@ mod tests {
             }
         });
         let resp = rpc(&state, 1, &req).await;
-        let err = resp.error.expect("slash form should also reject unknown project");
+        let err = resp
+            .error
+            .expect("slash form should also reject unknown project");
         assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
         assert_eq!(err.data.unwrap()["kind"], "project_not_found");
     }
@@ -20544,7 +20508,11 @@ mod tests {
             "params": { "command": "CreateProject", "name": "alias", "rootPath": "/tmp" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "command-key alias failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "command-key alias failed: {:?}",
+            resp.error
+        );
         assert_eq!(resp.result.unwrap()["dispatched"], true);
     }
 
@@ -20568,10 +20536,16 @@ mod tests {
         assert!(resp.error.is_none(), "repairState failed: {:?}", resp.error);
         let result = resp.result.unwrap();
         // New ORCH-3 return shape.
-        assert_eq!(result["driftDetected"], false, "no drift on a consistent store");
+        assert_eq!(
+            result["driftDetected"], false,
+            "no drift on a consistent store"
+        );
         assert_eq!(result["repaired"], true, "repair:true keeps the replay");
         let replayed = result["repairedCount"].as_u64().unwrap_or(0);
-        assert!(replayed >= 1, "expected at least 1 event replayed, got {replayed}");
+        assert!(
+            replayed >= 1,
+            "expected at least 1 event replayed, got {replayed}"
+        );
         // details.before == details.after when there's no drift.
         assert_eq!(result["details"]["before"], result["details"]["after"]);
         assert_eq!(result["details"]["after"]["projects"], 1);
@@ -20670,7 +20644,10 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "repairState failed: {:?}", resp.error);
         let result = resp.result.unwrap();
-        assert_eq!(result["driftDetected"], true, "drift was present before replay");
+        assert_eq!(
+            result["driftDetected"], true,
+            "drift was present before replay"
+        );
         assert_eq!(result["repaired"], true, "default is repair:true");
         assert_eq!(result["details"]["before"]["projects"], 2);
         assert_eq!(result["details"]["after"]["projects"], 1);
@@ -20697,7 +20674,11 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "orchestration.repairReadModel"
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "repairReadModel failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "repairReadModel failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["driftDetected"], false);
         assert!(result["repairedCount"].as_u64().unwrap_or(0) >= 1);
@@ -20717,12 +20698,20 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "orchestration.replayEvents"
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "replayEvents failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "replayEvents failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         // ORCH-2 widened replay_read_model to return (replayed, seeded);
         // the handler now surfaces both. `replayed` is the event count (u32),
         // `seeded` is the snapshot count (0 on a cold store).
-        assert!(result["replayed"].as_u64().unwrap_or(0) >= 1, "expected replayed >= 1, got {}", result["replayed"]);
+        assert!(
+            result["replayed"].as_u64().unwrap_or(0) >= 1,
+            "expected replayed >= 1, got {}",
+            result["replayed"]
+        );
         assert_eq!(result["scope"], "all");
     }
 
@@ -20737,17 +20726,23 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "orchestration.subscribeShell"
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "subscribeShell failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "subscribeShell failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["subscribed"], true);
         assert_eq!(result["channel"], "orchestration");
         // Connection is now registered on the orchestration channel.
-        assert!(state
-            .subscriptions
-            .read()
-            .await
-            .subscribers_for(crate::channels::CHANNEL_ORCHESTRATION)
-            .contains(&1));
+        assert!(
+            state
+                .subscriptions
+                .read()
+                .await
+                .subscribers_for(crate::channels::CHANNEL_ORCHESTRATION)
+                .contains(&1)
+        );
     }
 
     #[tokio::test]
@@ -20800,9 +20795,15 @@ mod tests {
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none(), "getTurnDiff failed: {:?}", resp.error);
         let result = resp.result.unwrap();
-        assert_eq!(result["diff"], "", "diff must be empty when git unavailable");
+        assert_eq!(
+            result["diff"], "",
+            "diff must be empty when git unavailable"
+        );
         assert!(
-            result["note"].as_str().unwrap_or("").contains("git unavailable"),
+            result["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("git unavailable"),
             "fallback note must mention git unavailable, got: {:?}",
             result["note"]
         );
@@ -20841,12 +20842,21 @@ mod tests {
             "params": { "threadId": "th1", "turnId": "tu1", "cwd": "/nonexistent-orch-6" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "slash-form getTurnDiff failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "slash-form getTurnDiff failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         // Graceful fallback (git unavailable) — but the handler successfully
         // resolved two checkpoints + attempted the diff, never erroring.
         assert_eq!(result["diff"], "");
-        assert!(result["note"].as_str().unwrap_or("").contains("git unavailable"));
+        assert!(
+            result["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("git unavailable")
+        );
     }
 
     #[tokio::test]
@@ -20860,10 +20870,18 @@ mod tests {
             "params": { "threadId": "no-such-thread", "cwd": "/tmp" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "getFullThreadDiff failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "getFullThreadDiff failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["threadId"], "no-such-thread");
-        assert_eq!(result["turns"].as_array().unwrap().len(), 0, "turns must be empty");
+        assert_eq!(
+            result["turns"].as_array().unwrap().len(),
+            0,
+            "turns must be empty"
+        );
         assert_eq!(result["totalDiff"], "", "totalDiff must be empty");
         assert_eq!(
             result["note"], "no checkpoints for thread",
@@ -20901,14 +20919,21 @@ mod tests {
             "params": { "threadId": "th1", "cwd": "/nonexistent-orch-7" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "getFullThreadDiff failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "getFullThreadDiff failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["threadId"], "th1");
         let turns = result["turns"].as_array().unwrap();
         assert_eq!(turns.len(), 2, "must aggregate both turns");
         // Each turn's diff is "" with a "git unavailable" note.
         for t in turns {
-            assert_eq!(t["diff"], "", "per-turn diff must be empty when git unavailable");
+            assert_eq!(
+                t["diff"], "",
+                "per-turn diff must be empty when git unavailable"
+            );
             assert!(
                 t["note"].as_str().unwrap_or("").contains("git unavailable"),
                 "per-turn note must mention git unavailable, got: {:?}",
@@ -20917,7 +20942,10 @@ mod tests {
         }
         assert_eq!(result["totalDiff"], "", "totalDiff must be empty");
         assert!(
-            result["note"].as_str().unwrap_or("").contains("git unavailable"),
+            result["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("git unavailable"),
             "top-level note must mention git unavailable, got: {:?}",
             result["note"]
         );
@@ -20958,7 +20986,11 @@ mod tests {
             "params": { "threadId": "th1", "cwd": "/nonexistent-orch-7" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "slash-form getFullThreadDiff failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "slash-form getFullThreadDiff failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["threadId"], "th1");
         let turns = result["turns"].as_array().unwrap();
@@ -21018,7 +21050,11 @@ mod tests {
             "params": { "threadId": "th1", "cwd": "/nonexistent-orch-7" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "getFullThreadDiff failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "getFullThreadDiff failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         let turns = result["turns"].as_array().unwrap();
         assert_eq!(turns.len(), 2, "must not leak th2's checkpoint");
@@ -21037,7 +21073,10 @@ mod tests {
             "params": { "cwd": "/tmp" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.result.is_none(), "must not return a result on missing param");
+        assert!(
+            resp.result.is_none(),
+            "must not return a result on missing param"
+        );
         let err = resp.error.expect("missing threadId must error");
         assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
     }
@@ -21168,7 +21207,8 @@ mod tests {
         async fn send_request(
             &self,
             _request: syncode_provider::ProviderRequest,
-        ) -> Result<syncode_provider::ProviderResponse, syncode_provider::ProviderAdapterError> {
+        ) -> Result<syncode_provider::ProviderResponse, syncode_provider::ProviderAdapterError>
+        {
             Ok(syncode_provider::ProviderResponse {
                 jsonrpc: "2.0".to_string(),
                 id: None,
@@ -21179,7 +21219,8 @@ mod tests {
         fn event_stream(
             &self,
             _session_id: &str,
-        ) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError> {
+        ) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError>
+        {
             Ok(Box::pin(futures_util::stream::empty()))
         }
         async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> {
@@ -21205,9 +21246,8 @@ mod tests {
         history: Vec<syncode_provider::ExternalThreadMessage>,
     ) {
         use crate::llm::SharedAdapter;
-        let mock: SharedAdapter = std::sync::Arc::new(tokio::sync::RwLock::new(
-            HistoryMockAdapter::new(history),
-        ));
+        let mock: SharedAdapter =
+            std::sync::Arc::new(tokio::sync::RwLock::new(HistoryMockAdapter::new(history)));
         let mut registry = state.provider_registry.write().await;
         registry.register_shared("claude".to_string(), mock);
     }
@@ -21231,9 +21271,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Register an adapter surfacing a 2-message external transcript.
         register_history_provider(
@@ -21259,7 +21299,11 @@ mod tests {
             }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "importThread failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "importThread failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(
@@ -21325,9 +21369,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "orchestration.importThread",
@@ -21360,9 +21404,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
         register_history_provider(&state, Vec::new()).await;
 
         let req = serde_json::json!({
@@ -21397,9 +21441,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
         register_history_provider(
             &state,
             vec![syncode_provider::ExternalThreadMessage {
@@ -21436,9 +21480,9 @@ mod tests {
         .await
         .result
         .unwrap()["aggregateId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
         register_history_provider(
             &state,
             vec![syncode_provider::ExternalThreadMessage {
@@ -21456,7 +21500,11 @@ mod tests {
             }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "importThread failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "importThread failed: {:?}",
+            resp.error
+        );
         let result = resp.result.unwrap();
         assert_eq!(result["imported"], 1);
         assert_eq!(
@@ -21489,10 +21537,7 @@ mod tests {
         let state = WsState::new_in_memory(16);
 
         // 1. listDevServers is empty before any start (both forms).
-        for method in [
-            "project.listDevServers",
-            "project/list-dev-servers",
-        ] {
+        for method in ["project.listDevServers", "project/list-dev-servers"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method
             });
@@ -21520,14 +21565,15 @@ mod tests {
             }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "plain server start failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "plain server start failed: {:?}",
+            resp.error
+        );
 
         // 3. Start TWO dev servers via project.startDevServer (both forms).
         let mut dev_ids = Vec::new();
-        for method in [
-            "project.startDevServer",
-            "project/start-dev-server",
-        ] {
+        for method in ["project.startDevServer", "project/start-dev-server"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
                 "params": {
@@ -21570,10 +21616,7 @@ mod tests {
 
         // 5. listDevServers returns ONLY the dev servers (not the plain
         //    server started in step 2). Both forms.
-        for method in [
-            "project.listDevServers",
-            "project/list-dev-servers",
-        ] {
+        for method in ["project.listDevServers", "project/list-dev-servers"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method
             });
@@ -21602,7 +21645,11 @@ mod tests {
             "params": { "id": dev_ids[0] }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "stopDevServer failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "stopDevServer failed: {:?}",
+            resp.error
+        );
         assert_eq!(resp.result.unwrap()["ok"], true);
 
         // 7. After stop: registry has one entry, listDevServers returns one.
@@ -21631,13 +21678,21 @@ mod tests {
             "params": { "id": dev_ids[1] }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "slash-form stop failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "slash-form stop failed: {:?}",
+            resp.error
+        );
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "server.stopLocalServer",
             "params": { "id": "plain-server" }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "plain server cleanup failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "plain server cleanup failed: {:?}",
+            resp.error
+        );
 
         // 9. dev_servers registry is empty after all dev servers stopped.
         let dev = state.dev_servers.read().await;
@@ -21651,16 +21706,16 @@ mod tests {
         let state = WsState::new_in_memory(16);
 
         // Missing command -> INVALID_PARAMS (both forms).
-        for method in [
-            "project.startDevServer",
-            "project/start-dev-server",
-        ] {
+        for method in ["project.startDevServer", "project/start-dev-server"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
                 "params": { "name": "x" }
             });
             let resp = rpc(&state, 1, &req).await;
-            assert!(resp.result.is_none(), "{method}: missing command must error");
+            assert!(
+                resp.result.is_none(),
+                "{method}: missing command must error"
+            );
             let err = resp.error.expect("error present");
             assert_eq!(
                 err.code,
@@ -21670,10 +21725,7 @@ mod tests {
         }
 
         // Unknown id -> INVALID_PARAMS (both forms).
-        for method in [
-            "project.stopDevServer",
-            "project/stop-dev-server",
-        ] {
+        for method in ["project.stopDevServer", "project/stop-dev-server"] {
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method,
                 "params": { "id": "never-started" }

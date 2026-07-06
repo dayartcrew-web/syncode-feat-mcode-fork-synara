@@ -152,17 +152,12 @@ line after the score.";
 /// text the run produced. The prompt is the sole channel through which run
 /// state reaches the model — nothing else about the run is leaked.
 pub fn build_prompt(stop_when: &str, assistant_text: &str) -> String {
-    format!(
-        "Should I stop? Condition: {stop_when}\n\nRun output:\n{assistant_text}"
-    )
+    format!("Should I stop? Condition: {stop_when}\n\nRun output:\n{assistant_text}")
 }
 
 /// The system instruction paired with the prompt — convenience for callers that
 /// wire the port to a provider expecting both (`system` + `prompt`).
-pub fn build_system_and_prompt(
-    stop_when: &str,
-    assistant_text: &str,
-) -> ( &'static str, String ) {
+pub fn build_system_and_prompt(stop_when: &str, assistant_text: &str) -> (&'static str, String) {
     (SYSTEM_INSTRUCTION, build_prompt(stop_when, assistant_text))
 }
 
@@ -568,10 +563,7 @@ mod tests {
     fn parse_confidence_instructed_form() {
         assert_eq!(parse_confidence("CONFIDENCE: 0.92"), Some(0.92));
         assert_eq!(parse_confidence("confidence: 0.50"), Some(0.5));
-        assert_eq!(
-            parse_confidence("CONFIDENCE: 0.99 looks done"),
-            Some(0.99)
-        );
+        assert_eq!(parse_confidence("CONFIDENCE: 0.99 looks done"), Some(0.99));
     }
 
     #[test]
@@ -624,10 +616,13 @@ mod tests {
         let llm = CannedLlm::ok("CONFIDENCE: 0.95 — all tests green");
         let run = run_ctx();
 
-        let result =
-            evaluate_completion_policy(&def, &run, "50 tests passed", &llm, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "50 tests passed", &llm, &repo).await;
 
-        assert!(result.is_match(), "expected Match, got {:?}", result.verdict);
+        assert!(
+            result.is_match(),
+            "expected Match, got {:?}",
+            result.verdict
+        );
         match result.verdict {
             CompletionVerdict::Match { confidence } => {
                 assert!((confidence - 0.95).abs() < 1e-9);
@@ -651,15 +646,11 @@ mod tests {
         let llm = CannedLlm::ok("CONFIDENCE: 0.40 — only some tests pass");
         let run = run_ctx();
 
-        let result =
-            evaluate_completion_policy(&def, &run, "some tests failed", &llm, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "some tests failed", &llm, &repo).await;
 
         assert!(!result.is_match());
         match result.verdict {
-            CompletionVerdict::NoMatch {
-                confidence,
-                reason,
-            } => {
+            CompletionVerdict::NoMatch { confidence, reason } => {
                 assert_eq!(confidence, Some(0.40));
                 assert_eq!(reason, NoMatchReason::BelowThreshold);
             }
@@ -676,14 +667,10 @@ mod tests {
         let llm = CannedLlm::ok("the tests look fine I guess");
         let run = run_ctx();
 
-        let result =
-            evaluate_completion_policy(&def, &run, "output", &llm, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "output", &llm, &repo).await;
 
         match result.verdict {
-            CompletionVerdict::NoMatch {
-                confidence,
-                reason,
-            } => {
+            CompletionVerdict::NoMatch { confidence, reason } => {
                 assert_eq!(confidence, None);
                 assert_eq!(reason, NoMatchReason::Unparseable);
             }
@@ -700,14 +687,10 @@ mod tests {
         let llm = CannedLlm::err("provider timeout");
         let run = run_ctx();
 
-        let result =
-            evaluate_completion_policy(&def, &run, "output", &llm, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "output", &llm, &repo).await;
 
         match result.verdict {
-            CompletionVerdict::NoMatch {
-                confidence,
-                reason,
-            } => {
+            CompletionVerdict::NoMatch { confidence, reason } => {
                 assert_eq!(confidence, None);
                 assert_eq!(reason, NoMatchReason::LlmFailed);
             }
@@ -753,10 +736,13 @@ mod tests {
             repo: repo_inner.clone(),
         };
 
-        let result =
-            evaluate_completion_policy(&def, &run, "output", &bumping, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "output", &bumping, &repo).await;
 
-        assert!(result.is_stale(), "expected Stale, got {:?}", result.verdict);
+        assert!(
+            result.is_stale(),
+            "expected Stale, got {:?}",
+            result.verdict
+        );
         match result.verdict {
             CompletionVerdict::Stale {
                 expected_version,
@@ -792,11 +778,14 @@ mod tests {
         }
         let dropping = DroppingLlm { repo: repo_inner };
 
-        let result =
-            evaluate_completion_policy(&def, &run, "output", &dropping, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "output", &dropping, &repo).await;
 
         // Stale-defensive: can't confirm unchanged → discard the verdict.
-        assert!(result.is_stale(), "expected Stale, got {:?}", result.verdict);
+        assert!(
+            result.is_stale(),
+            "expected Stale, got {:?}",
+            result.verdict
+        );
     }
 
     // ─── evaluate_completion_policy: legacy def (no version field) ─────
@@ -824,8 +813,7 @@ mod tests {
         }
         let legacy = LegacyLlm { repo: repo_inner };
 
-        let result =
-            evaluate_completion_policy(&def, &run, "output", &legacy, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "output", &legacy, &repo).await;
 
         assert!(
             result.is_match(),
@@ -849,8 +837,7 @@ mod tests {
         let llm = CannedLlm::ok("CONFIDENCE: 0.99");
         let run = run_ctx();
 
-        let result =
-            evaluate_completion_policy(&def, &run, "output", &llm, &repo).await;
+        let result = evaluate_completion_policy(&def, &run, "output", &llm, &repo).await;
 
         assert!(matches!(
             result.verdict,

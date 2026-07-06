@@ -54,7 +54,7 @@ use syncode_core::ports::EventRepository;
 use syncode_orchestration::Orchestrator;
 use syncode_persistence::adapters::SqliteEventRepository;
 use syncode_provider::{FileResumeCursorStore, SessionManager};
-use syncode_ws::{server::build_app, WsState};
+use syncode_ws::{WsState, server::build_app};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 3000;

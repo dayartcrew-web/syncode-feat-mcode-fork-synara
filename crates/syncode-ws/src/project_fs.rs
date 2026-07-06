@@ -75,8 +75,8 @@ pub struct DirEntry {
 pub fn resolve_within_root(root: &Path, relative: &str) -> Result<PathBuf, ProjectFsError> {
     // Delegate the canonicalize step to syncode-core (uses dunce on Windows to
     // avoid \\?\ prefix pollution; passthrough on Unix).
-    let canonical_root = core_path::canonicalize_existing(root)
-        .map_err(|_| ProjectFsError::InvalidRoot)?;
+    let canonical_root =
+        core_path::canonicalize_existing(root).map_err(|_| ProjectFsError::InvalidRoot)?;
 
     // Empty relative → the root itself.
     if relative.is_empty() {
@@ -105,8 +105,8 @@ pub fn resolve_within_root(root: &Path, relative: &str) -> Result<PathBuf, Proje
                 Some(p) if !p.as_os_str().is_empty() => p,
                 _ => return Err(ProjectFsError::PathTraversal),
             };
-            let canonical_parent = core_path::canonicalize_existing(parent)
-                .map_err(|_| ProjectFsError::NotFound)?;
+            let canonical_parent =
+                core_path::canonicalize_existing(parent).map_err(|_| ProjectFsError::NotFound)?;
             if !canonical_parent.starts_with(&canonical_root) {
                 return Err(ProjectFsError::PathTraversal);
             }
@@ -170,7 +170,11 @@ pub async fn list_directory(root: &Path, relative: &str) -> Result<Vec<DirEntry>
         entries.push(DirEntry {
             name: entry.file_name().to_string_lossy().into_owned(),
             is_dir: metadata.is_dir(),
-            size: if metadata.is_file() { metadata.len() } else { 0 },
+            size: if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            },
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -227,8 +231,8 @@ pub async fn write_file(root: &Path, relative: &str, content: &[u8]) -> Result<(
 /// components are then re-appended lexically; since they don't exist they
 /// cannot themselves be symlinks yet.
 fn resolve_for_write(root: &Path, relative: &str) -> Result<PathBuf, ProjectFsError> {
-    let canonical_root = core_path::canonicalize_existing(root)
-        .map_err(|_| ProjectFsError::InvalidRoot)?;
+    let canonical_root =
+        core_path::canonicalize_existing(root).map_err(|_| ProjectFsError::InvalidRoot)?;
     if relative.is_empty() {
         return Err(ProjectFsError::NotAFile);
     }
@@ -438,19 +442,17 @@ async fn collect_suffix_matches(
 /// See [`parse_gitdir_line`] for the pure parsing helper (unit-tested without
 /// touching the filesystem).
 pub async fn parse_git_worktree_pointer(git_file: &Path) -> Result<PathBuf, ProjectFsError> {
-    let metadata = tokio::fs::symlink_metadata(git_file)
-        .await
-        .map_err(|e| {
-            // A missing .git file is a "not a worktree" condition, not a
-            // generic IO failure — surface it as NotFound so callers can
-            // distinguish "this dir isn't a linked worktree" (NotFound) from
-            // a genuine permission/disk error (Io).
-            if e.kind() == std::io::ErrorKind::NotFound {
-                ProjectFsError::NotFound
-            } else {
-                ProjectFsError::Io(e)
-            }
-        })?;
+    let metadata = tokio::fs::symlink_metadata(git_file).await.map_err(|e| {
+        // A missing .git file is a "not a worktree" condition, not a
+        // generic IO failure — surface it as NotFound so callers can
+        // distinguish "this dir isn't a linked worktree" (NotFound) from
+        // a genuine permission/disk error (Io).
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ProjectFsError::NotFound
+        } else {
+            ProjectFsError::Io(e)
+        }
+    })?;
     if !metadata.is_file() {
         return Err(ProjectFsError::NotAFile);
     }
@@ -560,7 +562,10 @@ pub struct ScriptRunResult {
 /// by prerequisites; recipe lines begin with a TAB and are ignored for
 /// discovery). Returns the union sorted by `(source, name)` for deterministic
 /// output. If neither file exists, returns an empty list.
-pub async fn discover_scripts(root: &Path, relative: &str) -> Result<Vec<DiscoveredScript>, ProjectFsError> {
+pub async fn discover_scripts(
+    root: &Path,
+    relative: &str,
+) -> Result<Vec<DiscoveredScript>, ProjectFsError> {
     let base = resolve_within_root(root, relative)?;
     let mut out = Vec::new();
 
@@ -571,7 +576,8 @@ pub async fn discover_scripts(root: &Path, relative: &str) -> Result<Vec<Discove
     {
         // Parse defensively: a malformed package.json must not break
         // discovery (we just skip it and continue to the Makefile).
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        if let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_slice::<serde_json::Value>(&bytes)
             && let Some(serde_json::Value::Object(scripts)) = map.get("scripts")
         {
             for (name, val) in scripts {
@@ -718,9 +724,7 @@ mod tests {
         tokio::fs::write(root_path.join("b.txt"), b"bb")
             .await
             .unwrap();
-        tokio::fs::create_dir(root_path.join("sub"))
-            .await
-            .unwrap();
+        tokio::fs::create_dir(root_path.join("sub")).await.unwrap();
 
         let entries = list_directory(root_path, "").await.expect("list ok");
         assert_eq!(entries.len(), 3, "three entries expected");
@@ -754,14 +758,18 @@ mod tests {
     async fn read_write_roundtrip() {
         let root = temp_root();
         let root_path = root.path();
-        write_file(root_path, "out.txt", b"hello").await.expect("write ok");
+        write_file(root_path, "out.txt", b"hello")
+            .await
+            .expect("write ok");
         // create_dir_all on parent of nested write.
         write_file(root_path, "nested/dir/deep.txt", b"deep")
             .await
             .expect("nested write ok");
         let a = read_file(root_path, "out.txt").await.expect("read ok");
         assert_eq!(a, b"hello");
-        let b = read_file(root_path, "nested/dir/deep.txt").await.expect("read ok");
+        let b = read_file(root_path, "nested/dir/deep.txt")
+            .await
+            .expect("read ok");
         assert_eq!(b, b"deep");
     }
 
@@ -778,13 +786,21 @@ mod tests {
     async fn search_files_finds_by_substring() {
         let root = temp_root();
         let root_path = root.path();
-        tokio::fs::write(root_path.join("foo.rs"), b"").await.unwrap();
-        tokio::fs::write(root_path.join("bar.rs"), b"").await.unwrap();
+        tokio::fs::write(root_path.join("foo.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(root_path.join("bar.rs"), b"")
+            .await
+            .unwrap();
         tokio::fs::write(root_path.join("README.md"), b"")
             .await
             .unwrap();
-        tokio::fs::create_dir_all(root_path.join("src")).await.unwrap();
-        tokio::fs::write(root_path.join("src/foo.rs"), b"").await.unwrap();
+        tokio::fs::create_dir_all(root_path.join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(root_path.join("src/foo.rs"), b"")
+            .await
+            .unwrap();
 
         let rs_files = search_files(root_path, ".rs").await.expect("search ok");
         assert_eq!(rs_files.len(), 3, "got {rs_files:?}");
@@ -807,17 +823,15 @@ mod tests {
             .await
             .ok(); // may already exist; ignore.
 
-        let err = list_directory(root_path, "..").await.expect_err("must block");
-        assert!(
-            matches!(err, ProjectFsError::PathTraversal),
-            "got {err:?}"
-        );
+        let err = list_directory(root_path, "..")
+            .await
+            .expect_err("must block");
+        assert!(matches!(err, ProjectFsError::PathTraversal), "got {err:?}");
 
-        let err = read_file(root_path, "../secret.txt").await.expect_err("must block");
-        assert!(
-            matches!(err, ProjectFsError::PathTraversal),
-            "got {err:?}"
-        );
+        let err = read_file(root_path, "../secret.txt")
+            .await
+            .expect_err("must block");
+        assert!(matches!(err, ProjectFsError::PathTraversal), "got {err:?}");
     }
 
     #[tokio::test]
@@ -840,8 +854,7 @@ mod tests {
     async fn traversal_dotdot_chain_escape_is_blocked() {
         let root = temp_root();
         let root_path = root.path();
-        let err = resolve_within_root(root_path, "../../../../etc/passwd")
-            .expect_err("must block");
+        let err = resolve_within_root(root_path, "../../../../etc/passwd").expect_err("must block");
         assert!(matches!(err, ProjectFsError::PathTraversal), "got {err:?}");
     }
 
@@ -868,9 +881,7 @@ mod tests {
         // Create a file outside the root, in a sibling tempdir.
         let outside = tempfile::tempdir().expect("outside tempdir");
         let outside_file = outside.path().join("outside.txt");
-        tokio::fs::write(&outside_file, b"outside")
-            .await
-            .unwrap();
+        tokio::fs::write(&outside_file, b"outside").await.unwrap();
 
         // Plant a symlink inside root pointing at the outside file.
         let link_path = root_path.join("escape_link.txt");
@@ -880,10 +891,7 @@ mod tests {
         let err = read_file(root_path, "escape_link.txt")
             .await
             .expect_err("symlink escape must block");
-        assert!(
-            matches!(err, ProjectFsError::PathTraversal),
-            "got {err:?}"
-        );
+        assert!(matches!(err, ProjectFsError::PathTraversal), "got {err:?}");
     }
 
     #[cfg(unix)]
@@ -935,10 +943,7 @@ mod tests {
         let err = write_file(root_path, "linkdir/x", b"content")
             .await
             .expect_err("write through symlinked dir must block");
-        assert!(
-            matches!(err, ProjectFsError::PathTraversal),
-            "got {err:?}"
-        );
+        assert!(matches!(err, ProjectFsError::PathTraversal), "got {err:?}");
 
         // Defense-in-depth: the outside directory must remain empty — the
         // blocked write must not have created `outside/x`.
@@ -959,10 +964,7 @@ mod tests {
         let err = write_file(root_path, "", b"content")
             .await
             .expect_err("empty path must error");
-        assert!(
-            matches!(err, ProjectFsError::NotAFile),
-            "got {err:?}"
-        );
+        assert!(matches!(err, ProjectFsError::NotAFile), "got {err:?}");
     }
 
     #[cfg(unix)]
@@ -1087,7 +1089,9 @@ lint:\n\
         // A bare tempdir with no package.json and no Makefile must return
         // an empty list (not an error) — the discovery is best-effort.
         let root = temp_root();
-        let scripts = discover_scripts(root.path(), "").await.expect("discover ok");
+        let scripts = discover_scripts(root.path(), "")
+            .await
+            .expect("discover ok");
         assert!(scripts.is_empty(), "got {scripts:?}");
     }
 
@@ -1152,19 +1156,18 @@ lint:\n\
         tokio::fs::create_dir_all(root.join("crates/syncode-core/src"))
             .await
             .unwrap();
-        tokio::fs::write(
-            root.join("crates/syncode-ws/src/project_fs.rs"),
-            b"// ws",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(root.join("crates/syncode-ws/src/project_fs.rs"), b"// ws")
+            .await
+            .unwrap();
         tokio::fs::write(root.join("crates/syncode-ws/Cargo.toml"), b"")
             .await
             .unwrap();
         tokio::fs::write(root.join("crates/syncode-core/src/lib.rs"), b"// core")
             .await
             .unwrap();
-        tokio::fs::write(root.join("README.md"), b"# demo").await.unwrap();
+        tokio::fs::write(root.join("README.md"), b"# demo")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1196,10 +1199,7 @@ lint:\n\
         let resolved = resolve_file_by_suffix(root_path, "_fs")
             .await
             .expect("unique suffix match");
-        assert!(
-            resolved.ends_with("project_fs.rs"),
-            "got {resolved:?}"
-        );
+        assert!(resolved.ends_with("project_fs.rs"), "got {resolved:?}");
     }
 
     #[tokio::test]
@@ -1230,10 +1230,7 @@ lint:\n\
         let err = resolve_file_by_suffix(root_path, "does_not_exist.rs")
             .await
             .expect_err("no match");
-        assert!(
-            matches!(err, ProjectFsError::NotFound),
-            "got {err:?}"
-        );
+        assert!(matches!(err, ProjectFsError::NotFound), "got {err:?}");
     }
 
     #[tokio::test]
@@ -1241,18 +1238,23 @@ lint:\n\
         // AC: error if ambiguous. Seed two files whose names share a suffix.
         let root = temp_root();
         let root_path = root.path();
-        tokio::fs::create_dir_all(root_path.join("a")).await.unwrap();
-        tokio::fs::create_dir_all(root_path.join("b")).await.unwrap();
-        tokio::fs::write(root_path.join("a/mod.rs"), b"").await.unwrap();
-        tokio::fs::write(root_path.join("b/mod.rs"), b"").await.unwrap();
+        tokio::fs::create_dir_all(root_path.join("a"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(root_path.join("b"))
+            .await
+            .unwrap();
+        tokio::fs::write(root_path.join("a/mod.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(root_path.join("b/mod.rs"), b"")
+            .await
+            .unwrap();
 
         let err = resolve_file_by_suffix(root_path, "mod.rs")
             .await
             .expect_err("ambiguous");
-        assert!(
-            matches!(err, ProjectFsError::Ambiguous),
-            "got {err:?}"
-        );
+        assert!(matches!(err, ProjectFsError::Ambiguous), "got {err:?}");
     }
 
     #[tokio::test]
@@ -1272,7 +1274,9 @@ lint:\n\
         // `.git` and `node_modules`; the query must come back NotFound.
         let root = temp_root();
         let root_path = root.path();
-        tokio::fs::create_dir_all(root_path.join(".git/refs")).await.unwrap();
+        tokio::fs::create_dir_all(root_path.join(".git/refs"))
+            .await
+            .unwrap();
         tokio::fs::write(root_path.join(".git/hidden.rs"), b"")
             .await
             .unwrap();
@@ -1286,10 +1290,7 @@ lint:\n\
         let err = resolve_file_by_suffix(root_path, "hidden.rs")
             .await
             .expect_err("should skip noisy dirs");
-        assert!(
-            matches!(err, ProjectFsError::NotFound),
-            "got {err:?}"
-        );
+        assert!(matches!(err, ProjectFsError::NotFound), "got {err:?}");
     }
 
     // ─── PROJ-4: parse_git_worktree_pointer ────────────────────────────────
@@ -1302,12 +1303,9 @@ lint:\n\
         let root = temp_root();
         let root_path = root.path();
         let dot_git = root_path.join(".git");
-        tokio::fs::write(
-            &dot_git,
-            "gitdir: /home/user/repo/.git/worktrees/feat-a\n",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(&dot_git, "gitdir: /home/user/repo/.git/worktrees/feat-a\n")
+            .await
+            .unwrap();
 
         let parsed = parse_git_worktree_pointer(&dot_git)
             .await
@@ -1330,10 +1328,7 @@ lint:\n\
         let err = parse_git_worktree_pointer(&dot_git_dir)
             .await
             .expect_err("directory must error");
-        assert!(
-            matches!(err, ProjectFsError::NotAFile),
-            "got {err:?}"
-        );
+        assert!(matches!(err, ProjectFsError::NotAFile), "got {err:?}");
     }
 
     #[tokio::test]

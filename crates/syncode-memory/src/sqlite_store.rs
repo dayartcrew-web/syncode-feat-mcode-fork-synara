@@ -23,11 +23,11 @@
 //! The schema is created idempotently via [`SqliteMemoryStore::init_schema`]
 //! (called automatically by [`SqliteMemoryStore::new`]/[`new_in_memory`]).
 
-use crate::provider::{MemoryProvider, Result, NO_PRIOR_CONTEXT};
 use crate::DEFAULT_PROJECT_ID;
+use crate::provider::{MemoryProvider, NO_PRIOR_CONTEXT, Result};
 use async_trait::async_trait;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 
 /// Default number of recent interactions returned by
@@ -299,15 +299,30 @@ mod tests {
     async fn persist_then_retrieve_roundtrips_interaction() {
         let store = SqliteMemoryStore::new_in_memory().await.unwrap();
         store
-            .persist_interaction("user-1", "How do I add an RPC?", "Add a dispatch arm", "claude", 42)
+            .persist_interaction(
+                "user-1",
+                "How do I add an RPC?",
+                "Add a dispatch arm",
+                "claude",
+                42,
+            )
             .await
             .unwrap();
 
         let ctx = store.retrieve_context("user-1", "").await;
         assert!(ctx.starts_with("## Prior Context"), "header missing: {ctx}");
-        assert!(ctx.contains("Interaction 1"), "numbered entry missing: {ctx}");
-        assert!(ctx.contains("How do I add an RPC?"), "prompt missing: {ctx}");
-        assert!(ctx.contains("Add a dispatch arm"), "response missing: {ctx}");
+        assert!(
+            ctx.contains("Interaction 1"),
+            "numbered entry missing: {ctx}"
+        );
+        assert!(
+            ctx.contains("How do I add an RPC?"),
+            "prompt missing: {ctx}"
+        );
+        assert!(
+            ctx.contains("Add a dispatch arm"),
+            "response missing: {ctx}"
+        );
         assert!(ctx.contains("claude"), "provider missing: {ctx}");
     }
 
@@ -341,8 +356,14 @@ mod tests {
         assert!(ctx.contains("prompt-5"), "newest missing: {ctx}");
         assert!(ctx.contains("prompt-4"), "second missing: {ctx}");
         assert!(ctx.contains("prompt-3"), "third missing: {ctx}");
-        assert!(!ctx.contains("prompt-2"), "older row leaked past limit: {ctx}");
-        assert!(!ctx.contains("prompt-1"), "oldest row leaked past limit: {ctx}");
+        assert!(
+            !ctx.contains("prompt-2"),
+            "older row leaked past limit: {ctx}"
+        );
+        assert!(
+            !ctx.contains("prompt-1"),
+            "oldest row leaked past limit: {ctx}"
+        );
 
         // Ordering: prompt-5 must appear before prompt-3 (DESC by timestamp).
         let p5 = ctx.find("prompt-5").unwrap();
@@ -390,7 +411,10 @@ mod tests {
         // row written by the first one.
         let store = SqliteMemoryStore::new(&db_path, "proj").await.unwrap();
         let ctx = store.retrieve_context("u", "").await;
-        assert!(ctx.contains("persist me"), "data not persisted to disk: {ctx}");
+        assert!(
+            ctx.contains("persist me"),
+            "data not persisted to disk: {ctx}"
+        );
         assert!(ctx.contains("across reopen"));
     }
 
@@ -465,7 +489,10 @@ mod tests {
         let ctx = store.retrieve_context("meta-user", "").await;
         assert!(ctx.contains("the prompt"), "prompt not stored: {ctx}");
         assert!(ctx.contains("the response"), "response not stored: {ctx}");
-        assert!(ctx.contains("openai"), "provider metadata not stored: {ctx}");
+        assert!(
+            ctx.contains("openai"),
+            "provider metadata not stored: {ctx}"
+        );
         // tokens are intentionally not surfaced in the rendered markdown
         // (kept for future budget-aware retrieval), so we verify them at the
         // row level instead.
@@ -483,7 +510,10 @@ mod tests {
     /// full recent history up to the limit (P3-3 + P3-2 ordering).
     #[tokio::test]
     async fn persist_multiple_interactions_all_retrievable_most_recent_first() {
-        let store = SqliteMemoryStore::new_in_memory().await.unwrap().with_limit(5);
+        let store = SqliteMemoryStore::new_in_memory()
+            .await
+            .unwrap()
+            .with_limit(5);
         store
             .persist_interaction("hist-user", "first-q", "first-a", "claude", 10)
             .await

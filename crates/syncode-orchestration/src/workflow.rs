@@ -27,7 +27,7 @@
 //! error is propagated to the caller via `?`.
 
 use syncode_core::agent::{
-    execute_step, run_output_guardrails, AgentState, StepResult, WorkflowError,
+    AgentState, StepResult, WorkflowError, execute_step, run_output_guardrails,
 };
 use syncode_memory::MemoryProvider;
 
@@ -119,9 +119,7 @@ pub async fn execute_workflow(
     // 2. Context retrieval (memory grounding).
     state.log("[Workflow] Step 2/6: Retrieving context");
     let context = memory.retrieve_context(user_id, initial_task).await;
-    state
-        .memory
-        .set_ephemeral("context", context.as_str());
+    state.memory.set_ephemeral("context", context.as_str());
     let context = state.memory.ephemeral["context"].clone();
     state.log("[Workflow] Context grounded");
 
@@ -137,8 +135,7 @@ pub async fn execute_workflow(
     state.memory.set_ephemeral("plan", plan.as_str());
 
     // 4. Execution.
-    let exec_result =
-        execute_step("Execution", || executor.execute(&plan), &mut state).await?;
+    let exec_result = execute_step("Execution", || executor.execute(&plan), &mut state).await?;
     let StepResult::Success(execution_output) = exec_result;
 
     // 5. Guardrails — validate the execution output before committing.
@@ -146,12 +143,10 @@ pub async fn execute_workflow(
 
     // 6. Persistence — mark complete, then best-effort persist.
     state.mark_completed();
-    state.memory.append_summary(format!(
-        "Completed workflow for task: {task}"
-    ));
-    state.log(
-        "[Workflow] Step 6/6: Workflow completed successfully with zero drift.".to_string(),
-    );
+    state
+        .memory
+        .append_summary(format!("Completed workflow for task: {task}"));
+    state.log("[Workflow] Step 6/6: Workflow completed successfully with zero drift.".to_string());
 
     if let Err(persist_err) = memory
         .persist_interaction(
@@ -260,7 +255,11 @@ impl ProviderWorkflowExecutor {
     /// Bridges the async `send_request` through `block_in_place`. Any provider
     /// error is mapped to [`WorkflowError::ProviderError`] so the orchestrator's
     /// shared failure-routing sink handles it uniformly.
-    fn send(&self, method: &str, params: serde_json::Value) -> Result<ProviderResponse, WorkflowError> {
+    fn send(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<ProviderResponse, WorkflowError> {
         let request = ProviderRequest::new(method, Some(params));
         let adapter = Arc::clone(&self.adapter);
         let response = tokio::task::block_in_place(|| {
@@ -310,10 +309,7 @@ impl WorkflowExecutor for ProviderWorkflowExecutor {
 /// - A JSON-RPC `error` field on the response → `ProviderError`.
 /// - A missing `result` object → `ProviderError`.
 /// - Neither key present (or non-string) → `ProviderError`.
-fn extract_output(
-    response: &ProviderResponse,
-    method: &str,
-) -> Result<String, WorkflowError> {
+fn extract_output(response: &ProviderResponse, method: &str) -> Result<String, WorkflowError> {
     if let Some(rpc_err) = response.error.as_ref() {
         return Err(WorkflowError::ProviderError(format!(
             "{method}: provider returned RPC error code {}: {}",
@@ -321,9 +317,7 @@ fn extract_output(
         )));
     }
     let result = response.result.as_ref().ok_or_else(|| {
-        WorkflowError::ProviderError(format!(
-            "{method}: provider response had no 'result' field"
-        ))
+        WorkflowError::ProviderError(format!("{method}: provider response had no 'result' field"))
     })?;
     // Prefer "output" (subprocess adapters); fall back to "text" (HTTP adapters).
     if let Some(output) = result.get("output").and_then(|v| v.as_str()) {
@@ -348,9 +342,9 @@ fn provider_error_message(method: &str, e: &ProviderAdapterError) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
     use syncode_core::agent::WorkflowStep;
     use syncode_memory::MemoryProviderError;
-    use std::sync::{Arc, Mutex};
 
     // ------------------------------------------------------------------
     // Test doubles
@@ -476,16 +470,16 @@ mod tests {
             state.memory.get_ephemeral("context"),
             Some("prior context fragment")
         );
-        assert_eq!(
-            state.memory.get_ephemeral("plan"),
-            Some("1. do a\n2. do b")
-        );
+        assert_eq!(state.memory.get_ephemeral("plan"), Some("1. do a\n2. do b"));
 
         // Every pipeline phase left a log entry.
         let logs = state.execution_logs.join("\n");
         assert!(logs.contains("Initialization complete"), "logs: {logs}");
         assert!(logs.contains("Retrieving context"), "logs: {logs}");
-        assert!(logs.contains("[Harness] Starting step: Planning"), "logs: {logs}");
+        assert!(
+            logs.contains("[Harness] Starting step: Planning"),
+            "logs: {logs}"
+        );
         assert!(
             logs.contains("[Harness] Step Planning completed"),
             "logs: {logs}"
@@ -632,8 +626,8 @@ mod tests {
     // exact JSON-RPC shape the executor emits.
 
     use syncode_provider::{
-        ProviderCapability, ProviderConfig, ProviderStatus, ProviderStream,
-        SessionContext, SessionManager,
+        ProviderCapability, ProviderConfig, ProviderStatus, ProviderStream, SessionContext,
+        SessionManager,
     };
 
     /// A minimal `ProviderAdapter` mock for the P1-5 executor tests.
@@ -689,9 +683,7 @@ mod tests {
         fn execute_failing(err_msg: &str) -> Self {
             let inner = MockProviderInner {
                 plan_output: Some(Ok("a plan".to_string())),
-                execute_output: Some(Err(ProviderAdapterError::Internal(
-                    err_msg.to_string(),
-                ))),
+                execute_output: Some(Err(ProviderAdapterError::Internal(err_msg.to_string()))),
                 ..MockProviderInner::default()
             };
             Self {
@@ -734,16 +726,10 @@ mod tests {
         ) -> Result<String, ProviderAdapterError> {
             Ok("mock-p1-5-session".to_string())
         }
-        async fn resume_session(
-            &mut self,
-            _session_id: &str,
-        ) -> Result<(), ProviderAdapterError> {
+        async fn resume_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
             Ok(())
         }
-        async fn stop_session(
-            &mut self,
-            _session_id: &str,
-        ) -> Result<(), ProviderAdapterError> {
+        async fn stop_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
             Ok(())
         }
         async fn send_request(
@@ -784,10 +770,7 @@ mod tests {
                 }),
             }
         }
-        fn event_stream(
-            &self,
-            _session_id: &str,
-        ) -> Result<ProviderStream, ProviderAdapterError> {
+        fn event_stream(&self, _session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
             Ok(Box::pin(tokio_stream::empty()))
         }
         async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
@@ -808,22 +791,22 @@ mod tests {
         // shares the same recording state.
         let recorder = provider.clone();
         let session_manager = Arc::new(SessionManager::new());
-        let executor = ProviderWorkflowExecutor::new(
-            Arc::new(provider),
-            session_manager,
-        );
+        let executor = ProviderWorkflowExecutor::new(Arc::new(provider), session_manager);
 
         // Run the executor through the full pipeline so we exercise the
         // plan/execute bridge AND the guardrails/persistence wiring.
         let memory = MockMemory::new_returning("grounded context");
-        let state =
-            execute_workflow("user-p1-5", "wf-p1-5", "do thing", &memory, &executor)
-                .await
-                .expect("happy path should complete");
+        let state = execute_workflow("user-p1-5", "wf-p1-5", "do thing", &memory, &executor)
+            .await
+            .expect("happy path should complete");
 
         // The provider received exactly two requests in the right order.
         let requests = recorder.requests();
-        assert_eq!(requests.len(), 2, "expected plan + execute, got {requests:?}");
+        assert_eq!(
+            requests.len(),
+            2,
+            "expected plan + execute, got {requests:?}"
+        );
         let (plan_method, plan_params) = &requests[0];
         assert_eq!(plan_method, PLAN_METHOD);
         assert_eq!(plan_params["task"], "do thing");
@@ -864,10 +847,7 @@ mod tests {
         let provider = MockProvider::execute_failing("codex subprocess crashed");
         let recorder = provider.clone();
         let session_manager = Arc::new(SessionManager::new());
-        let executor = ProviderWorkflowExecutor::new(
-            Arc::new(provider),
-            session_manager,
-        );
+        let executor = ProviderWorkflowExecutor::new(Arc::new(provider), session_manager);
 
         let memory = MockMemory::new_returning("ctx");
         let err = execute_workflow("user-err", "wf-err", "do thing", &memory, &executor)
@@ -911,10 +891,7 @@ mod tests {
     async fn provider_workflow_executor_accepts_text_key_from_http_adapters() {
         let provider = MockProvider::happy("the-plan", "the-result").with_text_key();
         let session_manager = Arc::new(SessionManager::new());
-        let executor = ProviderWorkflowExecutor::new(
-            Arc::new(provider.clone()),
-            session_manager,
-        );
+        let executor = ProviderWorkflowExecutor::new(Arc::new(provider.clone()), session_manager);
 
         let memory = MockMemory::new_returning("ctx");
         let state = execute_workflow("u", "w", "task", &memory, &executor)
@@ -940,10 +917,7 @@ mod tests {
     async fn provider_workflow_executor_provider_tag_is_the_adapter_id() {
         let provider = MockProvider::happy("p", "e");
         let session_manager = Arc::new(SessionManager::new());
-        let executor = ProviderWorkflowExecutor::new(
-            Arc::new(provider),
-            session_manager,
-        );
+        let executor = ProviderWorkflowExecutor::new(Arc::new(provider), session_manager);
         assert_eq!(executor.provider_tag(), "mock-p1-5");
         // ...and the default (P1-4 mock) executor keeps the sentinel.
         let legacy = MockExecutor {
@@ -1041,7 +1015,13 @@ mod tests {
         // Seed one prior interaction so retrieve_context has something to
         // return (rather than the NO_PRIOR_CONTEXT sentinel).
         store
-            .persist_interaction("user-e2e", "earlier question", "earlier answer", "claude", 10)
+            .persist_interaction(
+                "user-e2e",
+                "earlier question",
+                "earlier answer",
+                "claude",
+                10,
+            )
             .await
             .expect("seed persist");
 
@@ -1121,9 +1101,7 @@ mod tests {
         );
         // Most-recent first: the new interaction (just persisted) should
         // appear before the seed.
-        let new_pos = after
-            .find("follow up")
-            .expect("new interaction present");
+        let new_pos = after.find("follow up").expect("new interaction present");
         let seed_pos = after
             .find("earlier question")
             .expect("seed interaction present");
@@ -1141,7 +1119,7 @@ mod tests {
     /// the first-turn cold-start works end-to-end.
     #[tokio::test]
     async fn execute_workflow_sqlite_cold_start_persists_first_interaction() {
-        use syncode_memory::{SqliteMemoryStore, NO_PRIOR_CONTEXT};
+        use syncode_memory::{NO_PRIOR_CONTEXT, SqliteMemoryStore};
 
         // Brand-new in-memory store — no rows for this user.
         let store = SqliteMemoryStore::new_in_memory()

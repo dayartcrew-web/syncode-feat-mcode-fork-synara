@@ -401,21 +401,13 @@ mod tests {
 
     #[test]
     fn automation_def_version_defaults_to_one() {
-        let def = AutomationDef::new(
-            "v".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        );
+        let def = AutomationDef::new("v".to_string(), "echo".to_string(), ScheduleType::Manual);
         assert_eq!(def.version, 1, "new defs start at version 1");
     }
 
     #[test]
     fn automation_def_bump_version_is_monotonic() {
-        let mut def = AutomationDef::new(
-            "v".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        );
+        let mut def = AutomationDef::new("v".to_string(), "echo".to_string(), ScheduleType::Manual);
         assert_eq!(def.version, 1);
         def.bump_version();
         assert_eq!(def.version, 2);
@@ -426,11 +418,7 @@ mod tests {
     #[test]
     fn automation_def_version_roundtrip_and_legacy_default() {
         // A def with an explicit version round-trips the value.
-        let mut def = AutomationDef::new(
-            "v".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        );
+        let mut def = AutomationDef::new("v".to_string(), "echo".to_string(), ScheduleType::Manual);
         def.version = 7;
         let json = serde_json::to_string(&def).unwrap();
         let back: AutomationDef = serde_json::from_str(&json).unwrap();
@@ -457,8 +445,7 @@ mod tests {
             "checkpointBefore": false,
             "autoCommitAfter": false,
         });
-        let legacy_def: AutomationDef =
-            serde_json::from_value(legacy).unwrap();
+        let legacy_def: AutomationDef = serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy_def.version, 1, "legacy defs default to version 1");
     }
 
@@ -466,28 +453,18 @@ mod tests {
 
     #[test]
     fn automation_def_new_defaults_max_iterations_none_and_stop_on_error_false() {
-        let def = AutomationDef::new(
-            "p2-6".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        );
+        let def = AutomationDef::new("p2-6".to_string(), "echo".to_string(), ScheduleType::Manual);
         assert_eq!(def.max_iterations, None, "default: no iteration cap");
         assert!(!def.stop_on_error, "default: stop_on_error is false");
         assert_eq!(def.iteration_count, 0, "default: iteration_count is 0");
-        assert!(
-            !def.is_max_iterations_reached(),
-            "no cap → never reached"
-        );
+        assert!(!def.is_max_iterations_reached(), "no cap → never reached");
     }
 
     #[test]
     fn automation_def_max_iterations_reached_at_cap() {
-        let mut def = AutomationDef::new(
-            "p2-6".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        )
-        .with_max_iterations(3);
+        let mut def =
+            AutomationDef::new("p2-6".to_string(), "echo".to_string(), ScheduleType::Manual)
+                .with_max_iterations(3);
 
         // Two runs — under the cap.
         def.increment_iteration_count();
@@ -508,11 +485,8 @@ mod tests {
 
     #[test]
     fn automation_def_iteration_count_saturates() {
-        let mut def = AutomationDef::new(
-            "p2-6".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        );
+        let mut def =
+            AutomationDef::new("p2-6".to_string(), "echo".to_string(), ScheduleType::Manual);
         def.iteration_count = u32::MAX;
         let next = def.increment_iteration_count();
         assert_eq!(next, u32::MAX, "saturating add does not overflow");
@@ -520,13 +494,10 @@ mod tests {
 
     #[test]
     fn automation_def_max_iterations_roundtrip_and_legacy_default() {
-        let mut def = AutomationDef::new(
-            "p2-6".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        )
-        .with_max_iterations(10)
-        .with_stop_on_error(true);
+        let mut def =
+            AutomationDef::new("p2-6".to_string(), "echo".to_string(), ScheduleType::Manual)
+                .with_max_iterations(10)
+                .with_stop_on_error(true);
         def.increment_iteration_count();
         def.increment_iteration_count();
 
@@ -567,22 +538,14 @@ mod tests {
 
     #[test]
     fn automation_def_new_defaults_max_runtime_seconds_none() {
-        let def = AutomationDef::new(
-            "p2-7".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        );
+        let def = AutomationDef::new("p2-7".to_string(), "echo".to_string(), ScheduleType::Manual);
         assert_eq!(def.max_runtime_seconds, None);
     }
 
     #[test]
     fn automation_def_max_runtime_seconds_builder_and_roundtrip() {
-        let def = AutomationDef::new(
-            "p2-7".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        )
-        .with_max_runtime_seconds(120);
+        let def = AutomationDef::new("p2-7".to_string(), "echo".to_string(), ScheduleType::Manual)
+            .with_max_runtime_seconds(120);
 
         assert_eq!(def.max_runtime_seconds, Some(120));
 
@@ -620,22 +583,14 @@ mod tests {
 
     #[test]
     fn automation_def_new_defaults_worktree_mode_local() {
-        let def = AutomationDef::new(
-            "p2-8".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        );
+        let def = AutomationDef::new("p2-8".to_string(), "echo".to_string(), ScheduleType::Manual);
         assert_eq!(def.worktree_mode, WorktreeMode::Local);
     }
 
     #[test]
     fn automation_def_worktree_mode_builder_and_roundtrip() {
-        let def = AutomationDef::new(
-            "p2-8".to_string(),
-            "echo".to_string(),
-            ScheduleType::Manual,
-        )
-        .with_worktree_mode(WorktreeMode::Worktree);
+        let def = AutomationDef::new("p2-8".to_string(), "echo".to_string(), ScheduleType::Manual)
+            .with_worktree_mode(WorktreeMode::Worktree);
 
         assert_eq!(def.worktree_mode, WorktreeMode::Worktree);
 

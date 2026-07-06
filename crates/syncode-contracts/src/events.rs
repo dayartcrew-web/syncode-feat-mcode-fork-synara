@@ -749,12 +749,10 @@ impl From<&syncode_core::DomainEvent> for DomainEventDto {
                 delta: delta.clone(),
                 created_at: to_ts(*created_at),
             },
-            E::MessageStreamingFinalized { id, finalized_at } => {
-                Self::MessageStreamingFinalized {
-                    id: to_id(*id),
-                    finalized_at: to_ts(*finalized_at),
-                }
-            }
+            E::MessageStreamingFinalized { id, finalized_at } => Self::MessageStreamingFinalized {
+                id: to_id(*id),
+                finalized_at: to_ts(*finalized_at),
+            },
 
             // ─── Proposed Plan & Checkpoint ─────────────────────────────
             E::ProposedPlanUpserted {
@@ -906,7 +904,10 @@ mod tests {
             updated_at: Timestamp("2026-07-02T00:00:00Z".into()),
         };
         let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"eventType\":\"threadStatusChanged\""), "{json}");
+        assert!(
+            json.contains("\"eventType\":\"threadStatusChanged\""),
+            "{json}"
+        );
         assert!(json.contains("\"oldStatus\""), "{json}");
         let back: DomainEventDto = serde_json::from_str(&json).unwrap();
         match back {
@@ -927,7 +928,10 @@ mod tests {
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"eventType\":\"turnCompleted\""), "{json}");
-        assert!(json.contains("\"durationMs\":123456"), "duration emitted: {json}");
+        assert!(
+            json.contains("\"durationMs\":123456"),
+            "duration emitted: {json}"
+        );
         let back: DomainEventDto = serde_json::from_str(&json).unwrap();
         match back {
             DomainEventDto::TurnCompleted { duration_ms, .. } => {
@@ -1052,7 +1056,10 @@ mod tests {
             completed_at: Timestamp("2026-07-02T00:00:00Z".into()),
         };
         let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"eventType\":\"turnDiffCompleted\""), "{json}");
+        assert!(
+            json.contains("\"eventType\":\"turnDiffCompleted\""),
+            "{json}"
+        );
         assert!(json.contains("\"checkpointTurnCount\""), "{json}");
         let back: DomainEventDto = serde_json::from_str(&json).unwrap();
         match back {
@@ -1072,7 +1079,10 @@ mod tests {
             reverted_at: Timestamp("2026-07-02T00:00:00Z".into()),
         };
         let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"eventType\":\"threadRevertCompleted\""), "{json}");
+        assert!(
+            json.contains("\"eventType\":\"threadRevertCompleted\""),
+            "{json}"
+        );
         let back: DomainEventDto = serde_json::from_str(&json).unwrap();
         match back {
             DomainEventDto::ThreadRevertCompleted { turn_count, .. } => {
@@ -1092,11 +1102,16 @@ mod tests {
             rolled_back_at: Timestamp("2026-07-02T00:00:00Z".into()),
         };
         let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"eventType\":\"conversationRolledBack\""), "{json}");
+        assert!(
+            json.contains("\"eventType\":\"conversationRolledBack\""),
+            "{json}"
+        );
         assert!(json.contains("\"removedTurnIds\""), "{json}");
         let back: DomainEventDto = serde_json::from_str(&json).unwrap();
         match back {
-            DomainEventDto::ConversationRolledBack { removed_turn_ids, .. } => {
+            DomainEventDto::ConversationRolledBack {
+                removed_turn_ids, ..
+            } => {
                 assert_eq!(removed_turn_ids.len(), 2);
             }
             _ => panic!("wrong variant"),
@@ -1116,11 +1131,12 @@ mod tests {
         assert!(json.contains("\"eventType\":\"activityLogged\""), "{json}");
         assert!(json.contains("\"threadId\":\"t1\""), "{json}");
         // `#[serde(default)]` lets missing `threadId` deserialize as None.
-        let json_no_thread =
-            r#"{"eventType":"activityLogged","data":{"id":"a2","activityType":"x","description":"d","createdAt":"t"}}"#;
+        let json_no_thread = r#"{"eventType":"activityLogged","data":{"id":"a2","activityType":"x","description":"d","createdAt":"t"}}"#;
         let back: DomainEventDto = serde_json::from_str(json_no_thread).unwrap();
         match back {
-            DomainEventDto::ActivityLogged { thread_id: None, .. } => {}
+            DomainEventDto::ActivityLogged {
+                thread_id: None, ..
+            } => {}
             _ => panic!("wrong variant or thread_id not None"),
         }
     }

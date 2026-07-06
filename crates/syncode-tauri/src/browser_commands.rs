@@ -241,8 +241,18 @@ mod tests {
     #[test]
     fn available_windows_maps_to_browser_tabs() {
         let tabs = available_windows([
-            ("main".to_string(), "Syncode".to_string(), "tauri://localhost".to_string(), true),
-            ("docs".to_string(), "Docs".to_string(), "tauri://localhost/docs".to_string(), false),
+            (
+                "main".to_string(),
+                "Syncode".to_string(),
+                "tauri://localhost".to_string(),
+                true,
+            ),
+            (
+                "docs".to_string(),
+                "Docs".to_string(),
+                "tauri://localhost/docs".to_string(),
+                false,
+            ),
         ]);
         assert_eq!(tabs.len(), 2);
         assert!(tabs[0].active);

@@ -341,7 +341,6 @@ impl Orchestrator {
         }
     }
 
-
     /// Attach an outbound domain-event publisher (builder-style, consumes and
     /// returns `self` so it chains after a constructor). When attached, every
     /// appended domain event is pushed to the bus after append+project.
@@ -482,7 +481,12 @@ impl Orchestrator {
                 .save_snapshot(aggregate_id, state, version)
                 .await
         {
-            crate::log::warn_err(&e, &format!("failed to save aggregate snapshot (aggregate = {aggregate_id:?}, version = {version})"));
+            crate::log::warn_err(
+                &e,
+                &format!(
+                    "failed to save aggregate snapshot (aggregate = {aggregate_id:?}, version = {version})"
+                ),
+            );
         }
 
         let envelopes: Vec<Envelope> = domain_events
@@ -494,7 +498,10 @@ impl Orchestrator {
             })
             .collect();
 
-        crate::log::info(&format!("Events persisted and projected (count = {})", envelopes.len()));
+        crate::log::info(&format!(
+            "Events persisted and projected (count = {})",
+            envelopes.len()
+        ));
 
         // 5b. Best-effort push of the just-appended command events to the
         //     outbound bus (e.g. WebSocket). Provider-stream events take the
@@ -1072,8 +1079,8 @@ pub(crate) async fn consume_provider_stream(
     turn_id: EntityId,
     session_id: String,
 ) {
-    use tokio_stream::StreamExt;
     use tokio::time::{Duration, interval};
+    use tokio_stream::StreamExt;
 
     // Resolve the turn's owning thread once; every event on this stream shares
     // it (StartTurn emits TurnStarted before the consumer spawns, so the turn is
@@ -2191,7 +2198,12 @@ mod tests {
         let envelopes = repo.replay_events(turn_id).await.expect("replay");
         assert_eq!(envelopes.len(), 1, "batched tokens flush as one event");
         match &envelopes[0].event {
-            DomainEvent::MessageDeltaAppended { id, turn_id: tid, delta, .. } => {
+            DomainEvent::MessageDeltaAppended {
+                id,
+                turn_id: tid,
+                delta,
+                ..
+            } => {
                 assert_eq!(*id, turn_id, "message id is the turn id");
                 assert_eq!(*tid, turn_id);
                 assert_eq!(delta, "Hello world", "token text is concatenated");
@@ -2208,7 +2220,10 @@ mod tests {
             .expect("streamed assistant message projected");
         assert_eq!(msg.role, "assistant");
         assert_eq!(msg.content, "Hello world");
-        assert!(msg.is_streaming, "message remains streaming until finalized");
+        assert!(
+            msg.is_streaming,
+            "message remains streaming until finalized"
+        );
     }
 
     #[tokio::test]
@@ -2246,9 +2261,19 @@ mod tests {
 
         let calls = recorder.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "one batched delta is pushed");
-        assert_eq!(calls[0].0, "orchestration", "pushed on orchestration channel");
-        assert_eq!(calls[0].1, "MessageDeltaAppended", "pushed as MessageDeltaAppended");
-        assert_eq!(calls[0].2, turn_id.to_string(), "aggregate id is the turn id");
+        assert_eq!(
+            calls[0].0, "orchestration",
+            "pushed on orchestration channel"
+        );
+        assert_eq!(
+            calls[0].1, "MessageDeltaAppended",
+            "pushed as MessageDeltaAppended"
+        );
+        assert_eq!(
+            calls[0].2,
+            turn_id.to_string(),
+            "aggregate id is the turn id"
+        );
         // The pushed payload carries the concatenated delta.
         let delta = calls[0].3["data"]["delta"]
             .as_str()
@@ -2269,15 +2294,16 @@ mod tests {
         let turn_id = EntityId::new();
 
         let total = TOKEN_BATCH_MAX_COUNT + 2;
-        let events: Vec<Result<syncode_provider::ProviderEvent, syncode_provider::ProviderAdapterError>> =
-            (0..total)
-                .map(|i| {
-                    Ok(syncode_provider::ProviderEvent::Token {
-                        session_id: "s1".into(),
-                        content: format!("t{i} "),
-                    })
+        let events: Vec<
+            Result<syncode_provider::ProviderEvent, syncode_provider::ProviderAdapterError>,
+        > = (0..total)
+            .map(|i| {
+                Ok(syncode_provider::ProviderEvent::Token {
+                    session_id: "s1".into(),
+                    content: format!("t{i} "),
                 })
-                .collect();
+            })
+            .collect();
         let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(events));
 
         consume_provider_stream(
@@ -2298,10 +2324,11 @@ mod tests {
             "count threshold should trigger at least one early flush, got {} events",
             envelopes.len()
         );
-        assert!(envelopes.iter().all(|env| matches!(
-            env.event,
-            DomainEvent::MessageDeltaAppended { .. }
-        )));
+        assert!(
+            envelopes
+                .iter()
+                .all(|env| matches!(env.event, DomainEvent::MessageDeltaAppended { .. }))
+        );
 
         // No token text is lost: concatenating every flushed delta reproduces
         // the full original stream content in order.
@@ -2316,7 +2343,10 @@ mod tests {
 
         // The read model reflects the full concatenated content.
         let rm = read_model.read().await;
-        let msg = rm.messages.get(&turn_id.as_str()).expect("message projected");
+        let msg = rm
+            .messages
+            .get(&turn_id.as_str())
+            .expect("message projected");
         assert_eq!(msg.content, expected);
     }
 
@@ -2374,10 +2404,11 @@ mod tests {
             2,
             "time window should flush the first token before the second arrives"
         );
-        assert!(envelopes.iter().all(|env| matches!(
-            env.event,
-            DomainEvent::MessageDeltaAppended { .. }
-        )));
+        assert!(
+            envelopes
+                .iter()
+                .all(|env| matches!(env.event, DomainEvent::MessageDeltaAppended { .. }))
+        );
         // Ordering preserved: first delta precedes second.
         let deltas: Vec<String> = envelopes
             .iter()
@@ -2850,7 +2881,10 @@ mod tests {
             .expect("start turn");
 
         // The turn was started.
-        assert!(!start_result.events.is_empty(), "StartTurn must produce events");
+        assert!(
+            !start_result.events.is_empty(),
+            "StartTurn must produce events"
+        );
         let turn_id = start_result
             .events
             .iter()
@@ -2897,7 +2931,8 @@ mod tests {
         //    This simulates the provider's reply arriving (in production the
         //    ingestion reactor would ingest the Completed provider event and
         //    drive CompleteTurn). CompleteTurn persists TurnCompleted.
-        let assistant_reply = "This codebase is a Rust workspace implementing a CQRS orchestration engine.";
+        let assistant_reply =
+            "This codebase is a Rust workspace implementing a CQRS orchestration engine.";
         orch.handle_command(Command::CompleteTurn {
             id: turn_id,
             assistant_output: assistant_reply.into(),

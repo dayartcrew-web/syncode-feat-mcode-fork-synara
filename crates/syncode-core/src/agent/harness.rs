@@ -120,9 +120,7 @@ pub fn run_output_guardrails(
     state: &mut AgentState,
 ) -> Result<String, WorkflowError> {
     if raw_output.trim().is_empty() {
-        let error = WorkflowError::GuardrailViolation(
-            "Empty payload generated.".into(),
-        );
+        let error = WorkflowError::GuardrailViolation("Empty payload generated.".into());
         handle_workflow_failure(state, &error);
         return Err(error);
     }
@@ -195,17 +193,13 @@ mod tests {
             state
                 .execution_logs
                 .iter()
-                .any(|e| e.contains("[Harness] Step failed:")
-                    && e.contains("adapter blew up")),
+                .any(|e| e.contains("[Harness] Step failed:") && e.contains("adapter blew up")),
             "missing failure log; logs = {:?}",
             state.execution_logs
         );
         // No spurious completion log on the failure path.
         assert!(
-            !state
-                .execution_logs
-                .iter()
-                .any(|e| e.contains("completed")),
+            !state.execution_logs.iter().any(|e| e.contains("completed")),
             "completion log should not be present on failure path"
         );
     }
@@ -256,8 +250,7 @@ mod tests {
             state
                 .execution_logs
                 .iter()
-                .any(|e| e.contains("[Harness] Step failed:")
-                    && e.contains("guardrail violation")),
+                .any(|e| e.contains("[Harness] Step failed:") && e.contains("guardrail violation")),
             "missing failure log; logs = {:?}",
             state.execution_logs
         );

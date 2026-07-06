@@ -196,8 +196,8 @@ async fn all_provider_adapters_spawn_and_shutdown() {
 
 #[tokio::test]
 async fn all_provider_adapters_have_unique_ids() {
-    use syncode_provider::adapters::*;
     use syncode_provider::ProviderAdapter;
+    use syncode_provider::adapters::*;
     let ids: Vec<String> = vec![
         ClaudeAdapter::new().provider_id().to_string(),
         CodexAdapter::new().provider_id().to_string(),
@@ -216,8 +216,8 @@ async fn all_provider_adapters_have_unique_ids() {
 
 #[tokio::test]
 async fn all_provider_adapters_have_capabilities() {
-    use syncode_provider::adapters::*;
     use syncode_provider::ProviderAdapter;
+    use syncode_provider::adapters::*;
 
     let adapters: Vec<Box<dyn ProviderAdapter>> = vec![
         Box::new(ClaudeAdapter::new()),

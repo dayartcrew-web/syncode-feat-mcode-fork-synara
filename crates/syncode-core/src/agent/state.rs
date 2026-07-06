@@ -205,7 +205,10 @@ mod tests {
     fn workflow_step_from_name_unknown_is_failed() {
         assert_eq!(WorkflowStep::from_name("nope"), WorkflowStep::Failed);
         // whitespace is trimmed
-        assert_eq!(WorkflowStep::from_name("  Planning  "), WorkflowStep::Planning);
+        assert_eq!(
+            WorkflowStep::from_name("  Planning  "),
+            WorkflowStep::Planning
+        );
     }
 
     #[test]
@@ -241,10 +244,7 @@ mod tests {
         m.append_summary("First paragraph.");
         assert_eq!(m.long_term_summary, "First paragraph.");
         m.append_summary("Second paragraph.");
-        assert_eq!(
-            m.long_term_summary,
-            "First paragraph.\nSecond paragraph."
-        );
+        assert_eq!(m.long_term_summary, "First paragraph.\nSecond paragraph.");
     }
 
     // --- AgentState ---

@@ -207,9 +207,7 @@ pub async fn dispatch_queued_turn_after_completion(
         thread_id.as_str(),
         completed_turn_id.as_str()
     ));
-    reactor
-        .dispatch_next_queued_turn(thread_id, adapter)
-        .await
+    reactor.dispatch_next_queued_turn(thread_id, adapter).await
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +247,12 @@ mod tests {
         let result = ingest_provider_event(event, turn_id, None, None);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
-            DomainEvent::MessageDeltaAppended { id, turn_id: tid, delta, .. } => {
+            DomainEvent::MessageDeltaAppended {
+                id,
+                turn_id: tid,
+                delta,
+                ..
+            } => {
                 assert_eq!(*id, turn_id, "message id is the turn id");
                 assert_eq!(*tid, turn_id);
                 assert_eq!(delta, "hello");

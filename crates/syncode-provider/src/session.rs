@@ -645,11 +645,7 @@ impl SessionManager {
     /// `ensure_session_for_thread` (in the command reactor) to stamp the
     /// provider/model/working-dir trio on a freshly started session so a
     /// subsequent call can decide reuse vs. restart.
-    pub async fn set_session_identity(
-        &self,
-        session_id: &str,
-        identity: SessionIdentity,
-    ) -> bool {
+    pub async fn set_session_identity(&self, session_id: &str, identity: SessionIdentity) -> bool {
         if let Some(session) = self.get_session(session_id).await {
             session.set_identity(Some(identity));
             true
@@ -917,8 +913,9 @@ impl SessionManager {
     ) -> tokio::task::JoinHandle<()> {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(IDLE_STOP_SWEEP_INTERVAL_SECS));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                IDLE_STOP_SWEEP_INTERVAL_SECS,
+            ));
             // Don't fire immediately on the first tick — the first session
             // may have just been started by the bootstrap that launched us.
             interval.tick().await;
@@ -1571,10 +1568,7 @@ mod tests {
 
         /// Allow `resume_session` to succeed for this session id.
         fn allow_resume(&self, session_id: &str) {
-            self.resumable
-                .lock()
-                .unwrap()
-                .push(session_id.to_string());
+            self.resumable.lock().unwrap().push(session_id.to_string());
         }
     }
 
@@ -1609,22 +1603,18 @@ mod tests {
             Ok(format!("session-{}", uuid::Uuid::new_v4().hyphenated()))
         }
 
-        async fn resume_session(
-            &mut self,
-            session_id: &str,
-        ) -> Result<(), ProviderAdapterError> {
+        async fn resume_session(&mut self, session_id: &str) -> Result<(), ProviderAdapterError> {
             let resumable = self.resumable.lock().unwrap();
             if resumable.contains(&session_id.to_string()) {
                 Ok(())
             } else {
-                Err(ProviderAdapterError::SessionNotFound(session_id.to_string()))
+                Err(ProviderAdapterError::SessionNotFound(
+                    session_id.to_string(),
+                ))
             }
         }
 
-        async fn stop_session(
-            &mut self,
-            _session_id: &str,
-        ) -> Result<(), ProviderAdapterError> {
+        async fn stop_session(&mut self, _session_id: &str) -> Result<(), ProviderAdapterError> {
             Ok(())
         }
         async fn send_request(
@@ -1638,10 +1628,7 @@ mod tests {
                 error: None,
             })
         }
-        fn event_stream(
-            &self,
-            _session_id: &str,
-        ) -> Result<ProviderStream, ProviderAdapterError> {
+        fn event_stream(&self, _session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
             Ok(Box::pin(tokio_stream::empty()))
         }
         async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
@@ -1815,7 +1802,9 @@ mod tests {
         drop(adapter);
 
         // Rehydrate.
-        let results = new_mgr.rehydrate_sessions(store.as_ref(), &new_adapter).await;
+        let results = new_mgr
+            .rehydrate_sessions(store.as_ref(), &new_adapter)
+            .await;
         assert_eq!(results.len(), 2, "both sessions rehydrated");
 
         // Both should have reattached.
@@ -1866,10 +1855,7 @@ mod tests {
 
         let results = mgr.rehydrate_sessions(&store, &adapter).await;
         assert_eq!(results.len(), 1);
-        assert!(matches!(
-            results[0].outcome,
-            RehydrationOutcome::Failed(_)
-        ));
+        assert!(matches!(results[0].outcome, RehydrationOutcome::Failed(_)));
 
         // The session is tracked but Errored.
         let session = mgr.get_session("doomed-session").await.expect("tracked");
@@ -1921,10 +1907,7 @@ mod tests {
         };
         let results = mgr_b.rehydrate_sessions(&store, &new_adapter).await;
         assert_eq!(results.len(), 1);
-        assert!(matches!(
-            results[0].outcome,
-            RehydrationOutcome::Reattached
-        ));
+        assert!(matches!(results[0].outcome, RehydrationOutcome::Reattached));
 
         // The session id from the first manager is now tracked in the second.
         let rehydrated = mgr_b.get_session(&session.id).await.expect("tracked");
@@ -1960,12 +1943,22 @@ mod tests {
         let adapter = make_shared_mock();
         assert_eq!(mgr.generation(), 0, "fresh manager starts at generation 0");
 
-        let s1 = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let s1 = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
         let g1 = mgr.generation();
         assert_eq!(g1, 1, "first start bumps generation to 1");
-        assert_eq!(s1.last_generation(), g1, "session stamps the live generation");
+        assert_eq!(
+            s1.last_generation(),
+            g1,
+            "session stamps the live generation"
+        );
 
-        let s2 = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let s2 = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
         let g2 = mgr.generation();
         assert_eq!(g2, 2, "second start bumps generation to 2");
         assert_eq!(s2.last_generation(), g2);
@@ -1989,7 +1982,10 @@ mod tests {
         // wait the full 10 minutes.
         let mgr = SessionManager::with_idle_ttl_secs(1);
         let adapter = make_shared_mock();
-        let session = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let session = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
         assert_eq!(session.status(), SessionStateStatus::Processing);
         assert!(session.is_active());
 
@@ -2001,10 +1997,7 @@ mod tests {
         let stopped = mgr.idle_stop_sweep(&adapter, Utc::now()).await;
         assert_eq!(stopped.len(), 1, "expired session should be stopped");
         assert_eq!(stopped[0], session.id);
-        assert!(
-            !session.is_active(),
-            "stopped session must be deactivated"
-        );
+        assert!(!session.is_active(), "stopped session must be deactivated");
     }
 
     #[tokio::test]
@@ -2017,7 +2010,10 @@ mod tests {
         let adapter = make_shared_mock();
 
         // Start a session at generation 1.
-        let session = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let session = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
         let session_generation = session.last_generation();
         assert_eq!(session_generation, 1);
 
@@ -2051,11 +2047,17 @@ mod tests {
         let adapter = make_shared_mock();
 
         // (a) Completed session — never a candidate.
-        let completed = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let completed = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
         mgr.complete_session(&adapter, &completed.id).await.unwrap();
 
         // (b) Freshly-started Processing session — not yet expired.
-        let fresh = mgr.start_session(&adapter, make_session_ctx()).await.unwrap();
+        let fresh = mgr
+            .start_session(&adapter, make_session_ctx())
+            .await
+            .unwrap();
 
         let stopped = mgr.idle_stop_sweep(&adapter, Utc::now()).await;
         assert!(
