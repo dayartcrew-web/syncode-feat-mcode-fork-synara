@@ -5760,12 +5760,13 @@ async fn handle_server_list_local_server_processes(state: &WsState, id: Value) -
 //     null`. Real ahead/behind requires resolving the upstream ref —
 //     deferred (the `push()` impl in `service.rs` already does this; a
 //     follow-up could lift it into `status()`).
-//   - `git.readWorkingTreeDiff` synthesizes a minimal textual patch from
-//     the diff entries (per-file path + status header). Real unified-diff
-//     hunk generation (`patch` field) requires `git2::Patch` plumbing —
-//     deferred. The UI's `DiffPanel` parses the patch with `parsePatch()`;
-//     an empty/synthesized patch renders as "no changes" rather than
-//     crashing. Documented gap.
+//   - `git.readWorkingTreeDiff` emits REAL unified-diff hunks via
+//     `syncode_git::diff::compute_diff_with_patches` (which goes through
+//     `git2::Patch::to_buf`). Per-file additions/deletions are populated
+//     from `git2::Patch::line_stats`. Binary files fall back to an empty
+//     patch (libgit2 returns `None` from `Patch::from_diff`). A repo with
+//     no HEAD (fresh init) yields an empty patch string (graceful "no
+//     changes" fallback).
 
 /// Open a `Git2Service` for the `cwd`/`path` param. Both keys are accepted:
 /// the MCode UI sends `cwd`; older callers (mirroring the Tauri commands)
@@ -5861,8 +5862,14 @@ fn handle_git_diff(id: Value, params: &Value) -> JsonRpcResponse {
     let old_ref = params.get("oldRef").and_then(|v| v.as_str());
     let new_ref = params.get("newRef").and_then(|v| v.as_str());
 
-    let entries = match svc.diff(old_ref, new_ref) {
-        Ok(e) => e,
+    // Use the patch-aware diff helper (goes through `git2::Patch`). Produces
+    // REAL unified-diff hunks per file (`@@ ... @@` headers + `+`/`-` line
+    // content) with non-zero per-file additions/deletions — the MCode UI's
+    // `DiffPanel` parses the patch with `parsePatch()` and renders the line
+    // chips. Falls back gracefully when the repo has no HEAD (fresh init) →
+    // empty entries → empty patch string (UI renders "no changes").
+    let summary = match syncode_git::diff::compute_diff_with_patches(&svc, old_ref, new_ref) {
+        Ok(s) => s,
         Err(e) => {
             return git_error(
                 id,
@@ -5872,19 +5879,17 @@ fn handle_git_diff(id: Value, params: &Value) -> JsonRpcResponse {
         }
     };
 
-    // Synthesize a minimal textual patch: one header line per changed file
-    // (`diff --git a/<path> b/<path>` + status). Real unified-diff hunks
-    // (with `@@` markers and line content) require `git2::Patch` plumbing —
-    // deferred. An empty entries list yields an empty patch string.
+    // Concatenate the per-file unified-diff patch texts into a single patch
+    // string. `compute_diff_with_patches` already emits standard unified-diff
+    // syntax (`diff --git a/X b/X\nindex ..\n--- a/X\n+++ b/X\n@@ ... @@\n...`)
+    // via `git2::Patch::to_buf` — so the MCode UI's `parsePatch()` can walk
+    // the result and split per file. An empty entries list yields an empty
+    // patch string (graceful "no changes" fallback).
     let mut patch = String::new();
-    for entry in &entries {
-        let path = entry.old_path.as_deref().unwrap_or(&entry.new_path);
-        patch.push_str(&format!(
-            "diff --git a/{path} b/{new}\nnew file mode 100644\nstatus: {status:?}\n",
-            path = path,
-            new = entry.new_path,
-            status = entry.status,
-        ));
+    for entry in &summary.entries {
+        if let Some(p) = entry.patch.as_deref() {
+            patch.push_str(p);
+        }
     }
     JsonRpcResponse::success(id, serde_json::json!({ "patch": patch }))
 }
@@ -12769,6 +12774,147 @@ mod tests {
         assert!(
             patch.contains("README.md"),
             "patch should reference changed file"
+        );
+    }
+
+    /// `git.readWorkingTreeDiff` must emit REAL unified-diff hunks (not the
+    /// old synthesized "+0/-0" patch). Sets up a temp repo with a multi-line
+    /// modification, then asserts the patch contains:
+    ///   - a real hunk header (`@@ ... @@`)
+    ///   - `+` content lines (the additions)
+    ///   - `-` content lines (the deletions)
+    ///   - the `diff --git a/X b/X` per-file header
+    /// Regression test for the "GitPanel feels empty / insertions=0" audit
+    /// finding — proves `git2::Patch::to_buf` plumbing flows through to the
+    /// UI's `parsePatch()`.
+    #[tokio::test]
+    async fn git_diff_read_working_tree_returns_real_hunks() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // README.md currently contains "init\n" (one line). Replace it with a
+        // multi-line body so the diff has both a real deletion (`-init`) and
+        // real additions — proves `+`/`-` content lines flow through.
+        std::fs::write(
+            repo.join("README.md"),
+            "replaced\nline 2 added\nline 3 added\n",
+        )
+        .expect("write");
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.readWorkingTreeDiff",
+            "params": { "cwd": repo.to_string_lossy(), "scope": "workingTree" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let patch = result["patch"].as_str().expect("patch is a string");
+
+        // The patch must be non-empty and contain a real hunk header.
+        assert!(
+            !patch.is_empty(),
+            "patch must not be empty for a modified file"
+        );
+        assert!(
+            patch.contains("@@"),
+            "patch must contain a `@@` hunk header — got:\n{patch}"
+        );
+        // The per-file diff header.
+        assert!(
+            patch.contains("diff --git a/README.md b/README.md"),
+            "patch must contain the `diff --git a/X b/X` header — got:\n{patch}"
+        );
+        // Real addition / deletion content lines (not the synthesized header).
+        // `+` lines: the three added lines (`+replaced`, `+line 2 added`,
+        // `+line 3 added`) plus the `+++ b/README.md` file header.
+        let plus_count = patch.lines().filter(|l| l.starts_with('+')).count();
+        // `-` lines: the one deletion (`-init`) plus the `--- a/README.md`
+        // file header.
+        let minus_count = patch.lines().filter(|l| l.starts_with('-')).count();
+        assert!(
+            plus_count >= 4,
+            "expected ≥4 `+`-prefixed lines (3 additions + `+++` header), got {plus_count}:\n{patch}"
+        );
+        assert!(
+            minus_count >= 2,
+            "expected ≥2 `-`-prefixed lines (1 deletion + `---` header), got {minus_count}:\n{patch}"
+        );
+        // The actual added / removed content lines must be present verbatim.
+        assert!(
+            patch.contains("+replaced"),
+            "patch must contain the added line — got:\n{patch}"
+        );
+        assert!(
+            patch.contains("+line 2 added"),
+            "patch must contain the added line — got:\n{patch}"
+        );
+        assert!(
+            patch.contains("-init"),
+            "patch must contain the deleted line — got:\n{patch}"
+        );
+    }
+
+    /// `git.readWorkingTreeDiff` includes STAGED changes in the working-tree
+    /// diff (the helper uses `diff_tree_to_workdir_with_index`, not just
+    /// `diff_index_to_workdir`). Regression for the "staged changes invisible"
+    /// failure mode.
+    #[tokio::test]
+    async fn git_diff_read_working_tree_includes_staged_changes() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Stage a modification (replaces the working file's content AND the
+        // index — the staged change must appear in the working-tree-vs-HEAD
+        // diff even though the unstaged workdir matches the index).
+        std::fs::write(repo.join("staged.txt"), "staged content\n").expect("write");
+        let add = std::process::Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        assert!(add.status.success(), "git add staged.txt failed");
+
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.readWorkingTreeDiff",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let patch = result["patch"].as_str().unwrap_or("");
+        assert!(
+            patch.contains("staged.txt") && patch.contains("@@"),
+            "staged change must appear in working-tree diff — got:\n{patch}"
+        );
+    }
+
+    /// `git.readWorkingTreeDiff` returns an empty patch (NOT an error) when
+    /// the repo has no changes — graceful "no changes" fallback for the UI.
+    #[tokio::test]
+    async fn git_diff_read_working_tree_empty_when_no_changes() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo(); // clean repo, just the initial commit
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.readWorkingTreeDiff",
+            "params": { "cwd": repo.to_string_lossy() }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let patch = result["patch"].as_str().unwrap_or("non-empty");
+        assert!(
+            patch.is_empty(),
+            "patch must be empty for a clean repo — got:\n{patch}"
         );
     }
 

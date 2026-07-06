@@ -263,6 +263,106 @@ impl Git2Service {
         Repository::discover(&self.repo_path)
             .map_err(|_| GitError::RepoNotFound(self.repo_path.display().to_string()))
     }
+
+    /// Compute a diff with REAL unified-diff hunks (patch text) and per-file
+    /// additions/deletions. Uses `git2::Patch` plumbing — vs the delta-only
+    /// walk in [`GitService::diff`], which leaves `patch: None` and
+    /// `additions: 0, deletions: 0`.
+    ///
+    /// This is the "real" version of `diff()` for callers that need to render
+    /// the actual hunks (the MCode UI's `DiffPanel` parses the patch with
+    /// `parsePatch()`, which expects `@@ ... @@` hunk headers and `+`/`-`
+    /// line content).
+    ///
+    /// Defaults to a working-tree-vs-HEAD diff — i.e. all changes since the
+    /// last commit, staged + unstaged together. When `old_ref` is provided,
+    /// diffs against that ref instead. When `new_ref` is provided, resolves
+    /// to a tree and does a tree-to-tree diff; otherwise the working tree +
+    /// index is used as the new state.
+    ///
+    /// Graceful empty fallback:
+    ///   - Repo with no HEAD AND no `old_ref` (fresh init) → empty entries
+    ///     (nothing to diff against — no synthesized patch).
+    ///   - Binary files → entry included with `patch: None`, `additions: 0`,
+    ///     `deletions: 0` (libgit2 returns `None` from `Patch::from_diff`).
+    pub fn diff_with_patches(
+        &self,
+        old_ref: Option<&str>,
+        new_ref: Option<&str>,
+    ) -> Result<Vec<GitDiffEntry>, GitError> {
+        let repo = self.repo()?;
+        // Resolve the baseline tree (defaults to HEAD). If HEAD doesn't exist
+        // (fresh repo with no commits) AND no explicit `old_ref` was provided,
+        // return empty entries — there's nothing to diff against.
+        let old_tree = match resolve_tree(&repo, old_ref) {
+            Ok(t) => t,
+            Err(_) if old_ref.is_none() => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+
+        // Build the diff. `new_ref=Some` → tree-to-tree; `new_ref=None` →
+        // tree-to-workdir-with-index (i.e. staged + unstaged vs the baseline).
+        let diff = if let Some(new_r) = new_ref {
+            let new_tree = resolve_tree(&repo, Some(new_r))?;
+            repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)?
+        } else {
+            repo.diff_tree_to_workdir_with_index(Some(&old_tree), None)?
+        };
+
+        let mut entries = Vec::with_capacity(diff.deltas().count());
+        for (idx, delta) in diff.deltas().enumerate() {
+            let new_path = delta
+                .new_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let old_path = delta
+                .old_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string())
+                .filter(|p| !p.is_empty() && p != &new_path);
+            let status = status_from_delta(delta.status());
+
+            // `Patch::from_diff` returns `Ok(None)` for binary / unchanged
+            // files — we still emit the entry with empty patch/stats so the
+            // caller can list the file as changed.
+            let (additions, deletions, patch_text) = match git2::Patch::from_diff(&diff, idx)? {
+                Some(mut p) => {
+                    let (_ctx, add, del) = p.line_stats().unwrap_or((0, 0, 0));
+                    let text = p.to_buf().ok().and_then(|b| {
+                        let s = b.as_str().unwrap_or("").to_string();
+                        if s.is_empty() { None } else { Some(s) }
+                    });
+                    (add as u32, del as u32, text)
+                }
+                None => (0u32, 0u32, None),
+            };
+
+            entries.push(GitDiffEntry {
+                old_path,
+                new_path,
+                status,
+                additions,
+                deletions,
+                patch: patch_text,
+            });
+        }
+        Ok(entries)
+    }
+}
+
+/// Resolve a `git2::Tree` for the given ref. `None` resolves to `HEAD`.
+/// Accepts any revparse-single expression (branch name, commit hash, ref,
+/// `"HEAD"`, `"HEAD~1"`, etc.) — peels to a commit and returns its tree.
+fn resolve_tree<'a>(
+    repo: &'a Repository,
+    ref_str: Option<&'a str>,
+) -> Result<git2::Tree<'a>, GitError> {
+    let commit = match ref_str {
+        Some(r) => repo.revparse_single(r)?.peel_to_commit()?,
+        None => repo.head()?.peel_to_commit()?,
+    };
+    Ok(commit.tree()?)
 }
 
 impl GitService for Git2Service {
