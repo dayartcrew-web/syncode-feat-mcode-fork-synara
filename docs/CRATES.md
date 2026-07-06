@@ -15,7 +15,7 @@ Quick reference for all 12 internal crates. For full detail (files, API surface,
 | [`syncode-ws`](../.masday/intel/crates/syncode-ws.md) | L3 | WebSocket JSON-RPC server + push bus + channels + authz + **standalone bin** (`src/bin/server.rs`) + **97 served RPCs** (all MCode domains) + terminal live-push + LLM-via-provider-CLI (`src/llm.rs`) | ~5500 | 132 | ✅ backend (clone+rewire) |
 | [`syncode-tauri`](../.masday/intel/crates/syncode-tauri.md) | L4 | Tauri desktop binary — tray, updater, IPC + **28 commands wired** (git/terminal/shell) | ~1500 | 29 | ✅ builds + wired (glib unblocked) |
 | [`syncode-auth`](../.masday/intel/crates/syncode-auth.md) | L1 | Credentials, auth policy, secret store, **principal/session/authenticator** | 1203 | 39 | ✅ wired into WS (opt-in) |
-| [`syncode-http`](../.masday/intel/crates/syncode-http.md) | L1 | Future REST surface | 12 | 0 | 🚧 stub |
+| [`syncode-http`](../.masday/intel/crates/syncode-http.md) | L1 | HTTP REST routes (`/health`, `/api/project-favicon`) + middleware (cors, trace, request-id) | ~200 | 8 | ✅ REAL (PR #118) |
 
 † `syncode-tauri` now builds (GTK/webkit `-dev` libs installed — env, not committed; CI must `apt install` Tauri v2 Linux prereqs). 29 tests. Workspace `cargo check --workspace` green.
 
