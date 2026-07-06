@@ -227,8 +227,21 @@ function definitionsToEntries(
   platform: string,
   context: ShortcutSheetContext,
 ): ShortcutSheetEntry[] {
+  // KB-SAFE: drop any keybinding entry that lacks a resolvable `command`
+  // before iteration. The backend `server/getConfig` sanitize drops these at
+  // the source, but this is the defense-in-depth backstop that guarantees
+  // the sheet builder never feeds a malformed entry into
+  // `shortcutLabelForCommand` even if the backend regresses. Without this
+  // guard a single bad entry can crash the entire root route via the
+  // `ShortcutsDialog` error boundary.
+  const safeKeybindings = keybindings.filter(
+    (binding): binding is typeof binding =>
+      binding != null &&
+      typeof (binding as { command?: unknown }).command === "string" &&
+      (binding as { command?: unknown }).command !== "",
+  );
   return definitions
-    .map((definition) => definitionToEntry(definition, keybindings, platform, context))
+    .map((definition) => definitionToEntry(definition, safeKeybindings, platform, context))
     .filter((entry): entry is ShortcutSheetEntry => entry !== null);
 }
 

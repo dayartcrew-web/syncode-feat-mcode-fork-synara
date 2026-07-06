@@ -4500,8 +4500,17 @@ fn process_rss_kbytes() -> u64 {
 /// builder at `WsState` construction and updated by `server.setConfig` /
 /// `upsertKeybinding` writes; reads therefore reflect the most recent edit
 /// for the server session (not just the static default).
+///
+/// Sanitizes the `keybindings` array (defense-in-depth, KB-SAFE): any entry
+/// that lacks a non-empty `command` AND a non-empty shortcut (`shortcut` or
+/// `key` field) is dropped before serialization. This prevents persisted
+/// garbage (e.g. a malformed `{keybinding: {id, key}}` entry from a prior
+/// `upsertKeybinding` test that used the wrong param shape) from reaching
+/// the frontend, where it would crash `ShortcutsDialog` via
+/// `matchesShortcutModifiers` reading `event.metaKey` on undefined.
 async fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse {
-    let config = state.settings.read().await.config.clone();
+    let mut config = state.settings.read().await.config.clone();
+    sanitize_keybindings_in_place(&mut config);
     JsonRpcResponse::success(id, config)
 }
 
@@ -4510,9 +4519,65 @@ async fn handle_server_get_config(state: &WsState, id: Value) -> JsonRpcResponse
 /// default builder and updated by `server.updateSettings` /
 /// `patchSettings` / `updateProvider` writes; reads reflect the most recent
 /// merged state for the server session.
+///
+/// Defensive: if a `keybindings` array ever appears on the settings document
+/// (it does not in the canonical MCode shape, but a prior `setConfig` /
+/// `patchSettings` write could have leaked one), the same sanitize pass as
+/// `getConfig` is applied so the frontend never sees a malformed entry from
+/// either read path.
 async fn handle_server_get_settings(state: &WsState, id: Value) -> JsonRpcResponse {
-    let settings = state.settings.read().await.settings.clone();
+    let mut settings = state.settings.read().await.settings.clone();
+    sanitize_keybindings_in_place(&mut settings);
     JsonRpcResponse::success(id, settings)
+}
+
+/// Filter a `keybindings` array in-place on a `ServerConfig`-shaped document
+/// (KB-SAFE). Each entry must have:
+///   - a non-empty string `command`, AND
+///   - a non-empty string shortcut under EITHER the `shortcut` field (the
+///     canonical MCode `ResolvedKeybindingRule` wire form used by
+///     [`crate::settings::build_default_server_config`]) OR the `key` field
+///     (the MCode `KeybindingRule` input form accepted by
+///     `server.upsertKeybinding`).
+///
+/// Entries that fail either check (malformed shapes like
+/// `{keybinding: {id, key}}`, primitives, or objects missing the required
+/// fields) are silently dropped — this is persisted garbage, not user data.
+/// The function is a no-op when `doc` is not an object or has no
+/// `keybindings` array.
+fn sanitize_keybindings_in_place(doc: &mut Value) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    let Some(arr) = obj.get_mut("keybindings").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    arr.retain(is_valid_keybinding_entry);
+}
+
+/// Predicate form of the KB-SAFE sanitize check (see
+/// [`sanitize_keybindings_in_place`]). `true` when `entry` is a JSON object
+/// carrying a non-empty string `command` AND a non-empty string shortcut
+/// under `shortcut` or `key`.
+fn is_valid_keybinding_entry(entry: &Value) -> bool {
+    let Some(obj) = entry.as_object() else {
+        return false;
+    };
+    let command_nonempty = obj
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !command_nonempty {
+        return false;
+    }
+    let shortcut_nonempty = |field: &str| {
+        obj.get(field)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    };
+    shortcut_nonempty("shortcut") || shortcut_nonempty("key")
 }
 
 /// `server.welcome` — return a `WsWelcomePayload` shape. MCode emits this as a
@@ -5154,6 +5219,19 @@ async fn handle_server_upsert_keybinding(
             Some(id),
             crate::error_codes::INVALID_PARAMS,
             "Invalid params: 'upsertKeybinding' expects a keybinding-rule object",
+        );
+    }
+    // KB-SAFE: validate the entry has a non-empty `command` AND a non-empty
+    // shortcut (`shortcut` or `key`). Rejects malformed shapes like
+    // `{keybinding: {id, key}}` (no top-level `command`/`shortcut`) or
+    // `{id, key}` (no `command`) BEFORE persisting, preventing the
+    // frontend-crash garbage that motivated this guard. Mirrors the
+    // [`is_valid_keybinding_entry`] predicate used by the getConfig sanitize.
+    if !is_valid_keybinding_entry(params) {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "Invalid params: 'upsertKeybinding' requires non-empty `command` and `shortcut` (or `key`) string fields",
         );
     }
     let (keybindings, push_payload) = {
@@ -14811,6 +14889,151 @@ mod tests {
         assert_eq!(resp.error.unwrap().code, crate::error_codes::INVALID_PARAMS);
     }
 
+    /// KB-SAFE: `server.upsertKeybinding` must reject malformed entry shapes
+    /// that lack a non-empty `command` AND a non-empty shortcut. The
+    /// historical regression: a prior test sent `{keybinding:{id,key}}`
+    /// (wrong param shape) which the unguarded handler happily persisted;
+    /// the malformed entry then crashed the frontend's `ShortcutsDialog` via
+    /// `matchesShortcutModifiers` on `undefined`. This test locks the
+    /// validation guard added alongside the getConfig sanitize.
+    #[tokio::test]
+    async fn server_upsert_keybinding_rejects_malformed_entries() {
+        let state = WsState::new_in_memory(16);
+        let baseline = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "server/getConfig"
+            }),
+        )
+        .await;
+        let baseline_len = baseline.result.unwrap()["keybindings"]
+            .as_array()
+            .unwrap()
+            .len();
+
+        let malformed_cases = [
+            // The exact regression: nested `keybinding` instead of top-level
+            // command/shortcut.
+            serde_json::json!({ "keybinding": { "id": "kb1", "key": "ctrl+s" } }),
+            // `{id, key}` — has shortcut-ish `key` but no `command`.
+            serde_json::json!({ "id": "kb1", "key": "ctrl+s" }),
+            // Missing both command and shortcut.
+            serde_json::json!({ "id": "kb1" }),
+            // `command` present but empty.
+            serde_json::json!({ "command": "  ", "shortcut": "ctrl+s" }),
+            // `shortcut` present but empty.
+            serde_json::json!({ "command": "test", "shortcut": "" }),
+            // Whitespace-only `key` shortcut.
+            serde_json::json!({ "command": "test", "key": "  " }),
+        ];
+
+        for (i, params) in malformed_cases.iter().enumerate() {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 10 + i as i64,
+                "method": "server/upsert-keybinding", "params": params
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(
+                resp.error.is_some(),
+                "malformed case {} ({:?}) should reject",
+                i,
+                params
+            );
+            assert_eq!(
+                resp.error.unwrap().code,
+                crate::error_codes::INVALID_PARAMS,
+                "case {} ({:?}) error code",
+                i,
+                params
+            );
+        }
+
+        // None of the malformed entries were persisted: getConfig returns the
+        // baseline length unchanged (and the backend sanitize is also a
+        // backstop in case a future regression slips past validation).
+        let after = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 99, "method": "server/getConfig"
+            }),
+        )
+        .await;
+        let keybindings = after.result.unwrap()["keybindings"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            keybindings.len(),
+            baseline_len,
+            "no malformed entry should be persisted"
+        );
+        // And getConfig's sanitize confirms none of them snuck through with
+        // the regression shape.
+        assert!(
+            keybindings.iter().all(|kb| kb.get("keybinding").is_none()),
+            "no `keybinding`-nested shape in stored entries"
+        );
+    }
+
+    /// KB-SAFE: `server/getConfig` must drop persisted malformed keybinding
+    /// entries at read time, even when they slipped into the in-memory store
+    /// through some other mutation path. Simulates a corrupted config and
+    /// verifies the sanitize pass drops the garbage before serialization.
+    #[tokio::test]
+    async fn server_get_config_sanitizes_malformed_keybindings() {
+        let state = WsState::new_in_memory(16);
+
+        // Inject the regression shape directly into the in-memory config.
+        {
+            let mut store = state.settings.write().await;
+            let cfg_obj = store
+                .config
+                .as_object_mut()
+                .expect("stored ServerConfig is always an object");
+            cfg_obj["keybindings"] = serde_json::json!([
+                { "command": "sidebar.toggle", "shortcut": "meta+b" },
+                { "keybinding": { "id": "kb1", "key": "ctrl+s" } },
+                { "id": "kb2", "key": "ctrl+t" },
+                { "command": "  ", "shortcut": "meta+x" },
+                { "command": "chat.send" },
+                "not-even-an-object",
+                { "command": "chat.new", "key": "meta+l" }
+            ]);
+        }
+
+        let resp = rpc(
+            &state,
+            1,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "server/getConfig"
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let keybindings = resp.result.unwrap()["keybindings"]
+            .as_array()
+            .unwrap()
+            .clone();
+
+        // Only the two well-formed entries survive:
+        //  - `{command: "sidebar.toggle", shortcut: "meta+b"}`
+        //  - `{command: "chat.new", key: "meta+l"}`
+        assert_eq!(
+            keybindings.len(),
+            2,
+            "expected exactly the 2 valid entries to survive sanitize, got {:?}",
+            keybindings
+        );
+        let commands: Vec<&str> = keybindings
+            .iter()
+            .map(|kb| kb.get("command").and_then(|v| v.as_str()).unwrap_or(""))
+            .collect();
+        assert!(commands.contains(&"sidebar.toggle"));
+        assert!(commands.contains(&"chat.new"));
+    }
+
     // ─── Voice STT stub tests (T6c-15) ─────────────────────────────────
     //
     // The 3 voice RPCs must dispatch BOTH dot-form and slash-form, must NOT
@@ -18996,12 +19219,17 @@ mod tests {
         // setConfig overwrites the stored config; a subsequent getConfig
         // returns the written value (not the default). This is the core
         // REAL behavior — the stub echoed the default.
+        //
+        // KB-SAFE: the keybinding entry must be well-formed (non-empty
+        // `command` + `key`) because `server/getConfig` now sanitizes the
+        // array — a malformed `{id, key}` (no command) would be dropped
+        // before read-back.
         let state = WsState::new_in_memory(16);
         let new_config = serde_json::json!({
             "cwd": "/custom/cwd",
             "worktreesDir": "/custom/worktrees",
             "keybindingsConfigPath": "/custom/kb.json",
-            "keybindings": [{ "id": "kb1", "key": "cmd+k" }],
+            "keybindings": [{ "id": "kb1", "command": "test", "key": "cmd+k" }],
             "issues": [{ "kind": "keybindings.invalid-entry", "message": "bad" }],
             "providers": [],
             "availableEditors": [],

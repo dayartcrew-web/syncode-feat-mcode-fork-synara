@@ -259,6 +259,48 @@ const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
   KeyZ: ["z"],
 };
 
+/**
+ * KB-SAFE type-guard: narrows an untrusted value (e.g. a keybinding entry
+ * loaded from `server/getConfig`) to a well-formed `KeybindingShortcut`
+ * object. Returns `false` for:
+ *   - null/undefined
+ *   - strings (the backend's default config uses string-form shortcuts like
+ *     `"meta+b"` — these are NOT the structured `KeybindingShortcut` shape
+ *     the resolver expects; skipping them lets the UI fall back to its
+ *     built-in `DEFAULT_SHORTCUT_FALLBACKS`)
+ *   - objects missing any of the required modifier flags
+ *
+ * Without this guard, a string-form `shortcut` reaches
+ * `formatShortcutLabel` → `formatShortcutKeyLabel(shortcut.key)` where
+ * `shortcut.key` is `undefined` for strings, crashing with
+ * `TypeError: Cannot read properties of undefined (reading 'length')` and
+ * taking down the root error boundary.
+ */
+function isKeybindingShortcut(value: unknown): value is KeybindingShortcut {
+  if (value == null || typeof value !== "object") return false;
+  const shortcut = value as Record<string, unknown>;
+  return (
+    typeof shortcut.key === "string" &&
+    typeof shortcut.metaKey === "boolean" &&
+    typeof shortcut.ctrlKey === "boolean" &&
+    typeof shortcut.shiftKey === "boolean" &&
+    typeof shortcut.altKey === "boolean" &&
+    typeof shortcut.modKey === "boolean"
+  );
+}
+
+/**
+ * KB-SAFE type-guard: narrows an untrusted entry to a well-formed
+ * `ResolvedKeybindingRule`. Requires a non-empty string `command` AND a
+ * structured `KeybindingShortcut` object (per [`isKeybindingShortcut`]).
+ */
+function isResolvedKeybindingRule(value: unknown): value is ResolvedKeybindingRule {
+  if (value == null || typeof value !== "object") return false;
+  const rule = value as Record<string, unknown>;
+  if (typeof rule.command !== "string" || rule.command === "") return false;
+  return isKeybindingShortcut(rule.shortcut);
+}
+
 function normalizeEventKey(key: string): string {
   const normalized = key.toLowerCase();
   if (normalized === "esc") return "escape";
@@ -283,6 +325,15 @@ function matchesShortcutModifiers(
   shortcut: KeybindingShortcut,
   platform = navigator.platform,
 ): boolean {
+  // KB-SAFE: guard against an `undefined`/`null` event (e.g. a malformed
+  // keybinding entry that slipped past the backend sanitize and was
+  // accidentally passed where a KeyboardEvent is expected). Returning
+  // `false` makes the match silently fail rather than throwing
+  // `TypeError: Cannot read properties of undefined (reading 'metaKey')`,
+  // which would otherwise propagate to the root error boundary and take
+  // down the entire UI.
+  if (event == null) return false;
+  if (shortcut == null) return false;
   const useMetaForMod = isMacPlatform(platform);
   const expectedMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
   const expectedCtrl = shortcut.ctrlKey || (shortcut.modKey && !useMetaForMod);
@@ -299,6 +350,8 @@ function matchesShortcut(
   shortcut: KeybindingShortcut,
   platform = navigator.platform,
 ): boolean {
+  // KB-SAFE: defensive guard — see `matchesShortcutModifiers` for rationale.
+  if (event == null || shortcut == null) return false;
   if (!matchesShortcutModifiers(event, shortcut, platform)) return false;
   return resolveEventKeys(event).has(shortcut.key);
 }
@@ -339,6 +392,11 @@ function matchesWhenClause(
 }
 
 function shortcutConflictKey(shortcut: KeybindingShortcut, platform = navigator.platform): string {
+  // KB-SAFE: a malformed keybinding entry (e.g. one that slipped past the
+  // backend sanitize) may have an undefined `shortcut`. Returning an empty
+  // conflict key keeps the dedupe loop functional rather than throwing on
+  // `shortcut.metaKey` of undefined.
+  if (shortcut == null) return "";
   const useMetaForMod = isMacPlatform(platform);
   const metaKey = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
   const ctrlKey = shortcut.ctrlKey || (shortcut.modKey && !useMetaForMod);
@@ -363,7 +421,13 @@ function findEffectiveShortcutForCommand(
 
   for (let index = keybindings.length - 1; index >= 0; index -= 1) {
     const binding = keybindings[index];
-    if (!binding) continue;
+    // KB-SAFE: skip any malformed entry (non-object, missing `command`, or
+    // non-object `shortcut` including the backend's string-form defaults).
+    // The backend `server/getConfig` sanitize drops these at the source;
+    // this is the defense-in-depth backstop for callers that pass untrusted
+    // data. Skipping malformed entries lets the resolver fall through to the
+    // built-in `DEFAULT_SHORTCUT_FALLBACKS`.
+    if (!isResolvedKeybindingRule(binding)) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
 
     const conflictKey = shortcutConflictKey(binding.shortcut, platform);
@@ -399,7 +463,9 @@ function resolveShortcutCommandFromBindings(
 
   for (let index = keybindings.length - 1; index >= 0; index -= 1) {
     const binding = keybindings[index];
-    if (!binding) continue;
+    // KB-SAFE: skip malformed entries (non-object, missing `command`, or
+    // non-object `shortcut`) before reading `binding.shortcut`.
+    if (!isResolvedKeybindingRule(binding)) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
     if (!matchesShortcut(event, binding.shortcut, platform)) continue;
     return binding.command;
@@ -411,7 +477,15 @@ function resolveShortcutCommandFromBindings(
 function getFallbackBindings(
   keybindings: ResolvedKeybindingsConfig,
 ): ReadonlyArray<ResolvedKeybindingRule> {
-  const configuredCommands = new Set(keybindings.map((binding) => binding.command));
+  // KB-SAFE: only WELL-FORMED entries (per `isResolvedKeybindingRule`) count
+  // as "configured" — a malformed entry (null, missing `command`, or
+  // non-object `shortcut` like the backend's string-form defaults) must NOT
+  // suppress the built-in fallback for that command, otherwise the user
+  // would get no binding at all. Also guards against the null-entry crash
+  // that `keybindings.map((binding) => binding.command)` would hit.
+  const configuredCommands = new Set(
+    keybindings.filter(isResolvedKeybindingRule).map((binding) => binding.command),
+  );
   return DEFAULT_SHORTCUT_FALLBACKS.filter((binding) => !configuredCommands.has(binding.command));
 }
 
@@ -448,6 +522,8 @@ export function formatShortcutLabel(
   shortcut: KeybindingShortcut,
   platform = navigator.platform,
 ): string {
+  // KB-SAFE: defensive guard \u2014 see `shortcutConflictKey` for rationale.
+  if (shortcut == null) return "";
   const keyLabel = formatShortcutKeyLabel(shortcut.key);
   const useMetaForMod = isMacPlatform(platform);
   const showMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
@@ -506,7 +582,11 @@ export function shortcutLabelForCommand(
   if (!contextProvided) {
     for (let index = keybindings.length - 1; index >= 0; index -= 1) {
       const binding = keybindings[index];
-      if (!binding || binding.command !== command) continue;
+      // KB-SAFE: skip malformed entries (non-object, missing `command`, or
+      // non-object `shortcut`) before they reach `formatShortcutLabel` —
+      // same guard as `findEffectiveShortcutForCommand`.
+      if (!isResolvedKeybindingRule(binding)) continue;
+      if (binding.command !== command) continue;
       return formatShortcutLabel(binding.shortcut, platform);
     }
     for (const binding of getFallbackBindings(keybindings)) {

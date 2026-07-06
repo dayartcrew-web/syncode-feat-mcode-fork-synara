@@ -1,4 +1,4 @@
-import { assert, describe, it } from "vitest";
+import { assert, describe, expect, it } from "vitest";
 
 import {
   type KeybindingCommand,
@@ -1421,3 +1421,136 @@ describe("plus key parsing", () => {
     );
   });
 });
+
+// KB-SAFE: regression coverage for the UI-launch blocker where a malformed
+// `keybindings` entry (e.g. `{keybinding: {id, key}}` persisted by a prior
+// `server.upsertKeybinding` test using the wrong param shape) crashed the
+// root route via `ShortcutsDialog`. The backend `server/getConfig` sanitize
+// drops these at the source, but the frontend must also tolerate them so a
+// future backend regression cannot take down the UI again. The malformed
+// shapes here intentionally bypass the TS type system (the runtime data is
+// untrusted JSON from RPC); we cast through `unknown` to simulate the
+// corruption.
+describe("malformed keybinding entries (KB-SAFE)", () => {
+  // The exact regression shape: a `{keybinding: {id, key}}` entry that was
+  // accidentally persisted in place of `{command, shortcut}`.
+  const MALFORMED_ENTRIES = [
+    { keybinding: { id: "kb1", key: "ctrl+s" } },
+    { id: "kb1", key: "ctrl+s" },
+    { command: "  ", shortcut: "meta+x" },
+    null,
+    undefined,
+    "not-an-object",
+  ] as unknown as ResolvedKeybindingsConfig;
+
+  it("shortcutLabelForCommand does not throw and returns null when entries are malformed", () => {
+    // Without context-provided options (uses the simple iteration path).
+    expect(() =>
+      shortcutLabelForCommand(MALFORMED_ENTRIES, "sidebar.toggle", "MacIntel"),
+    ).not.toThrow();
+    assert.strictEqual(
+      shortcutLabelForCommand(MALFORMED_ENTRIES, "sidebar.toggle", "MacIntel"),
+      null,
+    );
+
+    // With context (uses `findEffectiveShortcutForCommand`).
+    expect(() =>
+      shortcutLabelForCommand(MALFORMED_ENTRIES, "sidebar.toggle", {
+        platform: "MacIntel",
+        context: { terminalFocus: false },
+      }),
+    ).not.toThrow();
+    assert.strictEqual(
+      shortcutLabelForCommand(MALFORMED_ENTRIES, "sidebar.toggle", {
+        platform: "MacIntel",
+        context: { terminalFocus: false },
+      }),
+      null,
+    );
+  });
+
+  it("formatShortcutLabel returns an empty string for nullish shortcut", () => {
+    assert.strictEqual(
+      formatShortcutLabel(null as unknown as KeybindingShortcut, "MacIntel"),
+      "",
+    );
+    assert.strictEqual(
+      formatShortcutLabel(undefined as unknown as KeybindingShortcut, "Linux"),
+      "",
+    );
+  });
+
+  it("shouldShowThreadJumpHints does not throw on malformed entries with a null event", () => {
+    expect(() =>
+      shouldShowThreadJumpHints(
+        null as unknown as ShortcutEventLike,
+        MALFORMED_ENTRIES,
+        { platform: "MacIntel" },
+      ),
+    ).not.toThrow();
+    assert.isFalse(
+      shouldShowThreadJumpHints(
+        null as unknown as ShortcutEventLike,
+        MALFORMED_ENTRIES,
+        { platform: "MacIntel" },
+      ),
+    );
+  });
+
+  it("resolveShortcutCommand does not throw on malformed entries with a null event", () => {
+    expect(() =>
+      resolveShortcutCommand(
+        null as unknown as ShortcutEventLike,
+        MALFORMED_ENTRIES,
+        { platform: "Linux" },
+      ),
+    ).not.toThrow();
+  });
+
+  it("a well-formed entry is still resolvable when malformed entries are mixed in", () => {
+    const mixed = [
+      ...MALFORMED_ENTRIES,
+      {
+        command: "sidebar.toggle",
+        shortcut: modShortcut("b"),
+      },
+    ] as unknown as ResolvedKeybindingsConfig;
+    assert.strictEqual(
+      shortcutLabelForCommand(mixed, "sidebar.toggle", "MacIntel"),
+      "⌘B",
+    );
+  });
+
+  it("skips string-form shortcuts (the backend default shape) and falls back to built-in defaults", () => {
+    // The backend `build_default_server_config` emits entries like
+    // `{command, shortcut: "meta+b"}` — a STRING shortcut, not the
+    // structured `KeybindingShortcut` object the resolver expects. The
+    // KB-SAFE guard must skip these so the resolver falls through to
+    // `DEFAULT_SHORTCUT_FALLBACKS` (which uses the structured form).
+    // Without the guard, `formatShortcutKeyLabel(shortcut.key)` crashes on
+    // `undefined.length`.
+    const stringFormEntries = [
+      { command: "sidebar.addProject", shortcut: "meta+shift+o" },
+      { command: "composer.focus.toggle", shortcut: "meta+l" },
+    ] as unknown as ResolvedKeybindingsConfig;
+
+    // Does not throw, and resolves via the built-in default fallback for
+    // `sidebar.addProject` (which is `mod+shift+o` on macOS → "⇧⌘O").
+    expect(() =>
+      shortcutLabelForCommand(stringFormEntries, "sidebar.addProject", "MacIntel"),
+    ).not.toThrow();
+    const label = shortcutLabelForCommand(stringFormEntries, "sidebar.addProject", "MacIntel");
+    assert.ok(typeof label === "string" && label.length > 0, `got ${String(label)}`);
+
+    // A string-form entry for a command that has NO built-in default
+    // resolves to null (no crash, no fallback).
+    expect(() =>
+      shortcutLabelForCommand(stringFormEntries, "chat.send", "MacIntel"),
+    ).not.toThrow();
+    assert.strictEqual(
+      shortcutLabelForCommand(stringFormEntries, "chat.send", "MacIntel"),
+      null,
+    );
+  });
+});
+
