@@ -96,25 +96,38 @@ async fn all_provider_adapters_spawn_and_shutdown() {
     use syncode_provider::adapters::*;
     use syncode_provider::{ProviderAdapter, ProviderConfig, ProviderStatus};
 
-    let mut claude = ClaudeAdapter::new();
-    claude.spawn(ProviderConfig::default()).await.unwrap();
-    assert_eq!(claude.status(), ProviderStatus::Idle);
-    claude.shutdown().await.unwrap();
+    // Subprocess adapters (claude, codex, cursor, grok, gemini, kilo, opencode,
+    // pi) all spawn a real CLI binary. `cargo test --workspace` must pass on
+    // any machine regardless of which CLIs are installed, so each adapter's
+    // spawn→Idle→shutdown path is gated behind its own env var. Real-binary
+    // validation lives in the dedicated `*_e2e.rs` integration tests.
+    //
+    // HTTP adapters (anthropic, openai) hold no subprocess — spawn is a pure
+    // config-store, so they are always exercised.
 
-    let mut codex = CodexAdapter::new();
-    codex.spawn(ProviderConfig::default()).await.unwrap();
-    assert_eq!(codex.status(), ProviderStatus::Idle);
-    codex.shutdown().await.unwrap();
+    // --- Claude (subprocess) -------------------------------------------------
+    if std::env::var("SYNICODE_CLAUDE_E2E").as_deref() == Ok("1") {
+        let mut claude = ClaudeAdapter::new();
+        claude.spawn(ProviderConfig::default()).await.unwrap();
+        assert_eq!(claude.status(), ProviderStatus::Idle);
+        claude.shutdown().await.unwrap();
+    } else {
+        assert_eq!(ClaudeAdapter::new().status(), ProviderStatus::Disconnected);
+    }
 
-    // cursor, grok & gemini are real ACP subprocess adapters: they spawn
-    // `cursor-agent` / `grok` / `gemini` and run the ACP `initialize` handshake.
-    // The strict spawn→Idle→shutdown path is environment-dependent (needs the
-    // CLI installed AND speaking ACP), so it runs only under SYNICODE_ACP_E2E=1;
-    // the full protocol lifecycle is also covered by syncode-provider's own
-    // from_streams duplex unit tests (no real binary). Otherwise just assert the
-    // real, environment-independent pre-spawn invariant (Disconnected).
-    let e2e = std::env::var("SYNICODE_ACP_E2E").as_deref() == Ok("1");
-    if e2e {
+    // --- Codex (subprocess) --------------------------------------------------
+    if std::env::var("SYNICODE_CODEX_E2E").as_deref() == Ok("1") {
+        let mut codex = CodexAdapter::new();
+        codex.spawn(ProviderConfig::default()).await.unwrap();
+        assert_eq!(codex.status(), ProviderStatus::Idle);
+        codex.shutdown().await.unwrap();
+    } else {
+        assert_eq!(CodexAdapter::new().status(), ProviderStatus::Disconnected);
+    }
+
+    // --- Cursor / Grok / Gemini (ACP subprocess) -----------------------------
+    let acp_e2e = std::env::var("SYNICODE_ACP_E2E").as_deref() == Ok("1");
+    if acp_e2e {
         let mut cursor = create_cursor();
         cursor.spawn(ProviderConfig::default()).await.unwrap();
         assert_eq!(cursor.status(), ProviderStatus::Idle);
@@ -135,26 +148,46 @@ async fn all_provider_adapters_spawn_and_shutdown() {
         assert_eq!(create_gemini().status(), ProviderStatus::Disconnected);
     }
 
-    let mut kilo = KiloAdapter::new();
-    kilo.spawn(ProviderConfig::default()).await.unwrap();
-    assert_eq!(kilo.status(), ProviderStatus::Idle);
-    kilo.shutdown().await.unwrap();
+    // --- Kilo (subprocess) ---------------------------------------------------
+    if std::env::var("SYNICODE_KILO_E2E").as_deref() == Ok("1") {
+        let mut kilo = KiloAdapter::new();
+        kilo.spawn(ProviderConfig::default()).await.unwrap();
+        assert_eq!(kilo.status(), ProviderStatus::Idle);
+        kilo.shutdown().await.unwrap();
+    } else {
+        assert_eq!(KiloAdapter::new().status(), ProviderStatus::Disconnected);
+    }
 
-    let mut opencode = OpenCodeAdapter::new();
-    opencode.spawn(ProviderConfig::default()).await.unwrap();
-    assert_eq!(opencode.status(), ProviderStatus::Idle);
-    opencode.shutdown().await.unwrap();
+    // --- OpenCode (subprocess) -----------------------------------------------
+    if std::env::var("SYNICODE_OPENCODE_E2E").as_deref() == Ok("1") {
+        let mut opencode = OpenCodeAdapter::new();
+        opencode.spawn(ProviderConfig::default()).await.unwrap();
+        assert_eq!(opencode.status(), ProviderStatus::Idle);
+        opencode.shutdown().await.unwrap();
+    } else {
+        assert_eq!(
+            OpenCodeAdapter::new().status(),
+            ProviderStatus::Disconnected
+        );
+    }
 
-    let mut pi = PiAdapter::new();
-    pi.spawn(ProviderConfig::default()).await.unwrap();
-    assert_eq!(pi.status(), ProviderStatus::Idle);
-    pi.shutdown().await.unwrap();
+    // --- Pi (subprocess) -----------------------------------------------------
+    if std::env::var("SYNICODE_PI_E2E").as_deref() == Ok("1") {
+        let mut pi = PiAdapter::new();
+        pi.spawn(ProviderConfig::default()).await.unwrap();
+        assert_eq!(pi.status(), ProviderStatus::Idle);
+        pi.shutdown().await.unwrap();
+    } else {
+        assert_eq!(PiAdapter::new().status(), ProviderStatus::Disconnected);
+    }
 
+    // --- Anthropic (HTTP — always exercised) --------------------------------
     let mut anthropic = AnthropicAdapter::new();
     anthropic.spawn(ProviderConfig::default()).await.unwrap();
     assert_eq!(anthropic.status(), ProviderStatus::Idle);
     anthropic.shutdown().await.unwrap();
 
+    // --- OpenAI (HTTP — always exercised) -----------------------------------
     let mut openai = OpenAIAdapter::new();
     openai.spawn(ProviderConfig::default()).await.unwrap();
     assert_eq!(openai.status(), ProviderStatus::Idle);
@@ -163,8 +196,8 @@ async fn all_provider_adapters_spawn_and_shutdown() {
 
 #[tokio::test]
 async fn all_provider_adapters_have_unique_ids() {
-    use syncode_provider::ProviderAdapter;
     use syncode_provider::adapters::*;
+    use syncode_provider::ProviderAdapter;
     let ids: Vec<String> = vec![
         ClaudeAdapter::new().provider_id().to_string(),
         CodexAdapter::new().provider_id().to_string(),
@@ -183,8 +216,8 @@ async fn all_provider_adapters_have_unique_ids() {
 
 #[tokio::test]
 async fn all_provider_adapters_have_capabilities() {
-    use syncode_provider::ProviderAdapter;
     use syncode_provider::adapters::*;
+    use syncode_provider::ProviderAdapter;
 
     let adapters: Vec<Box<dyn ProviderAdapter>> = vec![
         Box::new(ClaudeAdapter::new()),

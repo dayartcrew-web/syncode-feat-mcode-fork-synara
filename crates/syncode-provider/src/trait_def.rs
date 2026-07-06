@@ -131,6 +131,10 @@ impl ProviderRequest {
 /// A JSON-RPC response received FROM a provider
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderResponse {
+    /// JSON-RPC version. Defaults to `"2.0"` when the peer omits it — some
+    /// CLIs (e.g. `codex app-server`) return bare `{"id":1,"result":{...}}`
+    /// without the `jsonrpc` envelope, and we must still route the response.
+    #[serde(default = "default_jsonrpc")]
     pub jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
@@ -138,6 +142,11 @@ pub struct ProviderResponse {
     pub result: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ProviderError>,
+}
+
+/// Default `jsonrpc` version used when a peer omits the envelope field.
+fn default_jsonrpc() -> String {
+    "2.0".to_string()
 }
 
 /// JSON-RPC error object
@@ -722,7 +731,10 @@ mod tests {
             .read_external_thread("any-thread-ref")
             .await
             .expect("default impl must not error");
-        assert!(messages.is_empty(), "default read_external_thread must return an empty vec");
+        assert!(
+            messages.is_empty(),
+            "default read_external_thread must return an empty vec"
+        );
     }
 
     /// Adapter that opts into read_external_thread by overriding it.

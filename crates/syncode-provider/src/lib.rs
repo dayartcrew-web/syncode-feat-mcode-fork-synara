@@ -16,6 +16,7 @@
 pub mod acp;
 pub mod acp_provider;
 pub mod adapters;
+pub mod bin_resolver;
 pub mod codex_app_server;
 pub mod opencode_server;
 pub mod pi_rpc;
@@ -23,6 +24,9 @@ pub mod registry;
 pub mod session;
 pub mod subprocess;
 pub mod trait_def;
+
+// Re-export binary resolver for cross-platform CLI discovery (Windows .cmd vs .exe).
+pub use bin_resolver::resolve_binary;
 
 // Re-exports for convenience
 pub use acp::{AcpClient, PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, PromptResult};

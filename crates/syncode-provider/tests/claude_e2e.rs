@@ -36,6 +36,11 @@ use tokio_stream::StreamExt;
 
 /// Gate: only run when the operator opted in AND the `claude` CLI is on PATH.
 ///
+/// We use [`syncode_provider::resolve_binary`] (which on Windows prefers the
+/// native `claude.exe` from `~/.local/bin/` over the npm `claude.cmd` shim)
+/// rather than `std::process::Command::new("claude")`, because the latter does
+/// not resolve `.cmd` wrappers on Windows and would falsely skip the test.
+///
 /// `Command::status` succeeds (returns `Ok`) whenever the process *spawns*,
 /// regardless of its exit code — so an unknown `--version` flag still confirms
 /// the binary exists, while a missing binary yields `Err(NotFound)` → skip.
@@ -43,7 +48,8 @@ fn e2e_enabled() -> bool {
     if std::env::var("SYNICODE_CLAUDE_E2E").as_deref() != Ok("1") {
         return false;
     }
-    std::process::Command::new("claude")
+    let resolved = syncode_provider::resolve_binary("claude");
+    std::process::Command::new(&resolved)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
