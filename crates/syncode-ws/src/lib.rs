@@ -12,6 +12,7 @@ pub mod channels;
 pub mod completion;
 pub mod llm;
 pub mod local_server;
+pub mod orchestration_executor;
 pub mod project_fs;
 pub mod push;
 pub mod rpc;
@@ -226,13 +227,38 @@ impl WsState {
     ) -> Self {
         let (push_tx, _) = broadcast::channel(push_capacity);
 
-        // Feed domain events from the pipeline onto the push bus: wrap the push
-        // sender as a DomainEventPublisher and attach it to the orchestrator.
-        // Builder-style call consumes and returns the enriched orchestrator.
-        let publisher = crate::push::WsDomainEventPublisher::new(push_tx.clone());
+        // Fan-out domain-event publisher: every published event lands on the
+        // WS push bus (for browser clients) AND on a typed broadcast channel
+        // (for in-process consumers — the AutomationRunReactor subscribes to
+        // reconcile run status from turn outcomes). Both fan-outs are
+        // best-effort (receiver-less is normal before any subscriber joins).
+        let typed_event_tx = broadcast::channel::<syncode_core::DomainEvent>(push_capacity).0;
+        let publisher =
+            crate::push::FanoutDomainEventPublisher::new(push_tx.clone(), typed_event_tx.clone());
         let orchestrator = orchestrator.with_event_publisher(Arc::new(publisher));
 
-        let read_store = orchestrator.read_model_ref();
+        // Wrap the orchestrator in its Arc BEFORE building the automation
+        // scheduler — the scheduler's OrchestrationRunExecutor needs a clone
+        // of the Arc so each automation run can drive ApplicationService.
+        let orchestrator_arc = Arc::new(orchestrator);
+        let read_store = orchestrator_arc.read_model_ref();
+
+        // Automation scheduler: dispatches each run through the chat pipeline
+        // via OrchestrationRunExecutor (ApplicationService → provider adapter
+        // → stream → TurnCompleted). AI-completion harness armed when the
+        // default provider is armable. See [`crate::completion`].
+        let automation_scheduler =
+            crate::completion::build_automation_scheduler(orchestrator_arc.clone());
+
+        // Spawn the AutomationRunReactor: subscribes to orchestration domain
+        // events via the typed bus and reconciles run status from real turn
+        // outcomes (running → succeeded/failed/interrupted). Mirrors MCode's
+        // `AutomationRunReactorLive` layer — a host spawns it at boot so
+        // automation runs transition out of `Running` based on the actual
+        // turn result, not just the executor's exit code. Detached (runs
+        // until the typed bus sender is dropped on WsState drop).
+        spawn_automation_run_reactor(typed_event_tx.clone(), automation_scheduler.clone());
+
         // Capture the auth mode as a kebab-case string for the in-memory
         // server-config store (the `authMode` field is surfaced to the UI as
         // an informational extra field — it's not part of the MCode schema,
@@ -252,7 +278,7 @@ impl WsState {
             push_tx,
             next_connection_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             read_store,
-            orchestrator: Arc::new(orchestrator),
+            orchestrator: orchestrator_arc,
             subscriptions: Arc::new(RwLock::new(crate::push::SubscriptionRegistry::new())),
             auth_config,
             conn_auth: crate::auth::SharedConnectionAuth::new(),
@@ -264,10 +290,7 @@ impl WsState {
             ),
             terminal_manager: Arc::new(RwLock::new(syncode_terminal::SessionManager::new())),
             terminal_readers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            // Automation scheduler with the AI-completion harness wired when the
-            // default provider is armable (graceful degradation otherwise). See
-            // [`crate::completion::build_automation_scheduler`] for the decisions.
-            automation_scheduler: crate::completion::build_automation_scheduler(),
+            automation_scheduler,
             provider_registry: Arc::new(RwLock::new(
                 syncode_provider::registry::ProviderRegistry::new(),
             )),
@@ -431,6 +454,36 @@ impl WsState {
         self.subscriptions.write().await.unregister(id);
         tracing::info!(connection_id = id, "WebSocket client disconnected");
     }
+}
+
+// ─── Automation run reactor boot wiring ─────────────────────────────────────
+
+/// Spawn the [`AutomationRunReactor`] as a detached Tokio task that runs until
+/// the typed-domain-event broadcast sender is dropped (i.e. until [`WsState`]
+/// itself is dropped).
+///
+/// The reactor subscribes to orchestration domain events via the typed bus and
+/// reconciles automation run status from real turn outcomes — mirroring MCode's
+/// `AutomationRunReactorLive` layer. Without this, automation runs only reach
+/// `Completed` via the executor's own dispatch-return path (which works for
+/// synchronous adapters like claude, but leaves async/ACP adapter runs stuck in
+/// `Running`). With it, every domain event in the lifecycle set
+/// (`TurnDiffCompleted`, `TurnFailed`, `TurnInterrupted`,
+/// `ThreadApprovalResponded`, …) drives a run-status transition.
+///
+/// [`AutomationRunReactor`]: syncode_automation::run_reactor::AutomationRunReactor
+fn spawn_automation_run_reactor(
+    typed_event_tx: broadcast::Sender<syncode_core::DomainEvent>,
+    scheduler: Arc<syncode_automation::Scheduler>,
+) {
+    use syncode_automation::run_reactor::{AutomationRunReactor, BroadcastDomainEventStream};
+
+    let stream = Arc::new(BroadcastDomainEventStream::new(typed_event_tx.subscribe()));
+    let reactor = Arc::new(AutomationRunReactor::new(stream, scheduler));
+    tokio::spawn(async move {
+        reactor.run().await;
+    });
+    tracing::info!("automation run reactor spawned (event-driven run-status reconciliation)");
 }
 
 /// JSON-RPC standard error codes

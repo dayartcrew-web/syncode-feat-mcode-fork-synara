@@ -504,11 +504,17 @@ async fn dispatch_retry_loop(inputs: DispatchLoopInputs<'_>) {
             Ok(outcome) => {
                 // Success signal: a dispatched turn maps to "exit code 0".
                 let exit_code = 0;
-                run.mark_completed(
-                    exit_code,
-                    format!("turn {}", outcome.turn_id),
-                    String::new(),
-                );
+                // Surface the assistant's finalized text in the run record when
+                // the executor provided it (e.g. `OrchestrationRunExecutor`
+                // driving the provider via `ApplicationService::start_turn`).
+                // Fall back to the legacy `turn <id>` placeholder when the
+                // executor is process-backed or otherwise has no assistant
+                // text — preserves the historical run-record shape.
+                let stdout = outcome
+                    .assistant_output
+                    .clone()
+                    .unwrap_or_else(|| format!("turn {}", outcome.turn_id));
+                run.mark_completed(exit_code, stdout, String::new());
 
                 // If the completion policy rejects (e.g. AllowedExitCodes), mark failed.
                 if !completion.is_success(exit_code) {
@@ -724,19 +730,19 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| {
-                    Ok(DispatchOutcome {
-                        thread_id: syncode_core::EntityId::new(),
-                        turn_id: syncode_core::EntityId::new(),
-                    })
+                    Ok(DispatchOutcome::new(
+                        syncode_core::EntityId::new(),
+                        syncode_core::EntityId::new(),
+                    ))
                 })
         }
     }
 
     fn ok_outcome() -> Result<DispatchOutcome, PortError> {
-        Ok(DispatchOutcome {
-            thread_id: syncode_core::EntityId::new(),
-            turn_id: syncode_core::EntityId::new(),
-        })
+        Ok(DispatchOutcome::new(
+            syncode_core::EntityId::new(),
+            syncode_core::EntityId::new(),
+        ))
     }
 
     // ─── dispatch_request_for tests ────────────────────────────────────

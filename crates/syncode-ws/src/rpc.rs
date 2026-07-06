@@ -8827,14 +8827,16 @@ async fn handle_automation_delete(state: &WsState, id: Value, params: &Value) ->
 /// `automation.runNow` / `automation.run` — trigger a run immediately and
 /// return the MCode `AutomationRunNowResult` shape (`{ run: AutomationRun }`).
 ///
-/// The default Scheduler uses `NoopExecutor`, so the run fails (status Failed)
-/// but a run record is persisted and returned — the panel can render it. Real
-/// dispatch requires wiring a `RunExecutor` (deferred).
+/// The default Scheduler wires an `OrchestrationRunExecutor` that dispatches
+/// the run as a real orchestration turn through the chat pipeline
+/// (`ApplicationService::create_thread` + `start_turn` → provider adapter →
+/// `TurnCompleted`). The finalized assistant output is captured into the run
+/// record's `stdout` so the AI reply surfaces in the panel.
 ///
-/// Uses `Delay::Immediate` (not `Delay::Real`) to skip the retry backoff: with
-/// the default `NoopExecutor` retrying is pointless, and real backoff sleeps
-/// (default `retry_delay_secs=30` × `max_retries=3` = ~90s) would hang the RPC.
-/// When a real `RunExecutor` is wired (deferred), revisit the delay strategy.
+/// Uses `Delay::Immediate` (not `Delay::Real`) to skip the retry backoff:
+/// with the orchestration executor retrying is pointless (a failed turn is
+/// already terminal), and real backoff sleeps (default `retry_delay_secs=30`
+/// × `max_retries=3` = ~90s) would hang the RPC.
 async fn handle_automation_run_now(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
     let auto_id = match params
         .get("id")
@@ -15776,14 +15778,17 @@ mod tests {
         // Subscribe BEFORE triggering so we see every live event.
         let mut rx = state.push_tx.subscribe();
 
-        // Create an automation whose command prints output (drives ≥1
-        // run-progress event). Multiple echo lines so we exercise the
-        // incremental stdout reader.
+        // Create an automation. The prompt is dispatched as a turn through
+        // the OrchestrationRunExecutor (the default scheduler executor) —
+        // the prompt text is forwarded to the provider as user input, not
+        // executed as a shell command. In `new_in_memory` no provider is
+        // armed, so the turn is accepted but no assistant output is
+        // generated (the run still reaches `Completed`).
         let create = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "automation.create",
             "params": {
                 "name": "Live progress",
-                "prompt": "echo line-one; echo line-two",
+                "prompt": "Reply with anything",
                 "schedule": { "type": "manual" },
                 "projectId": "proj-push-1"
             }
@@ -15792,7 +15797,9 @@ mod tests {
         assert!(resp.error.is_none(), "create: {:?}", resp.error);
         let auto_id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
-        // runNow → triggers the live-push path (trigger_with_events).
+        // runNow → triggers the live-push path (trigger_with_events). The
+        // OrchestrationRunExecutor emits run-started at the beginning and
+        // run-completed at the end of dispatch_turn.
         let run_now = serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "automation.runNow",
             "params": { "id": auto_id }
@@ -15818,27 +15825,26 @@ mod tests {
             }
         }
 
-        // All three live event types must arrive, plus the final run-upserted
-        // (backward-compat with T6c-21).
+        // The OrchestrationRunExecutor emits run-started + run-completed
+        // (PUSH-1 lifecycle endpoints). The incremental run-progress event
+        // was specific to ProcessRunExecutor's stdout-capture path;
+        // orchestration drives token-level progress via its own push channel
+        // (`orchestration` events like `TokenAppended`), not the automation
+        // channel — so we don't assert it here.
         assert!(
             types.iter().any(|t| t == "run-started"),
             "subscriber must receive run-started (got {types:?})"
         );
         assert!(
-            types.iter().any(|t| t == "run-progress"),
-            "subscriber must receive ≥1 run-progress (got {types:?})"
-        );
-        assert!(
             types.iter().any(|t| t == "run-completed"),
             "subscriber must receive run-completed (got {types:?})"
         );
-        // Order: started before progress, progress before completed.
+        // Order: started before completed.
         let started_idx = types.iter().position(|t| t == "run-started").unwrap();
-        let progress_idx = types.iter().position(|t| t == "run-progress").unwrap();
         let completed_idx = types.iter().position(|t| t == "run-completed").unwrap();
         assert!(
-            started_idx < progress_idx && progress_idx < completed_idx,
-            "events must arrive started→progress→completed (got {types:?})"
+            started_idx < completed_idx,
+            "events must arrive started→completed (got {types:?})"
         );
         // The final run-upserted still arrives (backward compat).
         assert!(

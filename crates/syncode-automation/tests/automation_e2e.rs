@@ -36,10 +36,7 @@ impl RunExecutor for CountingExecutor {
                 fails
             )))
         } else {
-            Ok(DispatchOutcome {
-                thread_id: EntityId::new(),
-                turn_id: EntityId::new(),
-            })
+            Ok(DispatchOutcome::new(EntityId::new(), EntityId::new()))
         }
     }
 }
