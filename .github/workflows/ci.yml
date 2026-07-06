@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,7 +49,7 @@ jobs:
       # an explicit actions/cache for ~/.cargo/registry so the index + download
       # cache survive even when the compiled-target key changes (faster fetches).
       - name: Cache cargo registry + git
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -59,7 +59,7 @@ jobs:
             cargo-registry-${{ runner.os }}-
 
       - name: Cache cargo target dir
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: target
           key: cargo-target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
@@ -145,7 +145,7 @@ jobs:
       - name: Upload test artifacts on failure
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: backend-test-output-${{ github.run_id }}
           path: |
@@ -162,11 +162,11 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # PR-3-2: npm cache via setup-node `cache: npm` (restores ~/.npm from the
       # lockfile hash, so `npm ci` skips re-downloading unchanged packages).
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
@@ -189,7 +189,7 @@ jobs:
       - name: Upload frontend test artifacts on failure
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-test-output-${{ github.run_id }}
           path: frontend/test-results/
