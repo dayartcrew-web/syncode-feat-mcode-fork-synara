@@ -710,10 +710,7 @@ mod tests {
                 error: None,
             })
         }
-        fn event_stream(
-            &self,
-            _session_id: &str,
-        ) -> Result<ProviderStream, ProviderAdapterError> {
+        fn event_stream(&self, _session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
             Ok(Box::pin(tokio_stream::empty()))
         }
         async fn health_check(&self) -> Result<bool, ProviderAdapterError> {
@@ -765,7 +762,10 @@ mod tests {
             .await
             .expect("override must succeed");
         assert_eq!(resp.id, Some(42));
-        assert_eq!(resp.result.as_ref().and_then(|v| v.get("steered")), Some(&serde_json::json!(true)));
+        assert_eq!(
+            resp.result.as_ref().and_then(|v| v.get("steered")),
+            Some(&serde_json::json!(true))
+        );
 
         // The override recorded exactly one call with the right session + payload.
         let recorded = adapter.recorded.lock().unwrap().clone();
