@@ -1,6 +1,6 @@
 import { MessageId, TurnId } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { COLLAPSED_USER_MESSAGE_MAX_CHARS } from "./userMessagePreview";
 
@@ -35,37 +35,46 @@ function matchMedia() {
   };
 }
 
-beforeAll(() => {
-  const classList = {
-    add: () => {},
-    remove: () => {},
-    toggle: () => {},
-    contains: () => false,
-  };
-
-  vi.stubGlobal("localStorage", {
-    getItem: () => null,
-    setItem: () => {},
-    removeItem: () => {},
-    clear: () => {},
-  });
-  vi.stubGlobal("window", {
-    matchMedia,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    desktopBridge: undefined,
-  });
-  vi.stubGlobal("document", {
-    documentElement: {
-      classList,
-      offsetHeight: 0,
-    },
-  });
-  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-    callback(0);
-    return 0;
-  });
+// Stub globals at module-evaluation time so they are in place before the
+// pre-warming import below executes. The stubs are intentionally kept at top
+// level (rather than in a `beforeAll` hook) so the heavy MessagesTimeline
+// import can also run at top level — vitest's module-evaluation phase is not
+// bound by `testTimeout` or `hookTimeout`, which eliminates the flake that
+// occurred when the first test (or a `beforeAll` hook) paid the full ~4s
+// transitive-import cost (KaTeX, markdown-it, …) inside a bounded timeout.
+// Default `unstubGlobals: false` keeps these stubs alive for the whole file.
+vi.stubGlobal("localStorage", {
+  getItem: () => null,
+  setItem: () => {},
+  removeItem: () => {},
+  clear: () => {},
 });
+vi.stubGlobal("window", {
+  matchMedia,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  desktopBridge: undefined,
+});
+vi.stubGlobal("document", {
+  documentElement: {
+    classList: {
+      add: () => {},
+      remove: () => {},
+      toggle: () => {},
+      contains: () => false,
+    },
+    offsetHeight: 0,
+  },
+});
+vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+  callback(0);
+  return 0;
+});
+
+// Pre-warm the MessagesTimeline module at module-evaluation time. Each test's
+// own `await import("./MessagesTimeline")` then resolves as a sub-millisecond
+// cache hit, so no individual test pays the transitive-import cost.
+await import("./MessagesTimeline");
 
 describe("MessagesTimeline", () => {
   it("keeps small transcripts on the simple non-virtualized path", async () => {
