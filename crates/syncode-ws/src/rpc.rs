@@ -9183,6 +9183,17 @@ fn to_mcode_provider_kind(syncode_id: &str) -> Option<&'static str> {
 /// result is the safe fallback; populating from `ALL_PROVIDERS` keeps the model
 /// picker non-empty so the user can actually select a provider without the
 /// "no models" empty state blocking thread creation.
+/// Display-friendly name for the UI model/agent pickers. The `claudeAgent`
+/// kind renders as "Claude" (the binary/familiar name users see); other kinds
+/// keep their id. Only the human-facing `name`/`displayName` field is mapped —
+/// the `slug`/`name` value fields stay as the `ProviderKind` id (type-safe).
+fn provider_display_name(kind: &str) -> &str {
+    match kind {
+        "claudeAgent" => "Claude",
+        _ => kind,
+    }
+}
+
 fn handle_provider_list_models(id: Value) -> JsonRpcResponse {
     let models: Vec<Value> = syncode_provider::ALL_PROVIDERS
         .iter()
@@ -9190,7 +9201,7 @@ fn handle_provider_list_models(id: Value) -> JsonRpcResponse {
         .map(|kind| {
             serde_json::json!({
                 "slug": kind,
-                "name": kind,
+                "name": provider_display_name(kind),
             })
         })
         .collect();
@@ -9378,7 +9389,7 @@ fn handle_provider_list_agents(id: Value) -> JsonRpcResponse {
         .map(|kind| {
             serde_json::json!({
                 "name": kind,
-                "displayName": kind,
+                "displayName": provider_display_name(kind),
             })
         })
         .collect();
