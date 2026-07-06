@@ -39,6 +39,39 @@ pub fn compute_diff(
     })
 }
 
+/// Like [`compute_diff`], but populates each entry's `patch` field with REAL
+/// unified-diff hunks (`@@ ... @@` headers + `+`/`-` line content) and the
+/// per-file `additions`/`deletions` counts. Uses `Git2Service::diff_with_patches`
+/// (which goes through `git2::Patch`) instead of the delta-only
+/// [`GitService::diff`](crate::service::GitService::diff) — the latter leaves
+/// `patch: None` and `additions: 0, deletions: 0`.
+///
+/// Defaults to working-tree-vs-HEAD (staged + unstaged together). See
+/// [`Git2Service::diff_with_patches`] for the resolution rules and graceful
+/// fallbacks (no HEAD → empty; binary files → empty patch).
+///
+/// Used by the MCode UI's `DiffPanel` (via the `git.readWorkingTreeDiff` RPC),
+/// which parses the per-file patch text with `parsePatch()` and renders the
+/// actual `+`/`-` line chips with non-zero counts.
+pub fn compute_diff_with_patches(
+    service: &Git2Service,
+    old_ref: Option<&str>,
+    new_ref: Option<&str>,
+) -> Result<DiffSummary, GitError> {
+    let entries = service.diff_with_patches(old_ref, new_ref)?;
+
+    let additions: u32 = entries.iter().map(|e| e.additions).sum();
+    let deletions: u32 = entries.iter().map(|e| e.deletions).sum();
+    let files_changed = entries.len();
+
+    Ok(DiffSummary {
+        files_changed,
+        additions,
+        deletions,
+        entries,
+    })
+}
+
 /// Compute diff between two turn checkpoints
 pub fn diff_between_turns(
     service: &Git2Service,
