@@ -546,8 +546,22 @@ impl Orchestrator {
             // nothing to ingest (the events would be uncorrelated to a turn).
             if let Some(turn_id) = turn_id_hint {
                 // Capture the session id (if the reactor created one) before
-                // moving reaction.events into the batch ingest below.
+                // moving reaction.events into the batch ingest below. Also note
+                // whether the reactor already observed a terminal event: the
+                // claude adapter runs `send_request` synchronously (one CLI
+                // turn to completion) and the reactor pre-subscribes so its
+                // captured events include the terminal Completed/Error — in
+                // that case the turn is already finished and spawning the live
+                // stream consumer would only leak a task that blocks forever
+                // on the adapter's never-dropped broadcast sender.
                 let session_id = reaction.session_id.clone();
+                let reactor_captured_terminal = reaction.events.iter().any(|ev| {
+                    matches!(
+                        ev,
+                        syncode_provider::ProviderEvent::Completed { .. }
+                            | syncode_provider::ProviderEvent::Error { .. }
+                    )
+                });
                 side_effect_events = self
                     .ingest_provider_events_batch(reaction.events, turn_id)
                     .await?;
@@ -557,7 +571,13 @@ impl Orchestrator {
                 // session's provider event stream back into the pipeline
                 // (append + project) under the turn. Streaming output (tokens,
                 // tool calls, completion) arrives here, not via react().
-                if let Some(sid) = session_id
+                //
+                // Skipped when the reactor already captured a terminal event
+                // (synchronous adapters like claude that run the whole turn
+                // inside `send_request`): the turn is complete, and a fresh
+                // subscriber would see no further events.
+                if !reactor_captured_terminal
+                    && let Some(sid) = session_id
                     && let Err(e) = self.spawn_provider_stream_consumer(sid, turn_id).await
                 {
                     crate::log::warn_err(&e, "failed to spawn provider stream consumer");

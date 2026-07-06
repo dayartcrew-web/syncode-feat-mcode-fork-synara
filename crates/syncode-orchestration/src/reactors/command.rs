@@ -898,6 +898,33 @@ impl ProviderCommandReactor {
         let outcome = self.ensure_session_for_thread(ctx, None, adapter).await?;
         let session_id = outcome.session_id().to_string();
 
+        // Pre-subscribe to the session's event stream BEFORE send_request.
+        //
+        // Synchronous one-shot adapters (claude) run `send_request` to
+        // completion inline: they spawn the provider subprocess, read its
+        // stdout to EOF, and emit every event (Token/ToolCall/Completed/Error)
+        // to the shared broadcast bus DURING the `send_request` call. Without a
+        // subscriber on the bus at that point, `broadcast::send` returns
+        // `Err(SendError)` (no receivers) and the events are silently dropped.
+        // The pipeline's stream consumer is only spawned AFTER `react()`
+        // returns — so it would miss every event and the turn would stick in
+        // `pending` forever (the consumer then blocks indefinitely on the
+        // adapter's never-dropped broadcast sender).
+        //
+        // Subscribing here places a receiver in the broadcast ring buffer before
+        // any event is emitted; we drain it after `send_request` returns and
+        // forward the events via `reaction.events` (the pipeline ingests them
+        // through `ingest_provider_events_batch`). Mirrors mcode's
+        // `ClaudeAdapter.ts` stream-fiber pattern, where the SDK `query()`
+        // async iterable is consumed by a forked fiber whose exit observer
+        // (`handleStreamExit`) guarantees turn completion.
+        let stream = {
+            let guard = adapter.read().await;
+            guard
+                .event_stream(&session_id)
+                .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?
+        };
+
         // Send the initial request to the provider
         let request = ProviderRequest::new(
             "chat",
@@ -908,15 +935,66 @@ impl ProviderCommandReactor {
         );
 
         let guard = adapter.read().await;
-        let _resp = guard
-            .send_request(request)
-            .await
-            .map_err(|e| CommandReactorError::ProviderError(e.to_string()))?;
+        let send_result = guard.send_request(request).await;
+        drop(guard);
+
+        // Drain events captured by our pre-subscription. Each buffered event
+        // returns immediately from the broadcast receiver; a short timeout
+        // covers the "buffer empty, no more coming" tail without delaying the
+        // response for async/ACP adapters that return immediately and stream
+        // later (those produce no events here — the pipeline's live consumer
+        // handles them).
+        let mut events = drain_captured_provider_events(stream).await;
+
+        // Safety net (mcode `handleStreamExit` equivalent): guarantee the turn
+        // reaches a terminal state even if the adapter returned without emitting
+        // an explicit Completed/Error on the bus.
+        match &send_result {
+            Ok(_) => {
+                let saw_activity = !events.is_empty();
+                if !events.iter().any(is_terminal_provider_event) && saw_activity {
+                    // The turn ran (we observed non-terminal events) but no
+                    // terminal event was captured — synthesize Completed so the
+                    // turn cannot stick in pending. (Pure-async adapters that
+                    // return immediately emit no events, so `saw_activity` is
+                    // false and we leave the stream consumer path active.)
+                    events.push(ProviderEvent::Completed {
+                        session_id: session_id.clone(),
+                        output: String::new(),
+                        usage: None,
+                    });
+                }
+            }
+            Err(e) => {
+                // The adapter already emits `ProviderEvent::Error` on its error
+                // path (claude.rs send_request failure arm). If it didn't (e.g.
+                // a panic-safe early return), synthesize one so the turn fails
+                // explicitly rather than hanging.
+                if !events.iter().any(is_terminal_provider_event) {
+                    events.push(ProviderEvent::Error {
+                        session_id: session_id.clone(),
+                        message: e.to_string(),
+                        code: None,
+                    });
+                }
+            }
+        }
+
+        // NOTE: `send_request` errors are intentionally NOT propagated from
+        // `react()` for StartTurn. Propagating would make the pipeline return
+        // `OrchestrationError` before ingesting any events — the TurnStarted
+        // the Decider emitted would never be followed by a TurnFailed, so the
+        // turn would stick in `pending` on provider failure. The synthesized
+        // Error event above is returned in `reaction.events` and the pipeline
+        // ingests it → `DomainEvent::TurnFailed` → turn status `error`.
+        // (Failures from session creation / ensure_session_for_thread above
+        // still propagate normally, as they precede any turn dispatch.)
+        let _ = send_result;
 
         Ok(CommandReaction {
             handled: true,
             session_id: Some(session_id),
-            events: vec![],
+            events,
         })
     }
 
@@ -1038,6 +1116,51 @@ impl ProviderCommandReactor {
         }
         Ok(session_id)
     }
+}
+
+// ---------------------------------------------------------------------------
+// StartTurn event-capture helpers
+// ---------------------------------------------------------------------------
+
+/// Whether a provider event is terminal (turn-relevant): the adapter will emit
+/// no further events for this session after one of these.
+fn is_terminal_provider_event(ev: &ProviderEvent) -> bool {
+    matches!(
+        ev,
+        ProviderEvent::Completed { .. } | ProviderEvent::Error { .. }
+    )
+}
+
+/// Drain events already buffered in a pre-subscribed provider stream.
+///
+/// [`ProviderCommandReactor::handle_start_turn`] subscribes to the session's
+/// event stream BEFORE calling `send_request` so the synchronous one-shot
+/// adapter pattern (claude) cannot drop events on a subscriber-less broadcast
+/// bus. After `send_request` returns, this function drains the buffered events
+/// with a short per-item timeout: buffered broadcast messages return
+/// immediately, and the timeout only fires once the buffer is empty (signalling
+/// the end of the turn's captured events). Pure-async adapters that return
+/// immediately from `send_request` emit nothing here, so the drain is a no-op
+/// and the pipeline's live stream consumer takes over for the real streaming.
+async fn drain_captured_provider_events(
+    mut stream: syncode_provider::ProviderStream,
+) -> Vec<ProviderEvent> {
+    use std::time::Duration;
+    use tokio_stream::StreamExt;
+    // 25ms is generous for buffered broadcast reads (which are synchronous
+    // in-memory copies) while keeping the "no more events" tail bounded.
+    const DRAIN_TIMEOUT: Duration = Duration::from_millis(25);
+    let mut events = Vec::new();
+    loop {
+        match tokio::time::timeout(DRAIN_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(event))) => events.push(event),
+            // Stream errored or ended: stop draining.
+            Ok(Some(Err(_))) | Ok(None) => break,
+            // Timed out waiting for the next buffered event: buffer drained.
+            Err(_) => break,
+        }
+    }
+    events
 }
 
 /// Errors during command reaction
@@ -2769,6 +2892,360 @@ pub(crate) mod tests {
             recorded[0].as_deref(),
             Some("passthrough-prompt"),
             "no memory → prompt must pass through unchanged"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P-FIX: StartTurn event-capture for synchronous one-shot adapters
+    // (claude). Regression test for the subscribe-too-late race where the
+    // consumer was spawned after `send_request` had already emitted every
+    // event to a subscriber-less broadcast bus.
+    // -----------------------------------------------------------------------
+
+    /// A mock adapter that mirrors the claude adapter's synchronous event
+    /// pattern: `send_request` runs inline, emitting events to a real broadcast
+    /// bus before returning. The session id assigned by `start_session` is
+    /// stamped into every emitted event so the reactor's session-filtered
+    /// `event_stream` subscription can observe them — exactly like the real
+    /// claude adapter stamps its session id into Token/Completed events.
+    /// `event_stream` subscribes to the bus filtered by session id.
+    struct SynchronousEventMock {
+        event_tx: tokio::sync::broadcast::Sender<ProviderEvent>,
+        last_session: std::sync::Mutex<Option<String>>,
+        /// Event "templates" emitted on the next `send_request`. Each template's
+        /// session_id is overwritten with the real session id at emit time.
+        queued_templates: std::sync::Mutex<Vec<ProviderEvent>>,
+        fail_send: bool,
+    }
+
+    impl SynchronousEventMock {
+        fn new(templates: Vec<ProviderEvent>) -> Self {
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            Self {
+                event_tx: tx,
+                last_session: std::sync::Mutex::new(None),
+                queued_templates: std::sync::Mutex::new(templates),
+                fail_send: false,
+            }
+        }
+
+        fn new_failing(templates: Vec<ProviderEvent>) -> Self {
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            Self {
+                event_tx: tx,
+                last_session: std::sync::Mutex::new(None),
+                queued_templates: std::sync::Mutex::new(templates),
+                fail_send: true,
+            }
+        }
+
+        fn make_shared(self) -> syncode_provider::registry::SharedAdapter {
+            Arc::new(tokio::sync::RwLock::new(self))
+        }
+
+        /// Stamp the real session id into an event template, then broadcast it.
+        fn emit(&self, template: ProviderEvent, sid: &str) {
+            let ev = match template {
+                ProviderEvent::Started { .. } => ProviderEvent::Started {
+                    session_id: sid.to_string(),
+                },
+                ProviderEvent::Token { content, .. } => ProviderEvent::Token {
+                    session_id: sid.to_string(),
+                    content,
+                },
+                ProviderEvent::ToolCall {
+                    tool_name,
+                    tool_input,
+                    ..
+                } => ProviderEvent::ToolCall {
+                    session_id: sid.to_string(),
+                    tool_name,
+                    tool_input,
+                },
+                ProviderEvent::ToolResult {
+                    tool_name, result, ..
+                } => ProviderEvent::ToolResult {
+                    session_id: sid.to_string(),
+                    tool_name,
+                    result,
+                },
+                ProviderEvent::Completed { output, usage, .. } => ProviderEvent::Completed {
+                    session_id: sid.to_string(),
+                    output,
+                    usage,
+                },
+                ProviderEvent::Error { message, code, .. } => ProviderEvent::Error {
+                    session_id: sid.to_string(),
+                    message,
+                    code,
+                },
+                ProviderEvent::StatusChanged { status } => ProviderEvent::StatusChanged { status },
+            };
+            let _ = self.event_tx.send(ev);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl syncode_provider::ProviderAdapter for SynchronousEventMock {
+        fn provider_id(&self) -> &str {
+            "sync-event-mock"
+        }
+        fn capabilities(&self) -> Vec<ProviderCapability> {
+            vec![ProviderCapability::Streaming]
+        }
+        fn status(&self) -> syncode_provider::ProviderStatus {
+            syncode_provider::ProviderStatus::Idle
+        }
+        fn available_models(&self) -> Vec<String> {
+            vec!["mock".to_string()]
+        }
+        async fn spawn(
+            &mut self,
+            _config: syncode_provider::ProviderConfig,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn interrupt(
+            &self,
+            _session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn start_session(
+            &mut self,
+            _ctx: SessionContext,
+        ) -> Result<String, syncode_provider::ProviderAdapterError> {
+            let sid = format!("evt-{}", uuid::Uuid::new_v4().hyphenated());
+            *self.last_session.lock().unwrap() = Some(sid.clone());
+            Ok(sid)
+        }
+        async fn resume_session(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn stop_session(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<(), syncode_provider::ProviderAdapterError> {
+            Ok(())
+        }
+        async fn send_request(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<syncode_provider::ProviderResponse, syncode_provider::ProviderAdapterError>
+        {
+            // Emit queued events synchronously, exactly like the claude adapter
+            // emits Token/Completed while reading the subprocess stdout. These
+            // reach the broadcast bus — a pre-subscribed receiver captures them.
+            let sid = self
+                .last_session
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default();
+            let templates = std::mem::take(&mut *self.queued_templates.lock().unwrap());
+            for tpl in templates {
+                self.emit(tpl, &sid);
+            }
+            if self.fail_send {
+                return Err(syncode_provider::ProviderAdapterError::ProcessExited(
+                    "mock subprocess exited without result".to_string(),
+                ));
+            }
+            Ok(syncode_provider::ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(1),
+                result: Some(serde_json::json!({"ok": true})),
+                error: None,
+            })
+        }
+        async fn steer_turn(
+            &self,
+            _session_id: &str,
+            _payload: serde_json::Value,
+        ) -> Result<syncode_provider::ProviderResponse, syncode_provider::ProviderAdapterError>
+        {
+            Ok(syncode_provider::ProviderResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(1),
+                result: Some(serde_json::json!({"steered": true})),
+                error: None,
+            })
+        }
+        fn event_stream(
+            &self,
+            session_id: &str,
+        ) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError>
+        {
+            use tokio_stream::wrappers::ReceiverStream;
+            let mut rx = self.event_tx.subscribe();
+            let sid = session_id.to_string();
+            let (tx, recv) = tokio::sync::mpsc::channel::<
+                Result<ProviderEvent, syncode_provider::ProviderAdapterError>,
+            >(64);
+            tokio::spawn(async move {
+                while let Ok(event) = rx.recv().await {
+                    let owned = match &event {
+                        ProviderEvent::Started { session_id }
+                        | ProviderEvent::Token { session_id, .. }
+                        | ProviderEvent::ToolCall { session_id, .. }
+                        | ProviderEvent::ToolResult { session_id, .. }
+                        | ProviderEvent::Completed { session_id, .. }
+                        | ProviderEvent::Error { session_id, .. } => {
+                            session_id.as_str() == sid.as_str()
+                        }
+                        ProviderEvent::StatusChanged { .. } => true,
+                    };
+                    if owned && tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(Box::pin(ReceiverStream::new(recv)))
+        }
+        async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> {
+            Ok(true)
+        }
+    }
+
+    /// Regression: a synchronous adapter that emits Completed during
+    /// `send_request` must have that event captured by the reactor's
+    /// pre-subscription and surfaced in `reaction.events`. Before the fix the
+    /// consumer subscribed only AFTER `send_request` returned — every event
+    /// was dropped on the subscriber-less broadcast bus and the turn stuck in
+    /// pending.
+    #[tokio::test]
+    async fn start_turn_captures_events_from_synchronous_adapter() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let adapter = SynchronousEventMock::new(vec![
+            ProviderEvent::Token {
+                session_id: String::new(), // stamped at emit time
+                content: "HELLO_FROM_AI".to_string(),
+            },
+            ProviderEvent::Completed {
+                session_id: String::new(),
+                output: "HELLO_FROM_AI".to_string(),
+                usage: None,
+            },
+        ])
+        .make_shared();
+
+        let thread_id = EntityId::new();
+        let turn_id = EntityId::new();
+        let result = reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id,
+                    sequence: 1,
+                    user_input: "Reply with exactly: HELLO_FROM_AI".to_string(),
+                },
+                &adapter,
+                Some(turn_id),
+            )
+            .await
+            .expect("StartTurn should succeed");
+
+        assert!(result.handled, "StartTurn must be handled");
+        assert!(
+            result.session_id.is_some(),
+            "a provider session must have started"
+        );
+
+        // The core assertion: the Completed event must be captured in
+        // reaction.events. Before the fix this was empty (events dropped on
+        // the subscriber-less broadcast bus during the blocking send_request).
+        let has_completed = result.events.iter().any(
+            |ev| matches!(ev, ProviderEvent::Completed { output, .. } if output == "HELLO_FROM_AI"),
+        );
+        assert!(
+            has_completed,
+            "reaction.events must contain the Completed event emitted during send_request; got {:?}",
+            result.events
+        );
+
+        // And the streamed Token must be captured too (it carries the AI text).
+        let has_token = result.events.iter().any(
+            |ev| matches!(ev, ProviderEvent::Token { content, .. } if content == "HELLO_FROM_AI"),
+        );
+        assert!(has_token, "Token events must be captured too");
+    }
+
+    /// Safety-net coverage: when the synchronous adapter returns Ok but emits
+    /// non-terminal events only (no Completed/Error), the reactor synthesizes a
+    /// Completed so the turn cannot stick in pending. Mirrors mcode's
+    /// `handleStreamExit` "stream ended" arm.
+    #[tokio::test]
+    async fn start_turn_synthesizes_completion_when_no_terminal_event() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let adapter = SynchronousEventMock::new(vec![
+            // Only a Token — the adapter exits cleanly without a result event.
+            ProviderEvent::Token {
+                session_id: String::new(),
+                content: "partial".to_string(),
+            },
+        ])
+        .make_shared();
+
+        let result = reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id: EntityId::new(),
+                    sequence: 1,
+                    user_input: "hi".to_string(),
+                },
+                &adapter,
+                Some(EntityId::new()),
+            )
+            .await
+            .expect("StartTurn should succeed");
+
+        let has_synthesized_completed = result
+            .events
+            .iter()
+            .any(|ev| matches!(ev, ProviderEvent::Completed { .. }));
+        assert!(
+            has_synthesized_completed,
+            "a Completed must be synthesized when the adapter returns Ok with no terminal event; got {:?}",
+            result.events
+        );
+    }
+
+    /// Safety-net coverage: when the synchronous adapter returns Err but emits
+    /// no Error event on the bus, the reactor synthesizes one so the turn
+    /// fails explicitly rather than hanging in pending.
+    #[tokio::test]
+    async fn start_turn_synthesizes_error_when_adapter_fails_silently() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let adapter = SynchronousEventMock::new_failing(vec![]).make_shared();
+
+        let result = reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id: EntityId::new(),
+                    sequence: 1,
+                    user_input: "hi".to_string(),
+                },
+                &adapter,
+                Some(EntityId::new()),
+            )
+            .await
+            .expect(
+                "StartTurn returns Ok(CommandReaction); the failure is surfaced as an Error event",
+            );
+
+        let has_error = result
+            .events
+            .iter()
+            .any(|ev| matches!(ev, ProviderEvent::Error { .. }));
+        assert!(
+            has_error,
+            "an Error must be synthesized when the adapter returns Err without emitting one; got {:?}",
+            result.events
         );
     }
 }
