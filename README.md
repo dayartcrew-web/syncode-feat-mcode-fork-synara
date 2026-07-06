@@ -2,7 +2,7 @@
 
 A local-first AI-coding-agent desktop app built around a Rust CQRS / Event-Sourcing
 orchestration engine. Syncode reimplements the orchestration core of
-[MCode](https://github.com/dayartcrew-web/mcode) in Rust, exposing it over a
+[MCode](https://github.com/dayartcrew-web/mcode) in Rust,fork from [Synara](https://github.com/Emanuele-web04/synara)  exposing it over a
 WebSocket JSON-RPC server that a Tauri desktop shell (and any other client) can
 talk to.
 
