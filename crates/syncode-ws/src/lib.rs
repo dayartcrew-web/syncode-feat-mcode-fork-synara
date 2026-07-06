@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod channels;
+pub mod completion;
 pub mod llm;
 pub mod local_server;
 pub mod project_fs;
@@ -19,6 +20,10 @@ pub mod settings;
 pub mod transport;
 pub mod usage;
 pub mod voice;
+
+// Re-export the completion-harness host wiring so callers can construct the
+// LLM/disable implementations directly (e.g. tests, alternate schedulers).
+pub use completion::{WsCompletionDisableFn, WsCompletionLlm};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -259,10 +264,10 @@ impl WsState {
             ),
             terminal_manager: Arc::new(RwLock::new(syncode_terminal::SessionManager::new())),
             terminal_readers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            automation_scheduler: Arc::new(syncode_automation::Scheduler::new_with_deps(
-                Arc::new(syncode_automation::InMemoryAutomationRepository::new()),
-                Arc::new(syncode_automation::ProcessRunExecutor::new()),
-            )),
+            // Automation scheduler with the AI-completion harness wired when the
+            // default provider is armable (graceful degradation otherwise). See
+            // [`crate::completion::build_automation_scheduler`] for the decisions.
+            automation_scheduler: crate::completion::build_automation_scheduler(),
             provider_registry: Arc::new(RwLock::new(
                 syncode_provider::registry::ProviderRegistry::new(),
             )),
