@@ -1420,6 +1420,33 @@ async fn handle_orchestration_dispatch_command(
                 Ok(v) => v,
                 Err(r) => return *r,
             };
+            service
+                .create_thread(project_id, normalize_provider_id(provider_id), model)
+                .await
+        }
+        // `thread.create` (MCode dot-form) — the cloned UI dispatches new
+        // threads via `orchestration.dispatchCommand {type:"thread.create",
+        // modelSelection:{provider:"claudeAgent", model:"…"}, …}` rather than
+        // the flat `CreateThread` shape. Route the dot-form to the same
+        // ApplicationService method, extracting provider/model from
+        // `modelSelection` first and falling back to the flat
+        // `providerId`/`model` keys (so direct RPC callers keep working).
+        // The MCode provider kind `claudeAgent` is normalized to the backend
+        // id `claude` so the read model matches the provider registry.
+        "thread.create" => {
+            let project_id =
+                match pctx.require_id_any(&["projectId", "project_id"], "thread.create") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+            let provider_id = match resolve_thread_create_provider(&pctx) {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let model = match resolve_thread_create_model(&pctx) {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
             service.create_thread(project_id, provider_id, model).await
         }
         "PauseThread" => {
@@ -1639,6 +1666,67 @@ impl<'a> DispatchParams<'a> {
             format!("{cmd} requires '{}' (tried: {})", keys[0], keys.join(", ")),
         )))
     }
+}
+
+/// Normalize an MCode frontend provider kind to the backend's provider id.
+/// The inverse of `push::to_mcode_provider_kind`: the UI dispatches threads
+/// with `provider: "claudeAgent"` (the MCode-literal `ProviderKind`), while
+/// the backend's `ProviderRegistry` and `Command::CreateThread` use `"claude"`.
+/// Other ids (codex, cursor, gemini, grok, kilo, opencode, pi, …) pass
+/// through unchanged. Applied at every entry point that turns a UI dispatch
+/// into a `Command::CreateThread` so the read model never stores a kind the
+/// registry doesn't recognize.
+fn normalize_provider_id(provider_id: String) -> String {
+    if provider_id == "claudeAgent" {
+        "claude".to_string()
+    } else {
+        provider_id
+    }
+}
+
+/// Resolve the provider id for a `thread.create` dispatch (PR-fix-thread).
+///
+/// Order of precedence:
+///   1. `params.modelSelection.provider` (MCode wire shape — where the
+///      cloned UI places the field).
+///   2. `params.providerId` (flat camelCase, mirror of the `CreateThread`
+///      arm).
+///   3. `params.provider_id` (flat snake_case alias).
+///
+/// The resolved value is normalized via [`normalize_provider_id`] so
+/// `claudeAgent` becomes `claude` before reaching `ApplicationService`.
+/// Returns `INVALID_PARAMS` if none of the keys resolve to a non-empty
+/// string — the message lists both spellings so the caller can correct.
+fn resolve_thread_create_provider(pctx: &DispatchParams) -> Result<String, Box<JsonRpcResponse>> {
+    if let Some(s) = pctx
+        .params
+        .get("modelSelection")
+        .and_then(|v| v.get("provider"))
+        .and_then(|v| v.as_str())
+    {
+        return Ok(normalize_provider_id(s.to_string()));
+    }
+    match pctx.require_str_any(&["providerId", "provider_id"], "thread.create") {
+        Ok(s) => Ok(normalize_provider_id(s)),
+        Err(r) => Err(r),
+    }
+}
+
+/// Resolve the model id for a `thread.create` dispatch (PR-fix-thread).
+///
+/// Order of precedence: `params.modelSelection.model` (MCode wire shape)
+/// then `params.model` (flat). Mirrors [`resolve_thread_create_provider`]
+/// without normalization — model ids are pass-through.
+fn resolve_thread_create_model(pctx: &DispatchParams) -> Result<String, Box<JsonRpcResponse>> {
+    if let Some(s) = pctx
+        .params
+        .get("modelSelection")
+        .and_then(|v| v.get("model"))
+        .and_then(|v| v.as_str())
+    {
+        return Ok(s.to_string());
+    }
+    pctx.require_str("model", "thread.create")
 }
 
 /// Map an [`syncode_orchestration::OrchestrationError`] to a JSON-RPC error
@@ -4590,10 +4678,11 @@ async fn handle_server_welcome(state: &WsState, id: Value) -> JsonRpcResponse {
 }
 
 /// Build the `server.welcome` payload — shared between the `server.welcome`
-/// one-shot RPC response and the initial `welcome` event pushed by
-/// `server.subscribeLifecycle` (T6c-phase-27). The lifecycle channel carries
-/// this same shape as its snapshot baseline.
-fn build_server_welcome_payload(state: &WsState) -> Value {
+/// one-shot RPC response, the initial `welcome` event pushed by
+/// `server.subscribeLifecycle` (T6c-phase-27), AND the unconditional welcome
+/// push emitted at WS connection-accept time (PR-fix-welcome). The lifecycle
+/// channel carries this same shape as its snapshot baseline.
+pub(crate) fn build_server_welcome_payload(state: &WsState) -> Value {
     let cwd = server_cwd();
     let home = server_home_dir();
     let project_name = cwd
@@ -5003,7 +5092,7 @@ async fn emit_server_settings_snapshot(
 
 /// Serialize + send a `push/<channel>` notification to a single connection.
 /// Best-effort: a send failure (dropped connection) returns false.
-fn push_frame(
+pub(crate) fn push_frame(
     tx: &tokio::sync::mpsc::UnboundedSender<String>,
     channel: &str,
     data: &Value,
@@ -5016,6 +5105,30 @@ fn push_frame(
     serde_json::to_string(&msg)
         .map(|s| tx.send(s).is_ok())
         .unwrap_or(false)
+}
+
+/// Emit the `server.welcome` push directly to a connection's mpsc sender.
+/// Called by `handle_connection` (server.rs) right after `state.register` so
+/// every freshly-accepted WS connection receives the welcome payload as its
+/// first message — before any RPC round-trip or subscription opt-in. This
+/// mirrors MCode's `onServerWelcome` semantics: the welcome is unconditional,
+/// not gated by `push/subscribe`.
+///
+/// `params` carries the welcome payload at the top level (NOT wrapped in
+/// `{eventType, aggregateId, data}`) because the frontend's
+/// `onServerWelcome((payload) => …)` reads `payload.homeDir` / `payload.cwd`
+/// directly off `message.data` (= `notification.params`). The plain shape
+/// matches `WsWelcomePayload` in `frontend/src/contracts/tier3/ws.ts`.
+///
+/// Best-effort: a send failure (closed connection) returns false; the caller
+/// logs and continues (the connection will simply not receive the welcome,
+/// which surfaces as the known splash-screen gap rather than a crash).
+pub(crate) fn emit_welcome_on_connect(
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    state: &WsState,
+) -> bool {
+    let payload = build_server_welcome_payload(state);
+    push_frame(tx, crate::channels::CHANNEL_SERVER_WELCOME, &payload)
 }
 
 // ─── Server write-side handlers (T6c-18 — REAL persistence + push) ─
@@ -19558,6 +19671,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emit_welcome_on_connect_pushes_server_welcome_payload_directly() {
+        // PR-fix-welcome: on connection-accept, the server must push the
+        // welcome payload on the `server.welcome` channel (literally). The
+        // frontend's `onServerWelcome` listener binds to this exact channel
+        // name (see `frontend/src/contracts/tier3/ws.ts::WS_CHANNELS.
+        // serverWelcome === "server.welcome"`) and reads `payload.homeDir`
+        // directly off `message.data` (= `notification.params`). Without
+        // this push the splash screen never resolves because
+        // `workspaceStore.homeDir` stays null.
+        //
+        // Two correctness invariants checked here:
+        //   1. The wire `method` is `push/server.welcome` (not
+        //      `push/server.lifecycle` — the lifecycle channel is a
+        //      separate opt-in stream).
+        //   2. The welcome payload sits at the TOP LEVEL of `params` (not
+        //      nested inside `{eventType, aggregateId, data}`), because
+        //      `WsWelcomePayload` has `homeDir` / `cwd` / `projectName`
+        //      as required top-level fields.
+        let state = WsState::new_in_memory(16);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // Keep a clone for the emit — `register` moves the original.
+        let emit_tx = tx.clone();
+        state.register(1, tx).await;
+
+        let emitted = emit_welcome_on_connect(&emit_tx, &state);
+        assert!(emitted, "welcome push should be delivered to the tx");
+
+        let msg = rx
+            .recv()
+            .await
+            .expect("welcome push should arrive on the connection rx");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&msg).expect("welcome push is valid JSON");
+        assert_eq!(
+            parsed["method"], "push/server.welcome",
+            "wire method must be push/server.welcome (got: {parsed})"
+        );
+        // Welcome payload fields at the top level of params — not nested.
+        assert!(
+            parsed["params"]["homeDir"].is_string(),
+            "params.homeDir must be a string (got: {parsed})"
+        );
+        assert!(
+            parsed["params"]["cwd"].is_string(),
+            "params.cwd must be a string"
+        );
+        assert!(
+            parsed["params"]["projectName"].is_string(),
+            "params.projectName must be a string"
+        );
+        // Defensive: no `eventType`/`aggregateId` envelope wrapping — the
+        // frontend reads `payload.homeDir` directly off `message.data`.
+        assert!(
+            parsed["params"].get("eventType").is_none(),
+            "params must NOT be wrapped in an eventType envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_welcome_on_connect_returns_false_when_tx_closed() {
+        // PR-fix-welcome: a dropped receiver (closed connection) surfaces as
+        // `false` so the caller can log without crashing. Best-effort push
+        // semantics — never block on a stuck consumer.
+        let state = WsState::new_in_memory(16);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        drop(rx); // close the receiver
+        let emitted = emit_welcome_on_connect(&tx, &state);
+        assert!(!emitted, "closed tx should report not-emitted");
+    }
+
+    #[tokio::test]
     async fn subscribe_lifecycle_emits_welcome_and_registers_channel() {
         // T6c-phase-27: subscribeLifecycle registers the connection on
         // `server.lifecycle` and pushes an initial `welcome` event on push_tx
@@ -20905,6 +21089,138 @@ mod tests {
             resp.error
         );
         assert_eq!(resp.result.unwrap()["dispatched"], true);
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_thread_create_dot_form_creates_thread() {
+        // PR-fix-thread: the cloned UI dispatches new threads via the dot-form
+        // `thread.create` with `modelSelection: {provider, model}` (the MCode
+        // wire shape). The dispatcher must route this arm to the same
+        // ApplicationService method as `CreateThread`, extract provider+model
+        // from `modelSelection`, AND normalize `claudeAgent → claude` so the
+        // read model stores the backend id (matches the provider registry).
+        // Without this arm the UI's "New thread" button fails with
+        // "Unsupported command type: thread.create".
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "demo").await;
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "commandId": "cmd-1",
+                "threadId": "thread-1",
+                "projectId": project_id,
+                "title": "New thread",
+                "modelSelection": {
+                    "provider": "claudeAgent",
+                    "model": "claude-sonnet-4-5",
+                },
+                "runtimeMode": "full-access",
+                "interactionMode": "default",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.create (modelSelection) failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+        let thread_id = result["aggregateId"].as_str().unwrap().to_string();
+        assert!(!thread_id.is_empty(), "aggregateId should be non-empty");
+
+        // Read model reflects the new thread with the normalized provider id.
+        let store = state.read_store.read().await;
+        assert_eq!(store.threads.len(), 1, "thread should be projected");
+        let thread = store.threads.values().next().unwrap();
+        assert_eq!(
+            thread.provider_id, "claude",
+            "claudeAgent must normalize to claude in the read model"
+        );
+        assert_eq!(thread.model, "claude-sonnet-4-5");
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_thread_create_accepts_flat_provider_model() {
+        // PR-fix-thread: `thread.create` must also accept the flat
+        // `providerId`/`model` shape (mirror of the legacy `CreateThread`
+        // arm). Lets direct RPC callers use the dot-form without nesting.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "demo").await;
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "providerId": "openai",
+                "model": "gpt-4",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.create (flat) failed: {:?}",
+            resp.error
+        );
+
+        let store = state.read_store.read().await;
+        let thread = store.threads.values().next().unwrap();
+        assert_eq!(thread.provider_id, "openai");
+        assert_eq!(thread.model, "gpt-4");
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_thread_create_missing_provider_errors() {
+        // PR-fix-thread: without provider/model in either `modelSelection` or
+        // flat fields, the dispatcher must surface a structured INVALID_PARAMS
+        // error (not "Unsupported command type"). The error message lists the
+        // accepted keys so the caller can correct the dispatch shape.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "demo").await;
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                // provider/model deliberately omitted
+            }),
+        )
+        .await;
+        let err = resp
+            .error
+            .expect("expected INVALID_PARAMS for missing provider/model");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        assert!(
+            err.message.contains("providerId"),
+            "error should mention providerId: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_dispatch_command_thread_create_unknown_project_rejected() {
+        // PR-fix-thread: routing through ApplicationService applies the
+        // orphan-thread guard — `thread.create` against a bogus (but
+        // well-formed) project id is rejected with `project_not_found`. Same
+        // precondition as the `CreateThread` arm.
+        let state = WsState::new_in_memory(16);
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": "00000000-0000-0000-0000-000000000000",
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await;
+        let err = resp.error.expect("expected rejection for unknown project");
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        assert_eq!(err.data.unwrap()["kind"], "project_not_found");
     }
 
     #[tokio::test]
