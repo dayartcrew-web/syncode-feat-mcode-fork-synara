@@ -844,6 +844,7 @@ impl Orchestrator {
             | Command::StopThreadSession { id, .. }
             | Command::SetThreadRuntimeMode { id, .. }
             | Command::SetThreadInteractionMode { id, .. }
+            | Command::UpdateThreadMeta { id, .. }
             | Command::RespondThreadApproval { id, .. }
             | Command::RespondThreadUserInput { id, .. }
             | Command::EditAndResendThreadMessage { id, .. }
@@ -919,6 +920,7 @@ impl Orchestrator {
             | Command::StopThreadSession { .. }
             | Command::SetThreadRuntimeMode { .. }
             | Command::SetThreadInteractionMode { .. }
+            | Command::UpdateThreadMeta { .. }
             | Command::RespondThreadApproval { .. }
             | Command::RespondThreadUserInput { .. }
             | Command::EditAndResendThreadMessage { .. }

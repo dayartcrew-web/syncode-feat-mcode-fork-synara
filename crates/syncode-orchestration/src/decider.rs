@@ -79,6 +79,14 @@ pub enum Command {
         id: EntityId,
         title: String,
     },
+    /// Update a thread's metadata (provider/model). Faithful to mcode
+    /// `thread.meta.update` {threadId, modelSelection: {provider?, model?}}.
+    /// Either field is `Option<String>`; `None` means "leave unchanged".
+    UpdateThreadMeta {
+        id: EntityId,
+        provider_id: Option<String>,
+        model: Option<String>,
+    },
     /// Roll a thread back to a previously-captured git checkpoint.
     RevertToCheckpoint {
         thread_id: EntityId,
@@ -464,6 +472,11 @@ impl Decider {
             Command::SetThreadTitle { id, title } => {
                 Self::decide_set_thread_title(id, current_state, title)
             }
+            Command::UpdateThreadMeta {
+                id,
+                provider_id,
+                model,
+            } => Self::decide_update_thread_meta(id, current_state, provider_id, model),
             Command::RevertToCheckpoint { thread_id, git_ref } => {
                 Self::decide_revert_to_checkpoint(thread_id, current_state, git_ref)
             }
@@ -991,6 +1004,25 @@ impl Decider {
         Ok(vec![DomainEvent::ThreadRuntimeModeSet {
             id,
             runtime_mode,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    fn decide_update_thread_meta(
+        id: EntityId,
+        state: Option<&serde_json::Value>,
+        provider_id: Option<String>,
+        model: Option<String>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        // Guard: thread must exist. Both fields are optional config values
+        // (mcode modelSelection: {provider?, model?}); `None` means "unchanged".
+        // No status transition constraint, so we only assert existence.
+        let _ = Self::extract_thread_status(state, &id)?;
+
+        Ok(vec![DomainEvent::ThreadMetaUpdated {
+            thread_id: id,
+            provider_id,
+            model,
             updated_at: Timestamp::now(),
         }])
     }

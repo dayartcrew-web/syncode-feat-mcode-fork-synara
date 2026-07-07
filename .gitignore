@@ -52,3 +52,9 @@ contracts/generated/
 !.masday/intel/
 !.masday/research/
 !.masday/link-node-modules.sh
+
+# KMR runtime artifacts (session state, plans, agent work-product — not source)
+.kmr/
+
+# Playwright MCP artifacts (browser snapshots + screenshots from audits)
+.playwright-mcp/

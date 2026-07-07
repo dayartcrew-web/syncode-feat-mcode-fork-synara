@@ -593,6 +593,7 @@ impl ProviderCommandReactor {
             | Command::DeleteThread { .. }
             | Command::SetThreadRuntimeMode { .. }
             | Command::SetThreadInteractionMode { .. }
+            | Command::UpdateThreadMeta { .. }
             | Command::SetThreadSession { .. }
             | Command::AppendThreadActivity { .. }
             | Command::AddPinnedMessage { .. }

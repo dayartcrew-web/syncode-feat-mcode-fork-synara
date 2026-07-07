@@ -295,6 +295,25 @@ impl ApplicationService {
             .await
     }
 
+    /// Update a thread's metadata (provider/model). Faithful to mcode
+    /// `thread.meta.update` {threadId, modelSelection: {provider?, model?}}.
+    /// Either field is `Option<String>`: `None` means "leave unchanged".
+    /// The Decider guards thread existence.
+    pub async fn update_thread_meta(
+        &self,
+        id: EntityId,
+        provider_id: Option<String>,
+        model: Option<String>,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::UpdateThreadMeta {
+                id,
+                provider_id,
+                model,
+            })
+            .await
+    }
+
     /// Set a thread's runtime mode. Faithful to mcode `thread.runtime-mode.set`
     /// (runtimeMode: "approval-required" | "full-access"). The Decider guards
     /// thread existence.
@@ -1516,6 +1535,102 @@ mod tests {
             .set_thread_interaction_mode(EntityId::new(), "plan".into())
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_thread_meta_changes_provider() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let project_id = proj.events[0].event.aggregate_id();
+        let thr = svc
+            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let thread_id = thr.events[0].event.aggregate_id();
+
+        // Sanity: initial provider_id is "openai".
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.provider_id, "openai");
+
+        let result = svc
+            .update_thread_meta(thread_id, Some("anthropic".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadMetaUpdated"
+        );
+
+        // Provider changed; model untouched.
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.provider_id, "anthropic");
+        assert_eq!(thread.model, "gpt-4");
+    }
+
+    #[tokio::test]
+    async fn update_thread_meta_changes_model() {
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let project_id = proj.events[0].event.aggregate_id();
+        let thr = svc
+            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let thread_id = thr.events[0].event.aggregate_id();
+
+        let result = svc
+            .update_thread_meta(thread_id, None, Some("gpt-4o".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.events[0].event.event_type_name(),
+            "ThreadMetaUpdated"
+        );
+
+        // Model changed; provider untouched.
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.provider_id, "openai");
+        assert_eq!(thread.model, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn update_thread_meta_unknown_thread_rejected() {
+        let svc = make_service();
+        // No thread exists → decider existence guard rejects.
+        let result = svc
+            .update_thread_meta(
+                EntityId::new(),
+                Some("anthropic".into()),
+                Some("claude-3".into()),
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_thread_meta_persists_event() {
+        // Verifies the full pipeline: command → event → projector → read model.
+        // After two updates (provider-only, then model-only), the read model
+        // reflects both changes — proving each event was persisted & projected.
+        let svc = make_service();
+        let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
+        let project_id = proj.events[0].event.aggregate_id();
+        let thr = svc
+            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .await
+            .unwrap();
+        let thread_id = thr.events[0].event.aggregate_id();
+
+        svc.update_thread_meta(thread_id, Some("anthropic".into()), None)
+            .await
+            .unwrap();
+        svc.update_thread_meta(thread_id, None, Some("claude-sonnet-4-5".into()))
+            .await
+            .unwrap();
+
+        let thread = svc.get_thread(&thread_id.to_string()).await.unwrap();
+        assert_eq!(thread.provider_id, "anthropic");
+        assert_eq!(thread.model, "claude-sonnet-4-5");
     }
 
     #[tokio::test]

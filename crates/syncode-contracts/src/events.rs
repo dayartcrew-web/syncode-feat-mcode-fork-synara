@@ -165,6 +165,14 @@ pub enum DomainEventDto {
         interaction_mode: String,
         updated_at: Timestamp,
     },
+    /// Mirror of `DomainEvent::ThreadMetaUpdated`. Either field is optional;
+    /// `None` means "unchanged".
+    ThreadMetaUpdated {
+        thread_id: EntityId,
+        provider_id: Option<String>,
+        model: Option<String>,
+        updated_at: Timestamp,
+    },
     ThreadApprovalResponded {
         id: EntityId,
         request_id: String,
@@ -497,6 +505,17 @@ impl From<&syncode_core::DomainEvent> for DomainEventDto {
             } => Self::ThreadInteractionModeSet {
                 id: to_id(*id),
                 interaction_mode: interaction_mode.clone(),
+                updated_at: to_ts(*updated_at),
+            },
+            E::ThreadMetaUpdated {
+                thread_id,
+                provider_id,
+                model,
+                updated_at,
+            } => Self::ThreadMetaUpdated {
+                thread_id: to_id(*thread_id),
+                provider_id: provider_id.clone(),
+                model: model.clone(),
                 updated_at: to_ts(*updated_at),
             },
             E::ThreadApprovalResponded {

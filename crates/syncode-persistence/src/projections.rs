@@ -692,7 +692,12 @@ impl ProjectionManager {
             // deferrals). The event store is untouched either way.
             | DomainEvent::ThreadRevertCompleted { .. }
             | DomainEvent::ConversationRollbackRequested { .. }
-            | DomainEvent::ConversationRolledBack { .. } => {}
+            | DomainEvent::ConversationRolledBack { .. }
+            // ThreadMetaUpdated mutates the in-memory ThreadView
+            // (provider_id/model) only; persisting those columns to
+            // view_threads is deferred (consistent with the session-blob /
+            // streaming / plan / checkpoint deferrals above).
+            | DomainEvent::ThreadMetaUpdated { .. } => {}
         }
 
         // Update watermark

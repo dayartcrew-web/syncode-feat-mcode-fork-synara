@@ -1366,7 +1366,25 @@ async fn handle_orchestration_dispatch_command(
 
     let service = ApplicationService::new(state.orchestrator.clone());
 
+    // Emit at debug level so production noise doesn't change, but server logs
+    // can still correlate each incoming dispatchCommand to its JSON-RPC `id`
+    // for end-to-end tracing. The `id` field here is the JSON-RPC request id
+    // (used by the client to match responses), not the application `commandId`
+    // payload field.
+    tracing::debug!(
+        command_type = %cmd_type,
+        command_id = ?id,
+        "dispatching command"
+    );
+
     // Resolve params → call the matching ApplicationService method.
+    //
+    // Dot-notation arms are aliased alongside their PascalCase counterparts
+    // via inline `|` patterns. Frontend (mcode) emits dot-notation
+    // (`project.create`); legacy clients use PascalCase (`CreateProject`).
+    // To add a new alias: append `| "<dot.notation>"` to the existing
+    // PascalCase arm. The inline `|` is preferred over a runtime helper
+    // because Rust resolves `match` patterns at compile time.
     let outcome: Result<
         syncode_orchestration::CommandResult,
         syncode_orchestration::OrchestrationError,
@@ -1390,6 +1408,26 @@ async fn handle_orchestration_dispatch_command(
                 Err(r) => return *r,
             };
             service.delete_project(project_id).await
+        }
+        // `project.create` (MCode dot-form) — routes to the same
+        // ApplicationService method as `CreateProject`. Frontend payload uses
+        // `title`+`workspaceRoot` instead of `name`+`rootPath`; both spellings
+        // are accepted. Extra keys (projectId, kind, defaultModelSelection,
+        // createWorkspaceRootIfMissing, createdAt) are intentionally ignored
+        // to preserve the existing wire-tolerance — do NOT add validation.
+        "project.create" => {
+            let name = match pctx.require_str_any(&["title", "name"], "project.create") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let root_path = match pctx.require_str_any(
+                &["workspaceRoot", "rootPath", "root_path"],
+                "project.create",
+            ) {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.create_project(name, root_path).await
         }
         "UpdateProjectConfig" => {
             let project_id = match pctx.require_id_any(&["id", "projectId"], "UpdateProjectConfig")
@@ -1502,6 +1540,42 @@ async fn handle_orchestration_dispatch_command(
             };
             service.delete_thread(thread_id).await
         }
+        // `thread.delete` (MCode dot-form) — alias for `DeleteThread`. Accepts
+        // `threadId` (camelCase, frontend shape) and `thread_id`/`id` aliases.
+        "thread.delete" => {
+            let thread_id =
+                match pctx.require_id_any(&["threadId", "thread_id", "id"], "thread.delete") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+            service.delete_thread(thread_id).await
+        }
+        // `thread.meta.update` (MCode dot-form) — update a thread's
+        // `provider_id`/`model`. Accepts `modelSelection: {provider?, model?}`
+        // (mcode wire shape); either field is optional, `None` = unchanged.
+        "thread.meta.update" => {
+            let thread_id =
+                match pctx.require_id_any(&["threadId", "thread_id", "id"], "thread.meta.update") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+            // `modelSelection` is the canonical mcode envelope; accept the flat
+            // `providerId`/`model` pair as a fallback for direct callers.
+            let selection = pctx.params.get("modelSelection");
+            let provider_id = selection
+                .and_then(|s| s.get("provider"))
+                .and_then(|v| v.as_str())
+                .or_else(|| pctx.params.get("providerId").and_then(|v| v.as_str()))
+                .map(|s| s.to_string());
+            let model = selection
+                .and_then(|s| s.get("model"))
+                .and_then(|v| v.as_str())
+                .or_else(|| pctx.params.get("model").and_then(|v| v.as_str()))
+                .map(|s| s.to_string());
+            service
+                .update_thread_meta(thread_id, provider_id, model)
+                .await
+        }
 
         // ── Turn lifecycle ───────────────────────────────────────────
         "StartTurn" => {
@@ -1518,6 +1592,27 @@ async fn handle_orchestration_dispatch_command(
                 Ok(v) => v,
                 Err(r) => return *r,
             };
+            service.start_turn(thread_id, sequence, user_input).await
+        }
+        // `thread.turn.start` (MCode dot-form) — alias for `StartTurn`.
+        // Frontend may omit `sequence`; default to 0 (mirrors the StartTurn
+        // arm). `thread_id` width is u32 (matches `start_turn` signature).
+        "thread.turn.start" => {
+            let thread_id =
+                match pctx.require_id_any(&["threadId", "thread_id", "id"], "thread.turn.start") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+            let sequence = pctx
+                .params
+                .get("sequence")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let user_input =
+                match pctx.require_str_any(&["userInput", "user_input"], "thread.turn.start") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
             service.start_turn(thread_id, sequence, user_input).await
         }
         "CompleteTurn" => {
@@ -1566,7 +1661,213 @@ async fn handle_orchestration_dispatch_command(
             };
             service.interrupt_turn(turn_id).await
         }
+        // `thread.turn.interrupt` (MCode dot-form) — alias for
+        // `InterruptTurn`. Note: the Decider rejects this if the turn isn't
+        // "running" (a freshly-started turn is "pending" without a provider
+        // session). That rejection surfaces as INVALID_PARAMS to the frontend,
+        // which already handles this case — same behavior as `InterruptTurn`.
+        "thread.turn.interrupt" => {
+            let turn_id =
+                match pctx.require_id_any(&["turnId", "turn_id", "id"], "thread.turn.interrupt") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+            service.interrupt_turn(turn_id).await
+        }
+
+        // ── MCode dot-notation Phase 3 arms ─────────────────────────
+        //
+        // The 8 arms below route the remaining dot-notation types listed in
+        // `.kmr/plans/dot-notation-bridge.md` §3 to their existing
+        // ApplicationService methods. No new commands, events, or projector
+        // changes — pure transport-layer wiring.
+
+        // `thread.runtime-mode.set` — sets the thread's RuntimeMode (free-form
+        // string; mcode literal values "approval-required" | "full-access").
+        "thread.runtime-mode.set" => {
+            let id = match pctx
+                .require_id_any(&["threadId", "thread_id", "id"], "thread.runtime-mode.set")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let runtime_mode = match pctx
+                .require_str_any(&["runtimeMode", "runtime_mode"], "thread.runtime-mode.set")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.set_thread_runtime_mode(id, runtime_mode).await
+        }
+        // `thread.interaction-mode.set` — sets the thread's
+        // ProviderInteractionMode (free-form string; mcode literals
+        // "default" | "plan").
+        "thread.interaction-mode.set" => {
+            let id = match pctx.require_id_any(
+                &["threadId", "thread_id", "id"],
+                "thread.interaction-mode.set",
+            ) {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let interaction_mode = match pctx.require_str_any(
+                &["interactionMode", "interaction_mode"],
+                "thread.interaction-mode.set",
+            ) {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service
+                .set_thread_interaction_mode(id, interaction_mode)
+                .await
+        }
+        // `thread.session.stop` — emits ThreadSessionStopRequested. The actual
+        // provider-session teardown is an async side effect (SessionManager);
+        // this dispatch only initiates the stop.
+        "thread.session.stop" => {
+            let id = match pctx
+                .require_id_any(&["threadId", "thread_id", "id"], "thread.session.stop")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service.stop_thread_session(id).await
+        }
+        // `thread.checkpoint.revert` — frontend ships `turnCount`, NOT
+        // `gitRef`. The correct method is `complete_revert` (emits
+        // `ThreadRevertCompleted`, which the projector uses to truncate the
+        // read model by removing turns with sequence > turn_count).
+        //
+        // Calls complete_revert (read-model truncation by turn count),
+        // NOT revert_to_checkpoint (git-ref based). Frontend ships turnCount,
+        // not gitRef. Do not "fix" this to revert_to_checkpoint.
+        "thread.checkpoint.revert" => {
+            let thread_id = match pctx
+                .require_id_any(&["threadId", "thread_id", "id"], "thread.checkpoint.revert")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let turn_count = pctx
+                .params
+                .get("turnCount")
+                .or_else(|| pctx.params.get("turn_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            service.complete_revert(thread_id, turn_count).await
+        }
+        // `thread.approval.respond` — responds to a pending provider approval
+        // request. `request_id` is the opaque provider-supplied id; `decision`
+        // is a free-form string (mcode literals "approved" | "denied").
+        "thread.approval.respond" => {
+            let id = match pctx
+                .require_id_any(&["threadId", "thread_id", "id"], "thread.approval.respond")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let request_id = match pctx
+                .require_str_any(&["requestId", "request_id"], "thread.approval.respond")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let decision = match pctx.require_str_any(&["decision"], "thread.approval.respond") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service
+                .respond_thread_approval(id, request_id, decision)
+                .await
+        }
+        // `thread.user-input.respond` — responds to a pending provider
+        // user-input request. `answers` is a free-form string (the provider
+        // queue is not yet modeled — gap); mcode ships structured answers but
+        // the backend stores them as a serialized string for now.
+        "thread.user-input.respond" => {
+            let id = match pctx.require_id_any(
+                &["threadId", "thread_id", "id"],
+                "thread.user-input.respond",
+            ) {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let request_id = match pctx
+                .require_str_any(&["requestId", "request_id"], "thread.user-input.respond")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let answers = match pctx.require_str_any(&["answers"], "thread.user-input.respond") {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            service
+                .respond_thread_user_input(id, request_id, answers)
+                .await
+        }
+        // `thread.activity.append` — appends an activity log entry scoped to
+        // the thread. `activity_type` is the kind label (e.g. "info"); the
+        // frontend's nested `activity` envelope (ChatView.tsx:6081) is
+        // intentionally NOT unwrapped here — direct callers and tests pass
+        // `activityType`/`activity_type` directly. The `"type"` alias is
+        // intentionally SKIPPED to avoid colliding with the dispatch `type`
+        // key (ambiguity risk).
+        "thread.activity.append" => {
+            let id = match pctx
+                .require_id_any(&["threadId", "thread_id", "id"], "thread.activity.append")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let activity_type = match pctx
+                .require_str_any(&["activityType", "activity_type"], "thread.activity.append")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            let description =
+                match pctx.require_str_any(&["description", "text"], "thread.activity.append") {
+                    Ok(v) => v,
+                    Err(r) => return *r,
+                };
+            service
+                .append_thread_activity(id, activity_type, description)
+                .await
+        }
+        // `project.meta.update` — frontend ships `title` intending to rename
+        // the project. `Command::UpdateProjectConfig` only carries
+        // `provider_id`/`default_model`; there is NO `RenameProject` command
+        // yet (plan §4 risk #3). Dispatch with both optional fields as `None`
+        // so the call resolves cleanly; the `title` field is intentionally
+        // dropped (logged for observability).
+        "project.meta.update" => {
+            let project_id = match pctx
+                .require_id_any(&["projectId", "project_id", "id"], "project.meta.update")
+            {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
+            tracing::debug!(
+                project_id = %project_id,
+                "project.meta.update received; title field not yet supported"
+            );
+            // title field is intentionally dropped — no RenameProject command
+            // exists yet. Tracked in plan §4 risk #3.
+            service.update_project_config(project_id, None, None).await
+        }
         other => {
+            // Phase 0 (dot-notation bridge): emit a server-side warn log so
+            // regressions from the bridge work are visible. Log keys only —
+            // payloads may contain user input (prompt text, file paths).
+            tracing::warn!(
+                command_type = %other,
+                param_keys = ?params
+                    .as_object()
+                    .map(|o| o.keys().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "dispatchCommand rejected: unsupported command type"
+            );
             return JsonRpcResponse::error(
                 Some(id),
                 crate::error_codes::INVALID_PARAMS,
@@ -21223,6 +21524,806 @@ mod tests {
         assert_eq!(err.data.unwrap()["kind"], "project_not_found");
     }
 
+    // ─── Dot-notation bridge — Phase 1 ─────────────────────────────────
+    //
+    // The MCode frontend dispatches commands like `project.create`,
+    // `thread.delete`, `thread.turn.start`, `thread.turn.interrupt` via
+    // `orchestration.dispatchCommand`. The PascalCase arms (`CreateProject`,
+    // `DeleteThread`, `StartTurn`, `InterruptTurn`) MUST keep working as
+    // regression guards; the dot-form arms route to the same ApplicationService
+    // methods with camelCase/snake_case-tolerant param extraction.
+
+    #[tokio::test]
+    async fn project_create_dot_notation_creates_project() {
+        // Phase 1: `project.create` dispatches through to `create_project`.
+        // Frontend payload uses `title`+`workspaceRoot`; the arm maps these to
+        // `name`+`root_path`. Read model must reflect the new project.
+        let state = WsState::new_in_memory(16);
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "project.create",
+                "title": "My Proj",
+                "workspaceRoot": "/tmp/proj",
+                // Extra keys that must be ignored (wire-tolerance):
+                "projectId": "00000000-0000-0000-0000-000000000000",
+                "kind": "local",
+                "defaultModelSelection": { "provider": "claudeAgent", "model": "x" },
+                "createWorkspaceRootIfMissing": false,
+                "createdAt": "2026-07-08T00:00:00Z",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "project.create failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+
+        // Read model contains the project named via the `title` field.
+        let store = state.read_store.read().await;
+        assert_eq!(store.projects.len(), 1, "project should be projected");
+        let project = store.projects.values().next().unwrap();
+        assert_eq!(project.name, "My Proj");
+        assert_eq!(project.root_path, "/tmp/proj");
+    }
+
+    #[tokio::test]
+    async fn thread_delete_dot_notation_deletes_thread() {
+        // Phase 1: `thread.delete` dispatches through to `delete_thread`.
+        // Pre-seed a thread via `thread.create`, then delete it via the dot-form
+        // and verify the read model no longer contains it.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+
+        // Seed a thread via thread.create (dot-form) so we exercise the bridge
+        // end-to-end.
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let store = state.read_store.read().await;
+            assert!(
+                store.threads.contains_key(&thread_id),
+                "seeded thread exists"
+            );
+        }
+
+        // Delete via the dot-form (camelCase key).
+        let resp = dispatch(
+            &state,
+            serde_json::json!({ "type": "thread.delete", "threadId": thread_id }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.delete failed: {:?}",
+            resp.error
+        );
+
+        // Tombstone removes it from the read model.
+        let store = state.read_store.read().await;
+        assert!(
+            !store.threads.contains_key(&thread_id),
+            "thread must be removed from read model after delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_meta_update_dot_notation_updates_thread() {
+        // Phase 2: `thread.meta.update` dispatches through to
+        // `update_thread_meta`. Pre-seed a thread via `thread.create`, then
+        // mutate its provider/model via the dot-form using `modelSelection`
+        // and verify the read model reflects both fields.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Initial state from `thread.create`. Note: `thread.create` normalizes
+        // the mcode provider kind `claudeAgent` → backend id `claude`.
+        {
+            let store = state.read_store.read().await;
+            let thread = store.threads.get(&thread_id).expect("seeded thread");
+            assert_eq!(thread.provider_id, "claude");
+            assert_eq!(thread.model, "claude-sonnet-4-5");
+        }
+
+        // Update provider only (model left unchanged via None).
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.meta.update",
+                "threadId": thread_id,
+                "modelSelection": { "provider": "openai" },
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.meta.update (provider) failed: {:?}",
+            resp.error
+        );
+        {
+            let store = state.read_store.read().await;
+            let thread = store.threads.get(&thread_id).expect("seeded thread");
+            assert_eq!(thread.provider_id, "openai");
+            assert_eq!(thread.model, "claude-sonnet-4-5");
+        }
+
+        // Update model only (provider left unchanged via None).
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.meta.update",
+                "threadId": thread_id,
+                "modelSelection": { "model": "gpt-4o" },
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.meta.update (model) failed: {:?}",
+            resp.error
+        );
+        {
+            let store = state.read_store.read().await;
+            let thread = store.threads.get(&thread_id).expect("seeded thread");
+            assert_eq!(thread.provider_id, "openai");
+            assert_eq!(thread.model, "gpt-4o");
+        }
+    }
+
+    #[tokio::test]
+    async fn thread_turn_start_dot_notation_starts_turn() {
+        // Phase 1: `thread.turn.start` dispatches through to `start_turn`.
+        // Frontend payload uses `threadId`+`userInput`; `sequence` may be
+        // omitted (defaults to 0). Verifies the turn is created and active.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.turn.start",
+                "threadId": thread_id,
+                "userInput": "hello",
+                // sequence deliberately omitted; arm must default to 0.
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.turn.start failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+        let turn_id = result["aggregateId"].as_str().unwrap().to_string();
+        assert!(!turn_id.is_empty());
+
+        // Read model reflects an active turn for the thread.
+        let store = state.read_store.read().await;
+        let turn = store.turns.get(&turn_id).expect("turn should be projected");
+        assert_eq!(turn.thread_id, thread_id);
+        assert_eq!(turn.sequence, 0, "sequence defaults to 0 when omitted");
+        // A freshly-started turn is "pending" (no provider session is wired in
+        // the in-memory orchestrator).
+        assert_eq!(turn.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn thread_turn_interrupt_dot_notation_interrupts_turn() {
+        // Phase 1: `thread.turn.interrupt` dispatches through to
+        // `interrupt_turn`. Because the in-memory orchestrator has no provider
+        // session wired, the freshly-started turn is "pending" (not "running"),
+        // so the Decider rejects the interrupt — the SAME rejection the
+        // PascalCase `InterruptTurn` arm produces. Asserting the rejection is
+        // a Decider error (NOT "Unsupported command type") proves the arm is
+        // wired and routes through ApplicationService.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let turn_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.turn.start",
+                "threadId": thread_id,
+                "userInput": "hi",
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Interrupt via the dot-form.
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.turn.interrupt",
+                "turnId": turn_id,
+            }),
+        )
+        .await;
+        // The Decider rejects because the turn is "pending" (not "running").
+        // The error must be a structured Decider error — NOT "Unsupported
+        // command type" (which would mean the arm isn't wired).
+        let err = resp
+            .error
+            .expect("expected Decider rejection (turn not running) for thread.turn.interrupt");
+        assert_eq!(
+            err.code,
+            crate::error_codes::INVALID_PARAMS,
+            "Decider rejection must surface as INVALID_PARAMS"
+        );
+        assert!(
+            !err.message.contains("Unsupported command type"),
+            "arm must be wired; got: {err:?}"
+        );
+        let data = err.data.expect("expected structured data.kind");
+        assert_eq!(
+            data["kind"], "decider_error",
+            "Decider rejection must carry kind=decider_error; got: {data:?}"
+        );
+    }
+
+    // ─── Phase 3 dot-notation arms (8 commands + checkpoint-revert guard) ──
+
+    #[tokio::test]
+    async fn thread_runtime_mode_set_dot_notation_sets_mode() {
+        // Phase 3: `thread.runtime-mode.set` dispatches through to
+        // `set_thread_runtime_mode`. Read model must reflect the new mode.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.runtime-mode.set",
+                "threadId": thread_id,
+                "runtimeMode": "approval-required",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.runtime-mode.set failed: {:?}",
+            resp.error
+        );
+
+        let store = state.read_store.read().await;
+        let thread = store.threads.get(&thread_id).expect("thread projected");
+        assert_eq!(thread.runtime_mode, "approval-required");
+    }
+
+    #[tokio::test]
+    async fn thread_interaction_mode_set_dot_notation_sets_mode() {
+        // Phase 3: `thread.interaction-mode.set` dispatches through to
+        // `set_thread_interaction_mode`. Read model must reflect the new mode.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.interaction-mode.set",
+                "threadId": thread_id,
+                "interactionMode": "plan",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.interaction-mode.set failed: {:?}",
+            resp.error
+        );
+
+        let store = state.read_store.read().await;
+        let thread = store.threads.get(&thread_id).expect("thread projected");
+        assert_eq!(thread.interaction_mode, "plan");
+    }
+
+    #[tokio::test]
+    async fn thread_session_stop_dot_notation_stops_session() {
+        // Phase 3: `thread.session.stop` dispatches through to
+        // `stop_thread_session`. The Decider only guards thread existence; the
+        // emitted event is `ThreadSessionStopRequested`. We assert the dispatch
+        // resolves successfully (no INVALID_PARAMS).
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.session.stop",
+                "threadId": thread_id,
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.session.stop failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+    }
+
+    #[tokio::test]
+    async fn thread_checkpoint_revert_dot_notation_truncates_read_model() {
+        // CRITICAL Phase 3 test: `thread.checkpoint.revert` MUST call
+        // `complete_revert` (emits ThreadRevertCompleted → read-model
+        // truncation by turn_count), NOT `revert_to_checkpoint` (git-ref
+        // based). Pre-seed 3 turns (sequences 0, 1, 2), dispatch with
+        // turnCount:0, then assert exactly 1 turn remains (sequence 0). The
+        // projector removes turns with `sequence > turn_count`, so turnCount=0
+        // keeps only sequence 0. Guards against accidentally switching the
+        // mapping to revert_to_checkpoint (which would leave all 3 turns AND
+        // require a non-empty `gitRef` the frontend does not send).
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Seed 3 turns (sequence 0, 1, 2).
+        for seq in 0..3u32 {
+            let resp = dispatch(
+                &state,
+                serde_json::json!({
+                    "type": "thread.turn.start",
+                    "threadId": thread_id,
+                    "userInput": format!("turn-{seq}"),
+                    "sequence": seq,
+                }),
+            )
+            .await;
+            assert!(
+                resp.error.is_none(),
+                "seed turn {seq} failed: {:?}",
+                resp.error
+            );
+        }
+        {
+            let store = state.read_store.read().await;
+            let seeded: Vec<&syncode_orchestration::TurnView> = store
+                .turns
+                .values()
+                .filter(|t| t.thread_id == thread_id)
+                .collect();
+            assert_eq!(seeded.len(), 3, "3 turns must be seeded before revert");
+        }
+
+        // Revert to turnCount:0 — projector removes turns with sequence > 0,
+        // leaving only sequence 0 (1 turn).
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.checkpoint.revert",
+                "threadId": thread_id,
+                "turnCount": 0,
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.checkpoint.revert failed: {:?}",
+            resp.error
+        );
+
+        let store = state.read_store.read().await;
+        let remaining: Vec<&syncode_orchestration::TurnView> = store
+            .turns
+            .values()
+            .filter(|t| t.thread_id == thread_id)
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "complete_revert must truncate to 1 turn (sequence 0 only), \
+             NOT leave all 3 (which would mean revert_to_checkpoint was called). \
+             Got: {remaining:?}"
+        );
+        assert_eq!(
+            remaining[0].sequence, 0,
+            "only sequence-0 turn must remain after turnCount:0 revert"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_approval_respond_dot_notation_responds() {
+        // Phase 3: `thread.approval.respond` dispatches through to
+        // `respond_thread_approval`. Decider only guards thread existence; the
+        // provider approval queue is not yet modeled. Assert the dispatch
+        // resolves successfully and the event is appended.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.approval.respond",
+                "threadId": thread_id,
+                "requestId": "req-001",
+                "decision": "approved",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.approval.respond failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+    }
+
+    #[tokio::test]
+    async fn thread_user_input_respond_dot_notation_responds() {
+        // Phase 3: `thread.user-input.respond` dispatches through to
+        // `respond_thread_user_input`. `answers` is serialized to a string by
+        // the caller; the provider user-input queue is not yet modeled.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.user-input.respond",
+                "threadId": thread_id,
+                "requestId": "req-002",
+                "answers": "yes",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.user-input.respond failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+    }
+
+    #[tokio::test]
+    async fn project_meta_update_dot_notation_logs_and_returns_ok() {
+        // Phase 3: `project.meta.update` is intentionally a near-no-op: the
+        // `title` field has no destination in the current command surface
+        // (no RenameProject command — plan §4 risk #3). The dispatch resolves
+        // cleanly with provider_id/default_model = None; the `title` field is
+        // dropped. Asserts the call succeeds (no INVALID_PARAMS).
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "project.meta.update",
+                "projectId": project_id,
+                "title": "New Name",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "project.meta.update failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        // update_project_config(id, None, None) is a no-op Decider-side, but
+        // the event is still appended (the Decider emits ProjectConfigUpdated
+        // regardless of payload change). Assert the dispatch reports success.
+    }
+
+    #[tokio::test]
+    async fn thread_activity_append_dot_notation_appends() {
+        // Phase 3: `thread.activity.append` dispatches through to
+        // `append_thread_activity`. The read model's `activities` Vec must
+        // contain the new entry, scoped to the thread.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.activity.append",
+                "threadId": thread_id,
+                "activityType": "info",
+                "description": "test activity",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.activity.append failed: {:?}",
+            resp.error
+        );
+
+        let store = state.read_store.read().await;
+        let matching = store
+            .activities
+            .iter()
+            .filter(|a| a.thread_id.as_deref() == Some(&thread_id))
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "exactly one activity must be projected");
+        assert_eq!(matching[0].activity_type, "info");
+        assert_eq!(matching[0].description, "test activity");
+    }
+
+    #[tokio::test]
+    async fn thread_checkpoint_revert_does_not_call_revert_to_checkpoint() {
+        // Regression guard for the critical Phase 3 mapping. We assert by
+        // observing the read model: `revert_to_checkpoint` would emit
+        // `ThreadReverted { git_ref }` (no read-model turn truncation), while
+        // `complete_revert` emits `ThreadRevertCompleted { turn_count }`
+        // (truncates turns). With 3 seeded turns (sequences 0,1,2) and
+        // turnCount:1, a correct `complete_revert` call keeps turns with
+        // sequence ≤ 1 (i.e. 2 turns), and drops sequence 2. An incorrect
+        // `revert_to_checkpoint` call would either (a) leave all 3 turns
+        // intact AND require a non-empty `gitRef` the frontend does not send
+        // (triggering DeciderError::EmptyCheckpointRef → INVALID_PARAMS), or
+        // (b) silently leave all 3 turns. Either way, asserting Ok + exactly
+        // 2 turns remaining proves the right path was taken.
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for seq in 0..3u32 {
+            let resp = dispatch(
+                &state,
+                serde_json::json!({
+                    "type": "thread.turn.start",
+                    "threadId": thread_id,
+                    "userInput": format!("turn-{seq}"),
+                    "sequence": seq,
+                }),
+            )
+            .await;
+            assert!(
+                resp.error.is_none(),
+                "seed turn {seq} failed: {:?}",
+                resp.error
+            );
+        }
+
+        // turnCount:1 — projector keeps turns with sequence ≤ 1 (2 turns),
+        // drops the turn at sequence 2.
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.checkpoint.revert",
+                "threadId": thread_id,
+                "turnCount": 1,
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "dispatch must succeed via complete_revert; if revert_to_checkpoint \
+             were called instead, the missing gitRef would trigger \
+             EmptyCheckpointRef (DeciderError). Error: {:?}",
+            resp.error
+        );
+
+        let store = state.read_store.read().await;
+        let remaining: Vec<&syncode_orchestration::TurnView> = store
+            .turns
+            .values()
+            .filter(|t| t.thread_id == thread_id)
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            2,
+            "complete_revert must keep 2 turns (sequences 0 and 1) after \
+             turnCount:1. If 3 turns remain, revert_to_checkpoint was called \
+             instead. Got: {remaining:?}"
+        );
+        assert!(
+            remaining.iter().all(|t| t.sequence <= 1),
+            "all remaining turns must have sequence ≤ turnCount"
+        );
+    }
+
+    #[tokio::test]
+    async fn pascal_case_arms_still_work() {
+        // Phase 1 regression guard: the existing PascalCase arms MUST keep
+        // working untouched after the dot-notation arms are added. Verifies the
+        // `CreateProject` arm in particular (the dot-form `project.create`
+        // shares the ApplicationService method but has a different match arm).
+        let state = WsState::new_in_memory(16);
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "CreateProject",
+                "name": "X",
+                "rootPath": "/tmp/x",
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "PascalCase CreateProject regression: {:?}",
+            resp.error
+        );
+        assert_eq!(resp.result.unwrap()["dispatched"], true);
+
+        let store = state.read_store.read().await;
+        assert_eq!(store.projects.len(), 1, "PascalCase arm must still project");
+        let project = store.projects.values().next().unwrap();
+        assert_eq!(project.name, "X");
+    }
+
     #[tokio::test]
     async fn orchestration_repair_state_consistent_store_reports_no_drift() {
         // ORCH-3: when the in-memory read model matches a fresh replay, the
@@ -22480,5 +23581,158 @@ mod tests {
                 "rpc/listMethods missing {expected}"
             );
         }
+    }
+
+    // ─── Phase 0: dot-notation bridge — silent-swallow fix ───────────────
+    //
+    // The fall-through arm in `handle_orchestration_dispatch_command` must
+    // emit a `tracing::warn!` (with the offending type + param keys) before
+    // returning INVALID_PARAMS, so future regressions from the bridge work
+    // surface in server logs. Payload values are never logged — only keys.
+
+    /// Shared in-memory sink for `tracing_subscriber`. Clones cheaply; each
+    /// clone appends to the same backing `Vec<u8>`. Implements `MakeWriter`
+    /// so it can be plugged straight into `fmt().with_writer(...)`.
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl CapturingWriter {
+        fn new() -> Self {
+            Self {
+                buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn snapshot(&self) -> String {
+            String::from_utf8(self.buffer.lock().unwrap().clone()).unwrap_or_default()
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.buffer
+                .lock()
+                .map(|mut buf| {
+                    buf.extend_from_slice(bytes);
+                    bytes.len()
+                })
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_command_type_emits_warn_log() {
+        // Arrange: install a thread-local subscriber whose writer appends
+        // to our shared buffer.
+        use tracing_subscriber::EnvFilter;
+        let writer = CapturingWriter::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("warn"))
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Act: dispatch an unknown command type.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "foo.bar", "extraKey": "ignored" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+
+        // Assert: error returned AND warn log captured.
+        assert!(
+            resp.error.is_some(),
+            "expected INVALID_PARAMS for unknown type"
+        );
+        drop(_guard); // detach subscriber so it flushes before we read.
+        let captured = writer.snapshot();
+        assert!(
+            captured.contains("foo.bar"),
+            "warn log must contain the offending type; got: {captured}"
+        );
+        assert!(
+            captured.contains("unsupported command type"),
+            "warn log must contain the rejection message; got: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_command_type_returns_invalid_params() {
+        // Regression guard: the existing INVALID_PARAMS error code path
+        // must still work after the warn-log addition.
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
+            "params": { "type": "foo.bar" }
+        });
+        let resp = rpc(&state, 1, &req).await;
+        assert!(resp.error.is_some(), "expected error for unknown type");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, crate::error_codes::INVALID_PARAMS);
+        assert!(
+            err.message.contains("Unsupported command type"),
+            "error message must preserve existing format; got: {}",
+            err.message
+        );
+    }
+
+    // ─── Phase 4: dispatch entry debug-log ─────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_emits_debug_log_with_command_id() {
+        // Arrange: install a thread-local subscriber at `debug` level so the
+        // entry log line is captured. The JSON-RPC `id` (here the string
+        // "req-42") must appear alongside `command_type` in the buffer so
+        // server logs can correlate requests end-to-end.
+        use tracing_subscriber::EnvFilter;
+        let writer = CapturingWriter::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("debug"))
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Act: dispatch a known command type so it reaches the entry log
+        // before being routed. Using `CreateProject` with a missing `name`
+        // field keeps the call side-effect-free (it fails param validation
+        // after the debug! fires).
+        let state = WsState::new_in_memory(16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": "req-42", "method": "orchestration.dispatchCommand",
+            "params": { "type": "CreateProject" }
+        });
+        let _resp = rpc(&state, 1, &req).await;
+
+        drop(_guard);
+        let captured = writer.snapshot();
+        assert!(
+            captured.contains("dispatching command"),
+            "debug log must contain the entry message; got: {captured}"
+        );
+        assert!(
+            captured.contains("CreateProject"),
+            "debug log must contain the command_type; got: {captured}"
+        );
+        assert!(
+            captured.contains("req-42"),
+            "debug log must contain the JSON-RPC request id; got: {captured}"
+        );
     }
 }

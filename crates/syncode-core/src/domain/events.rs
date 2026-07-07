@@ -115,6 +115,15 @@ pub enum DomainEvent {
         interaction_mode: String,
         updated_at: Timestamp,
     },
+    /// A thread's metadata (provider/model) was updated. Faithful to mcode
+    /// `thread.meta.update` {threadId, modelSelection}. Either field is optional;
+    /// `None` means "unchanged".
+    ThreadMetaUpdated {
+        thread_id: EntityId,
+        provider_id: Option<String>,
+        model: Option<String>,
+        updated_at: Timestamp,
+    },
     /// A client responded to a pending provider approval request for a thread.
     /// Faithful to mcode `thread.approval.respond` — mcode dispatches the
     /// response to the provider with no dedicated orchestration payload; this
@@ -445,7 +454,8 @@ impl DomainEvent {
             | Self::TurnDiffCompleted { thread_id, .. }
             | Self::ThreadRevertCompleted { thread_id, .. }
             | Self::ConversationRollbackRequested { thread_id, .. }
-            | Self::ConversationRolledBack { thread_id, .. } => *thread_id,
+            | Self::ConversationRolledBack { thread_id, .. }
+            | Self::ThreadMetaUpdated { thread_id, .. } => *thread_id,
         }
     }
 
@@ -467,6 +477,7 @@ impl DomainEvent {
             Self::ThreadSessionStopRequested { .. } => "ThreadSessionStopRequested",
             Self::ThreadRuntimeModeSet { .. } => "ThreadRuntimeModeSet",
             Self::ThreadInteractionModeSet { .. } => "ThreadInteractionModeSet",
+            Self::ThreadMetaUpdated { .. } => "ThreadMetaUpdated",
             Self::ThreadApprovalResponded { .. } => "ThreadApprovalResponded",
             Self::ThreadUserInputResponded { .. } => "ThreadUserInputResponded",
             Self::ThreadMessageEditedAndResent { .. } => "ThreadMessageEditedAndResent",

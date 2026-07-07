@@ -202,6 +202,23 @@ impl Projector {
                 }
             }
 
+            DomainEvent::ThreadMetaUpdated {
+                thread_id,
+                provider_id,
+                model,
+                updated_at,
+            } => {
+                if let Some(thread) = store.threads.get_mut(&thread_id.as_str()) {
+                    if let Some(provider_id) = provider_id {
+                        thread.provider_id = provider_id.clone();
+                    }
+                    if let Some(model) = model {
+                        thread.model = model.clone();
+                    }
+                    thread.updated_at = updated_at.to_string();
+                }
+            }
+
             DomainEvent::ThreadApprovalResponded { .. }
             | DomainEvent::ThreadUserInputResponded { .. }
             | DomainEvent::ThreadMessageEditedAndResent { .. } => {
