@@ -1590,8 +1590,12 @@ mod tests {
             .working_dir
             .as_ref()
             .expect("working_dir must be set");
+        // Normalize backslashes to forward slashes so the assertion is
+        // cross-platform: PathBuf::to_string_lossy() emits OS-native
+        // separators, which is `\` on Windows.
+        let wd_normalized = wd.replace('\\', "/");
         assert!(
-            wd.contains("automation/ci-build/"),
+            wd_normalized.contains("automation/ci-build/"),
             "working_dir should be the worktree path, got {wd}"
         );
         assert!(
@@ -1723,8 +1727,11 @@ mod tests {
         assert_eq!(reqs.len(), 1, "one (failed) dispatch");
         let wd = reqs[0].working_dir.as_ref().expect("worktree was set");
         // The worktree WAS created (dispatch ran inside it)...
+        // Normalize backslashes to forward slashes so the assertion is
+        // cross-platform (Windows emits `\`, Unix emits `/`).
+        let wd_normalized = wd.replace('\\', "/");
         assert!(
-            wd.contains("automation/ci-build/"),
+            wd_normalized.contains("automation/ci-build/"),
             "failed run should still have dispatched into the worktree, got {wd}"
         );
         // ...and cleaned up despite the failure.
