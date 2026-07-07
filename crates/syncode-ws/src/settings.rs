@@ -215,17 +215,21 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
     let now = chrono::Utc::now().to_rfc3339();
     let default_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
         .iter()
-        .map(|pid| {
-            let mcode_kind = if *pid == "claude" {
-                "claudeAgent"
-            } else {
-                *pid as &str
-            };
+        .map(|&pid| {
+            let mcode_kind = if pid == "claude" { "claudeAgent" } else { pid };
+            // Probe the provider's CLI binary on PATH so the settings/provider
+            // panel reflects REAL availability — previously every provider was
+            // hardcoded `available:true / authenticated`, claiming CLIs that
+            // aren't installed. The binary name matches the provider id
+            // (codex, claude, cursor, gemini, grok, kilo, opencode, pi).
+            let binary_path = which::which(pid).ok();
+            let installed = binary_path.is_some();
             serde_json::json!({
                 "provider": mcode_kind,
-                "status": "ready",
-                "available": true,
-                "authStatus": "authenticated",
+                "status": if installed { "ready" } else { "unavailable" },
+                "available": installed,
+                "authStatus": if installed { "authenticated" } else { "not_installed" },
+                "binaryPath": binary_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                 "checkedAt": now,
             })
         })
