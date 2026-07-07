@@ -63,7 +63,7 @@ const PUSH_CAPACITY: usize = 1024;
 /// Default provider id used when `SYNCODE_DEFAULT_PROVIDER` is unset. The
 /// provider's CLI must be installed on PATH for the chat to actually generate
 /// AI responses; otherwise the orchestrator falls back to inert mode.
-const DEFAULT_PROVIDER: &str = "claude";
+const DEFAULT_PROVIDER: &str = "opencode";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

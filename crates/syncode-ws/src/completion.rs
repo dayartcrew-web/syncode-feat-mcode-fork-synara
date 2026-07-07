@@ -45,7 +45,7 @@ use crate::orchestration_executor::OrchestrationRunExecutor;
 /// standalone server binary ([`crate::bin::server`]) so the library and the
 /// binary resolve the same default — keeping the completion harness and the
 /// chat pipeline on the same provider id by convention.
-const DEFAULT_PROVIDER: &str = "claude";
+const DEFAULT_PROVIDER: &str = "opencode";
 
 // ─── WsCompletionLlm ───────────────────────────────────────────────────────
 
