@@ -44,18 +44,20 @@
 //! `permission.asked` request mid-turn (`"once"`), so a headless adapter never
 //! deadlocks on the first permission prompt.
 
+#![allow(clippy::let_underscore_future)]
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 use super::super::trait_def::*;
+use crate::bin_resolver::resolve_binary;
 use crate::opencode_server::{
-    ModelRef, OPENCODE_CLI_SPEC, OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnStatus,
+    ModelRef, OPENCODE_CLI_SPEC, OpenCodeCompatibleCliSpec, OpenCodeServerClient,
 };
-
-/// Startup-wait timeout for the local `opencode serve` server (mcode uses 20s).
-const SERVER_TIMEOUT_MS: u64 = 20_000;
 
 /// OpenCode-specific configuration.
 #[derive(Debug, Clone)]
@@ -230,6 +232,107 @@ fn model_ref(model: &str) -> Option<ModelRef> {
     })
 }
 
+struct OpenCodeTurnOutcome {
+    output: String,
+    usage: Option<UsageInfo>,
+}
+
+/// Parse the NDJSON event stream from `opencode run --format json` into
+/// ProviderEvents. Returns Ok(outcome) on clean stream end (EOF or
+/// session.ended), Err on an error event (caller synthesizes Error).
+async fn run_opencode_turn<R>(
+    mut reader: R,
+    session_id: &str,
+    fwd_tx: &mpsc::Sender<ProviderEvent>,
+) -> Result<OpenCodeTurnOutcome, ProviderAdapterError>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = String::new();
+    let mut output = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            break; // EOF → synthesize Completed
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let msg: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    provider = PROVIDER_OPENCODE,
+                    line = %trimmed,
+                    "skipping unparseable opencode NDJSON line"
+                );
+                continue;
+            }
+        };
+        let ty = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "error" => {
+                let err_msg = msg
+                    .pointer("/error/data/message")
+                    .or_else(|| msg.pointer("/error/message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("opencode error");
+                let _ = fwd_tx.send(ProviderEvent::Error {
+                    session_id: session_id.to_string(),
+                    message: err_msg.to_string(),
+                    code: None,
+                });
+                return Err(ProviderAdapterError::ProcessExited(err_msg.to_string()));
+            }
+            "assistant" | "message" => {
+                // Extract text content (try multiple shapes).
+                let text = msg
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| msg.pointer("/content/0/text").and_then(|v| v.as_str()))
+                    .or_else(|| msg.get("content").and_then(|v| v.as_str()));
+                if let Some(text) = text
+                    && !text.is_empty()
+                {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(text);
+                    let _ = fwd_tx.send(ProviderEvent::Token {
+                        session_id: session_id.to_string(),
+                        content: text.to_string(),
+                    });
+                }
+            }
+            "tool" => {
+                let _ = fwd_tx.send(ProviderEvent::ToolCall {
+                    session_id: session_id.to_string(),
+                    tool_name: msg
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool")
+                        .to_string(),
+                    tool_input: msg.clone(),
+                });
+            }
+            "session" if msg.get("ended").and_then(|v| v.as_bool()) == Some(true) => {
+                return Ok(OpenCodeTurnOutcome {
+                    output,
+                    usage: None,
+                });
+            }
+            _ => {} // ignore unknown event types (thinking_tokens, etc.)
+        }
+    }
+    // EOF without session.ended → synthesize Completed with collected output.
+    Ok(OpenCodeTurnOutcome {
+        output,
+        usage: None,
+    })
+}
+
 #[async_trait::async_trait]
 impl ProviderAdapter for OpenCodeAdapter {
     // -- Identity ----------------------------------------------------------
@@ -273,28 +376,11 @@ impl ProviderAdapter for OpenCodeAdapter {
             ));
         }
 
-        // Launch `opencode serve` rooted at the config's working dir (or cwd).
-        let cwd = config
-            .extra
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| ".".to_string())
-            });
-        let client = OpenCodeServerClient::spawn_with(
-            self.spec,
-            &self.oc_config.bin_path,
-            &self.oc_config.extra_args,
-            &cwd,
-            None,
-            SERVER_TIMEOUT_MS,
-        )
-        .await?;
-
-        *self.client.lock().await = Some(client);
+        // One-shot `opencode run` model: no long-lived `opencode serve` server.
+        // Each send_request spawns a fresh `opencode run` subprocess that reads
+        // ~/.local/share/opencode/auth.json natively (the same path the working
+        // CLI + @opencode-ai/sdk use). The serve path returned 401 because the
+        // served instance didn't propagate the Z.AI credential to AI sessions.
         self.config = Some(config);
         self.spawned.store(true, Ordering::Release);
         self.set_status(ProviderStatus::Idle);
@@ -304,9 +390,7 @@ impl ProviderAdapter for OpenCodeAdapter {
         tracing::info!(
             provider = PROVIDER_OPENCODE,
             binary = %self.oc_config.bin_path,
-            full_auto = self.oc_config.full_auto,
-            agent = self.agent(),
-            "OpenCode adapter spawned + server ready",
+            "OpenCode adapter spawned (one-shot `opencode run` mode — no serve)",
         );
         Ok(())
     }
@@ -318,7 +402,7 @@ impl ProviderAdapter for OpenCodeAdapter {
         self.set_status(ProviderStatus::ShuttingDown);
 
         if let Some(client) = self.client.lock().await.take() {
-            let _ = client.shutdown().await;
+            drop(client.shutdown().await);
         }
         *self.current_session.lock().await = None;
         *self.system_prompt.lock().await = None;
@@ -345,22 +429,12 @@ impl ProviderAdapter for OpenCodeAdapter {
         if !self.spawned.load(Ordering::Acquire) {
             return Err(ProviderAdapterError::NotSpawned);
         }
-        let model = self.spawn_model_ref();
-        let agent = self.agent().to_owned();
+        let _model = self.spawn_model_ref();
 
-        let guard = self.client.lock().await;
-        let Some(client) = guard.as_ref() else {
-            return Err(ProviderAdapterError::NotSpawned);
-        };
-        let session_id = client
-            .create_session(
-                "syncode",
-                model.as_ref(),
-                Some(&agent),
-                self.oc_config.full_auto,
-            )
-            .await?;
-        drop(guard);
+        // One-shot model: no server-side session.create (that was the 401 source
+        // on the serve path). Generate a synthetic session id; each send_request
+        // spawns a fresh `opencode run`.
+        let session_id = format!("opencode-{}", syncode_core::EntityId::new());
 
         *self.current_session.lock().await = Some(session_id.clone());
         *self.system_prompt.lock().await = ctx.system_prompt.clone();
@@ -426,7 +500,7 @@ impl ProviderAdapter for OpenCodeAdapter {
         })?;
         let parts = Self::turn_input(&request.params);
         let model = self.model_ref_for(&request);
-        let agent = self.agent().to_owned();
+        let _agent = self.agent().to_owned();
         let system = self.system_prompt.lock().await.clone();
 
         // Bridge the turn's mpsc events onto the shared broadcast bus so
@@ -442,55 +516,105 @@ impl ProviderAdapter for OpenCodeAdapter {
         });
 
         self.set_status(ProviderStatus::Busy);
-        let turn_result = {
-            let guard = self.client.lock().await;
-            let Some(client) = guard.as_ref() else {
-                return Err(ProviderAdapterError::NotSpawned);
-            };
-            client
-                .start_turn(
-                    &session_id,
-                    parts,
-                    model.as_ref(),
-                    Some(&agent),
-                    None,
-                    system.as_deref(),
-                    &fwd_tx,
-                )
-                .await
-        };
-        drop(fwd_tx); // close → forwarder drains remaining events and exits
-        let _ = forwarder.await;
-        let turn = turn_result?;
 
-        match turn.status {
-            TurnStatus::Completed | TurnStatus::Cancelled => {
+        // Build the one-shot `opencode run` subprocess (mirrors claude.rs).
+        // opencode run -m <model> --format json "<prompt>"
+        // This reads ~/.local/share/opencode/auth.json natively (credential
+        // discovery works — the serve path returned 401 because the served
+        // instance didn't propagate the Z.AI credential).
+        let prompt_text = parts
+            .first()
+            .and_then(|p| p.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt = if let Some(s) = &system {
+            format!("{s}\n\n{prompt_text}")
+        } else {
+            prompt_text
+        };
+        let bin = resolve_binary(&self.oc_config.bin_path);
+        let model_str = model
+            .as_ref()
+            .map(|m| format!("{}/{}", m.provider_id, m.id))
+            .unwrap_or_else(|| "default".to_string());
+        let working_dir = self
+            .config
+            .as_ref()
+            .and_then(|c| c.extra.get("cwd"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+        let mut cmd = Command::new(&bin);
+        cmd.args(["run", "-m", &model_str, "--format", "json", &prompt])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(working_dir)
+            .kill_on_drop(true);
+        for a in &self.oc_config.extra_args {
+            cmd.arg(a);
+        }
+        // Inherit parent env (HOME/PATH must reach the process so auth.json
+        // is found — tokio Command inherits env by default; do NOT env_clear).
+
+        let mut child = cmd.spawn().map_err(|e| {
+            ProviderAdapterError::ProcessExited(format!(
+                "failed to spawn `opencode run` ({bin}): {e}"
+            ))
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ProviderAdapterError::ProcessExited(
+                "opencode subprocess stdout not captured".to_string(),
+            )
+        })?;
+        let stderr_rx = child.stderr.take().map(|mut err| {
+            let (tx, rx) = oneshot::channel::<String>();
+            tokio::spawn(async move {
+                let mut buf = String::new();
+                drop(err.read_to_string(&mut buf).await);
+                let _ = tx.send(buf);
+            });
+            rx
+        });
+
+        let outcome = run_opencode_turn(BufReader::new(stdout), &session_id, &fwd_tx).await;
+        drop(fwd_tx); // close → forwarder drains remaining events and exits
+        _ = forwarder.await;
+        _ = child.wait().await; // reap
+        let stderr_buf = match stderr_rx {
+            Some(rx) => rx.await.unwrap_or_default(),
+            None => String::new(),
+        };
+
+        match outcome {
+            Ok(oc) => {
                 let _ = self.event_tx.send(ProviderEvent::Completed {
                     session_id: session_id.clone(),
-                    output: turn.output.clone(),
-                    usage: turn.usage.clone(),
+                    output: oc.output.clone(),
+                    usage: oc.usage.clone(),
                 });
                 self.set_status(ProviderStatus::Idle);
                 Ok(ProviderResponse {
                     jsonrpc: "2.0".to_string(),
                     id: Some(request.id),
-                    result: Some(json!({ "output": turn.output, "usage": turn.usage })),
+                    result: Some(json!({ "output": oc.output, "usage": oc.usage })),
                     error: None,
                 })
             }
-            TurnStatus::Failed => {
-                // The Error event was already forwarded to the bus by the SSE
-                // decoder inside `start_turn`; surface the failure as a
-                // JSON-RPC error so callers can distinguish it from a clean
-                // completion.
-                let message = turn
-                    .raw
-                    .get("properties")
-                    .and_then(|p| p.get("error"))
-                    .and_then(|e| e.get("message"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("opencode turn failed")
-                    .to_string();
+            Err(e) => {
+                let message = if stderr_buf.trim().is_empty() {
+                    e.to_string()
+                } else {
+                    format!(
+                        "{e}\n--- stderr ---\n{}",
+                        &stderr_buf[..stderr_buf.len().min(2048)]
+                    )
+                };
+                let _ = self.event_tx.send(ProviderEvent::Error {
+                    session_id: session_id.clone(),
+                    message: message.clone(),
+                    code: None,
+                });
                 self.set_status(ProviderStatus::Idle);
                 Ok(ProviderResponse {
                     jsonrpc: "2.0".to_string(),
@@ -499,7 +623,7 @@ impl ProviderAdapter for OpenCodeAdapter {
                     error: Some(ProviderError {
                         code: -32000,
                         message,
-                        data: Some(turn.raw.clone()),
+                        data: None,
                     }),
                 })
             }
