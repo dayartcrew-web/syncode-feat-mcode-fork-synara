@@ -47,6 +47,17 @@ pub const CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED: &str = "server.providerStatu
 /// via this channel.
 pub const CHANNEL_SERVER_LIFECYCLE: &str = "server.lifecycle";
 
+/// `server.welcome` — initial welcome push sent unconditionally on every new
+/// WS connection (PR-fix-welcome). The frontend's `onServerWelcome` listener
+/// (registered in `wsNativeApi.ts::createWsNativeApi`) binds to this exact
+/// channel name and uses the payload's `homeDir` to populate
+/// `workspaceStore.homeDir`. Without this push the splash screen never
+/// resolves and the "New chat" welcome flow is blocked. The push is emitted
+/// directly to the connection's mpsc sender in `handle_connection` (server.rs)
+/// — it bypasses the subscription opt-in since MCode semantics send the
+/// welcome on connect, not after an explicit `subscribe`.
+pub const CHANNEL_SERVER_WELCOME: &str = "server.welcome";
+
 /// All valid channel names
 pub const ALL_CHANNELS: &[&str] = &[
     CHANNEL_ALL,
@@ -59,6 +70,7 @@ pub const ALL_CHANNELS: &[&str] = &[
     CHANNEL_SERVER_SETTINGS_UPDATED,
     CHANNEL_SERVER_PROVIDER_STATUSES_UPDATED,
     CHANNEL_SERVER_LIFECYCLE,
+    CHANNEL_SERVER_WELCOME,
 ];
 
 /// Subscription manager for a single connection

@@ -44,6 +44,22 @@ async fn handle_connection(socket: WebSocket, state: Arc<WsState>) {
     let push_tx_clone = tx.clone();
     state.register(conn_id, tx).await;
 
+    // Emit the welcome push directly on this connection's mpsc — bypasses the
+    // subscription opt-in (the welcome is unconditional on connect, matching
+    // MCode's `onServerWelcome` semantics). The frontend's listener binds to
+    // the `server.welcome` channel name and uses the payload's `homeDir` to
+    // resolve the splash screen + populate `workspaceStore.homeDir`. Without
+    // this push the welcome gap blocks "New chat" (homeDir stays null).
+    //
+    // Sent BEFORE the push-delivery task spawns so the welcome is the first
+    // message buffered in the channel; the send task drains in FIFO order.
+    if !crate::rpc::emit_welcome_on_connect(&push_tx_clone, &state) {
+        tracing::warn!(
+            conn_id,
+            "welcome push not delivered (connection sender closed)"
+        );
+    }
+
     // Forward subscribed push-bus broadcasts to this connection (honors the
     // connection's channel subscriptions; see run_push_delivery).
     let push_handle = tokio::spawn(run_push_delivery(
