@@ -63,6 +63,7 @@ export const EVENT_TYPES = [
   "threadSessionStopRequested",
   "threadRuntimeModeSet",
   "threadInteractionModeSet",
+  "threadMetaUpdated",
   "threadApprovalResponded",
   "threadUserInputResponded",
   "threadMessageEditedAndResent",
