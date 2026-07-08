@@ -286,11 +286,17 @@ where
                 });
                 return Err(ProviderAdapterError::ProcessExited(err_msg.to_string()));
             }
-            "assistant" | "message" => {
-                // Extract text content (try multiple shapes).
+            "assistant" | "message" | "text" => {
+                // Extract text content (try multiple shapes). opencode's
+                // `--format json` emits the assistant text as a `text` event
+                // whose payload lives under `part.text`:
+                //   {"type":"text","part":{"type":"text","text":"<response>"}}
+                // (NOT a top-level `text`/`content` field). Try `/part/text`
+                // first, then fall back to the flat shapes other providers use.
                 let text = msg
-                    .get("text")
+                    .pointer("/part/text")
                     .and_then(|v| v.as_str())
+                    .or_else(|| msg.get("text").and_then(|v| v.as_str()))
                     .or_else(|| msg.pointer("/content/0/text").and_then(|v| v.as_str()))
                     .or_else(|| msg.get("content").and_then(|v| v.as_str()));
                 if let Some(text) = text
@@ -828,6 +834,36 @@ mod tests {
     fn turn_input_empty_when_null() {
         let input = OpenCodeAdapter::turn_input(&None);
         assert_eq!(input[0]["text"], "");
+    }
+
+    #[tokio::test]
+    async fn run_opencode_turn_extracts_part_text_from_text_event() {
+        // opencode `--format json` emits the assistant response as a `text`
+        // event with the payload nested under `part.text` (captured from a
+        // live `opencode run -m zai-coding-plan/glm-5.2 --format json`):
+        //   {"type":"step_start", ...}
+        //   {"type":"text", "part":{"type":"text","text":"SYNCODE_ROUNDTRIP_OK"}}
+        //   {"type":"step_finish", ...}
+        // The parser MUST extract `part.text` (not a top-level text/content),
+        // otherwise the turn completes with an empty assistant_output.
+        let ndjson = concat!(
+            r#"{"type":"step_start","part":{"type":"step-start"}}"#,
+            "\n",
+            r#"{"type":"text","part":{"type":"text","text":"SYNCODE_ROUNDTRIP_OK"}}"#,
+            "\n",
+            r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}"#,
+            "\n",
+        );
+        let reader =
+            tokio::io::BufReader::new(std::io::Cursor::new(ndjson.to_string().into_bytes()));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProviderEvent>(64);
+        let outcome = run_opencode_turn(reader, "ses_test", &tx)
+            .await
+            .expect("turn should complete at EOF");
+        assert_eq!(
+            outcome.output, "SYNCODE_ROUNDTRIP_OK",
+            "part.text must be extracted from the opencode `text` event"
+        );
     }
 
     #[test]
