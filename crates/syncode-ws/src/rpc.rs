@@ -793,7 +793,9 @@ async fn dispatch_method(
         // robustness (the wsNativeApi sends dot, the tauriNativeApi sends slash
         // — both must resolve). Entry order matches the MCODE_TO_SERVED append
         // block to ease parallel-merge conflict resolution.
-        "provider.listModels" | "provider/list-models" => handle_provider_list_models(id),
+        "provider.listModels" | "provider/list-models" => {
+            handle_provider_list_models(id, &request.params)
+        }
         "provider.listSkills" | "provider/list-skills" => {
             handle_provider_list_skills(id, &request.params)
         }
@@ -9686,22 +9688,53 @@ fn provider_display_name(kind: &str) -> &str {
     }
 }
 
-fn handle_provider_list_models(id: Value) -> JsonRpcResponse {
-    let models: Vec<Value> = syncode_provider::ALL_PROVIDERS
-        .iter()
-        .filter_map(|p| to_mcode_provider_kind(p))
-        .map(|kind| {
-            serde_json::json!({
-                "slug": kind,
-                "name": provider_display_name(kind),
-            })
-        })
-        .collect();
+fn handle_provider_list_models(id: Value, params: &Value) -> JsonRpcResponse {
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // When a specific provider is requested, return that provider's real model
+    // catalog. opencode is backed by the Z.AI Coding Plan (Anthropic-compatible)
+    // — its valid model ids are `zai-coding-plan/<glm-id>` (bare `glm-5` is NOT
+    // valid). Without this arm the handler ignored the `provider` param and
+    // returned the provider list for every query, so the UI model picker could
+    // never offer a working model for opencode.
+    //
+    // `source: "opencode"` (not "syncode") for this arm so the frontend's
+    // `hasResolvedOpenCodeModelDiscovery` gate (requires source "opencode" /
+    // "opencode-cli") treats discovery as resolved and uses these models.
+    let (models, source): (Vec<Value>, &str) = if provider
+        .eq_ignore_ascii_case(syncode_provider::PROVIDER_OPENCODE)
+    {
+        (
+            vec![
+                serde_json::json!({ "slug": "zai-coding-plan/glm-5.2", "name": "GLM 5.2 (Z.AI)" }),
+                serde_json::json!({ "slug": "zai-coding-plan/glm-5.1", "name": "GLM 5.1 (Z.AI)" }),
+                serde_json::json!({ "slug": "zai-coding-plan/glm-5-turbo", "name": "GLM 5 Turbo (Z.AI)" }),
+                serde_json::json!({ "slug": "zai-coding-plan/glm-4.6", "name": "GLM 4.6 (Z.AI)" }),
+            ],
+            "opencode",
+        )
+    } else {
+        (
+            syncode_provider::ALL_PROVIDERS
+                .iter()
+                .filter_map(|p| to_mcode_provider_kind(p))
+                .map(|kind| {
+                    serde_json::json!({
+                        "slug": kind,
+                        "name": provider_display_name(kind),
+                    })
+                })
+                .collect(),
+            "syncode",
+        )
+    };
     JsonRpcResponse::success(
         id,
         serde_json::json!({
             "models": models,
-            "source": "syncode",
+            "source": source,
         }),
     )
 }
