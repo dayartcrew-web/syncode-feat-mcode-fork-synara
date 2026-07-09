@@ -40,6 +40,7 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// ACP method names (client→agent requests + the `session/cancel` notification).
 mod methods {
     pub const INITIALIZE: &str = "initialize";
+    pub const AUTHENTICATE: &str = "authenticate";
     pub const SESSION_NEW: &str = "session/new";
     pub const SESSION_PROMPT: &str = "session/prompt";
     pub const SESSION_CANCEL: &str = "session/cancel";
@@ -86,7 +87,15 @@ impl AcpClient {
     }
 
     /// `initialize` handshake. Must be the first call. Returns the agent's
-    /// `InitializeResponse` result (protocol version, agent info, capabilities).
+    /// `InitializeResponse` result (protocol version, agent info, capabilities,
+    /// `authMethods`).
+    ///
+    /// We advertise `clientCapabilities` declaring that we do NOT delegate
+    /// filesystem or terminal access (`fs.readTextFile`/`writeTextFile` and
+    /// `terminal` are false). The ACP spec lets an agent offload these to the
+    /// client; without the explicit `false` flags some agents assume defaults
+    /// and attempt `fs/read_text_file`/`terminal/*` requests, which we deny
+    /// (method-not-found) mid-turn. Matching the mcode handshake exactly.
     pub async fn initialize(
         &mut self,
         client_name: &str,
@@ -95,6 +104,10 @@ impl AcpClient {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "clientInfo": { "name": client_name, "version": client_version },
+            "clientCapabilities": {
+                "fs": { "readTextFile": false, "writeTextFile": false },
+                "terminal": false
+            }
         });
         let resp = self
             .transport
@@ -102,6 +115,33 @@ impl AcpClient {
             .await?;
         check_rpc_error(&resp)?;
         Ok(resp.result.unwrap_or(Value::Null))
+    }
+
+    /// `authenticate` handshake step. The ACP spec requires this between
+    /// `initialize` and `session/new` for agents that gate sessions behind an
+    /// auth method (Cursor: `cursor_login`; Grok: `xai.api_key` /
+    /// `cached_token`). `method_id` selects the auth method advertised in the
+    /// `initialize` result's `authMethods`; optional `meta` is forwarded as
+    /// `_meta` (Grok sends `{"headless": true}`).
+    ///
+    /// Providers that self-authenticate from cached credentials (Gemini with a
+    /// configured API key) omit this step — call only when a method id is
+    /// resolved.
+    pub async fn authenticate(
+        &mut self,
+        method_id: &str,
+        meta: Option<&Value>,
+    ) -> Result<(), ProviderAdapterError> {
+        let mut params = json!({ "methodId": method_id });
+        if let Some(m) = meta {
+            params["_meta"] = m.clone();
+        }
+        let resp = self
+            .transport
+            .send_request(methods::AUTHENTICATE, Some(params))
+            .await?;
+        check_rpc_error(&resp)?;
+        Ok(())
     }
 
     /// `session/new` — opens a session rooted at `cwd`. Returns the agent-assigned
@@ -311,8 +351,21 @@ fn map_session_update(params: &Value) -> Vec<ProviderEvent> {
 
 /// Concatenate every `text` part of an ACP content array
 /// (`[{ "type":"text", "text":"..." }, ...]`). Non-text parts are ignored.
+///
+/// Also accepts the content **part itself** as a single object
+/// (`{ "type":"text", "text":"..." }`). The ACP spec v0.11.3 shapes `content`
+/// as an array, but Gemini (and some other agents) emit the part object
+/// directly. Without this fallback the streamed `agent_message_chunk` text is
+/// silently dropped — the terminal `Completed` then carries empty output.
 fn extract_text(content: Option<&Value>) -> Option<String> {
-    let items = content?.as_array()?;
+    let content = content?;
+    // Collect the parts to inspect: either an array of parts (spec form) or a
+    // single part object (Gemini wire quirk).
+    let items: Vec<&Value> = match content {
+        Value::Array(arr) => arr.iter().collect(),
+        Value::Object(_) => vec![content],
+        _ => return None,
+    };
     let mut text = String::new();
     for item in items {
         if item.get("type").and_then(|v| v.as_str()) == Some("text")
@@ -347,11 +400,28 @@ fn parse_prompt_response(resp: ProviderResponse) -> Result<PromptResult, Provide
         .get("stopReason")
         .and_then(|v| v.as_str())
         .map(str::to_owned);
-    let usage = result.get("usage").map(|u| UsageInfo {
-        input_tokens: num(u, "inputTokens"),
-        output_tokens: num(u, "outputTokens"),
-        total_tokens: num(u, "totalTokens"),
-    });
+    let usage = result
+        .get("usage")
+        .map(|u| UsageInfo {
+            input_tokens: num(u, "inputTokens"),
+            output_tokens: num(u, "outputTokens"),
+            total_tokens: num(u, "totalTokens"),
+        })
+        .or_else(|| {
+            // Gemini wire quirk: token usage lives under
+            // `result._meta.quota.token_count` with snake_case keys
+            // (`input_tokens` / `output_tokens`) — not the spec's top-level
+            // `result.usage` with camelCase keys. Without this fallback the
+            // turn reports `usage: None` even though Gemini did report tokens.
+            let tc = result.get("_meta")?.get("quota")?.get("token_count")?;
+            let input = num(tc, "input_tokens");
+            let output = num(tc, "output_tokens");
+            Some(UsageInfo {
+                input_tokens: input,
+                output_tokens: output,
+                total_tokens: input + output,
+            })
+        });
     Ok(PromptResult {
         stop_reason,
         usage,
@@ -460,6 +530,90 @@ mod tests {
 
         let session_id = client.new_session("/tmp/proj").await.expect("new_session");
         assert_eq!(session_id, "sess-1");
+
+        peer.await.unwrap();
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_no_fs_or_terminal_capability() {
+        // The handshake must declare we don't delegate fs/terminal to the agent,
+        // matching mcode — otherwise some agents issue fs/terminal requests we
+        // would deny mid-turn.
+        let (mut client, peer_reader, peer_writer) = acp_harness();
+        let peer = tokio::spawn(async move {
+            let mut reader = BufReader::new(peer_reader);
+            let mut writer = peer_writer;
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "initialize");
+            assert_eq!(
+                req["params"]["clientCapabilities"]["fs"]["readTextFile"],
+                false
+            );
+            assert_eq!(
+                req["params"]["clientCapabilities"]["fs"]["writeTextFile"],
+                false
+            );
+            assert_eq!(req["params"]["clientCapabilities"]["terminal"], false);
+            peer_write(
+                &mut writer,
+                &json!({
+                    "jsonrpc": "2.0", "id": req["id"],
+                    "result": { "protocolVersion": 1, "agentInfo": { "name": "fake" } }
+                }),
+            )
+            .await;
+        });
+        let _ = client
+            .initialize("syncode", "0.1.0")
+            .await
+            .expect("initialize");
+        peer.await.unwrap();
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticate_sends_method_id_with_optional_meta() {
+        // Cursor/Grok require the ACP `authenticate` step before session/new.
+        // Verify the request carries the method id, and forwards `_meta` only
+        // when supplied (Grok's headless flag) — and not when absent.
+        let (mut client, peer_reader, peer_writer) = acp_harness();
+        let peer = tokio::spawn(async move {
+            let mut reader = BufReader::new(peer_reader);
+            let mut writer = peer_writer;
+
+            // First authenticate call: with `_meta` (Grok headless shape).
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "authenticate");
+            assert_eq!(req["params"]["methodId"], "xai.api_key");
+            assert_eq!(req["params"]["_meta"]["headless"], true);
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "id": req["id"], "result": {} }),
+            )
+            .await;
+
+            // Second authenticate call: no `_meta` (Cursor shape).
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "authenticate");
+            assert_eq!(req["params"]["methodId"], "cursor_login");
+            assert!(req["params"].get("_meta").is_none());
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "id": req["id"], "result": {} }),
+            )
+            .await;
+        });
+
+        let meta = json!({ "headless": true });
+        client
+            .authenticate("xai.api_key", Some(&meta))
+            .await
+            .expect("authenticate with meta");
+        client
+            .authenticate("cursor_login", None)
+            .await
+            .expect("authenticate without meta");
 
         peer.await.unwrap();
         client.shutdown().await.unwrap();
@@ -773,6 +927,75 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(
             matches!(events[0], ProviderEvent::Token { ref content, .. } if content == "foobar")
+        );
+    }
+
+    #[test]
+    fn map_message_chunk_accepts_single_object_content() {
+        // Gemini wire quirk: `content` is the part object itself, not an array
+        // of parts. Without the object fallback the Token is dropped and the
+        // turn ends with empty output.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "PONG" }
+            }
+        }));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ProviderEvent::Token { ref content, .. } if content == "PONG"));
+    }
+
+    #[test]
+    fn parse_prompt_response_reads_gemini_meta_quota_usage() {
+        // Gemini reports tokens under `result._meta.quota.token_count` with
+        // snake_case keys instead of the spec's top-level `result.usage`.
+        let resp = ProviderResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(json!({
+                "stopReason": "end_turn",
+                "_meta": {
+                    "quota": {
+                        "token_count": {
+                            "input_tokens": 28998,
+                            "output_tokens": 2
+                        },
+                        "model_usage": [{
+                            "model": "gemini-3.5-flash",
+                            "token_count": { "input_tokens": 28998, "output_tokens": 2 }
+                        }]
+                    }
+                }
+            })),
+            error: None,
+        };
+        let parsed = parse_prompt_response(resp).expect("parse");
+        assert_eq!(parsed.stop_reason.as_deref(), Some("end_turn"));
+        let usage = parsed.usage.expect("usage from _meta.quota");
+        assert_eq!(usage.input_tokens, 28998);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.total_tokens, 29000);
+    }
+
+    #[test]
+    fn parse_prompt_response_prefers_top_level_usage_when_present() {
+        // Spec form (top-level `usage`, camelCase) takes precedence over the
+        // Gemini `_meta.quota` fallback.
+        let resp = ProviderResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(json!({
+                "stopReason": "end_turn",
+                "usage": { "inputTokens": 10, "outputTokens": 5, "totalTokens": 15 }
+            })),
+            error: None,
+        };
+        let parsed = parse_prompt_response(resp).expect("parse");
+        let usage = parsed.usage.expect("usage");
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (10, 5, 15)
         );
     }
 

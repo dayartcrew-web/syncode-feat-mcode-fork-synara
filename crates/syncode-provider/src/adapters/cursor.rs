@@ -64,6 +64,12 @@ pub fn spec_with(endpoint: Option<&str>) -> AcpProviderConfig {
         ],
         available_models: vec!["cursor-default".to_string()],
         client_name: "syncode".to_string(),
+        // Cursor-agent gates sessions behind the locally-cached Cursor
+        // account via the `cursor_login` auth method. The ACP `authenticate`
+        // step is mandatory for Cursor before `session/new` (matches mcode's
+        // `CursorAcpSupport` authMethodId).
+        auth_method_id: Some("cursor_login".to_string()),
+        auth_meta: None,
     }
 }
 
