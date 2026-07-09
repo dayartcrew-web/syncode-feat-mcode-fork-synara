@@ -10,15 +10,23 @@
 //! gemini --acp
 //! ```
 //!
-//! # Note on wire quirks
+//! # Gemini ACP wire quirks (handled in [`crate::acp`])
 //!
 //! mcode drives Gemini with a bespoke adapter (manual `child_process` + manual
-//! JSON-RPC parse) rather than its shared ACP session runtime, which hints that
-//! Gemini's ACP surface may have quirks (e.g. non-standard `initialize` params
-//! or `session/*` behavior). syncode routes Gemini through the standard
-//! [`AcpClient`]; real-binary interop is exercised by the gated E2E test at
-//! `tests/gemini_e2e.rs` (run with `SYNICODE_ACP_E2E=1`), which surfaces any
-//! provider-specific handling by driving a full real turn.
+//! JSON-RPC parse) rather than its shared ACP session runtime. syncode instead
+//! routes Gemini through the standard [`AcpClient`], which required absorbing
+//! two Gemini deviations from the ACP v0.11.3 spec:
+//!
+//! - **`agent_message_chunk.content` is a single part object** (`{ type, text }`),
+//!   not the spec's array of parts. Without the object fallback the streamed
+//!   text was dropped and every turn ended with empty output.
+//! - **Token usage lives under `result._meta.quota.token_count`** with
+//!   snake_case keys (`input_tokens` / `output_tokens`), not the spec's
+//!   top-level `result.usage` with camelCase keys.
+//!
+//! Real-binary interop is verified by the gated E2E test at `tests/gemini_e2e.rs`
+//! (run with `SYNICODE_ACP_E2E=1`), which drives a full turn against the real
+//! `gemini` CLI and asserts streamed tokens + usage arrive.
 
 use crate::acp_provider::{AcpProvider, AcpProviderConfig};
 use crate::subprocess::SubprocessSpec;

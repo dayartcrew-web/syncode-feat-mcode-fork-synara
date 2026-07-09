@@ -311,8 +311,21 @@ fn map_session_update(params: &Value) -> Vec<ProviderEvent> {
 
 /// Concatenate every `text` part of an ACP content array
 /// (`[{ "type":"text", "text":"..." }, ...]`). Non-text parts are ignored.
+///
+/// Also accepts the content **part itself** as a single object
+/// (`{ "type":"text", "text":"..." }`). The ACP spec v0.11.3 shapes `content`
+/// as an array, but Gemini (and some other agents) emit the part object
+/// directly. Without this fallback the streamed `agent_message_chunk` text is
+/// silently dropped — the terminal `Completed` then carries empty output.
 fn extract_text(content: Option<&Value>) -> Option<String> {
-    let items = content?.as_array()?;
+    let content = content?;
+    // Collect the parts to inspect: either an array of parts (spec form) or a
+    // single part object (Gemini wire quirk).
+    let items: Vec<&Value> = match content {
+        Value::Array(arr) => arr.iter().collect(),
+        Value::Object(_) => vec![content],
+        _ => return None,
+    };
     let mut text = String::new();
     for item in items {
         if item.get("type").and_then(|v| v.as_str()) == Some("text")
@@ -347,11 +360,28 @@ fn parse_prompt_response(resp: ProviderResponse) -> Result<PromptResult, Provide
         .get("stopReason")
         .and_then(|v| v.as_str())
         .map(str::to_owned);
-    let usage = result.get("usage").map(|u| UsageInfo {
-        input_tokens: num(u, "inputTokens"),
-        output_tokens: num(u, "outputTokens"),
-        total_tokens: num(u, "totalTokens"),
-    });
+    let usage = result
+        .get("usage")
+        .map(|u| UsageInfo {
+            input_tokens: num(u, "inputTokens"),
+            output_tokens: num(u, "outputTokens"),
+            total_tokens: num(u, "totalTokens"),
+        })
+        .or_else(|| {
+            // Gemini wire quirk: token usage lives under
+            // `result._meta.quota.token_count` with snake_case keys
+            // (`input_tokens` / `output_tokens`) — not the spec's top-level
+            // `result.usage` with camelCase keys. Without this fallback the
+            // turn reports `usage: None` even though Gemini did report tokens.
+            let tc = result.get("_meta")?.get("quota")?.get("token_count")?;
+            let input = num(tc, "input_tokens");
+            let output = num(tc, "output_tokens");
+            Some(UsageInfo {
+                input_tokens: input,
+                output_tokens: output,
+                total_tokens: input + output,
+            })
+        });
     Ok(PromptResult {
         stop_reason,
         usage,
@@ -773,6 +803,75 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(
             matches!(events[0], ProviderEvent::Token { ref content, .. } if content == "foobar")
+        );
+    }
+
+    #[test]
+    fn map_message_chunk_accepts_single_object_content() {
+        // Gemini wire quirk: `content` is the part object itself, not an array
+        // of parts. Without the object fallback the Token is dropped and the
+        // turn ends with empty output.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "PONG" }
+            }
+        }));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ProviderEvent::Token { ref content, .. } if content == "PONG"));
+    }
+
+    #[test]
+    fn parse_prompt_response_reads_gemini_meta_quota_usage() {
+        // Gemini reports tokens under `result._meta.quota.token_count` with
+        // snake_case keys instead of the spec's top-level `result.usage`.
+        let resp = ProviderResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(json!({
+                "stopReason": "end_turn",
+                "_meta": {
+                    "quota": {
+                        "token_count": {
+                            "input_tokens": 28998,
+                            "output_tokens": 2
+                        },
+                        "model_usage": [{
+                            "model": "gemini-3.5-flash",
+                            "token_count": { "input_tokens": 28998, "output_tokens": 2 }
+                        }]
+                    }
+                }
+            })),
+            error: None,
+        };
+        let parsed = parse_prompt_response(resp).expect("parse");
+        assert_eq!(parsed.stop_reason.as_deref(), Some("end_turn"));
+        let usage = parsed.usage.expect("usage from _meta.quota");
+        assert_eq!(usage.input_tokens, 28998);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.total_tokens, 29000);
+    }
+
+    #[test]
+    fn parse_prompt_response_prefers_top_level_usage_when_present() {
+        // Spec form (top-level `usage`, camelCase) takes precedence over the
+        // Gemini `_meta.quota` fallback.
+        let resp = ProviderResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(json!({
+                "stopReason": "end_turn",
+                "usage": { "inputTokens": 10, "outputTokens": 5, "totalTokens": 15 }
+            })),
+            error: None,
+        };
+        let parsed = parse_prompt_response(resp).expect("parse");
+        let usage = parsed.usage.expect("usage");
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (10, 5, 15)
         );
     }
 
