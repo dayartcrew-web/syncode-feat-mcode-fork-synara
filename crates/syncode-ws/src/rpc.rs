@@ -18494,10 +18494,12 @@ mod tests {
             assert_eq!(total["value"], "150");
         }
 
-        // Provider WITHOUT usage → null (UI empty state).
+        // Provider WITHOUT usage → null (UI empty state). Use "grok" — no
+        // archive reader, so the fallback returns None even if codex/claude
+        // archives exist on the dev box.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "server.getProviderUsageSnapshot",
-            "params": { "provider": "codex" }
+            "params": { "provider": "grok" }
         });
         let resp = rpc(&state, 1, &req).await;
         assert!(resp.error.is_none());
