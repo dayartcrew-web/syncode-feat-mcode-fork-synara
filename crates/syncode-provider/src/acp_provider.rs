@@ -36,6 +36,7 @@
 //! notification stream), so holding the lock for the duration of a turn is
 //! correct rather than a limitation.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
@@ -284,8 +285,19 @@ impl ProviderAdapter for AcpProvider {
         // published (and buffered by the broadcast channel) before completion.
         let (fwd_tx, mut fwd_rx) = mpsc::channel::<ProviderEvent>(64);
         let bus = self.event_tx.clone();
+        // Accumulate the streamed Token text so the terminal `Completed` event
+        // can carry the real assistant output. ACP's `session/result` only
+        // carries `stopReason` + `usage` (NO content) — the text arrives via
+        // streamed `agent_message_chunk` Token events. Without this, the
+        // Completed output falls back to the raw result JSON and the turn's
+        // `assistant_output` ends up as `{"stopReason":"end_turn"}`.
+        let accumulated: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let acc_for_fwd = accumulated.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = fwd_rx.recv().await {
+                if let ProviderEvent::Token { content, .. } = &event {
+                    acc_for_fwd.lock().await.push_str(content);
+                }
                 let _ = bus.send(event);
             }
         });
@@ -303,10 +315,13 @@ impl ProviderAdapter for AcpProvider {
 
         let prompt = prompt_result?;
 
-        // Terminal completion for this session, carrying the raw PromptResponse.
+        // Terminal completion for this session, carrying the accumulated
+        // streamed assistant text (NOT the raw result JSON, which only has
+        // `stopReason`/`usage`).
+        let output = accumulated.lock().await.clone();
         let _ = self.event_tx.send(ProviderEvent::Completed {
             session_id: session_id.clone(),
-            output: prompt.raw.to_string(),
+            output,
             usage: prompt.usage.clone(),
         });
         self.set_status(ProviderStatus::Idle);
@@ -552,8 +567,8 @@ mod tests {
             "{events:?}"
         );
         assert!(
-            matches!(&events[1], ProviderEvent::Completed { usage, .. } if usage.as_ref().map(|u| u.total_tokens) == Some(5)),
-            "{events:?}"
+            matches!(&events[1], ProviderEvent::Completed { output, usage, .. } if output == "Hi back" && usage.as_ref().map(|u| u.total_tokens) == Some(5)),
+            "Completed must carry the streamed text, not the raw result JSON: {events:?}"
         );
 
         peer.await.unwrap();
