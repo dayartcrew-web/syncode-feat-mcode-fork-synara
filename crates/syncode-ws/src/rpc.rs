@@ -11770,6 +11770,38 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
         _ => (Value::Null, Value::Null),
     };
 
+    // topReasoning: derive from model names in the usage log (syncode doesn't
+    // persist the reasoningEffort option — MCode stores it on turn events;
+    // this heuristic maps model → tier: opus→high, codex→xhigh, haiku→low).
+    let (top_reasoning, top_reasoning_percent): (Value, Value) = {
+        let mut tier_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for agg in &aggregates {
+            let m = agg.model.to_lowercase();
+            let tier = if m.contains("opus") {
+                "high"
+            } else if m.contains("codex") || m.contains("xhigh") {
+                "xhigh"
+            } else if m.contains("haiku") || m.contains("mini") || m.contains("turbo") {
+                "low"
+            } else {
+                "medium"
+            };
+            *tier_counts.entry(tier.to_string()).or_insert(0) += agg.call_count;
+        }
+        let total: u64 = tier_counts.values().sum();
+        match tier_counts.iter().max_by_key(|(_, c)| *c) {
+            Some((tier, count)) if total > 0 => {
+                let pct = (*count as f64 / total as f64) * 100.0;
+                (
+                    Value::String(tier.clone()),
+                    serde_json::json!((pct * 100.0).round() / 100.0),
+                )
+            }
+            _ => (Value::Null, Value::Null),
+        }
+    };
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
@@ -11796,8 +11828,8 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
             "insights": {
                 "topProvider": top_provider,
                 "topProviderPercent": top_provider_percent,
-                "topReasoning": Value::Null,
-                "topReasoningPercent": Value::Null,
+                "topReasoning": top_reasoning,
+                "topReasoningPercent": top_reasoning_percent,
                 "skillsExplored": 0,
                 "totalSkillsUsed": 0,
             },
