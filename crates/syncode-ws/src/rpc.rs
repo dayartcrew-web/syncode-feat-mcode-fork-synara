@@ -11920,6 +11920,63 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
         }
     };
 
+    // ── Skills extraction + mostWorkedProject (GAP 5-6) ──────────────────
+    // Skills: scan turn.user_input for $skill_name mentions (MCode
+    // profileStats.ts:119-233). mostWorkedProject: count turns per project
+    // via turn → thread → project_id (profileStats.ts:787-823).
+    let (skills, most_used_skill, skills_explored, total_skills_used, most_worked_project) = {
+        let store = state.read_store.read().await;
+        let mut project_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        let mut skill_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for turn in store.turns.values() {
+            if let Some(thread) = store.threads.get(&turn.thread_id) {
+                *project_counts.entry(thread.project_id.clone()).or_insert(0) += 1;
+            }
+            let input = &turn.user_input;
+            let mut chars = input.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '$' {
+                    let mut skill = String::new();
+                    while let Some(&next) = chars.peek()
+                        && (next.is_alphanumeric() || next == '_' || next == '-')
+                    {
+                        skill.push(next);
+                        chars.next();
+                    }
+                    if !skill.is_empty() {
+                        *skill_counts.entry(skill).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let total_skills_used: u64 = skill_counts.values().sum();
+        let skills_explored = skill_counts.len() as u64;
+        let most_used_skill = skill_counts
+            .iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(name, _)| Value::String(name.clone()))
+            .unwrap_or(Value::Null);
+        let skills: Vec<Value> = skill_counts
+            .iter()
+            .map(|(name, &count)| serde_json::json!({"name": name, "count": count}))
+            .collect();
+        let most_worked_project = project_counts
+            .iter()
+            .max_by_key(|(_, c)| *c)
+            .and_then(|(pid, _)| store.projects.get(pid))
+            .map(|p| serde_json::json!({"id": p.id, "name": p.name, "rootPath": p.root_path}))
+            .unwrap_or(Value::Null);
+        (
+            skills,
+            most_used_skill,
+            skills_explored,
+            total_skills_used,
+            most_worked_project,
+        )
+    };
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
@@ -11948,13 +12005,13 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
                 "topProviderPercent": top_provider_percent,
                 "topReasoning": top_reasoning,
                 "topReasoningPercent": top_reasoning_percent,
-                "skillsExplored": 0,
-                "totalSkillsUsed": 0,
+                "skillsExplored": skills_explored,
+                "totalSkillsUsed": total_skills_used,
             },
             "providerModels": provider_models,
-            "skills": [],
-            "mostUsedSkill": Value::Null,
-            "mostWorkedProject": Value::Null,
+            "skills": skills,
+            "mostUsedSkill": most_used_skill,
+            "mostWorkedProject": most_worked_project,
             "quota": {
                 "status": "unavailable",
                 "provider": Value::Null,
