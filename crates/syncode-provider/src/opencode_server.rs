@@ -773,6 +773,22 @@ fn map_event(event: &Value, session_id: &str, usage: &mut Option<UsageInfo>) -> 
     out
 }
 
+/// Whether a `message.part.updated` `part` should be projected to the caller.
+///
+/// Mirror of mcode's `shouldProjectOpenCodeTextPart`: non-text parts always
+/// project; a `text` part projects only when it is NOT flagged `synthetic` or
+/// `ignored`. Kilo (and opencode) emit flagged text parts for local-UI progress
+/// such as snapshot setup — concatenating them into the assistant output
+/// pollutes the turn with non-model chatter.
+fn should_project_part(part: &Value) -> bool {
+    let ty = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if ty != "text" {
+        return true;
+    }
+    let flagged = |key: &str| part.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    !(flagged("synthetic") || flagged("ignored"))
+}
+
 /// Map a `message.part.updated` event's `part` to events:
 /// - text/reasoning part → [`ProviderEvent::Token`] (non-empty `text`);
 /// - tool part → [`ProviderEvent::ToolCall`] (pending/running) or
@@ -781,6 +797,12 @@ fn map_part_updated(props: &Value, session_id: &str) -> Vec<ProviderEvent> {
     let Some(part) = props.get("part") else {
         return Vec::new();
     };
+    // Drop local-UI progress parts (kilo snapshot setup, etc.) flagged
+    // `synthetic` or `ignored` — mcode's `shouldProjectOpenCodeTextPart`.
+    // Otherwise these get concatenated into the assistant output as noise.
+    if !should_project_part(part) {
+        return Vec::new();
+    }
     let ty = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match ty {
         "text" | "reasoning" => {
@@ -1172,6 +1194,33 @@ mod tests {
         let got = map_part_updated(&json!({ "part": { "type": "text", "text": "hi" } }), "s1");
         assert_eq!(got.len(), 1);
         assert!(matches!(&got[0], ProviderEvent::Token { content, .. } if content == "hi"));
+    }
+
+    #[test]
+    fn map_part_updated_drops_synthetic_and_ignored_text() {
+        // mcode shouldProjectOpenCodeTextPart: kilo/opencode emit local-UI
+        // progress as flagged text parts — they must not pollute the output.
+        let synthetic = map_part_updated(
+            &json!({ "part": { "type": "text", "text": "snapshot setup…", "synthetic": true } }),
+            "s1",
+        );
+        assert!(synthetic.is_empty(), "synthetic text must be dropped");
+
+        let ignored = map_part_updated(
+            &json!({ "part": { "type": "text", "text": "ignored chatter", "ignored": true } }),
+            "s1",
+        );
+        assert!(ignored.is_empty(), "ignored text must be dropped");
+
+        // Real assistant text (no flags) still projects.
+        let real = map_part_updated(&json!({ "part": { "type": "text", "text": "real" } }), "s1");
+        assert_eq!(real.len(), 1);
+        // Tool/reasoning parts are unaffected by the text-only filter.
+        let reasoning = map_part_updated(
+            &json!({ "part": { "type": "reasoning", "text": "thinking", "synthetic": true } }),
+            "s1",
+        );
+        assert_eq!(reasoning.len(), 1, "synthetic flag only filters text parts");
     }
 
     #[test]
