@@ -11622,21 +11622,110 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
     // totalThreads = thread count.
     // promptsToday = turns whose `created_at` ISO timestamp date-matches today
     //   (UTC). Best-effort parse — malformed entries are silently skipped.
-    let (total_prompts, total_threads, prompts_today): (u64, u64, u64) = {
+    // ── Activity counts + per-hour + per-day buckets from the read store ──
+    // Mirrors MCode profileStats.ts: queryPromptActivity (activeHours),
+    // buildHeatmap (274-day window), computeStreaks (current/longest).
+    let (
+        total_prompts,
+        total_threads,
+        prompts_today,
+        heatmap,
+        current_streak,
+        longest_streak,
+        active_hours,
+    ): (u64, u64, u64, Vec<Value>, u64, u64, Value) = {
         let store = state.read_store.read().await;
         let turns = store.turns.len() as u64;
         let threads = store.threads.len() as u64;
-        let today = chrono::Utc::now().date_naive();
+        let now = chrono::Utc::now();
+        let today = now.date_naive();
         let mut today_count: u64 = 0;
+        let mut hours: [u64; 24] = [0; 24];
+        let mut days: std::collections::HashMap<chrono::NaiveDate, u64> =
+            std::collections::HashMap::new();
         for turn in store.turns.values() {
-            // `created_at` is an ISO-8601 string; parse the date portion only.
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&turn.created_at)
-                && dt.with_timezone(&chrono::Utc).date_naive() == today
-            {
-                today_count += 1;
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&turn.created_at) {
+                let utc = dt.with_timezone(&chrono::Utc);
+                let date = utc.date_naive();
+                if date == today {
+                    today_count += 1;
+                }
+                hours[chrono::Timelike::hour(&utc.time()) as usize] += 1;
+                *days.entry(date).or_insert(0) += 1;
             }
         }
-        (turns, threads, today_count)
+
+        // activeHours: peak hour bucket + label (MCode formatHour + arcName).
+        let (peak_hour, peak_count) = hours
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, c)| *c)
+            .map(|(h, c)| (h as u32, *c))
+            .unwrap_or((0, 0));
+        let active_hours = if peak_count > 0 {
+            let label = match peak_hour {
+                5..=11 => "Morning",
+                12..=16 => "Afternoon",
+                17..=21 => "Evening",
+                _ => "Night",
+            };
+            serde_json::json!({
+                "startHour": peak_hour,
+                "endHour": (peak_hour + 1) % 24,
+                "turnCount": peak_count,
+                "label": label,
+            })
+        } else {
+            serde_json::json!({
+                "startHour": serde_json::Value::Null,
+                "endHour": serde_json::Value::Null,
+                "turnCount": 0,
+                "label": serde_json::Value::Null,
+            })
+        };
+
+        // Heatmap: 274-day window ending today (MCode buildHeatmap).
+        let heatmap: Vec<Value> = (0..274i64)
+            .rev()
+            .map(|offset| {
+                let date = today - chrono::Duration::days(offset);
+                let value = days.get(&date).copied().unwrap_or(0);
+                serde_json::json!({"date": date.format("%Y-%m-%d").to_string(), "value": value})
+            })
+            .collect();
+
+        // Streaks (MCode computeStreaks).
+        let mut current_streak: u64 = 0;
+        let mut cursor = today;
+        while days.contains_key(&cursor) {
+            current_streak += 1;
+            cursor = match cursor.pred_opt() {
+                Some(p) => p,
+                None => break,
+            };
+        }
+        let mut sorted_days: Vec<chrono::NaiveDate> = days.keys().copied().collect();
+        sorted_days.sort_unstable();
+        sorted_days.dedup();
+        let mut longest_streak: u64 = 0;
+        let mut run: u64 = 0;
+        let mut prev: Option<chrono::NaiveDate> = None;
+        for d in &sorted_days {
+            let consecutive = prev.is_some_and(|p| d.pred_opt() == Some(p));
+            run = if consecutive { run + 1 } else { 1 };
+            longest_streak = longest_streak.max(run);
+            prev = Some(*d);
+        }
+
+        (
+            turns,
+            threads,
+            today_count,
+            heatmap,
+            current_streak,
+            longest_streak,
+            active_hours,
+        )
     };
 
     // ── Per-provider usage breakdown + top-provider insight ──────────────
@@ -11695,20 +11784,15 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
                 "defaultHandle": default_handle,
             },
             "activity": {
-                "currentStreakDays": 0,
-                "longestStreakDays": 0,
+                "currentStreakDays": current_streak,
+                "longestStreakDays": longest_streak,
                 "totalPromptsSent": total_prompts,
                 "totalThreads": total_threads,
                 "promptsToday": prompts_today,
                 "heatmapMetric": "prompts",
-                "heatmap": [],
+                "heatmap": heatmap,
             },
-            "activeHours": {
-                "startHour": Value::Null,
-                "endHour": Value::Null,
-                "turnCount": 0,
-                "label": Value::Null,
-            },
+            "activeHours": active_hours,
             "insights": {
                 "topProvider": top_provider,
                 "topProviderPercent": top_provider_percent,
@@ -19395,7 +19479,7 @@ mod tests {
         // Empty/zero aggregates.
         assert_eq!(result["providerModels"].as_array().unwrap().len(), 0);
         assert_eq!(result["skills"].as_array().unwrap().len(), 0);
-        assert_eq!(result["activity"]["heatmap"].as_array().unwrap().len(), 0);
+        assert_eq!(result["activity"]["heatmap"].as_array().unwrap().len(), 274);
         assert_eq!(result["activity"]["totalPromptsSent"], 0);
         assert_eq!(result["activity"]["currentStreakDays"], 0);
         assert_eq!(result["activity"]["heatmapMetric"], "prompts");
