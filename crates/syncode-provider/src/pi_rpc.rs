@@ -535,12 +535,45 @@ fn classify_agent_end(stop_reason: &Option<String>, message: &Option<String>) ->
 
 /// Best-effort token-usage extraction from an `agent_end` event.
 ///
-/// Pi's in-process SDK surfaces stats via `getSessionStats()`; in RPC mode the
-/// exact carrier is unverified, so this defensively probes the common shapes an
-/// event might carry (under `usage` / `tokens` / `stats`), accepting both
-/// snake_case and camelCase keys. Returns `None` when nothing matches — the
-/// turn still completes; usage simply isn't reported.
+/// Extract token usage from an `agent_end` event.
+///
+/// Verified against the pi RPC spec (`docs/rpc.md` @ 0.80.3): the `agent_end`
+/// event carries all generated messages, and each assistant message reports its
+/// own usage at `usage` = `{ input, output, cacheRead, cacheWrite }` (no `total`
+/// field). An agentic turn may issue several LLM calls (one per assistant
+/// message), so we SUM usage across all assistant messages for an accurate
+/// turn-total rather than reading only the last call. Session-wide totals are
+/// also available via a separate `get_session_stats` command, but summing the
+/// `agent_end` messages needs no extra round-trip. The top-level defensive
+/// probes are kept as a fallback for forward-compat. Returns `None` when nothing
+/// matches — the turn still completes; usage simply isn't reported.
 fn extract_usage(event: &serde_json::Value) -> Option<UsageInfo> {
+    // Verified path: sum `usage` across assistant messages in `agent_end`.
+    if let Some(msgs) = event.get("messages").and_then(|v| v.as_array()) {
+        let (mut input, mut output, mut any) = (0u32, 0u32, false);
+        for m in msgs {
+            if m.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                continue;
+            }
+            if let Some(u) = m.get("usage") {
+                input = input.saturating_add(
+                    uint(u, &["input", "input_tokens", "inputTokens"]).unwrap_or(0),
+                );
+                output = output.saturating_add(
+                    uint(u, &["output", "output_tokens", "outputTokens"]).unwrap_or(0),
+                );
+                any = true;
+            }
+        }
+        if any {
+            return Some(UsageInfo {
+                input_tokens: input,
+                output_tokens: output,
+                total_tokens: input.saturating_add(output),
+            });
+        }
+    }
+    // Defensive fallback: top-level usage-ish objects (forward-compat).
     for obj in [
         event.get("usage"),
         event.get("tokens"),
@@ -824,14 +857,46 @@ mod tests {
 
     #[test]
     fn extract_usage_is_defensive_across_shapes() {
-        // snake_case under `usage`.
+        // VERIFIED pi RPC spec shape: agent_end carries the final assistant
+        // message's usage at messages[last].usage = {input,output,cacheRead,
+        // cacheWrite} (no total — we synthesize input+output).
+        let ev = json!({
+            "type": "agent_end",
+            "messages": [
+                { "role": "user" },
+                { "role": "assistant", "usage": { "input": 100, "output": 50, "cacheRead": 0, "cacheWrite": 0 }, "stopReason": "stop" }
+            ]
+        });
+        let u = extract_usage(&ev).expect("usage from messages[last].usage");
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (100, 50, 150)
+        );
+
+        // Agentic turn: multiple assistant messages (one per LLM call) — usage
+        // is SUMMED across them for an accurate turn total.
+        let ev = json!({
+            "type": "agent_end",
+            "messages": [
+                { "role": "assistant", "usage": { "input": 100, "output": 50 } },
+                { "role": "user", "content": "tool result" },
+                { "role": "assistant", "usage": { "input": 200, "output": 30 } }
+            ]
+        });
+        let u = extract_usage(&ev).expect("summed usage");
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (300, 80, 380)
+        );
+
+        // snake_case under top-level `usage` (defensive fallback).
         let ev = json!({"usage": {"input_tokens": 10, "output_tokens": 4}});
         let u = extract_usage(&ev).expect("usage");
         assert_eq!(
             (u.input_tokens, u.output_tokens, u.total_tokens),
             (10, 4, 14)
         );
-        // camelCase under `tokens`.
+        // camelCase under `tokens` (defensive fallback).
         let ev = json!({"tokens": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 11}});
         let u = extract_usage(&ev).expect("usage");
         assert_eq!(
@@ -840,6 +905,13 @@ mod tests {
         );
         // Nothing recognizable → None (turn still completes without usage).
         assert!(extract_usage(&json!({"type": "agent_end"})).is_none());
+        // agent_end with messages but no usage on the last message → None.
+        assert!(
+            extract_usage(
+                &json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}]})
+            )
+            .is_none()
+        );
         // No input key → None (don't fabricate usage from output alone).
         assert!(extract_usage(&json!({"usage": {"output_tokens": 5}})).is_none());
     }
