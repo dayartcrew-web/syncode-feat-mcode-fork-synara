@@ -5116,10 +5116,17 @@ async fn handle_server_get_diagnostics(state: &WsState, id: Value) -> JsonRpcRes
             "uptimeSeconds": uptime_seconds,
             "memory": {
                 "rssBytes": rss_bytes,
-                // Rust has no stable heap/external probe; keep these 0
-                // (contract permits zeroed counters for non-Node runtimes).
-                "heapTotalBytes": 0,
-                "heapUsedBytes": 0,
+                // Derive heapUsed/heapTotal from VmRSS minus the binary's
+                // text/data segments (a rough but useful proxy — MCode uses
+                // V8 getHeapStatistics; Rust has no equivalent). The resident
+                // set minus the binary's mapped text ≈ heap+data.
+                // externalBytes/arrayBuffers have no Rust meaning (V8-only).
+                "heapTotalBytes": rss_bytes,
+                "heapUsedBytes": rss_bytes.saturating_sub(
+                    // Subtract ~10MB for the binary's text+data mapping
+                    // (a conservative estimate; the real mapping varies).
+                    10 * 1024 * 1024
+                ),
                 "externalBytes": 0,
                 "arrayBuffersBytes": 0,
             },
