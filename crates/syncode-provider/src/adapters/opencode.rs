@@ -250,6 +250,7 @@ where
 {
     let mut line = String::new();
     let mut output = String::new();
+    let mut usage: Option<UsageInfo> = None;
     loop {
         line.clear();
         let n = reader.read_line(&mut line).await?;
@@ -323,20 +324,37 @@ where
                     tool_input: msg.clone(),
                 });
             }
+            // opencode's one-shot `--format json` emits token usage on the
+            // terminal `step_finish` event: `part.tokens = {total, input,
+            // output, reasoning, cache:{...}}`. Capture it so the turn's
+            // `Completed.usage` carries real token counts → settings/usage +
+            // profile token-stats populate (previously always None).
+            "step_finish" => {
+                if let Some(tokens) = msg.pointer("/part/tokens") {
+                    let to_u32 = |k: &str| {
+                        tokens
+                            .get(k)
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as u32)
+                            .unwrap_or(0)
+                    };
+                    let input = to_u32("input");
+                    let total = to_u32("total");
+                    usage = Some(UsageInfo {
+                        input_tokens: input,
+                        output_tokens: to_u32("output"),
+                        total_tokens: total,
+                    });
+                }
+            }
             "session" if msg.get("ended").and_then(|v| v.as_bool()) == Some(true) => {
-                return Ok(OpenCodeTurnOutcome {
-                    output,
-                    usage: None,
-                });
+                return Ok(OpenCodeTurnOutcome { output, usage });
             }
             _ => {} // ignore unknown event types (thinking_tokens, etc.)
         }
     }
     // EOF without session.ended → synthesize Completed with collected output.
-    Ok(OpenCodeTurnOutcome {
-        output,
-        usage: None,
-    })
+    Ok(OpenCodeTurnOutcome { output, usage })
 }
 
 #[async_trait::async_trait]
@@ -834,6 +852,36 @@ mod tests {
     fn turn_input_empty_when_null() {
         let input = OpenCodeAdapter::turn_input(&None);
         assert_eq!(input[0]["text"], "");
+    }
+
+    #[tokio::test]
+    async fn run_opencode_turn_captures_tokens_from_step_finish() {
+        // opencode's one-shot `--format json` emits token usage on the terminal
+        // `step_finish` event: `part.tokens = {total, input, output, reasoning,
+        // cache:{...}}` (captured from a live opencode run). The parser must
+        // populate `usage` so the turn records real token counts (was always
+        // None before — settings/usage + profile token-stats were empty).
+        let ndjson = concat!(
+            r#"{"type":"step_start","part":{"type":"step-start"}}"#,
+            "\n",
+            r#"{"type":"text","part":{"type":"text","text":"hi"}}"#,
+            "\n",
+            r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop","tokens":{"total":195270,"input":195264,"output":6,"reasoning":0,"cache":{"write":0,"read":0}}}}"#,
+            "\n",
+        );
+        let reader =
+            tokio::io::BufReader::new(std::io::Cursor::new(ndjson.to_string().into_bytes()));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProviderEvent>(64);
+        let outcome = run_opencode_turn(reader, "ses_test", &tx)
+            .await
+            .expect("turn should complete at EOF");
+        assert_eq!(outcome.output, "hi");
+        let usage = outcome
+            .usage
+            .expect("step_finish tokens must populate usage");
+        assert_eq!(usage.input_tokens, 195264);
+        assert_eq!(usage.output_tokens, 6);
+        assert_eq!(usage.total_tokens, 195270);
     }
 
     #[tokio::test]
