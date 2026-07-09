@@ -40,6 +40,7 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// ACP method names (client→agent requests + the `session/cancel` notification).
 mod methods {
     pub const INITIALIZE: &str = "initialize";
+    pub const AUTHENTICATE: &str = "authenticate";
     pub const SESSION_NEW: &str = "session/new";
     pub const SESSION_PROMPT: &str = "session/prompt";
     pub const SESSION_CANCEL: &str = "session/cancel";
@@ -86,7 +87,15 @@ impl AcpClient {
     }
 
     /// `initialize` handshake. Must be the first call. Returns the agent's
-    /// `InitializeResponse` result (protocol version, agent info, capabilities).
+    /// `InitializeResponse` result (protocol version, agent info, capabilities,
+    /// `authMethods`).
+    ///
+    /// We advertise `clientCapabilities` declaring that we do NOT delegate
+    /// filesystem or terminal access (`fs.readTextFile`/`writeTextFile` and
+    /// `terminal` are false). The ACP spec lets an agent offload these to the
+    /// client; without the explicit `false` flags some agents assume defaults
+    /// and attempt `fs/read_text_file`/`terminal/*` requests, which we deny
+    /// (method-not-found) mid-turn. Matching the mcode handshake exactly.
     pub async fn initialize(
         &mut self,
         client_name: &str,
@@ -95,6 +104,10 @@ impl AcpClient {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "clientInfo": { "name": client_name, "version": client_version },
+            "clientCapabilities": {
+                "fs": { "readTextFile": false, "writeTextFile": false },
+                "terminal": false
+            }
         });
         let resp = self
             .transport
@@ -102,6 +115,33 @@ impl AcpClient {
             .await?;
         check_rpc_error(&resp)?;
         Ok(resp.result.unwrap_or(Value::Null))
+    }
+
+    /// `authenticate` handshake step. The ACP spec requires this between
+    /// `initialize` and `session/new` for agents that gate sessions behind an
+    /// auth method (Cursor: `cursor_login`; Grok: `xai.api_key` /
+    /// `cached_token`). `method_id` selects the auth method advertised in the
+    /// `initialize` result's `authMethods`; optional `meta` is forwarded as
+    /// `_meta` (Grok sends `{"headless": true}`).
+    ///
+    /// Providers that self-authenticate from cached credentials (Gemini with a
+    /// configured API key) omit this step — call only when a method id is
+    /// resolved.
+    pub async fn authenticate(
+        &mut self,
+        method_id: &str,
+        meta: Option<&Value>,
+    ) -> Result<(), ProviderAdapterError> {
+        let mut params = json!({ "methodId": method_id });
+        if let Some(m) = meta {
+            params["_meta"] = m.clone();
+        }
+        let resp = self
+            .transport
+            .send_request(methods::AUTHENTICATE, Some(params))
+            .await?;
+        check_rpc_error(&resp)?;
+        Ok(())
     }
 
     /// `session/new` — opens a session rooted at `cwd`. Returns the agent-assigned
@@ -490,6 +530,90 @@ mod tests {
 
         let session_id = client.new_session("/tmp/proj").await.expect("new_session");
         assert_eq!(session_id, "sess-1");
+
+        peer.await.unwrap();
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_no_fs_or_terminal_capability() {
+        // The handshake must declare we don't delegate fs/terminal to the agent,
+        // matching mcode — otherwise some agents issue fs/terminal requests we
+        // would deny mid-turn.
+        let (mut client, peer_reader, peer_writer) = acp_harness();
+        let peer = tokio::spawn(async move {
+            let mut reader = BufReader::new(peer_reader);
+            let mut writer = peer_writer;
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "initialize");
+            assert_eq!(
+                req["params"]["clientCapabilities"]["fs"]["readTextFile"],
+                false
+            );
+            assert_eq!(
+                req["params"]["clientCapabilities"]["fs"]["writeTextFile"],
+                false
+            );
+            assert_eq!(req["params"]["clientCapabilities"]["terminal"], false);
+            peer_write(
+                &mut writer,
+                &json!({
+                    "jsonrpc": "2.0", "id": req["id"],
+                    "result": { "protocolVersion": 1, "agentInfo": { "name": "fake" } }
+                }),
+            )
+            .await;
+        });
+        let _ = client
+            .initialize("syncode", "0.1.0")
+            .await
+            .expect("initialize");
+        peer.await.unwrap();
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticate_sends_method_id_with_optional_meta() {
+        // Cursor/Grok require the ACP `authenticate` step before session/new.
+        // Verify the request carries the method id, and forwards `_meta` only
+        // when supplied (Grok's headless flag) — and not when absent.
+        let (mut client, peer_reader, peer_writer) = acp_harness();
+        let peer = tokio::spawn(async move {
+            let mut reader = BufReader::new(peer_reader);
+            let mut writer = peer_writer;
+
+            // First authenticate call: with `_meta` (Grok headless shape).
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "authenticate");
+            assert_eq!(req["params"]["methodId"], "xai.api_key");
+            assert_eq!(req["params"]["_meta"]["headless"], true);
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "id": req["id"], "result": {} }),
+            )
+            .await;
+
+            // Second authenticate call: no `_meta` (Cursor shape).
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "authenticate");
+            assert_eq!(req["params"]["methodId"], "cursor_login");
+            assert!(req["params"].get("_meta").is_none());
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "id": req["id"], "result": {} }),
+            )
+            .await;
+        });
+
+        let meta = json!({ "headless": true });
+        client
+            .authenticate("xai.api_key", Some(&meta))
+            .await
+            .expect("authenticate with meta");
+        client
+            .authenticate("cursor_login", None)
+            .await
+            .expect("authenticate without meta");
 
         peer.await.unwrap();
         client.shutdown().await.unwrap();

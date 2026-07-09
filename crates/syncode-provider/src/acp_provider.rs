@@ -59,6 +59,14 @@ pub struct AcpProviderConfig {
     pub available_models: Vec<String>,
     /// Client name reported during the `initialize` handshake.
     pub client_name: String,
+    /// Optional ACP `authenticate` method id to send after `initialize` and
+    /// before `session/new` (Cursor: `cursor_login`; Grok: `xai.api_key` /
+    /// `cached_token`). `None` skips the step — for providers that
+    /// self-authenticate from cached credentials (Gemini with an API key).
+    pub auth_method_id: Option<String>,
+    /// Optional `_meta` forwarded with the `authenticate` request (Grok sends
+    /// `{"headless": true}`). Ignored when `auth_method_id` is `None`.
+    pub auth_meta: Option<Value>,
 }
 
 /// A [`ProviderAdapter`] backed by an ACP-speaking agent subprocess.
@@ -163,6 +171,23 @@ impl ProviderAdapter for AcpProvider {
         client
             .initialize(&self.config.client_name, env!("CARGO_PKG_VERSION"))
             .await?;
+
+        // ACP `authenticate` step — required by agents that gate sessions
+        // behind an auth method (Cursor: `cursor_login`; Grok:
+        // `xai.api_key`/`cached_token`). Skipped when no method is configured
+        // (Gemini self-authenticates from its cached API key). Matches the
+        // mcode `AcpSessionRuntime` handshake order: initialize → authenticate
+        // → session/new.
+        if let Some(method_id) = &self.config.auth_method_id {
+            client
+                .authenticate(method_id, self.config.auth_meta.as_ref())
+                .await?;
+            tracing::info!(
+                provider = %self.config.provider_id,
+                method_id = %method_id,
+                "ACP authenticate handshake complete"
+            );
+        }
 
         *self.client.lock().await = Some(client);
         self.provider_config = Some(config);
@@ -403,6 +428,8 @@ mod tests {
             capabilities: vec![ProviderCapability::Streaming, ProviderCapability::ToolUse],
             available_models: vec!["fake-model".to_string()],
             client_name: "syncode-tests".to_string(),
+            auth_method_id: None,
+            auth_meta: None,
         };
         let provider = AcpProvider {
             config,
@@ -638,6 +665,8 @@ mod tests {
             capabilities: vec![],
             available_models: vec![],
             client_name: "syncode".to_string(),
+            auth_method_id: None,
+            auth_meta: None,
         };
         let mut provider = AcpProvider::new(config);
         assert_eq!(provider.status(), ProviderStatus::Disconnected);

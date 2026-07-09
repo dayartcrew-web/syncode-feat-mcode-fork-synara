@@ -16,6 +16,8 @@ use crate::acp_provider::{AcpProvider, AcpProviderConfig};
 use crate::subprocess::SubprocessSpec;
 use crate::trait_def::{PROVIDER_GROK, ProviderCapability};
 
+use serde_json::json;
+
 /// Enable `--always-approve` when set to `1`/`true`/`yes`.
 pub const ENV_ALWAYS_APPROVE: &str = "SYNICODE_GROK_ALWAYS_APPROVE";
 /// Override the model passed via `-m <model>`.
@@ -91,6 +93,32 @@ pub fn build_args(flags: &GrokFlags) -> Vec<String> {
     args
 }
 
+/// Env vars that carry an explicit xAI API key. When either is set the
+/// `xai.api_key` ACP auth method is preferred over the cached CLI login.
+pub const ENV_XAI_API_KEY: &str = "XAI_API_KEY";
+pub const ENV_GROK_CODE_XAI_API_KEY: &str = "GROK_CODE_XAI_API_KEY";
+
+/// Resolve the ACP `authenticate` method id for Grok, mirroring mcode's
+/// `GrokAcpSupport` resolver: prefer `xai.api_key` when an explicit key is in
+/// the environment, otherwise fall back to `cached_token` (the locally-cached
+/// Grok CLI login). Grok gates `session/new` behind this step, so a method id
+/// is always returned.
+pub fn resolve_auth_method() -> String {
+    let has_key =
+        std::env::var(ENV_XAI_API_KEY).is_ok() || std::env::var(ENV_GROK_CODE_XAI_API_KEY).is_ok();
+    auth_method_for(has_key).to_string()
+}
+
+/// Pure decision core of [`resolve_auth_method`] (env-free; unit-testable).
+/// `xai.api_key` when an explicit key is available, else `cached_token`.
+fn auth_method_for(has_key: bool) -> &'static str {
+    if has_key {
+        "xai.api_key"
+    } else {
+        "cached_token"
+    }
+}
+
 /// Build the ACP spawn config + identity for the Grok provider, layering in
 /// optional flags from the environment.
 pub fn spec() -> AcpProviderConfig {
@@ -109,6 +137,12 @@ pub fn spec_with(flags: &GrokFlags) -> AcpProviderConfig {
         ],
         available_models: vec!["grok-default".to_string()],
         client_name: "syncode".to_string(),
+        // Grok requires the ACP `authenticate` step before `session/new`.
+        // `cached_token` is the headless-friendly default; `_meta.headless`
+        // tells the agent not to open an interactive login flow (matches mcode
+        // `GrokAcpSupport` authenticateMeta).
+        auth_method_id: Some(resolve_auth_method()),
+        auth_meta: Some(json!({ "headless": true })),
     }
 }
 
@@ -245,5 +279,30 @@ mod tests {
         let provider = create();
         assert_eq!(provider.provider_id(), PROVIDER_GROK);
         assert!(!provider.capabilities().is_empty());
+    }
+
+    #[test]
+    fn auth_method_prefers_api_key_else_cached_token() {
+        // Mirrors mcode GrokAcpSupport: explicit key → xai.api_key, else the
+        // locally-cached CLI login (cached_token).
+        assert_eq!(auth_method_for(true), "xai.api_key");
+        assert_eq!(auth_method_for(false), "cached_token");
+    }
+
+    #[test]
+    fn spec_with_sets_authenticate_method_and_headless_meta() {
+        let config = spec_with(&GrokFlags::default());
+        // Grok requires authenticate before session/new; the method id is one of
+        // the two mcode-defined values (env-dependent), and headless meta tells
+        // the agent not to open an interactive login flow.
+        let method = config
+            .auth_method_id
+            .as_deref()
+            .expect("auth_method_id set");
+        assert!(
+            method == "xai.api_key" || method == "cached_token",
+            "unexpected: {method}"
+        );
+        assert_eq!(config.auth_meta.as_ref().unwrap()["headless"], true);
     }
 }

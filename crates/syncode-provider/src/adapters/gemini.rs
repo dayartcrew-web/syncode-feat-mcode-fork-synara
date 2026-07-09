@@ -51,6 +51,12 @@ pub fn spec() -> AcpProviderConfig {
         ],
         available_models: vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
         client_name: "syncode".to_string(),
+        // Gemini self-authenticates from its cached API key (verified: the
+        // shared `AcpClient` reaches a working `session/prompt` without an
+        // explicit `authenticate` step). Left `None` so the handshake order is
+        // unchanged; Cursor/Grok set this because their agents require it.
+        auth_method_id: None,
+        auth_meta: None,
     }
 }
 
