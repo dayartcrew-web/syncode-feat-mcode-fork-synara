@@ -16,7 +16,7 @@ name: Desktop E2E (Tauri boot)
 # it under a virtual display.
 on:
   push:
-    branches: [main, develop]
+    branches: [master]
     paths:
       - "crates/syncode-tauri/**"
       - "crates/syncode-ws/**"
@@ -28,7 +28,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - "crates/syncode-tauri/**"
       - "crates/syncode-ws/**"
