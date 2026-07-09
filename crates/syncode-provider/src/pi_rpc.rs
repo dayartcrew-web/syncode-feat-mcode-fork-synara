@@ -54,6 +54,10 @@ pub struct PromptResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptStatus {
     Completed,
+    /// Turn ended via a user/network abort (mcode `piTurnFailure` "interrupted"
+    /// state). Distinct from [`PromptStatus::Failed`] so callers can tell a
+    /// clean cancel from a hard error — mcode drives UI state off this split.
+    Interrupted,
     Failed,
 }
 
@@ -323,11 +327,18 @@ impl PiClient {
             };
             let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if event_type == "agent_end" {
-                // Inspect the final message for success vs error.
-                if let Some(reason) = extract_stop_reason(&event)
-                    && matches!(reason.as_str(), "error" | "aborted")
-                {
-                    status = PromptStatus::Failed;
+                // Classify the terminal outcome: completed vs interrupted vs
+                // failed. Mirrors mcode's `classifyPiTurnFailure` — a user/
+                // network abort (explicit "aborted"/"cancelled" reason, or an
+                // error message matching an interruption marker) is an
+                // *interrupt*, not a hard error.
+                let stop_reason = extract_stop_reason(&event);
+                let message = extract_failure_message(&event);
+                // Keep the pre-set `Completed` on success; only override for a
+                // failure/interrupt.
+                let classified = classify_agent_end(&stop_reason, &message);
+                if classified != PromptStatus::Completed {
+                    status = classified;
                 }
                 if let Some(u) = extract_usage(&event) {
                     usage = Some(u);
@@ -438,7 +449,7 @@ fn terminal_event(
     usage: Option<UsageInfo>,
 ) -> ProviderEvent {
     match status {
-        PromptStatus::Completed => ProviderEvent::Completed {
+        PromptStatus::Completed | PromptStatus::Interrupted => ProviderEvent::Completed {
             session_id: session_id.to_string(),
             output: output.to_string(),
             usage,
@@ -460,10 +471,106 @@ fn extract_stop_reason(event: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
-/// Best-effort usage extraction (pi surfaces token stats via get_session_stats,
-/// not directly on agent_end — this is a stub for the documented shape).
-fn extract_usage(_event: &serde_json::Value) -> Option<UsageInfo> {
+/// Defensively surface a failure message from an `agent_end` event. MCode reads
+/// the in-process SDK's `session.agent.state.errorMessage`; in RPC mode the
+/// exact carrier field is unverified, so probe the common shapes and return the
+/// first text found (used to distinguish interrupt vs hard error).
+fn extract_failure_message(event: &serde_json::Value) -> Option<String> {
+    for key in ["error", "errorMessage", "message"] {
+        if let Some(s) = event.get(key).and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+    }
     None
+}
+
+/// Message markers (case-insensitive substring) that indicate a user/network
+/// abort rather than a hard error — a direct port of mcode's
+/// `piTurnFailure.PI_INTERRUPTION_MARKERS`.
+const PI_INTERRUPTION_MARKERS: &[&str] = &[
+    "request was aborted",
+    "operation was aborted",
+    "aborterror",
+    "interrupted by user",
+    "user aborted",
+];
+
+/// Port of mcode's `piTurnFailure.isPiInterruptedMessage`.
+fn is_pi_interrupted_message(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    PI_INTERRUPTION_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+/// Port of mcode's `piTurnFailure.classifyPiTurnFailure`: an interruption
+/// marker in the message → `Interrupted`; otherwise a hard `Failed`.
+fn classify_pi_turn_failure(message: &str) -> PromptStatus {
+    if is_pi_interrupted_message(message) {
+        PromptStatus::Interrupted
+    } else {
+        PromptStatus::Failed
+    }
+}
+
+/// Classify the `agent_end` outcome from its stop reason + failure message.
+///
+/// A terminal `error`/`aborted`/`cancelled` reason is a failure; within that,
+/// [`classify_pi_turn_failure`] splits interrupt vs hard error on the message.
+/// An explicit abort/cancel reason with no message defaults to interrupted.
+fn classify_agent_end(stop_reason: &Option<String>, message: &Option<String>) -> PromptStatus {
+    let reason = stop_reason.as_deref().unwrap_or("");
+    if !matches!(reason, "error" | "aborted" | "cancelled") {
+        return PromptStatus::Completed;
+    }
+    match message.as_deref() {
+        // mcode splits interrupted vs failed on the failure message.
+        Some(m) => classify_pi_turn_failure(m),
+        // No message: an explicit abort/cancel is an interrupt; a bare "error"
+        // is a hard failure.
+        None if matches!(reason, "aborted" | "cancelled") => PromptStatus::Interrupted,
+        None => PromptStatus::Failed,
+    }
+}
+
+/// Best-effort token-usage extraction from an `agent_end` event.
+///
+/// Pi's in-process SDK surfaces stats via `getSessionStats()`; in RPC mode the
+/// exact carrier is unverified, so this defensively probes the common shapes an
+/// event might carry (under `usage` / `tokens` / `stats`), accepting both
+/// snake_case and camelCase keys. Returns `None` when nothing matches — the
+/// turn still completes; usage simply isn't reported.
+fn extract_usage(event: &serde_json::Value) -> Option<UsageInfo> {
+    for obj in [
+        event.get("usage"),
+        event.get("tokens"),
+        event.get("tokenUsage"),
+        event.get("stats"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(info) = usage_from_obj(obj) {
+            return Some(info);
+        }
+    }
+    None
+}
+
+fn usage_from_obj(u: &serde_json::Value) -> Option<UsageInfo> {
+    let input = uint(u, &["input_tokens", "inputTokens", "input"])?;
+    let output = uint(u, &["output_tokens", "outputTokens", "output"]).unwrap_or(0);
+    let total = uint(u, &["total_tokens", "totalTokens", "total"]).unwrap_or(input + output);
+    Some(UsageInfo {
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+    })
+}
+
+fn uint(v: &serde_json::Value, keys: &[&str]) -> Option<u32> {
+    keys.iter()
+        .find_map(|k| v.get(k).and_then(|x| x.as_u64()).map(|n| n as u32))
 }
 
 #[cfg(test)]
@@ -541,7 +648,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_error_on_aborted_stop_reason() {
+    async fn prompt_aborted_stop_reason_is_interrupted() {
+        // mcode distinguishes a user/network abort (interrupted) from a hard
+        // error (failed). An explicit "aborted" stop reason → Interrupted, not
+        // Failed.
         let (client, mut peer_writer) = pi_harness();
         let (event_tx, _event_rx) = mpsc::channel::<ProviderEvent>(64);
 
@@ -561,7 +671,7 @@ mod tests {
         .await;
 
         let result = prompt_task.await.unwrap().unwrap();
-        assert_eq!(result.status, PromptStatus::Failed);
+        assert_eq!(result.status, PromptStatus::Interrupted);
     }
 
     #[tokio::test]
@@ -641,5 +751,96 @@ mod tests {
 
         let ev = json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"error"}]});
         assert_eq!(extract_stop_reason(&ev).as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn classify_pi_turn_failure_splits_interrupt_vs_error() {
+        // Direct port of mcode piTurnFailure markers.
+        for msg in [
+            "Request was aborted by the user",
+            "the operation was aborted",
+            "AbortError: timed out",
+            "Interrupted by user",
+            "the user aborted the request",
+        ] {
+            assert_eq!(
+                classify_pi_turn_failure(msg),
+                PromptStatus::Interrupted,
+                "{msg}"
+            );
+        }
+        // Hard errors stay Failed.
+        for msg in [
+            "model returned an error",
+            "rate limit exceeded",
+            "internal server error",
+        ] {
+            assert_eq!(classify_pi_turn_failure(msg), PromptStatus::Failed, "{msg}");
+        }
+    }
+
+    #[test]
+    fn classify_agent_end_preserves_completed_vs_interrupted_vs_failed() {
+        let none = Option::<String>::None;
+        // Success → Completed.
+        assert_eq!(
+            classify_agent_end(&Some("stop".into()), &none),
+            PromptStatus::Completed
+        );
+        assert_eq!(classify_agent_end(&none, &none), PromptStatus::Completed);
+        // Explicit abort reason without message → Interrupted.
+        assert_eq!(
+            classify_agent_end(&Some("aborted".into()), &none),
+            PromptStatus::Interrupted
+        );
+        assert_eq!(
+            classify_agent_end(&Some("cancelled".into()), &none),
+            PromptStatus::Interrupted
+        );
+        // Bare error reason → Failed.
+        assert_eq!(
+            classify_agent_end(&Some("error".into()), &none),
+            PromptStatus::Failed
+        );
+        // Error reason + interruption message → Interrupted (message wins).
+        assert_eq!(
+            classify_agent_end(&Some("error".into()), &Some("request was aborted".into())),
+            PromptStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn extract_failure_message_probes_common_fields() {
+        assert_eq!(
+            extract_failure_message(&json!({"error": "boom"})).as_deref(),
+            Some("boom")
+        );
+        assert_eq!(
+            extract_failure_message(&json!({"errorMessage": "x"})).as_deref(),
+            Some("x")
+        );
+        assert_eq!(extract_failure_message(&json!({"type": "agent_end"})), None);
+    }
+
+    #[test]
+    fn extract_usage_is_defensive_across_shapes() {
+        // snake_case under `usage`.
+        let ev = json!({"usage": {"input_tokens": 10, "output_tokens": 4}});
+        let u = extract_usage(&ev).expect("usage");
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (10, 4, 14)
+        );
+        // camelCase under `tokens`.
+        let ev = json!({"tokens": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 11}});
+        let u = extract_usage(&ev).expect("usage");
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (7, 3, 11)
+        );
+        // Nothing recognizable → None (turn still completes without usage).
+        assert!(extract_usage(&json!({"type": "agent_end"})).is_none());
+        // No input key → None (don't fabricate usage from output alone).
+        assert!(extract_usage(&json!({"usage": {"output_tokens": 5}})).is_none());
     }
 }
