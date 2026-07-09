@@ -1377,6 +1377,7 @@ impl Decider {
             assistant_output,
             duration_ms,
             completed_at: Timestamp::now(),
+            usage: None,
         }])
     }
 

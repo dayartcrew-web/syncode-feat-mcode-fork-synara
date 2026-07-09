@@ -134,6 +134,11 @@ pub fn ingest_provider_event(
                     assistant_output: output,
                     duration_ms,
                     completed_at: now,
+                    usage: usage.map(|u| syncode_core::TurnUsage {
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                        total_tokens: u.total_tokens,
+                    }),
                 }],
                 consumed: true,
             }

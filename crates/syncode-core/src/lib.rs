@@ -22,7 +22,7 @@ pub use domain::primitives::{EntityId, Timestamp, TrimmedString, TrimmedStringEr
 pub use domain::primitives::Command;
 
 // Re-export domain event enum and envelope
-pub use domain::events::{CheckpointFile, DomainEvent, Envelope};
+pub use domain::events::{CheckpointFile, DomainEvent, Envelope, TurnUsage};
 
 // Re-export aggregate roots
 pub use domain::activity::{Activity, ActivityType};
