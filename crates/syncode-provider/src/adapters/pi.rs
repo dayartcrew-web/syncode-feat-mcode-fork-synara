@@ -296,7 +296,7 @@ impl ProviderAdapter for PiAdapter {
 
         let result = result?;
         match result.status {
-            PromptStatus::Completed => Ok(ProviderResponse {
+            PromptStatus::Completed | PromptStatus::Interrupted => Ok(ProviderResponse {
                 jsonrpc: "2.0".to_string(),
                 id: Some(request.id),
                 result: Some(serde_json::json!({
