@@ -5958,6 +5958,7 @@ async fn handle_server_get_provider_auth_status(state: &WsState, id: Value) -> J
 /// Read on-disk provider archives (codex sessions / claude transcripts) for a
 /// usage snapshot when the in-memory UsageStore has no data for the provider.
 /// Mirrors MCode's providerUsageSnapshot.ts archive readers.
+#[allow(clippy::collapsible_if)]
 fn read_archive_usage(provider: &str) -> Option<crate::usage::ProviderUsageAggregate> {
     let (archive_root, is_codex) = match provider {
         "codex" => {
