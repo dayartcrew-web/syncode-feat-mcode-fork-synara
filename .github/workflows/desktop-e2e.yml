@@ -123,6 +123,13 @@ jobs:
         # desktop.log so the tear-down step can print WHY the WS didn't come up
         # (the backgrounded process's stdout/stderr would otherwise be lost).
         run: |
+          # webkit2gtk headless workarounds — without these the webview
+          # creation blocks the Tauri event loop under xvfb, so .setup()
+          # (which boots the WS server) never runs and the WS-connect fails.
+          export NO_AT_BRIDGE=1
+          export GTK_MODULES=""
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1
+          export WEBKIT_DISABLE_DMABUF_RENDERER=1
           xvfb-run -a --server-args="-screen 0 1280x800x24" \
             ./target/debug/syncode-tauri > desktop.log 2>&1 &
           echo $! > desktop.pid
