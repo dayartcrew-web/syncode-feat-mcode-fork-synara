@@ -38,6 +38,7 @@
 //! to auto-*decline* approvals instead (the agent then surfaces the refusal and
 //! proceeds within sandbox limits).
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
@@ -410,8 +411,16 @@ impl ProviderAdapter for CodexAdapter {
         // published (and buffered by the broadcast channel) before completion.
         let (fwd_tx, mut fwd_rx) = mpsc::channel::<ProviderEvent>(64);
         let bus = self.event_tx.clone();
+        // Accumulate streamed Token text (same fix as ACP #144 + opencode #142):
+        // codex's turn/completed carries status/stopReason — NOT the assistant
+        // text, which arrives via streamed session/update Token events.
+        let accumulated: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let acc_for_fwd = accumulated.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = fwd_rx.recv().await {
+                if let ProviderEvent::Token { content, .. } = &event {
+                    acc_for_fwd.lock().await.push_str(content);
+                }
                 let _ = bus.send(event);
             }
         });
@@ -432,10 +441,10 @@ impl ProviderAdapter for CodexAdapter {
         let turn = turn_result?;
         *self.active_turn.lock().await = turn.turn_id.clone();
 
-        // Terminal completion for this session, carrying the raw turn payload.
+        let output = accumulated.lock().await.clone();
         let _ = self.event_tx.send(ProviderEvent::Completed {
             session_id: thread_id.clone(),
-            output: turn.raw.to_string(),
+            output,
             usage: turn.usage.clone(),
         });
         self.set_status(ProviderStatus::Idle);
