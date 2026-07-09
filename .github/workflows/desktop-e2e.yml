@@ -128,6 +128,10 @@ jobs:
         # inside the xvfb session before the binary so .setup() (WS boot)
         # actually runs. Output → desktop.log (printed by the tear-down step).
         run: |
+          # webkit2gtk init hangs on GL/EGL under bare xvfb (no GL) — force the
+          # software GL renderer so the webview comes up without hardware GL.
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export WGPU_BACKEND=gl
           xvfb-run -a --server-args="-screen 0 1280x800x24" bash -c '
             openbox &
             sleep 1
