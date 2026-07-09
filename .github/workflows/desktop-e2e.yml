@@ -119,15 +119,16 @@ jobs:
         # xvfb-run provides a virtual X server so the webview window can be
         # created headlessly. `-a` picks an free display number; `--server-args`
         # gives it a reasonable screen size. The binary is backgrounded; we save
-        # its PID to tear it down after the test.
+        # its PID to tear it down after the test. Output is redirected to
+        # desktop.log so the tear-down step can print WHY the WS didn't come up
+        # (the backgrounded process's stdout/stderr would otherwise be lost).
         run: |
           xvfb-run -a --server-args="-screen 0 1280x800x24" \
-            ./target/debug/syncode-tauri &
+            ./target/debug/syncode-tauri > desktop.log 2>&1 &
           echo $! > desktop.pid
-          # Give setup() (window + ws_setup::boot) a beat to come up. The test
-          # itself retries the handshake for ~15s, but a short pre-warm avoids a
-          # flaky first-attempt log.
-          sleep 4
+          # Give setup() (ws_setup::boot + window) a beat to come up. CI runners
+          # are slower than local; 10s avoids a flaky WS-connect on cold boot.
+          sleep 10
 
       - name: Run full-shell boot E2E against live binary
         env:
@@ -140,4 +141,11 @@ jobs:
           if [ -f desktop.pid ]; then
             kill "$(cat desktop.pid)" 2>/dev/null || true
             rm -f desktop.pid
+          fi
+          # Print the binary's captured output so a failed WS-connect (or a
+          # crash before ws_setup::boot) is diagnosable in the run log.
+          if [ -f desktop.log ]; then
+            echo "===== desktop binary log (desktop.log) ====="
+            cat desktop.log
+            echo "===== end desktop.log ====="
           fi
