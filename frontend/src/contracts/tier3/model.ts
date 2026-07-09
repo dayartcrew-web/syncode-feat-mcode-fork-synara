@@ -240,7 +240,8 @@ export const MODEL_OPTIONS_BY_PROVIDER: Record<
     { slug: "grok-build", name: "Grok 4.3", capabilities: GROK_BUILD_CAPABILITIES },
   ],
   opencode: [
-    { slug: "openai/gpt-5", name: "OpenAI GPT-5", capabilities: EMPTY_CAPABILITIES },
+    { slug: "zai-coding-plan/glm-5.2", name: "GLM 5.2 (Z.AI)", capabilities: EMPTY_CAPABILITIES },
+    { slug: "zai-coding-plan/glm-4.6", name: "GLM 4.6 (Z.AI)", capabilities: EMPTY_CAPABILITIES },
   ],
   kilo: [
     { slug: "kilo/kilo-auto/free", name: "Kilo Auto Free", capabilities: EMPTY_CAPABILITIES },
@@ -280,7 +281,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Record<
   gemini: "auto-gemini-3",
   grok: "grok-build",
   kilo: "kilo/kilo-auto/free",
-  opencode: "openai/gpt-5",
+  opencode: "zai-coding-plan/glm-5.2",
 };
 
 export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini" as const;
