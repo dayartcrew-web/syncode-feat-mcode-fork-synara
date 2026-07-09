@@ -72,7 +72,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            xvfb
+            xvfb \
+            openbox
 
       - uses: actions/setup-node@v6
         with:
@@ -121,16 +122,17 @@ jobs:
         # fast if the wiring itself is broken.
         run: cargo test -p syncode-tauri --test boot_e2e ws_setup_boot_wiring_e2e -- --nocapture
 
-      - name: Boot desktop binary under xvfb-run
-        # xvfb-run provides a virtual X server so the webview window can be
-        # created headlessly. `-a` picks an free display number; `--server-args`
-        # gives it a reasonable screen size. The binary is backgrounded; we save
-        # its PID to tear it down after the test. Output is redirected to
-        # desktop.log so the tear-down step can print WHY the WS didn't come up
-        # (the backgrounded process's stdout/stderr would otherwise be lost).
+      - name: Boot desktop binary under xvfb-run + window manager
+        # webkit2gtk's webview creation blocks without a window manager managing
+        # its window (it waits for the WM). Start openbox (a lightweight WM)
+        # inside the xvfb session before the binary so .setup() (WS boot)
+        # actually runs. Output → desktop.log (printed by the tear-down step).
         run: |
-          xvfb-run -a --server-args="-screen 0 1280x800x24" \
-            ./target/debug/syncode-tauri > desktop.log 2>&1 &
+          xvfb-run -a --server-args="-screen 0 1280x800x24" bash -c '
+            openbox &
+            sleep 1
+            exec ./target/debug/syncode-tauri
+          ' > desktop.log 2>&1 &
           echo $! > desktop.pid
           # Give setup() (ws_setup::boot + window) a beat to come up. CI runners
           # are slower than local; 10s avoids a flaky WS-connect on cold boot.
