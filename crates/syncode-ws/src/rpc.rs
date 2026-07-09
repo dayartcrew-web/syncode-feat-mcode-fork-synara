@@ -5955,6 +5955,118 @@ async fn handle_server_get_provider_auth_status(state: &WsState, id: Value) -> J
 /// shape marks it required). The provider id is matched case-sensitively
 /// against what the `invoke()` helper recorded (the resolved registry id —
 /// e.g. `claude`, `codex`, `gemini`, …).
+/// Read on-disk provider archives (codex sessions / claude transcripts) for a
+/// usage snapshot when the in-memory UsageStore has no data for the provider.
+/// Mirrors MCode's providerUsageSnapshot.ts archive readers.
+fn read_archive_usage(provider: &str) -> Option<crate::usage::ProviderUsageAggregate> {
+    let (archive_root, is_codex) = match provider {
+        "codex" => {
+            let home = std::env::var("CODEX_HOME").ok().filter(|s| !s.is_empty());
+            let root = home.unwrap_or_else(|| {
+                let h = std::env::var("HOME").unwrap_or_else(|_| "~".into());
+                format!("{h}/.codex/sessions")
+            });
+            (root, true)
+        }
+        "claude" | "claudeAgent" => {
+            let cfg = std::env::var("CLAUDE_CONFIG_DIR")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let root = cfg.unwrap_or_else(|| {
+                let h = std::env::var("HOME").unwrap_or_else(|_| "~".into());
+                format!("{h}/.claude/projects")
+            });
+            (root, false)
+        }
+        _ => return None,
+    };
+
+    let mut input: u64 = 0;
+    let mut output: u64 = 0;
+    let mut call_count: u64 = 0;
+    let mut last_model = String::new();
+
+    // Walk the archive root recursively for *.jsonl files.
+    let mut walker = |entry: &std::path::Path| -> Option<()> {
+        if entry.extension().is_none_or(|e| e != "jsonl") {
+            return None;
+        }
+        let content = std::fs::read_to_string(entry).ok()?;
+        if is_codex {
+            // Codex: find the LAST token_count event in the file (running
+            // total — the last one is the session total).
+            for line in content.lines().rev() {
+                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                    if v.get("payload")
+                        .and_then(|p| p.get("type"))
+                        .and_then(|t| t.as_str())
+                        == Some("token_count")
+                    {
+                        let usage = v
+                            .pointer("/payload/info/total_token_usage")
+                            .or_else(|| v.pointer("/payload/info"));
+                        if let Some(u) = usage {
+                            input += u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            output += u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            call_count += 1;
+                            return Some(());
+                        }
+                    }
+                }
+            }
+        } else {
+            // Claude: each assistant message with a `usage` block.
+            for line in content.lines() {
+                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                    if v.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant") {
+                        if let Some(u) = v.pointer("/message/usage") {
+                            input += u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            output += u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            call_count += 1;
+                            if let Some(m) = v.pointer("/message/model").and_then(|m| m.as_str()) {
+                                last_model = m.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    // Best-effort recursive walk (shallow depth — codex uses YYYY/MM/DD).
+    fn walk_dir(dir: &std::path::Path, walker: &mut dyn FnMut(&std::path::Path) -> Option<()>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk_dir(&path, walker);
+                } else {
+                    let _ = walker(&path);
+                }
+            }
+        }
+    }
+    walk_dir(std::path::Path::new(&archive_root), &mut walker);
+
+    if call_count == 0 {
+        return None;
+    }
+    Some(crate::usage::ProviderUsageAggregate {
+        provider_id: if is_codex {
+            "codex".to_string()
+        } else {
+            "claude".to_string()
+        },
+        model: last_model,
+        call_count,
+        total_tokens: input + output,
+        total_input: input,
+        total_output: output,
+        last_used_at: Some(chrono::Utc::now()),
+    })
+}
+
 async fn handle_server_get_provider_usage_snapshot(
     state: &WsState,
     id: Value,
@@ -5975,8 +6087,14 @@ async fn handle_server_get_provider_usage_snapshot(
     match store.aggregate_for(provider) {
         Some(agg) => JsonRpcResponse::success(id, usage_snapshot_json(&agg, "syncode-usage-log")),
         None => {
-            // No usage recorded for this provider → null (UI shows empty state).
-            JsonRpcResponse::success(id, Value::Null)
+            // No in-memory usage → try on-disk archives (codex sessions /
+            // claude transcripts), like MCode's providerUsageSnapshot.
+            match read_archive_usage(provider) {
+                Some(agg) => {
+                    JsonRpcResponse::success(id, usage_snapshot_json(&agg, "provider-archive"))
+                }
+                None => JsonRpcResponse::success(id, Value::Null),
+            }
         }
     }
 }
