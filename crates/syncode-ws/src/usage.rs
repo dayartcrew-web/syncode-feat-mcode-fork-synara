@@ -28,10 +28,12 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A single recorded token-usage observation from one successful provider
 /// round trip. Append-only — once recorded, an entry is never mutated.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageEntry {
     /// The provider id the RPC resolved to (e.g. `"claude"`, `"codex"`).
     /// Matches the `ProviderKind` union on the client (minus the
@@ -77,30 +79,59 @@ pub struct ProviderUsageAggregate {
 /// so the most-recent usage is always retained.
 pub struct UsageStore {
     entries: Vec<UsageEntry>,
+    /// JSONL file for durability across restarts. Derived from SYNCODE_DB
+    /// (`<db>.usage.log`). When None (in-memory mode), entries are lost on
+    /// restart — backward-compatible with tests + `new_in_memory`.
+    log_path: Option<PathBuf>,
 }
 
 /// Maximum entries retained before FIFO eviction kicks in. ~10k entries at
-/// ~120 bytes each is ~1.2 MB — a generous ceiling for a session-scoped log
-/// that resets on restart.
+/// ~120 bytes each is ~1.2 MB — a generous ceiling for a session-scoped log.
 pub const MAX_ENTRIES: usize = 10_000;
 
 impl UsageStore {
-    /// Build an empty store.
+    /// Build a store. If `SYNCODE_DB` is set + non-empty, entries are loaded
+    /// from `<db>.usage.log` (durable across restarts). Otherwise in-memory.
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
+        let log_path = std::env::var("SYNCODE_DB")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|db| PathBuf::from(format!("{db}.usage.log")));
+        let mut entries = Vec::new();
+        if let Some(ref path) = log_path
+            && let Ok(content) = std::fs::read_to_string(path)
+        {
+            for line in content.lines() {
+                if entries.len() >= MAX_ENTRIES {
+                    break;
+                }
+                if let Ok(entry) = serde_json::from_str::<UsageEntry>(line) {
+                    entries.push(entry);
+                }
+            }
+            tracing::info!(loaded = entries.len(), "usage log loaded from disk");
         }
+        Self { entries, log_path }
     }
 
     /// Append a usage entry. If the log is at capacity, the oldest entry is
-    /// dropped first (FIFO). The entry's `timestamp` is captured by the
-    /// caller (so it can reflect response-arrival time, not log time).
+    /// dropped first (FIFO). When a log_path is set, the entry is also
+    /// appended to the JSONL file for durability.
     pub fn record(&mut self, entry: UsageEntry) {
+        // Persist to JSONL file (best-effort append).
+        if let Some(ref path) = self.log_path
+            && let Ok(json) = serde_json::to_string(&entry)
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(f, "{json}");
+            }
+        }
         if self.entries.len() >= MAX_ENTRIES {
-            // FIFO eviction: drop the oldest (index 0). `remove(0)` is O(n)
-            // but the cap makes this bounded; `VecDeque` would be slightly
-            // faster but `Vec` matches the rest of the codebase's style and
-            // the cap keeps the shift cheap (~10k element move, rare).
             self.entries.remove(0);
         }
         self.entries.push(entry);
