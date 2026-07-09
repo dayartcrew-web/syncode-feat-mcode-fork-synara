@@ -1608,11 +1608,28 @@ async fn handle_orchestration_dispatch_command(
                 .get("sequence")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
-            let user_input =
-                match pctx.require_str_any(&["userInput", "user_input"], "thread.turn.start") {
-                    Ok(v) => v,
-                    Err(r) => return *r,
-                };
+            let user_input = match pctx
+                .require_str_any(&["userInput", "user_input"], "thread.turn.start")
+                .or_else(|_| {
+                    // MCode UI nests the user text under `message.text`
+                    // (`ChatView.tsx` dispatches `thread.turn.start` with
+                    // `message: { text }`). Support both the flat `userInput`
+                    // shape (direct RPC callers) and the nested MCode shape.
+                    pctx.params
+                        .get("message")
+                        .and_then(|m| m.get("text"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .ok_or_else(|| {
+                            Box::new(param_error(
+                                pctx.id.clone(),
+                                "thread.turn.start requires 'userInput' (tried: userInput, user_input, message.text)",
+                            ))
+                        })
+                }) {
+                Ok(v) => v,
+                Err(r) => return *r,
+            };
             service.start_turn(thread_id, sequence, user_input).await
         }
         "CompleteTurn" => {
@@ -21753,6 +21770,61 @@ mod tests {
         // A freshly-started turn is "pending" (no provider session is wired in
         // the in-memory orchestrator).
         assert_eq!(turn.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn thread_turn_start_dot_notation_accepts_message_text_shape() {
+        // The cloned MCode UI (`ChatView.tsx`) dispatches `thread.turn.start`
+        // with the user text nested under `message.text` (NOT a top-level
+        // `userInput`). The arm must accept this MCode wire shape so the
+        // browser send flow produces a turn instead of an INVALID_PARAMS error
+        // ("thread.turn.start requires 'userInput'").
+        let state = WsState::new_in_memory(16);
+        let project_id = seed_project(&state, "p").await;
+        let thread_id = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.create",
+                "projectId": project_id,
+                "modelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-5" },
+            }),
+        )
+        .await
+        .result
+        .unwrap()["aggregateId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = dispatch(
+            &state,
+            serde_json::json!({
+                "type": "thread.turn.start",
+                "threadId": thread_id,
+                "message": { "messageId": "m-1", "role": "user", "text": "hello via message.text" },
+            }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "thread.turn.start (message.text) failed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["dispatched"], true);
+        assert_eq!(result["eventsAppended"], 1);
+        let turn_id = result["aggregateId"].as_str().unwrap().to_string();
+
+        // The user text routed from `message.text` lands on the projected turn.
+        let store = state.read_store.read().await;
+        let turn = store.turns.get(&turn_id).expect("turn should be projected");
+        assert_eq!(turn.thread_id, thread_id);
+        assert_eq!(turn.status, "pending");
+        assert!(
+            turn.user_input.contains("hello via message.text"),
+            "user_input should contain the message.text payload: {:?}",
+            turn.user_input
+        );
     }
 
     #[tokio::test]
