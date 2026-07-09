@@ -73,7 +73,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             xvfb \
-            openbox
+            weston
 
       - uses: actions/setup-node@v6
         with:
@@ -122,25 +122,28 @@ jobs:
         # fast if the wiring itself is broken.
         run: cargo test -p syncode-tauri --test boot_e2e ws_setup_boot_wiring_e2e -- --nocapture
 
-      - name: Boot desktop binary under xvfb-run + window manager
-        # webkit2gtk's webview creation blocks without a window manager managing
-        # its window (it waits for the WM). Start openbox (a lightweight WM)
-        # inside the xvfb session before the binary so .setup() (WS boot)
-        # actually runs. Output → desktop.log (printed by the tear-down step).
+      - name: Boot desktop binary under weston (nested Wayland compositor)
+        # webkit2gtk-4.1's webview creation hangs under bare xvfb (no EGL/GL
+        # surface). weston is a real Wayland compositor with EGL: run it nested
+        # under xvfb (x11-backend), then run the Tauri binary against weston's
+        # Wayland display (GDK_BACKEND=wayland) so webkit gets a working EGL
+        # surface and .setup() (WS boot) actually runs. LIBGL_ALWAYS_SOFTWARE
+        # because CI has no GPU.
         run: |
-          # webkit2gtk init hangs on GL/EGL under bare xvfb (no GL) — force the
-          # software GL renderer so the webview comes up without hardware GL.
-          export LIBGL_ALWAYS_SOFTWARE=1
-          export WGPU_BACKEND=gl
           xvfb-run -a --server-args="-screen 0 1280x800x24" bash -c '
-            openbox &
-            sleep 1
+            export XDG_RUNTIME_DIR=/tmp/xdg-runtime
+            mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+            weston --backend=x11-backend.so --idle-time=0 \
+                   --width=1280 --height=800 &
+            sleep 4
+            export WAYLAND_DISPLAY=wayland-0
+            export GDK_BACKEND=wayland
+            export LIBGL_ALWAYS_SOFTWARE=1
             exec ./target/debug/syncode-tauri
           ' > desktop.log 2>&1 &
           echo $! > desktop.pid
-          # Give setup() (ws_setup::boot + window) a beat to come up. CI runners
-          # are slower than local; 10s avoids a flaky WS-connect on cold boot.
-          sleep 10
+          # Give weston + setup() (ws_setup::boot + window) a beat to come up.
+          sleep 12
 
       - name: Run full-shell boot E2E against live binary
         env:
