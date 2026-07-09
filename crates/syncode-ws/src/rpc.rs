@@ -11593,6 +11593,29 @@ mod gh_parse {
 async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcResponse {
     let generated_at = chrono::Utc::now().to_rfc3339();
 
+    // ── Profile identity (derived from $HOME — was hardcoded empty/mock) ──
+    // homeDirBasename = last path segment of $HOME (e.g. "vibe-dev");
+    // defaultHandle mirrors it (MCode seeds the profile handle from it);
+    // initials = first letter of each alphanumeric word (up to 2), uppercased.
+    let home_basename = server_home_dir()
+        .as_deref()
+        .map(|h| {
+            h.trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default();
+    let default_handle = home_basename.clone();
+    let initials = home_basename
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .take(2)
+        .filter_map(|s| s.chars().next())
+        .collect::<String>()
+        .to_uppercase();
+
     // ── Activity counts from the read store ──────────────────────────────
     // totalPromptsSent = turn count (each turn = one user prompt + assistant
     //   response cycle, matching MCode's "prompts sent" semantic).
@@ -11667,9 +11690,9 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
                 "today": "",
             },
             "identity": {
-                "homeDirBasename": "",
-                "initials": "",
-                "defaultHandle": "",
+                "homeDirBasename": home_basename,
+                "initials": initials,
+                "defaultHandle": default_handle,
             },
             "activity": {
                 "currentStreakDays": 0,
