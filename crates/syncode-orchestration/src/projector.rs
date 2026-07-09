@@ -411,6 +411,7 @@ impl Projector {
                 assistant_output,
                 duration_ms,
                 completed_at,
+                usage: _,
             } => {
                 if let Some(turn) = store.turns.get_mut(&id.as_str()) {
                     turn.assistant_output = Some(assistant_output.clone());

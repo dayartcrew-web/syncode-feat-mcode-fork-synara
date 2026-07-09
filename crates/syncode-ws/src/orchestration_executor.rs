@@ -330,6 +330,7 @@ mod tests {
                     assistant_output: "AUTO_VIA_PROVIDER".into(),
                     duration_ms: 10,
                     completed_at: Timestamp::now(),
+                    usage: None,
                 },
                 2,
             )],

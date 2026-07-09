@@ -961,6 +961,7 @@ mod tests {
                 assistant_output: "world".into(),
                 duration_ms: 100,
                 completed_at: Timestamp::now(),
+                usage: None,
             },
             4,
         ))

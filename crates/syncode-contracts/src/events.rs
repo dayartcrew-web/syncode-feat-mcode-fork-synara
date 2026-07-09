@@ -711,6 +711,7 @@ impl From<&syncode_core::DomainEvent> for DomainEventDto {
                 assistant_output,
                 duration_ms,
                 completed_at,
+                usage: _,
             } => Self::TurnCompleted {
                 id: to_id(*id),
                 assistant_output: assistant_output.clone(),

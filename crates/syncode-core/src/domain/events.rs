@@ -10,6 +10,18 @@
 use crate::domain::primitives::{DomainEvent as DomainEventTrait, EntityId, Timestamp};
 use serde::{Deserialize, Serialize};
 
+/// Token usage reported by a provider for a completed turn. Mirrors the subset
+/// of `syncode_provider::UsageInfo` that the domain layer needs to record
+/// usage — kept here (core) because the domain event can't depend on the
+/// provider crate. `Option<TurnUsage>` on [`DomainEvent::TurnCompleted`] so
+/// historical events (no usage) deserialize as `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TurnUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
+}
+
 /// All domain event types in the system (the payload).
 ///
 /// Each variant carries only the data relevant to that event type.
@@ -269,6 +281,9 @@ pub enum DomainEvent {
         assistant_output: String,
         duration_ms: u64,
         completed_at: Timestamp,
+        /// Provider-reported token usage for the turn, if any. Consumed by the
+        /// WS usage recorder; absent for synthetic/synchronous completions.
+        usage: Option<TurnUsage>,
     },
     TurnFailed {
         id: EntityId,
@@ -713,6 +728,7 @@ mod tests {
             assistant_output: "done".into(),
             duration_ms: 500,
             completed_at: ts,
+            usage: None,
         };
         let envelope = Envelope::with_timestamp(event, 10, ts);
         assert_eq!(envelope.timestamp(), ts);

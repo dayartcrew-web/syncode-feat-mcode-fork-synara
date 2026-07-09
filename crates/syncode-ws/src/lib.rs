@@ -259,6 +259,13 @@ impl WsState {
         // until the typed bus sender is dropped on WsState drop).
         spawn_automation_run_reactor(typed_event_tx.clone(), automation_scheduler.clone());
 
+        // Usage log + the reactor that records chat-turn token usage into it
+        // (subscribes to TurnCompleted on the typed bus). Created here as a
+        // local so the reactor can clone it before WsState is finished.
+        let usage: Arc<RwLock<crate::usage::UsageStore>> =
+            Arc::new(RwLock::new(crate::usage::UsageStore::new()));
+        spawn_usage_reactor(typed_event_tx.clone(), read_store.clone(), usage.clone());
+
         // Capture the auth mode as a kebab-case string for the in-memory
         // server-config store (the `authMode` field is surfaced to the UI as
         // an informational extra field — it's not part of the MCode schema,
@@ -295,7 +302,7 @@ impl WsState {
                 syncode_provider::registry::ProviderRegistry::new(),
             )),
             settings,
-            usage: Arc::new(RwLock::new(crate::usage::UsageStore::new())),
+            usage,
             local_servers: Arc::new(RwLock::new(crate::local_server::LocalServerManager::new())),
             dev_servers: Arc::new(RwLock::new(std::collections::HashSet::new())),
             started_at: std::time::Instant::now(),
@@ -484,6 +491,60 @@ fn spawn_automation_run_reactor(
         reactor.run().await;
     });
     tracing::info!("automation run reactor spawned (event-driven run-status reconciliation)");
+}
+
+/// Spawn a task that records chat-turn token usage into the [`UsageStore`].
+///
+/// Subscribes to the typed domain-event bus; on each `TurnCompleted` carrying
+/// provider `usage`, it resolves the turn → thread → provider/model from the
+/// read model and appends a [`UsageEntry`]. This is what makes `server/getUsage`
+/// reflect real chat turns — without it only the LLM-op path
+/// (`invoke_llm_oneshot`) records usage, so the settings → usage panel looks
+/// empty after chatting.
+///
+/// Detached (runs until the typed bus sender is dropped on `WsState` drop).
+fn spawn_usage_reactor(
+    typed_event_tx: broadcast::Sender<syncode_core::DomainEvent>,
+    read_store: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>>,
+    usage: Arc<RwLock<crate::usage::UsageStore>>,
+) {
+    let mut rx = typed_event_tx.subscribe();
+    tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            let syncode_core::DomainEvent::TurnCompleted {
+                id, usage: Some(u), ..
+            } = event
+            else {
+                continue;
+            };
+            // Resolve turn → thread → provider/model from the read model. The
+            // thread + turn exist before TurnCompleted (ThreadCreated /
+            // TurnStarted project first), so the lookup is reliable.
+            let (provider_id, model) = {
+                let store = read_store.read().await;
+                let thread = store
+                    .turns
+                    .get(id.as_str().as_str())
+                    .and_then(|t| store.threads.get(&t.thread_id));
+                let Some(thread) = thread else {
+                    continue;
+                };
+                (thread.provider_id.clone(), thread.model.clone())
+            };
+            if provider_id.is_empty() {
+                continue;
+            }
+            usage.write().await.record(crate::usage::UsageEntry {
+                provider_id,
+                model,
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                total_tokens: u.total_tokens,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+    });
+    tracing::info!("usage reactor spawned (records chat-turn usage into the usage log)");
 }
 
 /// JSON-RPC standard error codes
