@@ -37,7 +37,14 @@
 //! appended).
 
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use syncode_persistence::SqlitePool;
+use syncode_provider::PROVIDER_CLAUDE;
+#[cfg(test)]
+use syncode_provider::{
+    PROVIDER_CODEX, PROVIDER_CURSOR, PROVIDER_GEMINI, PROVIDER_GROK, PROVIDER_KILO,
+    PROVIDER_OPENCODE, PROVIDER_PI,
+};
 
 /// In-memory server settings — persists during the server session, with
 /// optional on-disk write-through (SRV-1).
@@ -434,6 +441,137 @@ fn merge_objects(target: &mut Map<String, Value>, patch: &Map<String, Value>) {
     }
 }
 
+// ─── Provider selection helpers (SRV-1 follow-up) ──────────────────────
+//
+// Before SRV-1, the orchestrator was armed with `SYNCODE_DEFAULT_PROVIDER`
+// (default "opencode") before persisted settings were loaded — so the
+// Settings panel's provider picker was ignored at boot. The helpers below
+// reverse that precedence: persisted `textGenerationModelSelection` is now
+// the source of truth, with the env var kept as an operator override.
+
+/// Default provider id when neither persisted settings nor the env var
+/// specifies one. Matches the historical default ("opencode") so pre-SRV-1
+/// deployments keep booting the same adapter. Declared `pub` so
+/// `bin/server.rs` can reuse it instead of keeping a private copy that might
+/// drift.
+pub const DEFAULT_PROVIDER: &str = "opencode";
+
+/// Fields copied verbatim from a provider's settings entry into
+/// [`syncode_provider::ProviderConfig::extra`]. The provider adapters read
+/// these to locate the CLI binary, optional MCP-server credentials, and
+/// per-provider launch flags. Anything not in this allowlist is ignored —
+/// the MCode schema has many more fields (`customModels`, `apiKey`, …) that
+/// the adapter doesn't consume from `extra` and that may carry secrets we
+/// don't want to leak into adapter logs.
+const PROVIDER_EXTRA_FIELDS: &[&str] = &[
+    "binaryPath",
+    "homePath",
+    "launchArgs",
+    "serverUrl",
+    "serverPassword",
+    "apiEndpoint",
+    "agentDir",
+    "experimentalWebSockets",
+];
+
+/// Normalize an MCode frontend provider kind to the backend's provider id.
+///
+/// The frontend persists `claudeAgent` (the MCode `ProviderKind` literal) as
+/// the provider map key, while the backend's `ProviderRegistry` and
+/// `syncode_orchestration::Command` use `claude`. Other ids (codex, cursor,
+/// gemini, grok, kilo, opencode, pi, …) pass through unchanged. This is the
+/// canonical implementation — `rpc.rs` delegates here instead of keeping a
+/// private copy.
+pub fn normalize_provider_id(provider_id: &str) -> &str {
+    if provider_id == "claudeAgent" {
+        PROVIDER_CLAUDE
+    } else {
+        provider_id
+    }
+}
+
+/// The inverse of [`normalize_provider_id`]: returns the JSON key the MCode
+/// `ServerSettings.providers` map uses for a given backend provider id. Used
+/// by [`extract_provider_extras`] to look up the right entry.
+fn provider_settings_key(provider_id: &str) -> &str {
+    if provider_id == PROVIDER_CLAUDE {
+        "claudeAgent"
+    } else {
+        provider_id
+    }
+}
+
+/// Resolve the default provider id at orchestrator arm time. Precedence:
+///   1. `settings.textGenerationModelSelection.provider` — what the user
+///      picks in the Settings panel (source of truth post-SRV-1).
+///   2. `env_value` (`SYNCODE_DEFAULT_PROVIDER`) — operator override.
+///   3. [`DEFAULT_PROVIDER`] — backwards-compatible default.
+///
+/// The result is normalized (so `claudeAgent` becomes `claude`) so the
+/// caller can pass it straight to the provider registry.
+pub fn resolve_default_provider(settings: &Value, env_value: Option<&str>) -> String {
+    if let Some(p) = settings
+        .get("textGenerationModelSelection")
+        .and_then(|v| v.get("provider"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return normalize_provider_id(p).to_string();
+    }
+    if let Some(env) = env_value.filter(|s| !s.is_empty()) {
+        return normalize_provider_id(env).to_string();
+    }
+    DEFAULT_PROVIDER.to_string()
+}
+
+/// Resolve the default model id at orchestrator arm time. Precedence matches
+/// [`resolve_default_provider`]: settings first, then env, then empty string
+/// (the provider adapter falls back to its built-in default model).
+pub fn resolve_default_model(settings: &Value, env_value: Option<&str>) -> String {
+    if let Some(m) = settings
+        .get("textGenerationModelSelection")
+        .and_then(|v| v.get("model"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return m.to_string();
+    }
+    env_value
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Extract per-provider extras from the persisted `ServerSettings.providers`
+/// map for use in a [`syncode_provider::ProviderConfig`]. Returns an empty
+/// map when:
+///   - the provider isn't in `providers` (unknown / never configured), or
+///   - the entry is disabled (`enabled: false`), or
+///   - the `providers` object is missing entirely.
+///
+/// Only the allowlisted fields in [`PROVIDER_EXTRA_FIELDS`] are copied.
+pub fn extract_provider_extras(provider_id: &str, settings: &Value) -> HashMap<String, Value> {
+    let key = provider_settings_key(provider_id);
+    let Some(entry) = settings.get("providers").and_then(|v| v.get(key)) else {
+        return HashMap::new();
+    };
+    // Disabled providers are skipped — the adapter won't spawn, so extras
+    // would be misleading (the caller treats non-empty extras as "ready").
+    if entry.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return HashMap::new();
+    }
+    let mut extras = HashMap::new();
+    for field in PROVIDER_EXTRA_FIELDS {
+        if let Some(v) = entry.get(*field) {
+            // Skip explicit nulls — they mean "no value", not "default".
+            if !v.is_null() {
+                extras.insert((*field).to_string(), v.clone());
+            }
+        }
+    }
+    extras
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,5 +890,265 @@ mod tests {
         // persist_* are no-ops (no panic, no write).
         state.persist_config().await;
         state.persist_settings().await;
+    }
+
+    // ─── Provider selection from persisted settings ─────────────────
+    //
+    // Bug: orchestrator armed with `SYNCODE_DEFAULT_PROVIDER` env var
+    // (default "opencode") BEFORE persisted settings are loaded. The
+    // fix reads `settings.textGenerationModelSelection.provider` first,
+    // falling back to env, then DEFAULT_PROVIDER.
+
+    #[test]
+    fn normalize_provider_id_maps_claude_agent_to_claude() {
+        // Frontend persists "claudeAgent" (matches the providers map key);
+        // adapter registry expects "claude".
+        assert_eq!(normalize_provider_id("claudeAgent"), PROVIDER_CLAUDE);
+    }
+
+    #[test]
+    fn normalize_provider_id_passes_through_known_ids() {
+        assert_eq!(normalize_provider_id("codex"), PROVIDER_CODEX);
+        assert_eq!(normalize_provider_id("opencode"), PROVIDER_OPENCODE);
+        assert_eq!(normalize_provider_id("cursor"), PROVIDER_CURSOR);
+        assert_eq!(normalize_provider_id("gemini"), PROVIDER_GEMINI);
+        assert_eq!(normalize_provider_id("grok"), PROVIDER_GROK);
+        assert_eq!(normalize_provider_id("kilo"), PROVIDER_KILO);
+        assert_eq!(normalize_provider_id("pi"), PROVIDER_PI);
+    }
+
+    #[test]
+    fn resolve_default_provider_prefers_settings_over_env() {
+        let settings = serde_json::json!({
+            "textGenerationModelSelection": { "provider": "codex", "model": "gpt-5.4-mini" }
+        });
+        let resolved = resolve_default_provider(&settings, Some("opencode"));
+        assert_eq!(resolved, PROVIDER_CODEX);
+    }
+
+    #[test]
+    fn resolve_default_provider_falls_back_to_env_when_settings_missing() {
+        let settings = serde_json::json!({});
+        let resolved = resolve_default_provider(&settings, Some("claude"));
+        assert_eq!(resolved, PROVIDER_CLAUDE);
+    }
+
+    #[test]
+    fn resolve_default_provider_falls_back_to_default_when_both_empty() {
+        let settings = serde_json::json!({});
+        let resolved = resolve_default_provider(&settings, None);
+        // DEFAULT_PROVIDER constant in server.rs = "opencode"
+        assert_eq!(resolved, PROVIDER_OPENCODE);
+    }
+
+    #[test]
+    fn resolve_default_provider_normalizes_claude_agent() {
+        let settings = serde_json::json!({
+            "textGenerationModelSelection": { "provider": "claudeAgent" }
+        });
+        let resolved = resolve_default_provider(&settings, None);
+        assert_eq!(resolved, PROVIDER_CLAUDE);
+    }
+
+    #[test]
+    fn resolve_default_model_prefers_settings_over_env() {
+        let settings = serde_json::json!({
+            "textGenerationModelSelection": { "provider": "codex", "model": "gpt-5.4-mini" }
+        });
+        let resolved = resolve_default_model(&settings, Some("env-model"));
+        assert_eq!(resolved, "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn resolve_default_model_falls_back_to_env_when_settings_missing() {
+        let settings = serde_json::json!({});
+        let resolved = resolve_default_model(&settings, Some("env-model"));
+        assert_eq!(resolved, "env-model");
+    }
+
+    #[test]
+    fn resolve_default_model_returns_empty_when_both_empty() {
+        let settings = serde_json::json!({});
+        let resolved = resolve_default_model(&settings, None);
+        assert_eq!(resolved, "");
+    }
+
+    #[test]
+    fn extract_provider_extras_codex_returns_binary_path_and_home() {
+        let settings = serde_json::json!({
+            "providers": {
+                "codex": {
+                    "enabled": true,
+                    "binaryPath": "/usr/local/bin/codex",
+                    "customModels": [],
+                    "homePath": "/home/user/.codex"
+                }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_CODEX, &settings);
+        assert_eq!(
+            extras.get("binaryPath").and_then(|v| v.as_str()),
+            Some("/usr/local/bin/codex")
+        );
+        assert_eq!(
+            extras.get("homePath").and_then(|v| v.as_str()),
+            Some("/home/user/.codex")
+        );
+    }
+
+    #[test]
+    fn extract_provider_extras_claude_uses_claude_agent_key() {
+        let settings = serde_json::json!({
+            "providers": {
+                "claudeAgent": {
+                    "enabled": true,
+                    "binaryPath": "claude",
+                    "customModels": [],
+                    "launchArgs": "--debug"
+                }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_CLAUDE, &settings);
+        assert_eq!(
+            extras.get("binaryPath").and_then(|v| v.as_str()),
+            Some("claude")
+        );
+        assert_eq!(
+            extras.get("launchArgs").and_then(|v| v.as_str()),
+            Some("--debug")
+        );
+    }
+
+    #[test]
+    fn extract_provider_extras_opencode_includes_server_credentials() {
+        let settings = serde_json::json!({
+            "providers": {
+                "opencode": {
+                    "enabled": true,
+                    "binaryPath": "opencode",
+                    "customModels": [],
+                    "serverUrl": "https://opencode.example.com",
+                    "serverPassword": "secret",
+                    "experimentalWebSockets": true
+                }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_OPENCODE, &settings);
+        assert_eq!(
+            extras.get("binaryPath").and_then(|v| v.as_str()),
+            Some("opencode")
+        );
+        assert_eq!(
+            extras.get("serverUrl").and_then(|v| v.as_str()),
+            Some("https://opencode.example.com")
+        );
+        assert_eq!(
+            extras.get("serverPassword").and_then(|v| v.as_str()),
+            Some("secret")
+        );
+        assert_eq!(
+            extras
+                .get("experimentalWebSockets")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn extract_provider_extras_cursor_includes_api_endpoint() {
+        let settings = serde_json::json!({
+            "providers": {
+                "cursor": {
+                    "enabled": true,
+                    "binaryPath": "cursor-agent",
+                    "customModels": [],
+                    "apiEndpoint": "https://cursor.api"
+                }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_CURSOR, &settings);
+        assert_eq!(
+            extras.get("binaryPath").and_then(|v| v.as_str()),
+            Some("cursor-agent")
+        );
+        assert_eq!(
+            extras.get("apiEndpoint").and_then(|v| v.as_str()),
+            Some("https://cursor.api")
+        );
+    }
+
+    #[test]
+    fn extract_provider_extras_kilo_includes_server_credentials() {
+        let settings = serde_json::json!({
+            "providers": {
+                "kilo": {
+                    "enabled": true,
+                    "binaryPath": "kilo",
+                    "customModels": [],
+                    "serverUrl": "https://kilo.example.com",
+                    "serverPassword": "kilopw"
+                }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_KILO, &settings);
+        assert_eq!(
+            extras.get("serverUrl").and_then(|v| v.as_str()),
+            Some("https://kilo.example.com")
+        );
+        assert_eq!(
+            extras.get("serverPassword").and_then(|v| v.as_str()),
+            Some("kilopw")
+        );
+    }
+
+    #[test]
+    fn extract_provider_extras_pi_includes_agent_dir() {
+        let settings = serde_json::json!({
+            "providers": {
+                "pi": {
+                    "enabled": true,
+                    "binaryPath": "pi",
+                    "customModels": [],
+                    "agentDir": "/home/user/.pi/agents"
+                }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_PI, &settings);
+        assert_eq!(
+            extras.get("agentDir").and_then(|v| v.as_str()),
+            Some("/home/user/.pi/agents")
+        );
+    }
+
+    #[test]
+    fn extract_provider_extras_unknown_provider_returns_empty() {
+        let settings = serde_json::json!({ "providers": {} });
+        let extras = extract_provider_extras("unknown", &settings);
+        assert!(
+            extras.is_empty(),
+            "expected empty extras for unknown provider"
+        );
+    }
+
+    #[test]
+    fn extract_provider_extras_handles_missing_providers_key() {
+        let settings = serde_json::json!({});
+        let extras = extract_provider_extras(PROVIDER_CODEX, &settings);
+        assert!(extras.is_empty());
+    }
+
+    #[test]
+    fn extract_provider_extras_skips_disabled_provider() {
+        // Disabled provider entry should yield empty extras (adapter won't spawn).
+        let settings = serde_json::json!({
+            "providers": {
+                "codex": { "enabled": false, "binaryPath": "codex" }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_CODEX, &settings);
+        assert!(
+            extras.is_empty(),
+            "disabled provider should return empty extras"
+        );
     }
 }
