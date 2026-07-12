@@ -8,6 +8,7 @@ import {
   MessageId,
   type OrchestrationEvent,
   type ProviderKind,
+  ProjectId,
   ThreadId,
   type OrchestrationReadModel,
   type OrchestrationShellSnapshot,
@@ -3160,6 +3161,47 @@ function applyOrchestrationEvent(
     case "thread.deleted":
       // Deletion is terminal for both active sidebar rows and archived settings rows.
       return removeDeletedThreadFromClientState(state, event.payload.threadId);
+
+    case "thread.created": {
+      // Seed a minimal shell so subsequent live push events (message-sent,
+      // session-set, activity-appended) find the thread via applyThreadUpdate.
+      // The `subscribeThread` snapshot is the normal shell loader; this handles
+      // the race where a turn's push events arrive before the snapshot loads the
+      // thread into the store (e.g. create+send in one dispatch). Don't clobber
+      // an existing thread — the snapshot already loaded a richer projection.
+      const threadId = event.payload.threadId;
+      if (getThreadFromState(state, threadId)) return state;
+      const created = event.payload as {
+        projectId?: ProjectId;
+        providerId?: string;
+        model?: string;
+        createdAt?: string;
+      };
+      const createdAt = created.createdAt ?? new Date().toISOString();
+      return writeThreadState(state, {
+        id: threadId,
+        codexThreadId: null,
+        projectId: created.projectId ?? ("" as ProjectId),
+        title: "",
+        modelSelection: {
+          provider: (created.providerId ?? "codex") as ProviderKind,
+          model: created.model ?? "default",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        session: null,
+        messages: [],
+        proposedPlans: [],
+        error: null,
+        createdAt,
+        updatedAt: createdAt,
+        latestTurn: null,
+        turnDiffSummaries: [],
+        activities: [],
+        branch: null,
+        worktreePath: null,
+      });
+    }
 
     case "thread.meta-updated":
       return applyThreadUpdate(
