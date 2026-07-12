@@ -253,12 +253,31 @@ export function adaptPushEnvelope(
   switch (tag) {
     // ── Turn lifecycle (synthesize session + activity) ────────────────
     case "turnStarted": {
-      // Seed turnId → threadId. No emitted event (don't clobber optimistic
-      // dispatch state the UI set on send).
+      // Seed turnId → threadId for later resolution.
       if (raw) {
         const id = raw["id"];
         const tid = raw["thread_id"];
         if (typeof id === "string" && typeof tid === "string") lruSet(ctx.turns, id, tid);
+      }
+      // Emit session-set(running) so the UI's `phase` becomes "running" →
+      // `serverAcknowledgedLocalDispatch` flips true → `isSendBusy` clears +
+      // `localDispatch` resets (the composer stops thinking it's still sending).
+      // Without this, the session stays null (backend emits no ThreadSessionSet
+      // on the turn path) → serverAck stays false → isSendBusy → spinner stuck.
+      const turnId = raw ? (raw["id"] as string | undefined) : undefined;
+      const threadId = raw ? (raw["thread_id"] as string | undefined) : undefined;
+      if (threadId) {
+        const ts = pickTimestamp(raw, "created_at");
+        out.push(
+          makeEvent(
+            "thread.session-set",
+            { sequence: seq, occurredAt, aggregateId: threadId, aggregateKind: "thread" },
+            {
+              threadId: ThreadId.makeUnsafe(threadId),
+              session: buildSession(threadId, "running", turnId ?? null, null, ts, ctx),
+            },
+          ),
+        );
       }
       return out;
     }

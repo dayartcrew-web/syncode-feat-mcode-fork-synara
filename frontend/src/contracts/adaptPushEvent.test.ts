@@ -41,14 +41,20 @@ describe("adaptPushEnvelope", () => {
     expect(deleted[0]?.type).toBe("project.deleted");
   });
 
-  it("seeds turns map on TurnStarted and emits nothing", () => {
+  it("seeds turns map on TurnStarted + emits session-set(running)", () => {
     const ctx = createPushAdaptContext();
     const out = adaptPushEnvelope(
       env("TurnStarted", turnId, { id: turnId, thread_id: threadId, sequence: 0, user_input: "hi", created_at: "t" }),
       ctx,
     );
-    expect(out).toEqual([]);
     expect(ctx.turns.get(turnId)).toBe(threadId);
+    // Emits session-set(running) so the UI's phase becomes "running" →
+    // serverAcknowledgedLocalDispatch flips true → isSendBusy clears.
+    expect(out).toHaveLength(1);
+    expect(out[0]!.type).toBe("thread.session-set");
+    const session = (out[0]!.payload as { session: { status: string; activeTurnId: string | null } }).session;
+    expect(session.status).toBe("running");
+    expect(session.activeTurnId).toBe(turnId);
   });
 
   it("maps MessageDeltaAppended → thread.message-sent (streaming) with threadId resolved via turns map", () => {
