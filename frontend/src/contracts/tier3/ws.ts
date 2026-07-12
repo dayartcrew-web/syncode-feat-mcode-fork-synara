@@ -26,6 +26,7 @@ import type { GitActionProgressEvent } from "./git";
 import type { TerminalEvent } from "./terminal";
 import type { ProjectDevServerEvent } from "./project";
 import type { OrchestrationEvent, OrchestrationShellStreamItem, OrchestrationThreadStreamItem } from "../shell";
+import type { OrchestrationPushEnvelope } from "../events";
 
 // ─── WS method names (camelCase keys → dot method strings) ────────────
 
@@ -173,6 +174,10 @@ export interface WsPushPayloadByChannel {
   readonly [WS_CHANNELS.gitActionProgress]: GitActionProgressEvent;
   readonly [WS_CHANNELS.terminalEvent]: TerminalEvent;
   readonly [WS_CHANNELS.projectDevServerEvent]: ProjectDevServerEvent;
+  /** Bare multiplexed orchestration channel (`push/orchestration`) — the raw
+   *  envelope the backend actually emits (PascalCase `eventType`, double-
+   *  nested `data`). The wsNativeApi demux adapts it to `OrchestrationEvent`. */
+  readonly orchestration: OrchestrationPushEnvelope;
   readonly [ORCHESTRATION_WS_CHANNELS.domainEvent]: OrchestrationEvent;
   readonly [ORCHESTRATION_WS_CHANNELS.shellEvent]: OrchestrationShellStreamItem;
   readonly [ORCHESTRATION_WS_CHANNELS.threadEvent]: OrchestrationThreadStreamItem;
