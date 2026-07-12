@@ -117,6 +117,7 @@ impl ApplicationService {
         project_id: EntityId,
         provider_id: String,
         model: String,
+        thread_id: Option<EntityId>,
     ) -> Result<CommandResult, OrchestrationError> {
         if self.get_project(&project_id.to_string()).await.is_none() {
             return Err(OrchestrationError::ProjectNotFound(project_id));
@@ -126,6 +127,7 @@ impl ApplicationService {
                 project_id,
                 provider_id,
                 model,
+                thread_id,
             })
             .await
     }
@@ -1061,7 +1063,7 @@ mod tests {
         let pid = proj.events[0].event.aggregate_id();
 
         let thread = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thread.events[0].event.aggregate_id();
@@ -1092,7 +1094,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thread = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thread.events[0].event.aggregate_id();
@@ -1108,7 +1110,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thread = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thread.events[0].event.aggregate_id();
@@ -1125,7 +1127,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thread = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thread.events[0].event.aggregate_id();
@@ -1152,7 +1154,7 @@ mod tests {
 
         // Source thread must exist
         let source = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let source_id = source.events[0].event.aggregate_id();
@@ -1212,7 +1214,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let source = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let source_id = source.events[0].event.aggregate_id();
@@ -1238,7 +1240,7 @@ mod tests {
 
         // Create thread
         let result = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
 
@@ -1255,7 +1257,7 @@ mod tests {
         let svc = make_service();
         let bogus = EntityId::new();
         let result = svc
-            .create_thread(bogus, "openai".into(), "gpt-4".into())
+            .create_thread(bogus, "openai".into(), "gpt-4".into(), None)
             .await;
         assert!(result.is_err());
         assert!(matches!(
@@ -1274,7 +1276,7 @@ mod tests {
 
         // Thread
         let thr = svc
-            .create_thread(project_id, "anthropic".into(), "claude-3".into())
+            .create_thread(project_id, "anthropic".into(), "claude-3".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1307,7 +1309,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/tmp".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1340,13 +1342,13 @@ mod tests {
         let p2_id = p2.events[0].event.aggregate_id();
 
         // Create threads in each project
-        svc.create_thread(p1_id, "openai".into(), "gpt-4".into())
+        svc.create_thread(p1_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
-        svc.create_thread(p1_id, "anthropic".into(), "claude-3".into())
+        svc.create_thread(p1_id, "anthropic".into(), "claude-3".into(), None)
             .await
             .unwrap();
-        svc.create_thread(p2_id, "openai".into(), "gpt-4".into())
+        svc.create_thread(p2_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
 
@@ -1373,7 +1375,7 @@ mod tests {
             .unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1399,7 +1401,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1430,7 +1432,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1453,7 +1455,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1472,7 +1474,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1500,7 +1502,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1543,7 +1545,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1573,7 +1575,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1616,7 +1618,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1639,7 +1641,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thr.events[0].event.aggregate_id();
@@ -1660,7 +1662,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thr.events[0].event.aggregate_id();
@@ -1681,7 +1683,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thr.events[0].event.aggregate_id();
@@ -1702,7 +1704,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thr.events[0].event.aggregate_id();
@@ -1747,7 +1749,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thr.events[0].event.aggregate_id();
@@ -1797,7 +1799,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let pid = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(pid, "openai".into(), "gpt-4".into())
+            .create_thread(pid, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let tid = thr.events[0].event.aggregate_id();
@@ -1871,7 +1873,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
@@ -1905,7 +1907,7 @@ mod tests {
         let proj = svc.create_project("P".into(), "/p".into()).await.unwrap();
         let project_id = proj.events[0].event.aggregate_id();
         let thr = svc
-            .create_thread(project_id, "openai".into(), "gpt-4".into())
+            .create_thread(project_id, "openai".into(), "gpt-4".into(), None)
             .await
             .unwrap();
         let thread_id = thr.events[0].event.aggregate_id();
