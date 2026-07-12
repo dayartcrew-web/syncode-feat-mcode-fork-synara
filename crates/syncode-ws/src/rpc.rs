@@ -1461,11 +1461,21 @@ async fn handle_orchestration_dispatch_command(
                 Ok(v) => v,
                 Err(r) => return *r,
             };
+            // Optional client-provided thread id (draft promotion): when present,
+            // the backend uses it instead of generating a new one, so the
+            // `ThreadCreated` event + the subsequent turn reference the SAME id
+            // the frontend already holds.
+            let thread_id = pctx
+                .params
+                .get("threadId")
+                .and_then(|v| v.as_str())
+                .and_then(|s| syncode_core::EntityId::parse(s).ok());
             service
                 .create_thread(
                     project_id,
                     normalize_provider_id(&provider_id).to_string(),
                     model,
+                    thread_id,
                 )
                 .await
         }
@@ -1492,7 +1502,15 @@ async fn handle_orchestration_dispatch_command(
                 Ok(v) => v,
                 Err(r) => return *r,
             };
-            service.create_thread(project_id, provider_id, model).await
+            // Optional client-provided thread id (draft promotion) — see CreateThread arm.
+            let thread_id = pctx
+                .params
+                .get("threadId")
+                .and_then(|v| v.as_str())
+                .and_then(|s| syncode_core::EntityId::parse(s).ok());
+            service
+                .create_thread(project_id, provider_id, model, thread_id)
+                .await
         }
         "PauseThread" => {
             let thread_id = match pctx.require_id_any(&["id", "threadId"], "PauseThread") {
@@ -4245,6 +4263,7 @@ async fn handle_thread_create(state: &WsState, id: Value, params: &Value) -> Jso
         project_id,
         provider_id,
         model,
+        thread_id: None,
     };
     match state.orchestrator.handle_command(cmd).await {
         Ok(result) => {
@@ -17727,6 +17746,7 @@ mod tests {
                 project_id,
                 provider_id: "claude".into(),
                 model: "m".into(),
+                thread_id: None,
             })
             .await
             .expect("create thread");
