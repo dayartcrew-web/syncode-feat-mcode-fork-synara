@@ -1557,7 +1557,6 @@ mod tests {
                 project_id,
                 provider_id: "p".into(),
                 model: "m".into(),
-                thread_id: None,
             })
             .await
             .expect("create thread");
@@ -1681,7 +1680,6 @@ mod tests {
                 project_id,
                 provider_id: "p".into(),
                 model: "m".into(),
-                thread_id: None,
             })
             .await
             .expect("create thread");
@@ -2521,7 +2519,6 @@ mod tests {
                 project_id: EntityId::new(),
                 provider_id: "anthropic".into(),
                 model: "claude-3".into(),
-                thread_id: None,
             })
             .await;
 
@@ -2559,7 +2556,6 @@ mod tests {
                 project_id,
                 provider_id: "anthropic".into(),
                 model: "claude-3".into(),
-                thread_id: None,
             })
             .await
             .expect("create thread for existing project");
@@ -2744,7 +2740,6 @@ mod tests {
                 project_id,
                 provider_id: "anthropic".into(),
                 model: "claude".into(),
-                thread_id: None,
             })
             .await
             .expect("create thread");
@@ -2881,7 +2876,6 @@ mod tests {
                 project_id,
                 provider_id: "claude".into(),
                 model: "claude-sonnet".into(),
-                thread_id: None,
             })
             .await
             .expect("create thread");

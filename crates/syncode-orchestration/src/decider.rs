@@ -62,13 +62,6 @@ pub enum Command {
         project_id: EntityId,
         provider_id: String,
         model: String,
-        /// Optional client-provided thread id (draft promotion / idempotency).
-        /// When `Some`, the decider uses it instead of generating a new
-        /// `EntityId`, so the `ThreadCreated` event and the subsequent turn
-        /// reference the SAME id the frontend already holds (the frontend
-        /// dispatches `thread.create` with its draft threadId and then reuses
-        /// it for `thread.turn.start`). When `None`, a new id is generated.
-        thread_id: Option<EntityId>,
     },
     PauseThread {
         id: EntityId,
@@ -471,8 +464,7 @@ impl Decider {
                 project_id,
                 provider_id,
                 model,
-                thread_id,
-            } => Self::decide_create_thread(project_id, provider_id, model, thread_id),
+            } => Self::decide_create_thread(project_id, provider_id, model),
             Command::PauseThread { id } => Self::decide_pause_thread(id, current_state),
             Command::ResumeThread { id } => Self::decide_resume_thread(id, current_state),
             Command::CompleteThread { id } => Self::decide_complete_thread(id, current_state),
@@ -785,9 +777,8 @@ impl Decider {
         project_id: EntityId,
         provider_id: String,
         model: String,
-        thread_id: Option<EntityId>,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
-        let id = thread_id.unwrap_or_default();
+        let id = EntityId::new();
         let now = Timestamp::now();
         Ok(vec![DomainEvent::ThreadCreated {
             id,
@@ -1866,7 +1857,6 @@ mod tests {
                 project_id: pid,
                 provider_id: "openai".to_string(),
                 model: "gpt-4".to_string(),
-                thread_id: None,
             },
             None,
         )

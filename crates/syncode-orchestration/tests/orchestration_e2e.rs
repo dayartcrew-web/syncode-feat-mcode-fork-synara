@@ -103,7 +103,6 @@ async fn orchestration_real_db_thread_lifecycle() {
             project_id,
             provider_id: "test".into(),
             model: "default".into(),
-            thread_id: None,
         })
         .await;
     assert!(result.is_ok(), "CreateThread failed: {:?}", result.err());

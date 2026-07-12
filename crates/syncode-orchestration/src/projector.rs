@@ -732,7 +732,6 @@ mod tests {
                 project_id: pid,
                 provider_id: "openai".to_string(),
                 model: "gpt-4".to_string(),
-                thread_id: None,
             },
             None,
         )
@@ -750,7 +749,6 @@ mod tests {
                 project_id: pid,
                 provider_id: "openai".to_string(),
                 model: "gpt-4".to_string(),
-                thread_id: None,
             },
             None,
         )
@@ -776,7 +774,6 @@ mod tests {
                 project_id: pid,
                 provider_id: "openai".to_string(),
                 model: "gpt-4".to_string(),
-                thread_id: None,
             },
             None,
         )
@@ -807,7 +804,6 @@ mod tests {
                 project_id: pid,
                 provider_id: "openai".to_string(),
                 model: "gpt-4".to_string(),
-                thread_id: None,
             },
             None,
         )
@@ -919,7 +915,6 @@ mod tests {
                 project_id: pid,
                 provider_id: "anthropic".to_string(),
                 model: "claude-3".to_string(),
-                thread_id: None,
             },
             None,
         )

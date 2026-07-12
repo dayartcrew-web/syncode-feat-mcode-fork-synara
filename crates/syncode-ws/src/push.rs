@@ -576,7 +576,6 @@ mod snapshot_tests {
             project_id: pid,
             provider_id: "anthropic".into(),
             model: "claude".into(),
-            thread_id: None,
         };
         let result = state.orchestrator.handle_command(cmd).await.unwrap();
         let thread_id = result.events.first().unwrap().event.aggregate_id();
