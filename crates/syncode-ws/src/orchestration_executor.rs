@@ -224,7 +224,7 @@ async fn create_thread_for_run(
     model: &str,
 ) -> Result<EntityId, PortError> {
     let result = service
-        .create_thread(project_id, provider_id.to_string(), model.to_string())
+        .create_thread(project_id, provider_id.to_string(), model.to_string(), None)
         .await
         .map_err(map_orchestration_error)?;
     result
