@@ -1181,6 +1181,16 @@ function EventRouter() {
       threadSnapshotSequenceById.set(threadId, item.event.sequence);
       queueDomainEvent(item.event);
     });
+    // Live domain events (adapted from `push/orchestration` frames in
+    // wsNativeApi). Bypass the thread-snapshot-sequence dedup used by
+    // onThreadEvent — the adapter assigns a per-connection monotonic sequence
+    // in a different number space than the server snapshot sequence, so
+    // comparing them would drop legitimate live events. The store's
+    // idempotent cases + coalesceOrchestrationUiEvents handle the rest.
+    const unsubDomainEvent = api.orchestration.onDomainEvent((event) => {
+      if (disposed) return;
+      queueDomainEvent(event);
+    });
     const unsubTerminalEvent = api.terminal.onEvent((event) => {
       const terminalThreadId = ThreadId.makeUnsafe(event.threadId);
       if (event.type === "activity") {
@@ -1391,6 +1401,7 @@ function EventRouter() {
       unsubscribeRetainedThreadIdChanges();
       unsubShellEvent();
       unsubThreadEvent();
+      unsubDomainEvent();
       unsubTerminalEvent();
       unsubDevServerEvent();
       unsubWelcome();
