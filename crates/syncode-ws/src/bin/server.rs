@@ -52,18 +52,18 @@ use std::sync::Arc;
 
 use syncode_core::ports::EventRepository;
 use syncode_orchestration::Orchestrator;
+use syncode_persistence::SqlitePool;
 use syncode_persistence::adapters::SqliteEventRepository;
 use syncode_provider::{FileResumeCursorStore, SessionManager};
+use syncode_ws::settings::{
+    extract_provider_extras, resolve_default_model, resolve_default_provider,
+};
 use syncode_ws::{WsState, server::build_app};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 3000;
 const DEFAULT_DB_PATH: &str = "syncode.db";
 const PUSH_CAPACITY: usize = 1024;
-/// Default provider id used when `SYNCODE_DEFAULT_PROVIDER` is unset. The
-/// provider's CLI must be installed on PATH for the chat to actually generate
-/// AI responses; otherwise the orchestrator falls back to inert mode.
-const DEFAULT_PROVIDER: &str = "opencode";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -140,7 +140,13 @@ async fn build_state() -> WsState {
             // original pool backs the event repository (below).
             let settings_pool = pool.clone();
             let repo: Arc<dyn EventRepository> = Arc::new(SqliteEventRepository::new(pool));
-            let orchestrator = build_orchestrator(repo).await;
+            // SRV-1 follow-up: arm the orchestrator AFTER the pool is available
+            // so `build_orchestrator` can read the persisted
+            // `textGenerationModelSelection` (the Settings panel's provider
+            // picker) before choosing an adapter. Previously the orchestrator
+            // was armed first and always fell back to the env-var default,
+            // ignoring the user's pick until next restart.
+            let orchestrator = build_orchestrator(repo, &settings_pool).await;
             tracing::info!(db_path = %db_path, "SQLite-backed event store initialized");
             let state = WsState::new(PUSH_CAPACITY, orchestrator);
             // Attach the pool to the in-memory settings store: loads any
@@ -168,11 +174,21 @@ async fn build_state() -> WsState {
 /// Build the orchestrator with a [`ProviderCommandReactor`] + a provider
 /// adapter, so turns actually invoke a provider and AI responses stream back.
 ///
-/// The provider id comes from `SYNCODE_DEFAULT_PROVIDER` (default `claude`).
-/// When the named provider's CLI is unavailable (the adapter factory returns
-/// `None`), this falls back to [`Orchestrator::new`] — turns are still
-/// recorded but no AI response is generated, and the server still boots
-/// (graceful degradation, logged at `WARN`).
+/// Provider id precedence (post-SRV-1):
+///   1. `server_settings.textGenerationModelSelection.provider` — the Settings
+///      panel's picker (loaded fresh from `settings_pool`).
+///   2. `SYNCODE_DEFAULT_PROVIDER` env var — operator override.
+///   3. [`DEFAULT_PROVIDER`] (`"opencode"`) — backwards-compatible default.
+///
+/// Per-provider extras (`binaryPath`, `serverUrl`, `launchArgs`, …) are
+/// pulled from the same persisted settings so adapters launch with the
+/// user-configured CLI path and credentials. The model id follows the same
+/// precedence chain via [`resolve_default_model`].
+///
+/// When the resolved provider's CLI is unavailable (the adapter factory
+/// returns `None`), this falls back to [`Orchestrator::new`] — turns are
+/// still recorded but no AI response is generated, and the server still
+/// boots (graceful degradation, logged at `WARN`).
 ///
 /// `WsState::new` wraps the orchestrator's push bus as a
 /// [`syncode_ws::push::WsDomainEventPublisher`] via
@@ -186,9 +202,30 @@ async fn build_state() -> WsState {
 /// [`FileResumeCursorStore`]. Cursor-bearing sessions that were in flight
 /// before the restart are re-registered and the provider adapter is asked to
 /// `resume_session` for each — best-effort, never blocks startup.
-async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
-    let default_provider =
-        std::env::var("SYNCODE_DEFAULT_PROVIDER").unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
+async fn build_orchestrator(
+    repo: Arc<dyn EventRepository>,
+    settings_pool: &SqlitePool,
+) -> Orchestrator {
+    // Load persisted ServerSettings (best-effort). On any failure (fresh DB,
+    // pre-SRV-1 schema, IO error) we fall through to env-only resolution so
+    // the server still boots — matches the existing in-memory fallback.
+    let settings = match syncode_persistence::settings_store::load_settings(settings_pool).await {
+        Ok(Some(value)) => value,
+        Ok(None) => serde_json::Value::Null,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to load persisted ServerSettings — falling back to env-only provider selection"
+            );
+            serde_json::Value::Null
+        }
+    };
+
+    let env_provider = std::env::var("SYNCODE_DEFAULT_PROVIDER").ok();
+    let env_model = std::env::var("SYNCODE_DEFAULT_MODEL").ok();
+    let default_provider = resolve_default_provider(&settings, env_provider.as_deref());
+    let default_model = resolve_default_model(&settings, env_model.as_deref());
+    let provider_extras = extract_provider_extras(&default_provider, &settings);
 
     // PR-1-2: construct the shared read model handle first so the reactor and
     // the orchestrator can both see it. The reactor uses it to resolve a
@@ -212,13 +249,11 @@ async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
                 let mut guard = adapter.write().await;
                 let config = syncode_provider::ProviderConfig {
                     provider_id: default_provider.clone(),
-                    model: std::env::var("SYNCODE_DEFAULT_MODEL")
-                        .ok()
-                        .unwrap_or_default(),
+                    model: default_model.clone(),
                     api_key: None,
                     base_url: None,
                     max_tokens: Some(4096),
-                    extra: std::collections::HashMap::new(),
+                    extra: provider_extras,
                 };
                 match guard.spawn(config).await {
                     Ok(()) => {
@@ -232,6 +267,7 @@ async fn build_orchestrator(repo: Arc<dyn EventRepository>) -> Orchestrator {
 
             tracing::info!(
                 provider = %default_provider,
+                model = %default_model,
                 "chat pipeline armed: turns will dispatch to the provider"
             );
 

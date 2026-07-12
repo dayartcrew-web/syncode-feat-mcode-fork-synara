@@ -4,6 +4,7 @@
 //! which runs the full CQRS pipeline:
 //!   Decider → Events → EventRepository persist → Projector → ReadModelStore
 
+use crate::settings::normalize_provider_id;
 use crate::{ConnectionId, JsonRpcRequest, JsonRpcResponse, WsState};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -1472,7 +1473,7 @@ async fn handle_orchestration_dispatch_command(
             service
                 .create_thread(
                     project_id,
-                    normalize_provider_id(provider_id),
+                    normalize_provider_id(&provider_id).to_string(),
                     model,
                     thread_id,
                 )
@@ -2010,22 +2011,6 @@ impl<'a> DispatchParams<'a> {
     }
 }
 
-/// Normalize an MCode frontend provider kind to the backend's provider id.
-/// The inverse of `push::to_mcode_provider_kind`: the UI dispatches threads
-/// with `provider: "claudeAgent"` (the MCode-literal `ProviderKind`), while
-/// the backend's `ProviderRegistry` and `Command::CreateThread` use `"claude"`.
-/// Other ids (codex, cursor, gemini, grok, kilo, opencode, pi, …) pass
-/// through unchanged. Applied at every entry point that turns a UI dispatch
-/// into a `Command::CreateThread` so the read model never stores a kind the
-/// registry doesn't recognize.
-fn normalize_provider_id(provider_id: String) -> String {
-    if provider_id == "claudeAgent" {
-        "claude".to_string()
-    } else {
-        provider_id
-    }
-}
-
 /// Resolve the provider id for a `thread.create` dispatch (PR-fix-thread).
 ///
 /// Order of precedence:
@@ -2046,10 +2031,10 @@ fn resolve_thread_create_provider(pctx: &DispatchParams) -> Result<String, Box<J
         .and_then(|v| v.get("provider"))
         .and_then(|v| v.as_str())
     {
-        return Ok(normalize_provider_id(s.to_string()));
+        return Ok(normalize_provider_id(s).to_string());
     }
     match pctx.require_str_any(&["providerId", "provider_id"], "thread.create") {
-        Ok(s) => Ok(normalize_provider_id(s)),
+        Ok(s) => Ok(normalize_provider_id(&s).to_string()),
         Err(r) => Err(r),
     }
 }

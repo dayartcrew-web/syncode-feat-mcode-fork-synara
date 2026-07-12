@@ -26,7 +26,6 @@ import {
   type ServerLifecycleStreamEvent,
   type ServerSettingsUpdatedPayload,
   type TerminalEvent,
-  ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   type ContextMenuItem,
   type NativeApi,
@@ -39,6 +38,7 @@ import {
 
 import { showConfirmDialogFallback } from "./confirmDialogFallback";
 import { showContextMenuFallback } from "./contextMenuFallback";
+import { adaptPushEnvelope, createPushAdaptContext } from "./contracts/adaptPushEvent";
 import { WsTransport } from "./wsTransport";
 import { emitWsTransportState } from "./wsTransportEvents";
 
@@ -76,6 +76,9 @@ const orchestrationShellEventListeners = new Set<(payload: OrchestrationShellStr
 const orchestrationThreadEventListeners = new Set<
   (payload: OrchestrationThreadStreamItem) => void
 >();
+// Per-connection push adapter context (resets on page reload; reconnect
+// mid-turn is a known edge case — see adaptPushEvent.ts risks).
+const pushAdaptCtx = createPushAdaptContext();
 const fallbackBrowserStateListeners = new Set<(state: ThreadBrowserState) => void>();
 const fallbackBrowserStates = new Map<ThreadId, ThreadBrowserState>();
 
@@ -413,33 +416,38 @@ export function createWsNativeApi(): NativeApi {
       }
     }
   });
-  transport.subscribe(ORCHESTRATION_WS_CHANNELS.domainEvent, (message) => {
-    const payload = message.data;
-    for (const listener of orchestrationDomainEventListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
+  // The backend publishes every domain event on the bare `orchestration`
+  // channel (`push/orchestration`); wsTransport derives `channel =
+  // method.slice("push/".length)` and emits on that exact key. The previous
+  // subscribes on `orchestration.domainEvent`/`.shellEvent`/`.threadEvent`
+  // never matched → zero live delivery. Subscribe on the bare channel and
+  // demux: snapshot frames → shell listeners; domain frames → adapt → domain
+  // listeners. (The thread/shell "event" branches never fire from the real
+  // backend; only snapshots route through the shell branch, best-effort.)
+  transport.subscribe("orchestration", (message) => {
+    const env = message.data as { eventType?: string; data?: unknown } | undefined;
+    if (env && env.eventType === "snapshot") {
+      for (const listener of orchestrationShellEventListeners) {
+        try {
+          listener({ kind: "snapshot", snapshot: env.data } as OrchestrationShellStreamItem);
+        } catch {
+          // Swallow listener errors
+        }
       }
+      return;
     }
-  });
-  transport.subscribe(ORCHESTRATION_WS_CHANNELS.shellEvent, (message) => {
-    const payload = message.data;
-    for (const listener of orchestrationShellEventListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
-      }
-    }
-  });
-  transport.subscribe(ORCHESTRATION_WS_CHANNELS.threadEvent, (message) => {
-    const payload = message.data;
-    for (const listener of orchestrationThreadEventListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
+    if (!env || typeof env.eventType !== "string") return;
+    const events = adaptPushEnvelope(
+      { eventType: env.eventType, aggregateId: (env as { aggregateId?: string }).aggregateId ?? null, data: env.data },
+      pushAdaptCtx,
+    );
+    for (const event of events) {
+      for (const listener of orchestrationDomainEventListeners) {
+        try {
+          listener(event);
+        } catch {
+          // Swallow listener errors
+        }
       }
     }
   });

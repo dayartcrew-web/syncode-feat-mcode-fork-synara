@@ -9,10 +9,8 @@ import {
   AutomationRunId,
   CommandId,
   type ContextMenuItem,
-  EventId,
-  ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
-  type OrchestrationEvent,
+  type OrchestrationPushEnvelope,
   ProjectId,
   ThreadId,
   type WsPushChannel,
@@ -348,29 +346,18 @@ describe("wsNativeApi", () => {
     } as const;
     emitPush(WS_CHANNELS.terminalEvent, terminalEvent);
 
-    const orchestrationEvent = {
-      sequence: 1,
-      eventId: EventId.makeUnsafe("event-1"),
-      aggregateKind: "project",
-      aggregateId: ProjectId.makeUnsafe("project-1"),
-      occurredAt: "2026-02-24T00:00:00.000Z",
-      commandId: null,
-      causationEventId: null,
-      correlationId: null,
-      metadata: {},
-      type: "project.created",
-      payload: {
-        projectId: ProjectId.makeUnsafe("project-1"),
-        kind: "project",
-        title: "Project",
-        workspaceRoot: "/tmp/workspace",
-        defaultModelSelection: null,
-        scripts: [],
-        createdAt: "2026-02-24T00:00:00.000Z",
-        updatedAt: "2026-02-24T00:00:00.000Z",
+    // The backend multiplexes domain events on the bare `orchestration` channel
+    // as a raw `OrchestrationPushEnvelope` (PascalCase tag, double-nested
+    // data). wsNativeApi demuxes + adapts it to a formed `OrchestrationEvent`.
+    const rawOrchestrationEnvelope = {
+      eventType: "ProjectDeleted",
+      aggregateId: "project-1",
+      data: {
+        event_type: "ProjectDeleted",
+        data: { id: "project-1", deleted_at: "2026-02-24T00:00:00.000Z" },
       },
-    } satisfies Extract<OrchestrationEvent, { type: "project.created" }>;
-    emitPush(ORCHESTRATION_WS_CHANNELS.domainEvent, orchestrationEvent);
+    };
+    emitPush("orchestration", rawOrchestrationEnvelope as OrchestrationPushEnvelope);
     emitPush(WS_CHANNELS.gitActionProgress, {
       actionId: "action-1",
       cwd: "/repo",
@@ -383,7 +370,9 @@ describe("wsNativeApi", () => {
     expect(onTerminalEvent).toHaveBeenCalledTimes(1);
     expect(onTerminalEvent).toHaveBeenCalledWith(terminalEvent);
     expect(onDomainEvent).toHaveBeenCalledTimes(1);
-    expect(onDomainEvent).toHaveBeenCalledWith(orchestrationEvent);
+    expect(onDomainEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "project.deleted", aggregateKind: "project" }),
+    );
     expect(onActionProgress).toHaveBeenCalledTimes(1);
     expect(onActionProgress).toHaveBeenCalledWith({
       actionId: "action-1",
