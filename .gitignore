@@ -58,3 +58,18 @@ contracts/generated/
 
 # Playwright MCP artifacts (browser snapshots + screenshots from audits)
 .playwright-mcp/
+
+# Local agent/tooling runtimes (session state, caches — not source)
+.zcode/
+.omo/
+.claude/
+.kmr/
+
+# TanStack Router generated route tree cache
+frontend/.tanstack/
+
+# ts-rs contract generation build output
+crates/syncode-contracts/build/
+
+# Rust test binary output
+tests/bin/
