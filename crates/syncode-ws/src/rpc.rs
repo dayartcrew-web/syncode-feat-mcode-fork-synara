@@ -5589,7 +5589,12 @@ async fn handle_server_patch_settings(
 /// `ServerProviderStatusesUpdatedPayload` (`{ providers: [...] }`).
 async fn handle_server_refresh_providers(state: &WsState, id: Value) -> JsonRpcResponse {
     let providers = {
-        let store = state.settings.read().await;
+        let mut store = state.settings.write().await;
+        // Re-probe every provider's binary (honoring custom `binaryPath`
+        // overrides from settings) so "Refresh" actually reflects reality —
+        // previously this re-emitted the stale persisted `providers[]` array.
+        store.reprobe_provider_statuses();
+        store.persist_config().await;
         store.config["providers"].clone()
     };
     let payload = serde_json::json!({ "providers": providers.clone() });
@@ -5630,7 +5635,13 @@ async fn handle_server_update_provider(
         );
     }
     let providers = {
-        let store = state.settings.read().await;
+        let mut store = state.settings.write().await;
+        // Re-probe so a provider whose `binaryPath`/`apiEndpoint` was just
+        // changed via `updateSettings` is reflected immediately. Previously
+        // this re-emitted the stale persisted `providers[]` array (the
+        // targeted provider's status never changed).
+        store.reprobe_provider_statuses();
+        store.persist_config().await;
         store.config["providers"].clone()
     };
     let payload = serde_json::json!({ "providers": providers.clone() });

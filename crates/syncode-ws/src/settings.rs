@@ -36,8 +36,9 @@
 //! `ServerSettingsPatch` semantics — e.g. `skills.disabled` is replaced, not
 //! appended).
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use syncode_persistence::SqlitePool;
 use syncode_provider::PROVIDER_CLAUDE;
 #[cfg(test)]
@@ -129,11 +130,16 @@ impl ServerSettingsState {
                 build_default_server_settings()
             }
         };
-        Self {
+        let mut state = Self {
             config,
             settings,
             pool: Some(pool),
-        }
+        };
+        // Re-probe provider availability against the freshly-loaded settings
+        // (same rationale as `attach_pool`). A persisted `config` may carry a
+        // stale `providers[]` from a prior boot; re-probing keeps it honest.
+        state.reprobe_provider_statuses();
+        state
     }
 
     /// Attach a SQLite pool to an existing in-memory store, loading any
@@ -149,6 +155,14 @@ impl ServerSettingsState {
             self.settings = stored;
         }
         self.pool = Some(pool);
+        // Re-probe provider availability now that both the persisted `config`
+        // and `settings` (which may carry custom `binaryPath` overrides) are
+        // loaded. Without this, a stale `providers[]` snapshot from a prior
+        // boot would mask a newly-installed CLI or a freshly-saved binary path
+        // until the user clicks "Refresh". Best-effort persistence so the
+        // refreshed statuses survive the next restart.
+        self.reprobe_provider_statuses();
+        self.persist_config().await;
     }
 
     /// Write-through the `config` document to disk (no-op when no pool is
@@ -177,6 +191,131 @@ impl ServerSettingsState {
             tracing::warn!(error = %e, "failed to persist server_settings to disk");
         }
     }
+
+    /// Re-probe every provider's binary against the **current** `settings` and
+    /// overwrite the `config.providers` array in place.
+    ///
+    /// Why this exists: provider availability depends on two inputs — (1) what
+    /// binaries are installed, and (2) any custom `binaryPath` the user saved.
+    /// Both can change across a server restart (the user installs a CLI, or
+    /// edits the binary path in Settings). But the persisted `config` document
+    /// stores a frozen snapshot of the `providers[]` array from the last boot,
+    /// which [`attach_pool`] / [`with_pool`] restore verbatim — so without a
+    /// re-probe, a newly-installed CLI or a freshly-saved custom path would
+    /// never be reflected until the user clicked "Refresh".
+    ///
+    /// Calling this after both `config` and `settings` are loaded (and after
+    /// any `updateSettings` that might touch a `binaryPath`) keeps the
+    /// `providers[]` array honest. It does NOT persist — callers that want the
+    /// fresh statuses on disk follow up with [`Self::persist_config`].
+    ///
+    /// Synchronous and cheap: 10 providers × a few `which`/`metadata` probes.
+    pub fn reprobe_provider_statuses(&mut self) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let new_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
+            .iter()
+            .map(|&pid| build_provider_status(pid, &self.settings, &now))
+            .collect();
+        self.config["providers"] = Value::Array(new_providers);
+    }
+}
+
+/// Candidate binary names for a provider, in priority order. Most providers
+/// have a single canonical name (their id, or the ACP `spec.command`). Cursor
+/// is special: its CLI ships under several names depending on install method —
+/// `cursor-agent` (the npm/standalone CLI), `agent` (the binary bundled with
+/// the Cursor desktop app, per the official ACP docs at
+/// <https://cursor.com/docs/cli/acp> which document the launch form as
+/// `agent acp`), and `cursor` (legacy alias). Probing all three ensures we
+/// detect Cursor regardless of how it was installed.
+///
+/// Non-ACP providers (codex/claude/kilo/opencode/pi) use their id as the
+/// binary name; ACP providers (grok/gemini) use their `spec.command`.
+fn binary_candidates(pid: &str) -> Vec<String> {
+    let primary = syncode_provider::registry::acp_config_for(pid)
+        .map(|cfg| cfg.spec.command)
+        .unwrap_or_else(|| pid.to_string());
+    let mut candidates = vec![primary];
+    // Cursor-specific fallbacks (see doc comment). `agent` is the bundled-CLI
+    // name documented by Cursor; `cursor` is a legacy alias. Only appended for
+    // cursor so we don't pollute other providers' probe lists.
+    if pid == syncode_provider::PROVIDER_CURSOR {
+        for extra in ["agent", "cursor"] {
+            if !candidates.iter().any(|c| c == extra) {
+                candidates.push(extra.to_string());
+            }
+        }
+    }
+    candidates
+}
+
+/// Resolve a provider's installed binary. A custom `binaryPath` from persisted
+/// settings is honored FIRST (if the path exists on disk), then we fall back to
+/// probing PATH candidates from [`binary_candidates`].
+///
+/// Returns `(resolved_path, installed)`:
+/// - Custom path set and the file exists → `(Some(canonicalized), true)`.
+/// - No custom path, but a PATH candidate is found → `(Some(found), true)`.
+/// - Otherwise → `(None, false)`.
+///
+/// The custom path is checked with `which::which` (handles PATHEXT on Windows,
+/// so a bare `cursor` resolves to `cursor.cmd`) AND a direct `metadata` check
+/// (so an absolute `.cmd`/`.exe` path that isn't on PATH still counts). Either
+/// success wins.
+fn resolve_provider_binary(pid: &str, settings: &Value) -> (Option<PathBuf>, bool) {
+    // 1. Honor a custom binaryPath from settings.providers[<key>].binaryPath.
+    let settings_key = provider_settings_key(pid);
+    if let Some(custom) = settings
+        .get("providers")
+        .and_then(|p| p.get(settings_key))
+        .and_then(|entry| entry.get("binaryPath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        // `which::which` resolves PATHEXT (so "cursor" → "cursor.cmd" on
+        // Windows) and also accepts absolute paths. A direct metadata check
+        // covers absolute paths that `which` might reject (e.g. a `.cmd` shim
+        // with no ` PATHEXT` match in some setups).
+        if let Ok(found) = which::which(custom) {
+            return (Some(found), true);
+        }
+        if std::fs::metadata(custom).is_ok() {
+            // Canonicalize when possible so the stored path is absolute &
+            // normalized; fall back to the raw input if canonicalization fails
+            // (e.g. the file vanished between the two checks).
+            let resolved = std::fs::canonicalize(custom).unwrap_or_else(|_| PathBuf::from(custom));
+            return (Some(resolved), true);
+        }
+    }
+    // 2. Probe PATH candidates.
+    for candidate in binary_candidates(pid) {
+        if let Ok(found) = which::which(&candidate) {
+            return (Some(found), true);
+        }
+    }
+    // 3. Nothing found.
+    (None, false)
+}
+
+/// Build a single provider status object, honoring a custom `binaryPath` from
+/// persisted settings (via [`resolve_provider_binary`]). The shape mirrors the
+/// MCode `ServerProviderStatus` (`frontend/src/contracts/tier3/server.ts`).
+fn build_provider_status(pid: &str, settings: &Value, now: &str) -> Value {
+    let (binary_path, installed) = resolve_provider_binary(pid, settings);
+    let mcode_kind = if pid == PROVIDER_CLAUDE {
+        "claudeAgent"
+    } else {
+        pid
+    };
+    json!({
+        "provider": mcode_kind,
+        "status": if installed { "ready" } else { "unavailable" },
+        "available": installed,
+        "authStatus": if installed { "authenticated" } else { "not_installed" },
+        "binaryPath": binary_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "checkedAt": now,
+    })
 }
 
 /// Build the minimal valid `ServerConfig` shape (MCode
@@ -200,6 +339,21 @@ impl ServerSettingsState {
 ///   `ServerConfig` schema, but harmless as an extra field and useful for
 ///   the UI to display the active auth policy.
 pub fn build_default_server_config(auth_mode: &str) -> Value {
+    build_default_server_config_with_settings(auth_mode, &Value::Null)
+}
+
+/// Same as [`build_default_server_config`] but honors per-provider custom
+/// `binaryPath` values from persisted `ServerSettings` (the
+/// `settings.providers[<kind>].binaryPath` field). When the user saves a
+/// custom binary path in the Settings → Provider tools panel, that path is
+/// consulted FIRST during availability detection — previously the custom path
+/// was ignored (detection only probed the hardcoded ACP command name), so a
+/// saved override never flipped the provider to "Available".
+///
+/// Pass `&Value::Null` (or use [`build_default_server_config`]) when no
+/// settings document is available yet (e.g. first boot before the pool is
+/// attached); the probe then falls back to PATH candidates only.
+pub fn build_default_server_config_with_settings(auth_mode: &str, settings: &Value) -> Value {
     let cwd = server_cwd();
     let home = server_home_dir();
     let worktrees_dir = format!("{}/.synara/worktrees", cwd.trim_end_matches('/'));
@@ -218,34 +372,13 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
 
     // Build provider status objects for all known providers so the frontend's
     // `subscribeConfig` snapshot (which includes a `providers` array) matches
-    // the `subscribeProviderStatuses` snapshot.
+    // the `subscribeProviderStatuses` snapshot. Each entry honors a custom
+    // `binaryPath` from `settings` (if present) and probes multiple candidate
+    // binary names on PATH — see [`build_provider_status`] / [`binary_candidates`].
     let now = chrono::Utc::now().to_rfc3339();
     let default_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
         .iter()
-        .map(|&pid| {
-            let mcode_kind = if pid == "claude" { "claudeAgent" } else { pid };
-            // Probe the provider's CLI binary on PATH so the settings/provider
-            // panel reflects REAL availability — previously every provider was
-            // hardcoded `available:true / authenticated`, claiming CLIs that
-            // aren't installed. ACP providers (cursor/grok/gemini) declare their
-            // binary via `spec.command`, which can differ from the provider id —
-            // cursor's binary is `cursor-agent`, not `cursor` (probing `cursor`
-            // missed the installed `cursor-agent` and marked cursor unavailable).
-            // Non-ACP providers use the id as the binary name.
-            let binary_name = syncode_provider::registry::acp_config_for(pid)
-                .map(|cfg| cfg.spec.command)
-                .unwrap_or_else(|| pid.to_string());
-            let binary_path = which::which(&binary_name).ok();
-            let installed = binary_path.is_some();
-            serde_json::json!({
-                "provider": mcode_kind,
-                "status": if installed { "ready" } else { "unavailable" },
-                "available": installed,
-                "authStatus": if installed { "authenticated" } else { "not_installed" },
-                "binaryPath": binary_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-                "checkedAt": now,
-            })
-        })
+        .map(|&pid| build_provider_status(pid, settings, &now))
         .collect();
 
     // Default keybindings: the MCode frontend ships a set of default
@@ -1155,6 +1288,129 @@ mod tests {
         assert!(
             extras.is_empty(),
             "disabled provider should return empty extras"
+        );
+    }
+
+    // ─── Provider binary detection (custom binaryPath + multi-candidate) ──
+
+    #[test]
+    fn binary_candidates_cursor_includes_agent_and_cursor() {
+        // Cursor's CLI ships under several names; the probe must try all of
+        // them so an install method other than the npm `cursor-agent` is still
+        // detected. Order matters: the ACP `spec.command` (`cursor-agent`)
+        // wins first, then the bundled `agent`, then the legacy `cursor`.
+        let candidates = binary_candidates(PROVIDER_CURSOR);
+        assert_eq!(
+            candidates,
+            vec!["cursor-agent", "agent", "cursor"],
+            "cursor must probe cursor-agent, agent, and cursor"
+        );
+    }
+
+    #[test]
+    fn binary_candidates_non_cursor_provider_has_single_name() {
+        // Non-cursor providers must NOT inherit cursor's fallbacks — otherwise
+        // a random `cursor` on PATH could make, say, codex appear installed.
+        let codex = binary_candidates(PROVIDER_CODEX);
+        assert_eq!(codex, vec![PROVIDER_CODEX], "codex has one candidate");
+        // grok/gemini are ACP providers — their candidate is the spec.command.
+        let grok = binary_candidates(PROVIDER_GROK);
+        assert_eq!(grok.len(), 1, "grok has exactly one candidate");
+        assert_ne!(grok[0], "agent", "grok candidate is not cursor's 'agent'");
+    }
+
+    #[test]
+    fn resolve_provider_binary_honors_custom_path() {
+        // A custom binaryPath pointing at a real file on disk must mark the
+        // provider installed — even if the binary name isn't on PATH. This is
+        // the core fix: previously the custom path was ignored.
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let custom_path = tmp.path().to_string_lossy().to_string();
+        let settings = serde_json::json!({
+            "providers": {
+                "cursor": { "enabled": true, "binaryPath": custom_path }
+            }
+        });
+        let (resolved, installed) = resolve_provider_binary(PROVIDER_CURSOR, &settings);
+        assert!(installed, "custom path must mark provider installed");
+        let resolved_str = resolved
+            .expect("resolved path must be Some when installed")
+            .to_string_lossy()
+            .to_string();
+        // The canonicalized form of the temp path should contain the temp
+        // filename (we can't assert exact equality because canonicalize may
+        // alter the prefix on Windows, e.g. \\?\C:\...).
+        assert!(
+            resolved_str.contains(tmp.path().file_name().unwrap().to_string_lossy().as_ref()),
+            "resolved path should point at the custom file, got {resolved_str}"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_binary_empty_custom_path_falls_through() {
+        // An empty/blank custom binaryPath must NOT short-circuit the probe —
+        // the provider should still be checked against PATH candidates.
+        let settings = serde_json::json!({
+            "providers": {
+                "codex": { "enabled": true, "binaryPath": "" }
+            }
+        });
+        // We can't assert installed=true reliably (depends on host PATH), but
+        // the function must not panic and must return a well-formed tuple.
+        let (_resolved, _installed) = resolve_provider_binary(PROVIDER_CODEX, &settings);
+        // Smoke test: the call completes without error.
+    }
+
+    #[test]
+    fn build_provider_status_custom_path_marks_available() {
+        // End-to-end: a custom binaryPath → status "ready", available: true,
+        // authStatus: "authenticated", and binaryPath echoes the resolved path.
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let custom_path = tmp.path().to_string_lossy().to_string();
+        let settings = serde_json::json!({
+            "providers": {
+                "cursor": { "enabled": true, "binaryPath": custom_path }
+            }
+        });
+        let status = build_provider_status(PROVIDER_CURSOR, &settings, "2026-01-01T00:00:00Z");
+        assert_eq!(status["provider"], "cursor");
+        assert_eq!(status["status"], "ready", "custom path → ready");
+        assert_eq!(status["available"], true, "custom path → available");
+        assert_eq!(status["authStatus"], "authenticated");
+        assert!(
+            status["binaryPath"].is_string(),
+            "binaryPath must be populated when installed"
+        );
+        assert_eq!(status["checkedAt"], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn reprobe_provider_statuses_reflects_custom_path() {
+        // Build a store, inject a custom cursor binaryPath into settings, then
+        // re-probe — config.providers[cursor].available must flip to true.
+        // This mirrors the boot-time reprobe in attach_pool/with_pool.
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let custom_path = tmp.path().to_string_lossy().to_string();
+        let mut state = ServerSettingsState::new("unsafe-no-auth".into());
+        state.settings = serde_json::json!({
+            "providers": {
+                "cursor": { "enabled": true, "binaryPath": custom_path }
+            }
+        });
+        // Before reprobe, cursor is unavailable (default config probed PATH
+        // candidates only, and the temp file isn't named cursor-agent/agent/cursor).
+        // (We can't assert this deterministically on a host that happens to have
+        // one of those, so we only assert the post-reprobe state.)
+        state.reprobe_provider_statuses();
+        let cursor_status = state.config["providers"]
+            .as_array()
+            .expect("providers is an array")
+            .iter()
+            .find(|p| p["provider"] == "cursor")
+            .expect("cursor entry present");
+        assert_eq!(
+            cursor_status["available"], true,
+            "reprobe must honor the custom cursor binaryPath"
         );
     }
 }
