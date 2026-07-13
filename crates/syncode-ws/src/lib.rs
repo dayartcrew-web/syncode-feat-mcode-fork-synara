@@ -18,6 +18,7 @@ pub mod push;
 pub mod rpc;
 pub mod server;
 pub mod settings;
+pub mod skills_catalog;
 pub mod transport;
 pub mod usage;
 pub mod voice;

@@ -798,10 +798,10 @@ async fn dispatch_method(
             handle_provider_list_models(id, &request.params)
         }
         "provider.listSkills" | "provider/list-skills" => {
-            handle_provider_list_skills(id, &request.params)
+            handle_provider_list_skills(state, id, &request.params).await
         }
         "provider.listSkillsCatalog" | "provider/list-skills-catalog" => {
-            handle_provider_list_skills_catalog(id, &request.params)
+            handle_provider_list_skills_catalog(state, id, &request.params).await
         }
         "provider.listPlugins" | "provider/list-plugins" => {
             handle_provider_list_plugins(id, &request.params)
@@ -9822,12 +9822,18 @@ fn to_mcode_provider_kind(syncode_id: &str) -> Option<&'static str> {
     }
 }
 
-/// `provider.listModels` — return `ProviderListModelsResult` with one
-/// `ProviderModelDescriptor` per known MCode-valid provider (slug + name only;
-/// rich option fields omitted as Schema.optional). An empty `source`-less
-/// result is the safe fallback; populating from `ALL_PROVIDERS` keeps the model
-/// picker non-empty so the user can actually select a provider without the
-/// "no models" empty state blocking thread creation.
+/// `provider.listModels` — return `ProviderListModelsResult`. Providers with a
+/// real dynamic catalog (opencode, backed by the Z.AI Coding Plan) return their
+/// model list; every other provider returns an empty list with `source:
+/// "unsupported"` — mirroring MCode, whose `ProviderDiscoveryService.listModels`
+/// returns `{ models: [], source: "unsupported" }` when the adapter has no
+/// `listModels`. The frontend merges runtime-discovered models with its static
+/// per-provider model config, so an empty result does NOT empty the picker.
+///
+/// Previously this handler returned every provider id (`claudeAgent`, `cursor`,
+/// …) as a model `slug` for non-opencode providers — that leaked `claudeAgent`
+/// into the model list and surfaced a bogus "ClaudeAgent" model entry in the
+/// picker. Provider ids are not models.
 /// Display-friendly name for the UI model/agent pickers. The `claudeAgent`
 /// kind renders as "Claude" (the binary/familiar name users see); other kinds
 /// keep their id. Only the human-facing `name`/`displayName` field is mapped —
@@ -9844,14 +9850,9 @@ fn handle_provider_list_models(id: Value, params: &Value) -> JsonRpcResponse {
         .get("provider")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    // When a specific provider is requested, return that provider's real model
-    // catalog. opencode is backed by the Z.AI Coding Plan (Anthropic-compatible)
-    // — its valid model ids are `zai-coding-plan/<glm-id>` (bare `glm-5` is NOT
-    // valid). Without this arm the handler ignored the `provider` param and
-    // returned the provider list for every query, so the UI model picker could
-    // never offer a working model for opencode.
-    //
-    // `source: "opencode"` (not "syncode") for this arm so the frontend's
+    // opencode is backed by the Z.AI Coding Plan (Anthropic-compatible) — its
+    // valid model ids are `zai-coding-plan/<glm-id>` (bare `glm-5` is NOT
+    // valid). `source: "opencode"` (not "syncode") so the frontend's
     // `hasResolvedOpenCodeModelDiscovery` gate (requires source "opencode" /
     // "opencode-cli") treats discovery as resolved and uses these models.
     let (models, source): (Vec<Value>, &str) = if provider
@@ -9867,19 +9868,11 @@ fn handle_provider_list_models(id: Value, params: &Value) -> JsonRpcResponse {
             "opencode",
         )
     } else {
-        (
-            syncode_provider::ALL_PROVIDERS
-                .iter()
-                .filter_map(|p| to_mcode_provider_kind(p))
-                .map(|kind| {
-                    serde_json::json!({
-                        "slug": kind,
-                        "name": provider_display_name(kind),
-                    })
-                })
-                .collect(),
-            "syncode",
-        )
+        // No native model catalog for this provider — mirror MCode's empty
+        // `unsupported` result. The frontend still shows the static per-provider
+        // model config; we must NOT emit provider ids as model slugs (that
+        // leaked "claudeAgent" as a bogus "ClaudeAgent" model entry).
+        (Vec::new(), "unsupported")
     };
     JsonRpcResponse::success(
         id,
@@ -9890,46 +9883,103 @@ fn handle_provider_list_models(id: Value, params: &Value) -> JsonRpcResponse {
     )
 }
 
-/// `provider.listSkills` — return `ProviderListSkillsResult` populated from a
-/// filesystem scan of the project `.skills/*.md` directory (or
-/// `SYNCODE_SKILLS_DIR`). Each markdown file becomes a `ProviderSkillDescriptor`
-/// (name = filename stem, description = YAML frontmatter `description:` field,
-/// path = absolute, enabled = true). Missing/unreadable directory returns an
-/// empty `skills` array — the composer renders a "no skills" empty state.
-fn handle_provider_list_skills(id: Value, params: &Value) -> JsonRpcResponse {
-    let skills = match resolve_skills_dir(params) {
-        Some(dir) => scan_skills_dir(&dir),
-        None => Vec::new(),
+/// `provider.listSkills` — return `ProviderListSkillsResult` populated from the
+/// multi-origin skills catalog (port of MCode `ProviderDiscoveryService.listSkills`).
+/// Scans every provider's home + project skill folders, dedupes by name with the
+/// active provider's native copies winning, then filters out skills disabled via
+/// `settings.skills.disabled`. The composer renders the survivors in its `$skill`
+/// picker. See `crate::skills_catalog` for the origin table and preference order.
+async fn handle_provider_list_skills(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let provider = params.get("provider").and_then(|v| v.as_str());
+    let cwd = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let input = crate::skills_catalog::DiscoveryInput {
+        cwd,
+        home_dir: server_home_dir(),
+        provider,
+        include_duplicate_origins: false,
+        force_reload: params
+            .get("forceReload")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     };
+    let skills = crate::skills_catalog::discover_skills_catalog(input);
+    let disabled = read_disabled_skills(state).await;
+    let filtered = crate::skills_catalog::filter_disabled_skills(&skills, &disabled);
+    let skills_value =
+        serde_json::to_value(&filtered).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "skills": skills,
+            "skills": skills_value,
             "source": "filesystem",
         }),
     )
 }
 
-/// `provider.listSkillsCatalog` — same filesystem scan as `listSkills`. The
-/// catalog is a UI-side aggregated skill index; in syncode the catalog and the
-/// live skills list are the same filesystem-backed source. Includes the
-/// resolved `mcodeSkillsDir` (absolute path) when a skills dir exists.
-fn handle_provider_list_skills_catalog(id: Value, params: &Value) -> JsonRpcResponse {
-    let (skills, dir_field): (Vec<Value>, Value) = match resolve_skills_dir(params) {
-        Some(dir) => {
-            let abs = dir.canonicalize_unchecked();
-            let abs_str = abs.to_string_lossy().into_owned();
-            (scan_skills_dir(&dir), Value::String(abs_str))
-        }
-        None => (Vec::new(), Value::Null),
+/// `provider.listSkillsCatalog` — return `ProviderSkillsCatalogResult` for the
+/// settings panel. Unlike `listSkills`, this keeps duplicate origins (so a skill
+/// present in `~/.claude/skills` and `~/.synara/skills` shows both sources in one
+/// row) and does NOT filter disabled entries (the panel derives enabled status
+/// from `settings.skills.disabled` client-side). Includes the resolved
+/// `mcodeSkillsDir` (`~/.synara/skills`, auto-created) so the UI surfaces a real
+/// drop-in target.
+async fn handle_provider_list_skills_catalog(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let input = crate::skills_catalog::DiscoveryInput {
+        cwd,
+        home_dir: server_home_dir(),
+        provider: None,
+        include_duplicate_origins: true,
+        force_reload: params
+            .get("forceReload")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     };
+    let skills = crate::skills_catalog::discover_skills_catalog(input);
+    let skills_value =
+        serde_json::to_value(&skills).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+    let dir = crate::skills_catalog::ensure_synara_skills_dir();
+    let dir_field = dir
+        .map(|p| Value::String(p.to_string_lossy().into_owned()))
+        .unwrap_or(Value::Null);
     JsonRpcResponse::success(
         id,
         serde_json::json!({
-            "skills": skills,
+            "skills": skills_value,
             "mcodeSkillsDir": dir_field,
         }),
     )
+}
+
+/// Read `settings.skills.disabled` (array of lowercased skill names) from the
+/// in-memory `ServerSettingsState`. Returns an empty vec when the path is
+/// absent or malformed — discovery then surfaces every skill unfiltered.
+async fn read_disabled_skills(state: &WsState) -> Vec<String> {
+    let settings = state.settings.read().await.settings.clone();
+    settings
+        .get("skills")
+        .and_then(|s| s.get("disabled"))
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `provider.listPlugins` — filesystem scan of the project `.plugins/`
@@ -10118,83 +10168,6 @@ fn handle_provider_get_composer_capabilities(id: Value, params: &Value) -> JsonR
             "supportsThreadImport": true,
         }),
     )
-}
-
-/// Resolve the skills directory for a `listSkills`/`listSkillsCatalog`/`readSkill`
-/// request. Precedence: explicit `cwd` param joined with `.skills`, then the
-/// `SYNCODE_SKILLS_DIR` env var, finally a relative `.skills` fallback. Returns
-/// `None` if the resolved directory does not exist (graceful empty result).
-fn resolve_skills_dir(params: &Value) -> Option<PathBuf> {
-    let dir = params
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|cwd| Path::new(cwd).join(".skills"))
-        .or_else(|| std::env::var_os("SYNCODE_SKILLS_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(".skills"));
-    if dir.is_dir() { Some(dir) } else { None }
-}
-
-/// Parse a YAML-ish frontmatter block (`---\n...\n---`) from a markdown skill
-/// file and extract the `description:` value. Only the simple `key: value`
-/// scalar form is supported — sufficient for skill files authored as
-/// `name: foo\ndescription: bar`. Returns `None` if no frontmatter or no
-/// `description:` key is present.
-fn parse_skill_frontmatter_description(content: &str) -> Option<String> {
-    let trimmed = content.trim_start();
-    let after_fence = trimmed.strip_prefix("---")?;
-    let end = after_fence.find("\n---")?;
-    let frontmatter = &after_fence[..end];
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("description:") {
-            let val = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-            if !val.is_empty() {
-                return Some(val.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Scan the resolved skills directory for `*.md` files and build a
-/// `ProviderSkillDescriptor` per file. Name is the filename stem, description is
-/// parsed from the file's YAML frontmatter (`description:` field), path is the
-/// absolute (canonicalized) file path, enabled is always `true`. Returns an
-/// empty vec on any I/O error — callers return a graceful empty `skills` array.
-fn scan_skills_dir(dir: &Path) -> Vec<Value> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    let mut skills: Vec<(String, Value)> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let name = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(n) if !n.is_empty() => n.to_string(),
-            _ => continue,
-        };
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let description = parse_skill_frontmatter_description(&content);
-        let abs_path = path.canonicalize_unchecked().to_string_lossy().into_owned();
-        let mut descriptor = serde_json::json!({
-            "name": name,
-            "path": abs_path,
-            "enabled": true,
-        });
-        if let Some(desc) = description {
-            descriptor["description"] = Value::String(desc);
-        }
-        skills.push((name, descriptor));
-    }
-    skills.sort_by(|a, b| a.0.cmp(&b.0));
-    skills.into_iter().map(|(_, v)| v).collect()
 }
 
 /// Helper to convert a `Path` to a string for the `path` field without failing
@@ -17047,36 +17020,49 @@ mod tests {
     /// excludes `anthropic`/`openai` and renames `claude → claudeAgent`, so
     /// those transformations must be reflected in the model slugs.
     #[tokio::test]
-    async fn provider_list_models_populated_from_all_providers() {
+    async fn provider_list_models_opencode_catalog_and_non_native_empty() {
         let state = WsState::new_in_memory(16);
+
+        // opencode is backed by the Z.AI Coding Plan — its real model catalog
+        // is returned with source "opencode" so the frontend's discovery gate
+        // resolves.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listModels",
+            "params": { "provider": "opencode" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let models = result["models"].as_array().expect("models is an array");
+        assert_eq!(models.len(), 4, "opencode exposes 4 zai models");
+        assert_eq!(result["source"], "opencode");
+        for m in models {
+            assert!(m["slug"].as_str().unwrap().starts_with("zai-coding-plan/"));
+            assert!(m["name"].is_string(), "model missing name");
+        }
+
+        // Non-native providers (claude/cursor/gemini/…) have no dynamic model
+        // catalog — mirror MCode by returning an empty list with source
+        // "unsupported". The frontend merges runtime models with its static
+        // per-provider config, so the picker is NOT emptied. Crucially, the
+        // provider id ("claudeAgent") must NOT leak as a model slug.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "provider.listModels",
+            "params": { "provider": "claudeAgent" }
+        });
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        let models = result["models"].as_array().expect("models is an array");
+        assert!(
+            models.is_empty(),
+            "claudeAgent has no dynamic catalog: {models:?}"
+        );
+        assert_eq!(result["source"], "unsupported");
+
+        // No provider param → also empty (provider="" is non-opencode).
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listModels"
         });
-        let resp = provider_rpc(&state, &req).await;
-        let result = resp.result.unwrap();
-        let models = result["models"].as_array().expect("models is an array");
-        // 8 MCode-valid providers (claude/cursor/gemini/grok/kilo/opencode/pi +
-        // codex); anthropic + openai filtered out.
-        assert_eq!(models.len(), 8, "expected 8 MCode-valid provider models");
-        let slugs: Vec<&str> = models.iter().map(|m| m["slug"].as_str().unwrap()).collect();
-        // The claude → claudeAgent rename must be applied.
-        assert!(
-            slugs.contains(&"claudeAgent"),
-            "claude should map to claudeAgent"
-        );
-        assert!(
-            !slugs.contains(&"anthropic"),
-            "anthropic is not a MCode ProviderKind"
-        );
-        assert!(
-            !slugs.contains(&"openai"),
-            "openai is not a MCode ProviderKind"
-        );
-        // Each model must carry the schema-required slug + name.
-        for m in models {
-            assert!(m["slug"].is_string(), "model missing slug");
-            assert!(m["name"].is_string(), "model missing name");
-        }
+        let result = provider_rpc(&state, &req).await.result.unwrap();
+        assert!(result["models"].as_array().unwrap().is_empty());
+        assert_eq!(result["source"], "unsupported");
     }
 
     /// listAgents mirrors listModels: one entry per MCode-valid provider with
@@ -17105,23 +17091,36 @@ mod tests {
     async fn provider_empty_list_rpcs_return_minimal_shapes() {
         let state = WsState::new_in_memory(16);
 
-        // listSkills with no `cwd` and no .skills dir present → { skills: [] }
-        // (T6c-23 made this REAL: filesystem scan of `.skills/*.md`; with no
-        // skills dir on disk the result is an empty array.)
+        // listSkills now scans the multi-origin catalog — home roots like
+        // ~/.claude/skills are always scanned, even with a bogus cwd — so the
+        // result is a non-empty array on a machine with installed skills. Assert
+        // the shape (array + source field) rather than emptiness.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listSkills",
             "params": { "cwd": "/nonexistent-syncode-skills-empty-test-9999" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+        assert!(
+            result["skills"].is_array(),
+            "listSkills must return a skills array"
+        );
+        assert_eq!(result["source"], "filesystem");
 
-        // listSkillsCatalog with no `cwd` → { skills: [] }
+        // listSkillsCatalog surfaces every origin (incl. home roots), so it is
+        // non-empty when skills are installed. Assert shape + mcodeSkillsDir.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "provider.listSkillsCatalog",
             "params": { "cwd": "/nonexistent-syncode-skills-empty-test-9999" }
         });
         let result = provider_rpc(&state, &req).await.result.unwrap();
-        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+        assert!(
+            result["skills"].is_array(),
+            "listSkillsCatalog must return a skills array"
+        );
+        assert!(
+            result["mcodeSkillsDir"].as_str().is_some(),
+            "listSkillsCatalog must resolve the syncode skills dir"
+        );
 
         // listCommands is now REAL (T6c-23): static per-provider native
         // commands. With no provider param it defaults to claudeAgent and
@@ -21251,55 +21250,66 @@ mod tests {
         assert_eq!(names, vec!["/help", "/clear"]);
     }
 
-    #[test]
-    fn test_list_skills_scans_markdown_files() {
-        let tmp =
-            std::env::temp_dir().join(format!("syncode-ws-skills-test-{}", std::process::id()));
-        let skills_dir = tmp.join(".skills");
-        std::fs::create_dir_all(&skills_dir).unwrap();
-        // skill with frontmatter description
+    #[tokio::test]
+    async fn test_list_skills_finds_project_root_skill() {
+        // The multi-origin catalog discovers skills under project roots walked
+        // up from `cwd` (`<ancestor>/.<origin>/skills/<name>/SKILL.md`), in
+        // addition to home roots. We drop a uniquely-named skill in a temp
+        // project root and assert it surfaces — home roots are also scanned,
+        // so we only assert presence of our unique name, not the total count.
+        let state = WsState::new_in_memory(16);
+        let tmp = std::env::temp_dir().join(format!(
+            "syncode-ws-skills-proj-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let skill_dir = tmp.join(".claude").join("skills").join("syncodeprojtest");
+        std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
-            skills_dir.join("review.md"),
-            "---\nname: review\ndescription: Code review specialist.\n---\n# Review\nbody",
+            skill_dir.join("SKILL.md"),
+            "---\nname: syncodeprojtest\ndescription: Project-root test skill.\n---\n# body",
         )
         .unwrap();
-        // skill without frontmatter
-        std::fs::write(skills_dir.join("explore.md"), "# Explore\nplain body").unwrap();
-        // non-markdown file should be skipped
-        std::fs::write(skills_dir.join("ignore.txt"), "nope").unwrap();
 
         let params = serde_json::json!({ "cwd": tmp.to_string_lossy() });
-        let resp = handle_provider_list_skills(Value::from(1), &params);
+        let resp = handle_provider_list_skills(&state, Value::from(1), &params).await;
         let result = resp.result.unwrap();
         let skills = result["skills"].as_array().unwrap();
+        let names: Vec<&str> = skills
+            .iter()
+            .map(|s| s["name"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            names.contains(&"syncodeprojtest"),
+            "project-root skill should be discovered, got {names:?}"
+        );
         assert_eq!(
-            skills.len(),
-            2,
-            "expected 2 markdown skills, got {skills:?}"
-        );
-        // sorted alphabetically by name
-        assert_eq!(skills[0]["name"], "explore");
-        assert_eq!(skills[1]["name"], "review");
-        assert_eq!(skills[1]["description"], "Code review specialist.");
-        assert_eq!(skills[1]["enabled"], true);
-        assert!(
-            skills[1]["path"].as_str().unwrap().ends_with("review.md"),
-            "path should be absolute and end with review.md"
-        );
-        assert!(
-            skills[0].get("description").is_none(),
-            "explore has no frontmatter description"
+            result["source"], "filesystem",
+            "listSkills reports its discovery source"
         );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    #[test]
-    fn test_list_skills_missing_dir_is_empty() {
-        let params = serde_json::json!({ "cwd": "/nonexistent-syncode-skills-test-path-12345" });
-        let resp = handle_provider_list_skills(Value::from(1), &params);
+    #[tokio::test]
+    async fn test_list_skills_catalog_returns_synara_dir() {
+        // The catalog always returns a `skills` array and a `mcodeSkillsDir`
+        // pointing at the syncode portable folder (~/.synara/skills), which is
+        // auto-created on first call so the settings panel has a drop-in target.
+        let state = WsState::new_in_memory(16);
+        let resp =
+            handle_provider_list_skills_catalog(&state, Value::from(1), &serde_json::json!({}))
+                .await;
         let result = resp.result.unwrap();
-        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+        assert!(result["skills"].is_array(), "skills must be an array");
+        let dir = result["mcodeSkillsDir"].as_str().unwrap_or("");
+        assert!(
+            dir.ends_with(".synara/skills") || dir.ends_with(".synara\\skills"),
+            "mcodeSkillsDir should point at ~/.synara/skills, got {dir:?}"
+        );
     }
 
     #[test]
@@ -21351,23 +21361,6 @@ mod tests {
         let resp = handle_provider_read_skill(Value::from(1), &params);
         let result = resp.result.unwrap();
         assert!(result["skill"].is_null());
-    }
-
-    #[test]
-    fn test_frontmatter_description_parser() {
-        let content = "---\nname: foo\ndescription: \"A skill.\"\n---\n# body";
-        assert_eq!(
-            parse_skill_frontmatter_description(content),
-            Some("A skill.".to_string())
-        );
-        assert_eq!(
-            parse_skill_frontmatter_description("# no frontmatter"),
-            None
-        );
-        assert_eq!(
-            parse_skill_frontmatter_description("---\nname: foo\n---\nbody"),
-            None
-        );
     }
 
     // ─── T6c-29: orchestration generic RPC tests ───────────────────────
