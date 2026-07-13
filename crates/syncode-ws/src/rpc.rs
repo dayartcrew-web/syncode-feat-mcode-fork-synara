@@ -1405,7 +1405,7 @@ async fn handle_orchestration_dispatch_command(
             };
             service.create_project(name, root_path).await
         }
-        "DeleteProject" => {
+        "DeleteProject" | "project.delete" => {
             let project_id = match pctx.require_id_any(&["id", "projectId"], "DeleteProject") {
                 Ok(v) => v,
                 Err(r) => return *r,
