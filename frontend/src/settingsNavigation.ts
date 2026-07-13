@@ -14,6 +14,7 @@ export const SETTINGS_SECTION_IDS = [
   "models",
   "providers",
   "skills",
+  "agents",
   "usage",
   "advanced",
 ] as const;
@@ -133,6 +134,14 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     description: "Every skill found across providers, with toggles to control availability.",
     icon: "building-blocks",
     eyebrow: "Agent skills",
+  },
+  {
+    id: "agents",
+    group: "mcode",
+    label: "Agents",
+    description: "Cross-provider agent skills from your shared .agents folder.",
+    icon: "robot",
+    eyebrow: "Shared agents",
   },
   {
     id: "usage",

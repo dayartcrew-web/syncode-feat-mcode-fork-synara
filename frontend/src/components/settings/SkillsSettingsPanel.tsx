@@ -63,13 +63,22 @@ export function SkillsSettingsPanel() {
     [serverSettingsQuery.data?.skills.disabled],
   );
 
-  const skillGroups = useMemo(
-    () => buildSettingsSkillGroups(catalogQuery.data?.skills ?? []),
+  // Skills that ship from a provider's own folder (.codex/skills,
+  // .claude/skills, …) or the MCode portable folder. Entries from the shared
+  // `.agents/skills` origin are surfaced on the separate Agents settings page
+  // (see AgentsSettingsPanel), so exclude them here to avoid duplicate rows.
+  const providerSkills = useMemo(
+    () =>
+      (catalogQuery.data?.skills ?? []).filter(
+        (skill) => skill.scope !== "agents",
+      ),
     [catalogQuery.data?.skills],
   );
+
+  const skillGroups = useMemo(() => buildSettingsSkillGroups(providerSkills), [providerSkills]);
   const skillSections = useMemo(() => {
-    return buildSettingsSkillSections(catalogQuery.data?.skills ?? []);
-  }, [catalogQuery.data?.skills]);
+    return buildSettingsSkillSections(providerSkills);
+  }, [providerSkills]);
 
   const setSkillEnabled = (skillName: string, enabled: boolean) => {
     // Read through the query cache (not the render closure) so rapid toggles

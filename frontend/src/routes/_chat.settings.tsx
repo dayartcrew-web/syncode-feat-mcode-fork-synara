@@ -91,6 +91,7 @@ import {
 import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsageSettingsPanel";
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
+import { AgentsSettingsPanel } from "../components/settings/AgentsSettingsPanel";
 import {
   CHAT_CONTENT_CARD_CLASS_NAME,
   CHAT_MAIN_VIEWPORT_SHELL_CLASS_NAME,
@@ -3303,6 +3304,8 @@ function SettingsRouteView() {
         return <ProfileSettingsPanel />;
       case "skills":
         return <SkillsSettingsPanel />;
+      case "agents":
+        return <AgentsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
       case "advanced":
