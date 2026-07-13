@@ -5587,14 +5587,64 @@ async fn handle_server_patch_settings(
 /// write stored (the default `[]` if no probe or updateProvider has run).
 /// Pushes `server.providerStatusesUpdated` and returns the
 /// `ServerProviderStatusesUpdatedPayload` (`{ providers: [...] }`).
+/// Attach a `versionAdvisory` to every provider in `config.providers`,
+/// checking each concurrently. The npm registry lookups (6 providers) run in
+/// parallel via `join_all`, so the whole pass is roughly one round-trip. The
+/// advisory is NOT persisted between boots — it's recomputed on each
+/// `refreshProviders`/`updateProvider` call (cheap, avoids stale advisories).
+async fn attach_version_advisories(state: &WsState) {
+    // Snapshot the providers array + settings outside the lock so the
+    // concurrent per-provider version probes don't hold the settings lock
+    // during network I/O.
+    let (provider_kinds, settings_snapshot) = {
+        let store = state.settings.read().await;
+        let kinds: Vec<String> = store.config["providers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| p["provider"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (kinds, store.settings.clone())
+    };
+    // Build advisories concurrently. Each provider maps to a backend id (the
+    // config stores `claudeAgent`; version-check needs `claude`).
+    let advisories = futures_util::future::join_all(provider_kinds.iter().map(|kind| async {
+        let pid = normalize_provider_id(kind);
+        let advisory =
+            crate::provider_versions::build_version_advisory(pid, &settings_snapshot).await;
+        (kind.clone(), advisory)
+    }))
+    .await;
+    // Write each advisory back onto the matching provider entry.
+    let mut store = state.settings.write().await;
+    if let Some(arr) = store.config["providers"].as_array_mut() {
+        for entry in arr.iter_mut() {
+            if let Some(kind) = entry["provider"].as_str()
+                && let Some((_, advisory)) = advisories.iter().find(|(k, _)| k == kind)
+            {
+                entry["versionAdvisory"] = advisory.clone();
+            }
+        }
+    }
+}
+
 async fn handle_server_refresh_providers(state: &WsState, id: Value) -> JsonRpcResponse {
-    let providers = {
+    {
         let mut store = state.settings.write().await;
         // Re-probe every provider's binary (honoring custom `binaryPath`
         // overrides from settings) so "Refresh" actually reflects reality —
         // previously this re-emitted the stale persisted `providers[]` array.
         store.reprobe_provider_statuses();
         store.persist_config().await;
+    }
+    // Populate `versionAdvisory` per provider (parallel npm registry lookups)
+    // so the Settings → "Provider updates" section reflects real
+    // current/behind_latest state after a refresh.
+    attach_version_advisories(state).await;
+    let providers = {
+        let store = state.settings.read().await;
         store.config["providers"].clone()
     };
     let payload = serde_json::json!({ "providers": providers.clone() });
@@ -5609,12 +5659,16 @@ async fn handle_server_refresh_providers(state: &WsState, id: Value) -> JsonRpcR
     JsonRpcResponse::success(id, payload)
 }
 
-/// `server.updateProvider` — re-probe a single provider. Validates that
-/// `params.provider` is present and non-empty (MCode `ServerProviderUpdateInput`
-/// is `{ provider: ProviderKind }`). Syncode has no probe, so this re-emits the
-/// current provider list (the targeted provider's status is unchanged unless a
-/// prior `updateSettings` write updated its settings entry). Pushes
-/// `server.providerStatusesUpdated` and returns the payload.
+/// `server.updateProvider` — run the one-click CLI update (`npm install -g
+/// <pkg>@latest`) for the targeted provider, then re-probe its version and
+/// return the full provider list with the targeted entry's `updateState` and
+/// `versionAdvisory` refreshed. Validates `params.provider` is a non-empty
+/// string (MCode `ServerProviderUpdateInput` is `{ provider: ProviderKind }`).
+///
+/// The frontend's success/failure detection reads `updateState.status`:
+/// `succeeded` → success toast; `failed`/`unchanged` → error toast showing
+/// `updateState.output`. Pushes `server.providerStatusesUpdated` and returns
+/// the payload.
 async fn handle_server_update_provider(
     state: &WsState,
     id: Value,
@@ -5634,13 +5688,35 @@ async fn handle_server_update_provider(
             "Invalid params: 'provider' must be a non-empty string",
         );
     }
+    // Run the update (npm install -g <pkg>@latest). `provider` here is the
+    // MCode kind (`claudeAgent`); the version module expects the backend id
+    // (`claude`), so normalize before dispatching.
+    let pid = normalize_provider_id(provider);
+    let update_state = crate::provider_versions::run_provider_update(pid).await;
+
+    // Re-probe the targeted provider's version so a successful update flips
+    // `versionAdvisory.status` from `behind_latest` to `current`.
+    let settings_snapshot = {
+        let store = state.settings.read().await;
+        store.settings.clone()
+    };
+    let fresh_advisory =
+        crate::provider_versions::build_version_advisory(pid, &settings_snapshot).await;
+
     let providers = {
         let mut store = state.settings.write().await;
-        // Re-probe so a provider whose `binaryPath`/`apiEndpoint` was just
-        // changed via `updateSettings` is reflected immediately. Previously
-        // this re-emitted the stale persisted `providers[]` array (the
-        // targeted provider's status never changed).
         store.reprobe_provider_statuses();
+        // Patch the targeted provider's updateState + versionAdvisory onto the
+        // freshly re-probed entry.
+        if let Some(arr) = store.config["providers"].as_array_mut() {
+            for entry in arr.iter_mut() {
+                if entry["provider"].as_str() == Some(provider) {
+                    entry["updateState"] = update_state.clone();
+                    entry["versionAdvisory"] = fresh_advisory.clone();
+                    break;
+                }
+            }
+        }
         store.persist_config().await;
         store.config["providers"].clone()
     };

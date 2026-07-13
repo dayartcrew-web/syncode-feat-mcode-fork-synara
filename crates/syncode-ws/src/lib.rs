@@ -14,6 +14,7 @@ pub mod llm;
 pub mod local_server;
 pub mod orchestration_executor;
 pub mod project_fs;
+pub mod provider_versions;
 pub mod push;
 pub mod rpc;
 pub mod server;

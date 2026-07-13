@@ -262,7 +262,7 @@ fn binary_candidates(pid: &str) -> Vec<String> {
 /// so a bare `cursor` resolves to `cursor.cmd`) AND a direct `metadata` check
 /// (so an absolute `.cmd`/`.exe` path that isn't on PATH still counts). Either
 /// success wins.
-fn resolve_provider_binary(pid: &str, settings: &Value) -> (Option<PathBuf>, bool) {
+pub(crate) fn resolve_provider_binary(pid: &str, settings: &Value) -> (Option<PathBuf>, bool) {
     // 1. Honor a custom binaryPath from settings.providers[<key>].binaryPath.
     let settings_key = provider_settings_key(pid);
     if let Some(custom) = settings

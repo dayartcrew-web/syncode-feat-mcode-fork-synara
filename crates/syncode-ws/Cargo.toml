@@ -57,6 +57,9 @@ serde_json = { workspace = true }
 axum = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
+# `reqwest` fetches the npm registry `/latest` endpoint for the provider-update
+# version check (crates/syncode-ws/src/provider_versions.rs). Workspace-pinned.
+reqwest = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
