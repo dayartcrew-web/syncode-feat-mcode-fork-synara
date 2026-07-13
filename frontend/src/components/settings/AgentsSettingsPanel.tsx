@@ -14,7 +14,7 @@ import { useMemo } from "react";
 import { ProviderIcon } from "~/components/ProviderIcon";
 import { SettingsRow, SettingsSection } from "~/components/settings/SettingsPanelPrimitives";
 import { Switch } from "~/components/ui/switch";
-import { SkillCubeIcon } from "~/lib/icons";
+import { AgentIcon } from "~/lib/icons";
 import { ensureNativeApi } from "~/nativeApi";
 import {
   providerDiscoveryQueryKeys,
@@ -162,7 +162,7 @@ export function AgentsSettingsPanel() {
                 key={group.key}
                 title={
                   <span className="inline-flex min-w-0 items-center gap-1.5">
-                    <SkillCubeIcon
+                    <AgentIcon
                       aria-hidden="true"
                       className="size-3.5 shrink-0 text-muted-foreground"
                     />

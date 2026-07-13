@@ -119,6 +119,7 @@ export const SteerIcon: LucideIcon = centralIconWrapper("arrow-corner-down-right
 export const ComposerSendArrowIcon: LucideIcon = centralIconWrapper("arrow-up");
 export const HandoffIcon: LucideIcon = centralIconWrapper("arrow-left-right");
 export const SkillCubeIcon: LucideIcon = centralIconWrapper("building-blocks");
+export const AgentIcon: LucideIcon = centralIconWrapper("robot");
 export const NewThreadIcon: LucideIcon = centralIconWrapper("compose-pencil");
 export const EraserIcon: LucideIcon = centralIconWrapper("eraser");
 export const ArrowLeftIcon = adaptIcon(IconArrowLeft);
