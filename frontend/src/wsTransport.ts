@@ -427,6 +427,21 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "project.listDirectories": "project/list-directories",
   "project.searchEntries": "project/search-entries",
   "project.searchLocalEntries": "project/search-local-entries",
+  // The MCode contracts emit the PLURAL `projects.*` dot-strings (see
+  // WS_METHODS in contracts/tier3/ws.ts), but the syncode backend serves the
+  // SINGULAR `project/*` slash forms. Without these remaps the WS transport
+  // passes `projects.listDirectories` through unmapped → backend returns
+  // MethodNotFound (e.g. the "Work in a project" tree browser failed to load
+  // folders). Map every plural projects.* the frontend emits to its served
+  // singular project/* equivalent. (discoverScripts + dev-server methods also
+  // share this plural/singular mismatch but their served slash forms aren't in
+  // the SERVED_RPC type union yet — left for a follow-up since they're unused
+  // by the project picker.)
+  "projects.listDirectories": "project/list-directories",
+  "projects.searchEntries": "project/search-entries",
+  "projects.searchLocalEntries": "project/search-local-entries",
+  "projects.readFile": "project/read-file",
+  "projects.writeFile": "project/write-file",
 };
 
 /**

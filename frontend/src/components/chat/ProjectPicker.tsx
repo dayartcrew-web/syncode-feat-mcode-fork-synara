@@ -331,32 +331,17 @@ export const ProjectPicker = memo(function ProjectPicker({
                 </div>
               </div>
             ) : (
-              <>
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-[var(--color-background-elevated-secondary)] hover:text-[var(--color-text-foreground)] disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={() => void handleAddNewProject()}
-                  disabled={isPicking}
-                >
-                  <PlusIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
-                  <span className="truncate">
-                    {isPicking ? "Opening folder picker…" : "Add new project"}
-                  </span>
-                </button>
-                {/* Always-available manual path entry (works in browser mode where
-                    the native picker is absent). */}
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-[var(--color-background-elevated-secondary)] hover:text-[var(--color-text-foreground)]"
-                  onClick={() => {
-                    setManualPathMode(true);
-                    setErrorMessage(null);
-                  }}
-                >
-                  <FolderOpenIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
-                  <span className="truncate">Type a path…</span>
-                </button>
-              </>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-[var(--color-background-elevated-secondary)] hover:text-[var(--color-text-foreground)] disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => void handleAddNewProject()}
+                disabled={isPicking}
+              >
+                <PlusIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
+                <span className="truncate">
+                  {isPicking ? "Opening folder picker…" : "Add new project"}
+                </span>
+              </button>
             )}
             {selectedWorkspaceRoot ? (
               <button
