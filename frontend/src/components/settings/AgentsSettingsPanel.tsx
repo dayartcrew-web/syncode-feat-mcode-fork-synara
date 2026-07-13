@@ -79,7 +79,10 @@ export function AgentsSettingsPanel() {
   );
 
   const skillGroups = useMemo(() => buildSettingsSkillGroups(agentSkills), [agentSkills]);
-  const skillSections = useMemo(() => buildSettingsSkillSections(agentSkills), [agentSkills]);
+  const skillSections = useMemo(
+    () => buildSettingsSkillSections(agentSkills, "Shared agents"),
+    [agentSkills],
+  );
 
   const setSkillEnabled = (skillName: string, enabled: boolean) => {
     // Read through the query cache (not the render closure) so rapid toggles
