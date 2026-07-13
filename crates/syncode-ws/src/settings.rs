@@ -214,6 +214,10 @@ impl ServerSettingsState {
         let now = chrono::Utc::now().to_rfc3339();
         let new_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
             .iter()
+            .filter(|&&pid| {
+                pid != syncode_provider::PROVIDER_ANTHROPIC
+                    && pid != syncode_provider::PROVIDER_OPENAI
+            })
             .map(|&pid| build_provider_status(pid, &self.settings, &now))
             .collect();
         self.config["providers"] = Value::Array(new_providers);
@@ -378,6 +382,13 @@ pub fn build_default_server_config_with_settings(auth_mode: &str, settings: &Val
     let now = chrono::Utc::now().to_rfc3339();
     let default_providers: Vec<Value> = syncode_provider::ALL_PROVIDERS
         .iter()
+        // Skip HTTP-only internal providers (anthropic, openai) — they have no
+        // CLI binary, no ProviderKind in the frontend's union, and no icon.
+        // The MCode UI's ProviderIcon crashes (undefined component) if these
+        // reach the providers[] array. Only the 8 user-facing providers surface.
+        .filter(|&&pid| {
+            pid != syncode_provider::PROVIDER_ANTHROPIC && pid != syncode_provider::PROVIDER_OPENAI
+        })
         .map(|&pid| build_provider_status(pid, settings, &now))
         .collect();
 
