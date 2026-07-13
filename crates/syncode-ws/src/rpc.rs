@@ -11878,13 +11878,36 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
             })
         };
 
-        // Heatmap: 274-day window ending today (MCode buildHeatmap).
+        // Heatmap: 274-day window ending today (MCode buildHeatmap). Each cell
+        // MUST use the MCode `ProfileHeatmapCell` field names — `day`, `count`,
+        // `weekday`, `intensity` — NOT `date`/`value`. The frontend's
+        // `ActivityHeatmap` reads `cell.day.split("-")` and `cell.weekday`
+        // directly (no adapter); the prior `{"date","value"}` shape crashed
+        // with `Cannot read properties of undefined (reading 'split')`.
+        use chrono::Datelike;
+        let max_count = days.values().copied().max().unwrap_or(0);
         let heatmap: Vec<Value> = (0..274i64)
             .rev()
             .map(|offset| {
                 let date = today - chrono::Duration::days(offset);
                 let value = days.get(&date).copied().unwrap_or(0);
-                serde_json::json!({"date": date.format("%Y-%m-%d").to_string(), "value": value})
+                // 5-bucket intensity ramp (matches APP_HEATMAP_INTENSITY_CLASSES
+                // level 0..4): 0 for zero activity (or when there is no activity
+                // at all, so max_count == 0), else quartiles of the max.
+                let intensity: u32 = if value == 0 || max_count == 0 {
+                    0
+                } else {
+                    // ceil(value / max * 4), clamped to 1..=4 so any nonzero day
+                    // shows at least level 1.
+                    let bucket = ((value as f64) / (max_count as f64) * 4.0).ceil() as u32;
+                    bucket.clamp(1, 4)
+                };
+                serde_json::json!({
+                    "day": date.format("%Y-%m-%d").to_string(),
+                    "count": value,
+                    "weekday": date.weekday().num_days_from_monday(),
+                    "intensity": intensity,
+                })
             })
             .collect();
 
