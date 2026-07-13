@@ -227,9 +227,15 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
             // Probe the provider's CLI binary on PATH so the settings/provider
             // panel reflects REAL availability — previously every provider was
             // hardcoded `available:true / authenticated`, claiming CLIs that
-            // aren't installed. The binary name matches the provider id
-            // (codex, claude, cursor, gemini, grok, kilo, opencode, pi).
-            let binary_path = which::which(pid).ok();
+            // aren't installed. ACP providers (cursor/grok/gemini) declare their
+            // binary via `spec.command`, which can differ from the provider id —
+            // cursor's binary is `cursor-agent`, not `cursor` (probing `cursor`
+            // missed the installed `cursor-agent` and marked cursor unavailable).
+            // Non-ACP providers use the id as the binary name.
+            let binary_name = syncode_provider::registry::acp_config_for(pid)
+                .map(|cfg| cfg.spec.command)
+                .unwrap_or_else(|| pid.to_string());
+            let binary_path = which::which(&binary_name).ok();
             let installed = binary_path.is_some();
             serde_json::json!({
                 "provider": mcode_kind,
