@@ -105,6 +105,13 @@ export function ProviderIcon({
   }
 
   const Icon = PROVIDER_ICON_COMPONENT_BY_PROVIDER[provider];
+  // Unknown provider kind (e.g. internal 'anthropic'/'openai' that leaked
+  // into the providers[] array, or a future provider not yet in the icon
+  // map). Return the fallback instead of crashing React with an undefined
+  // component — the app stays usable even if one provider lacks an icon.
+  if (!Icon) {
+    return fallback;
+  }
   return (
     <Icon
       aria-hidden={ariaHidden}
