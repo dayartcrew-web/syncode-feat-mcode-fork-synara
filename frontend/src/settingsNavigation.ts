@@ -139,7 +139,7 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     id: "agents",
     group: "mcode",
     label: "Agents",
-    description: "Cross-provider agent skills from your shared .agents folder.",
+    description: "Agents from .agents/skills, provider agents/ folders, and portable ~/.syncode/agents.",
     icon: "robot",
     eyebrow: "Shared agents",
   },

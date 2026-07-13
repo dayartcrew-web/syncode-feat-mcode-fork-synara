@@ -325,8 +325,8 @@ fn build_provider_status(pid: &str, settings: &Value, now: &str) -> Value {
 ///
 /// Top-level fields returned:
 /// - `cwd`: process cwd (non-empty)
-/// - `worktreesDir`: `<cwd>/.synara/worktrees` (non-empty)
-/// - `keybindingsConfigPath`: `<home>/.synara/keybindings.json` (non-empty)
+/// - `worktreesDir`: `<cwd>/.syncode/worktrees` (non-empty)
+/// - `keybindingsConfigPath`: `<home>/.syncode/keybindings.json` (non-empty)
 /// - `keybindings`: empty array (no resolved rules; UI tolerates empty)
 /// - `issues`: empty array (no keybinding-config validation runs)
 /// - `providers`: empty array (no provider-availability probe)
@@ -356,9 +356,9 @@ pub fn build_default_server_config(auth_mode: &str) -> Value {
 pub fn build_default_server_config_with_settings(auth_mode: &str, settings: &Value) -> Value {
     let cwd = server_cwd();
     let home = server_home_dir();
-    let worktrees_dir = format!("{}/.synara/worktrees", cwd.trim_end_matches('/'));
+    let worktrees_dir = format!("{}/.syncode/worktrees", cwd.trim_end_matches('/'));
     let keybindings_path = format!(
-        "{}/.synara/keybindings.json",
+        "{}/.syncode/keybindings.json",
         home.as_deref().unwrap_or(&cwd)
     );
     // Use the supplied mode verbatim — the UI doesn't read this field today,
@@ -730,7 +730,7 @@ mod tests {
     fn default_config_non_empty_cwd() {
         let cfg = build_default_server_config("unsafe-no-auth");
         assert!(!cfg["cwd"].as_str().unwrap().is_empty());
-        assert!(cfg["worktreesDir"].as_str().unwrap().contains(".synara"));
+        assert!(cfg["worktreesDir"].as_str().unwrap().contains(".syncode"));
     }
 
     // ─── PR-4-1: homeDir must always be populated ───────────────────

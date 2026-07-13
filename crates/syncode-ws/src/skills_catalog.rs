@@ -3,7 +3,7 @@
 //! Port of MCode's `apps/server/src/provider/skillsCatalog.ts`. Aggregates skill
 //! folders across 10 origins (mcode/codex/claude/cursor/gemini/grok/kilo/opencode/
 //! pi/agents), each resolved at a home root (`~/.<origin>/skills`, with the
-//! portable `mcode` origin remapped to syncode's `~/.synara/skills`) and, when a
+//! portable `mcode` origin remapped to syncode's `~/.syncode/skills`) and, when a
 //! project `cwd` is supplied, at project roots (`<ancestor>/<rootName>/skills`
 //! walked up from the cwd). Skills are `<dir>/SKILL.md` (nested one namespace
 //! deep); the `pi` origin additionally accepts flat `*.md` files.
@@ -322,11 +322,11 @@ const HOME_ORIGIN_ORDER: &[&str] = &[
 ];
 
 /// Home roots for an origin. The `mcode` origin is remapped to syncode's
-/// `~/.synara/skills` portable folder; all others follow MCode's paths.
+/// `~/.syncode/skills` portable folder; all others follow MCode's paths.
 fn home_roots_for_origin(origin: &str, home_dir: &str) -> Vec<PathBuf> {
     let home = Path::new(home_dir);
     match origin {
-        "mcode" => vec![home.join(".synara").join("skills")],
+        "mcode" => vec![home.join(".syncode").join("skills")],
         "codex" => vec![home.join(".codex").join("skills")],
         "claude" => vec![home.join(".claude").join("skills")],
         "cursor" => vec![
@@ -468,6 +468,16 @@ fn roots_for_ordered_origins(input: &DiscoveryInput, origins: &[String]) -> Vec<
                 });
             }
         }
+        // Portable agents folder: `~/.syncode/agents` — the syncode-owned
+        // counterpart to `~/.syncode/skills`. Agent `.md` files placed here are
+        // available on every provider (portable, like MCode skills). Scope is
+        // `agents-mcode` so the UI groups it as a syncode-portable origin.
+        let portable_agents = Path::new(home_dir).join(".syncode").join("agents");
+        home_roots.push(SkillRoot {
+            path: portable_agents,
+            scope: "agents-mcode".to_string(),
+            include_markdown_files: true,
+        });
     }
     let home_root_paths: HashSet<PathBuf> = home_roots
         .iter()
@@ -642,19 +652,19 @@ pub fn filter_disabled_skills(
 
 // ── Syncode portable folder (replaces MCode mcodeBaseDir) ─────────────
 
-/// `~/.synara/skills` — the syncode portable skills folder (the `mcode` origin
+/// `~/.syncode/skills` — the syncode portable skills folder (the `mcode` origin
 /// home root). `None` when the home directory cannot be resolved.
-pub fn synara_skills_dir() -> Option<PathBuf> {
+pub fn syncode_skills_dir() -> Option<PathBuf> {
     let home = crate::settings::server_home_dir()?;
-    Some(Path::new(&home).join(".synara").join("skills"))
+    Some(Path::new(&home).join(".syncode").join("skills"))
 }
 
-/// Ensure `~/.synara/skills` exists (recursive `create_dir_all`), returning the
+/// Ensure `~/.syncode/skills` exists (recursive `create_dir_all`), returning the
 /// path on success. Discovery still works without the folder — reads simply
 /// return nothing — but creating it gives users a drop-in target and lets the
 /// settings panel surface a real `mcodeSkillsDir`.
-pub fn ensure_synara_skills_dir() -> Option<PathBuf> {
-    let dir = synara_skills_dir()?;
+pub fn ensure_syncode_skills_dir() -> Option<PathBuf> {
+    let dir = syncode_skills_dir()?;
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }

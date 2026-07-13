@@ -10012,10 +10012,10 @@ async fn handle_provider_list_skills(
 
 /// `provider.listSkillsCatalog` — return `ProviderSkillsCatalogResult` for the
 /// settings panel. Unlike `listSkills`, this keeps duplicate origins (so a skill
-/// present in `~/.claude/skills` and `~/.synara/skills` shows both sources in one
+/// present in `~/.claude/skills` and `~/.syncode/skills` shows both sources in one
 /// row) and does NOT filter disabled entries (the panel derives enabled status
 /// from `settings.skills.disabled` client-side). Includes the resolved
-/// `mcodeSkillsDir` (`~/.synara/skills`, auto-created) so the UI surfaces a real
+/// `mcodeSkillsDir` (`~/.syncode/skills`, auto-created) so the UI surfaces a real
 /// drop-in target.
 async fn handle_provider_list_skills_catalog(
     _state: &WsState,
@@ -10039,7 +10039,7 @@ async fn handle_provider_list_skills_catalog(
     let skills = crate::skills_catalog::discover_skills_catalog(input);
     let skills_value =
         serde_json::to_value(&skills).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
-    let dir = crate::skills_catalog::ensure_synara_skills_dir();
+    let dir = crate::skills_catalog::ensure_syncode_skills_dir();
     let dir_field = dir
         .map(|p| Value::String(p.to_string_lossy().into_owned()))
         .unwrap_or(Value::Null);
@@ -10075,7 +10075,7 @@ async fn read_disabled_skills(state: &WsState) -> Vec<String> {
 /// plugin descriptor files. Each file is parsed as a `ProviderPluginDescriptor`
 /// (id, name, source, installed, enabled, installPolicy, authPolicy), then the
 /// `installed`/`enabled`/`installPolicy` fields are overlaid from the
-/// install-state manifest (`~/.synara/plugins.json`, env-configurable via
+/// install-state manifest (`~/.syncode/plugins.json`, env-configurable via
 /// `SYNCODE_PLUGINS_MANIFEST`) when it has an entry for the plugin's `id`.
 /// Returns the full `ProviderListPluginsResult` shape: marketplaces/errors
 /// empty, remoteSyncError null, and the discovered plugins under a synthetic
@@ -10117,7 +10117,7 @@ fn handle_provider_list_plugins(id: Value, params: &Value) -> JsonRpcResponse {
 /// The path must point to an existing readable `*.json` file inside a `.plugins`
 /// directory (basic traversal guard). The on-disk descriptor's
 /// `installed`/`enabled`/`installPolicy` fields are overlaid from the
-/// install-state manifest (`~/.synara/plugins.json`, env-configurable via
+/// install-state manifest (`~/.syncode/plugins.json`, env-configurable via
 /// `SYNCODE_PLUGINS_MANIFEST`). Returns `{ plugin: {...} }` with the full
 /// descriptor shape or `{ plugin: null }` when missing/unreadable/out-of-bounds.
 fn handle_provider_read_plugin(id: Value, params: &Value) -> JsonRpcResponse {
@@ -10439,7 +10439,7 @@ fn provider_option_descriptors(kind: &str) -> Vec<Value> {
 }
 
 /// Per-plugin install-state entry loaded from the install manifest
-/// (`~/.synara/plugins.json` or `SYNCODE_PLUGINS_MANIFEST`). All fields
+/// (`~/.syncode/plugins.json` or `SYNCODE_PLUGINS_MANIFEST`). All fields
 /// optional so a sparse manifest only needs to record what differs from the
 /// default policy.
 #[derive(Debug, Clone, Default)]
@@ -10451,7 +10451,7 @@ struct PluginInstallEntry {
 
 /// Resolve the install-state manifest path. Precedence: the explicit
 /// `override_path` (from the request's `pluginsManifestPath` param), then the
-/// `SYNCODE_PLUGINS_MANIFEST` env var, then `<home>/.synara/plugins.json`
+/// `SYNCODE_PLUGINS_MANIFEST` env var, then `<home>/.syncode/plugins.json`
 /// (using the same `HOME`/`USERPROFILE` resolution as `server_home_dir`).
 /// Returns `None` when none of those resolve to a usable path.
 fn resolve_plugins_manifest_path(override_path: Option<&str>) -> Option<PathBuf> {
@@ -10465,7 +10465,7 @@ fn resolve_plugins_manifest_path(override_path: Option<&str>) -> Option<PathBuf>
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
         .filter(|s| !s.trim().is_empty())?;
-    Some(PathBuf::from(home).join(".synara").join("plugins.json"))
+    Some(PathBuf::from(home).join(".syncode").join("plugins.json"))
 }
 
 /// Read the install-state manifest and return a `HashMap<plugin_id, entry>`.
@@ -10570,7 +10570,7 @@ fn resolve_plugins_dir(params: &Value) -> Option<PathBuf> {
 /// fields are `id` and `name` (others default: source = local file path,
 /// installed/enabled = true, installPolicy = AVAILABLE, authPolicy = ON_USE).
 /// The on-disk descriptor's `installed`/`enabled`/`installPolicy` fields are
-/// then overlaid with the install-state manifest (`~/.synara/plugins.json`,
+/// then overlaid with the install-state manifest (`~/.syncode/plugins.json`,
 /// env-configurable via `SYNCODE_PLUGINS_MANIFEST`, or pinned per-request via
 /// `manifest_override`) when it has an entry for the plugin's `id`. Invalid
 /// JSON or missing required fields → file is skipped. Returns sorted by id.
@@ -20105,7 +20105,12 @@ mod tests {
         assert!(resp.error.is_none(), "get_config failed: {:?}", resp.error);
         let config = resp.result.unwrap();
         assert!(config["cwd"].as_str().unwrap().contains('/'));
-        assert!(config["worktreesDir"].as_str().unwrap().contains(".synara"));
+        assert!(
+            config["worktreesDir"]
+                .as_str()
+                .unwrap()
+                .contains(".syncode")
+        );
         assert!(!config["keybindings"].as_array().unwrap().is_empty());
         assert_eq!(config["authMode"], "unsafe-no-auth");
     }
@@ -21405,9 +21410,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_skills_catalog_returns_synara_dir() {
+    async fn test_list_skills_catalog_returns_syncode_dir() {
         // The catalog always returns a `skills` array and a `mcodeSkillsDir`
-        // pointing at the syncode portable folder (~/.synara/skills), which is
+        // pointing at the syncode portable folder (~/.syncode/skills), which is
         // auto-created on first call so the settings panel has a drop-in target.
         let state = WsState::new_in_memory(16);
         let resp =
@@ -21417,8 +21422,8 @@ mod tests {
         assert!(result["skills"].is_array(), "skills must be an array");
         let dir = result["mcodeSkillsDir"].as_str().unwrap_or("");
         assert!(
-            dir.ends_with(".synara/skills") || dir.ends_with(".synara\\skills"),
-            "mcodeSkillsDir should point at ~/.synara/skills, got {dir:?}"
+            dir.ends_with(".syncode/skills") || dir.ends_with(".syncode\\skills"),
+            "mcodeSkillsDir should point at ~/.syncode/skills, got {dir:?}"
         );
     }
 

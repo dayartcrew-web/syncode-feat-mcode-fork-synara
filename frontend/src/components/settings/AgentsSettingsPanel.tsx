@@ -121,7 +121,7 @@ export function AgentsSettingsPanel() {
       <SettingsSection title="Shared agents">
         <SettingsRow
           title="Agent skills folder"
-          description="Skills in your .agents/skills folder are shared across every provider that loads agent skills. Toggle availability per agent below."
+          description="Agents from your shared .agents/skills folder and each provider's agents/ folder (~/.claude/agents, ~/.codex/agents, …) are listed below. Add portable agents to ~/.syncode/agents to share them across every provider."
           control={
             <span className="text-xs font-medium text-muted-foreground">
               {catalogQuery.isLoading

@@ -37,6 +37,7 @@ const SHARED_SKILLS_SECTION = "shared";
 const PERSONAL_ORIGIN = "personal";
 export const ORIGIN_SECTION_ORDER = [
   "mcode",
+  "agents-mcode",
   "codex",
   "agents-codex",
   "claude",
@@ -98,6 +99,12 @@ export function skillOriginInfo(scope: string | undefined): SkillOriginInfo {
       // "From Codex" with the right icon, instead of falling through to the
       // raw scope string.
       if (scope?.startsWith("agents-")) {
+        // Portable syncode agents folder (~/.syncode/agents) — label as the
+        // syncode-owned origin, not "MCode", so it's clear these are the
+        // user's portable agents (analogous to the ~/.syncode/skills folder).
+        if (scope === "agents-mcode") {
+          return { label: "Syncode", provider: null };
+        }
         const provider = scope.slice("agents-".length);
         const info = skillOriginInfo(provider);
         return { label: info.label, provider: info.provider };
