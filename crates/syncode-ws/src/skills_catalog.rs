@@ -343,6 +343,27 @@ fn home_roots_for_origin(origin: &str, home_dir: &str) -> Vec<PathBuf> {
     }
 }
 
+/// Per-provider agent-definition folders (the `agents/` sibling of `skills/`).
+/// Each holds one file per subagent — `.md` with YAML frontmatter
+/// (`name` + `description`) for Claude/Codex, occasionally `.toml` config
+/// (skipped at read time). Returns the same provider → home-path mapping as
+/// [`home_roots_for_origin`] but pointing at the `agents` subfolder so the
+/// catalog surfaces subagents on the Agents settings page.
+fn agent_roots_for_origin(origin: &str, home_dir: &str) -> Vec<PathBuf> {
+    let home = Path::new(home_dir);
+    match origin {
+        "codex" => vec![home.join(".codex").join("agents")],
+        "claude" => vec![home.join(".claude").join("agents")],
+        "cursor" => vec![home.join(".cursor").join("agents")],
+        "gemini" => vec![home.join(".gemini").join("agents")],
+        "grok" => vec![home.join(".grok").join("agents")],
+        "kilo" => vec![home.join(".kilo").join("agents")],
+        "opencode" => vec![home.join(".config").join("opencode").join("agents")],
+        "pi" => vec![home.join(".pi").join("agent").join("agents")],
+        _ => vec![],
+    }
+}
+
 /// Per-origin project root directory names (e.g. `.claude`, `.mcode`).
 fn project_root_names_for_origin(origin: &str) -> &'static [&'static str] {
     match origin {
@@ -422,6 +443,28 @@ fn roots_for_ordered_origins(input: &DiscoveryInput, origins: &[String]) -> Vec<
                     path,
                     scope: origin.clone(),
                     include_markdown_files: origin == "pi",
+                });
+            }
+        }
+        // Agent subagent definitions: each provider may ship an `agents/`
+        // subfolder next to its `skills/` folder (e.g. `~/.claude/agents/`,
+        // `~/.codex/agents/`) containing per-agent markdown/toml files with
+        // YAML frontmatter (name + description). These surface on the Agents
+        // settings page alongside the shared `.agents/skills` entries. We scan
+        // every provider's agents folder regardless of the `origins` filter so
+        // the Agents page is complete even when a single provider's skills are
+        // requested. Scope is `agents-<provider>` so the UI can group by
+        // provider. `.md` files are read directly (include_markdown_files);
+        // `.toml` config files are skipped (they carry no name/description).
+        for provider in HOME_ORIGIN_ORDER {
+            if *provider == "mcode" || *provider == "agents" {
+                continue;
+            }
+            for path in agent_roots_for_origin(provider, home_dir) {
+                home_roots.push(SkillRoot {
+                    path,
+                    scope: format!("agents-{provider}"),
+                    include_markdown_files: true,
                 });
             }
         }

@@ -38,13 +38,21 @@ const PERSONAL_ORIGIN = "personal";
 export const ORIGIN_SECTION_ORDER = [
   "mcode",
   "codex",
+  "agents-codex",
   "claude",
+  "agents-claude",
   "cursor",
+  "agents-cursor",
   "gemini",
+  "agents-gemini",
   "grok",
+  "agents-grok",
   "kilo",
+  "agents-kilo",
   "opencode",
+  "agents-opencode",
   "pi",
+  "agents-pi",
   "agents",
   "project",
 ] as const;
@@ -84,6 +92,16 @@ export function skillOriginInfo(scope: string | undefined): SkillOriginInfo {
     case "project":
       return { label: "Project", provider: null };
     default:
+      // Subagent folders use the scope `agents-<provider>` (e.g.
+      // `agents-claude`, `agents-codex`). Map these to the provider display
+      // name so the Agents settings page groups them under "From Claude" /
+      // "From Codex" with the right icon, instead of falling through to the
+      // raw scope string.
+      if (scope?.startsWith("agents-")) {
+        const provider = scope.slice("agents-".length);
+        const info = skillOriginInfo(provider);
+        return { label: info.label, provider: info.provider };
+      }
       return { label: scope ?? "Personal", provider: null };
   }
 }

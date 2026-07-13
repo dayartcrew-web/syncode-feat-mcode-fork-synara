@@ -65,13 +65,16 @@ export function SkillsSettingsPanel() {
 
   // Skills that ship from a provider's own folder (.codex/skills,
   // .claude/skills, …) or the MCode portable folder. Entries from the shared
-  // `.agents/skills` origin are surfaced on the separate Agents settings page
-  // (see AgentsSettingsPanel), so exclude them here to avoid duplicate rows.
+  // `.agents/skills` origin AND per-provider subagent folders (`.claude/agents`,
+  // `.codex/agents`, scope `agents-<provider>`) are surfaced on the separate
+  // Agents settings page (see AgentsSettingsPanel), so exclude them all here
+  // to avoid duplicate rows.
   const providerSkills = useMemo(
     () =>
-      (catalogQuery.data?.skills ?? []).filter(
-        (skill) => skill.scope !== "agents",
-      ),
+      (catalogQuery.data?.skills ?? []).filter((skill) => {
+        const scope = skill.scope ?? "";
+        return scope !== "agents" && !scope.startsWith("agents-");
+      }),
     [catalogQuery.data?.skills],
   );
 

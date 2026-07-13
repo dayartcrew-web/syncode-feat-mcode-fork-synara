@@ -65,11 +65,16 @@ export function AgentsSettingsPanel() {
     [serverSettingsQuery.data?.skills.disabled],
   );
 
-  // Only agent skills — those installed in the shared `.agents/skills` folder
-  // (catalog scope "agents"). Provider-folder skills (.codex/skills,
-  // .claude/skills, …) live on the Skills settings page.
+  // Agent skills: entries from the shared `.agents/skills` folder (scope
+  // "agents") PLUS per-provider subagent folders (`.claude/agents`,
+  // `.codex/agents`, …, scope "agents-<provider>"). Provider-folder skills
+  // (.codex/skills, .claude/skills, …) live on the Skills settings page.
   const agentSkills = useMemo(
-    () => (catalogQuery.data?.skills ?? []).filter((skill) => skill.scope === "agents"),
+    () =>
+      (catalogQuery.data?.skills ?? []).filter((skill) => {
+        const scope = skill.scope ?? "";
+        return scope === "agents" || scope.startsWith("agents-");
+      }),
     [catalogQuery.data?.skills],
   );
 
