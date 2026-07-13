@@ -55,6 +55,8 @@ import type {
   ProjectDevServer,
   ProjectDevServerEvent,
 } from "./tier3/project";
+import type { ProjectCreateParams } from "../types/ProjectCreateParams";
+import type { ProjectSummary } from "../types/ProjectSummary";
 import type {
   GitListBranchesResult,
   GitStashInfoResult,
@@ -694,6 +696,7 @@ export interface NativeApi {
     onEvent: (callback: (event: TerminalEvent) => void) => () => void;
   };
   projects: {
+    create: (input: ProjectCreateParams) => Promise<ProjectSummary>;
     discoverScripts: (input: ProjectDiscoverScriptsInput) => Promise<ProjectDiscoverScriptsResult>;
     listDirectories: (input: ProjectListDirectoriesInput) => Promise<ProjectListDirectoriesResult>;
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;

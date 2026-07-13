@@ -35,6 +35,11 @@ export const WS_METHODS = {
   projectsList: "projects.list",
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
+  // `project/create` (syncode served form) — registers a folder as a backend
+  // project entity so it shows in the sidebar. Used by the "Work in a project"
+  // picker after a folder is selected. No MCode dot-string remap; the served
+  // method is passed through directly (see wsTransport.ts passthrough).
+  projectCreate: "project/create",
   projectsDiscoverScripts: "projects.discoverScripts",
   projectsListDirectories: "projects.listDirectories",
   projectsSearchEntries: "projects.searchEntries",

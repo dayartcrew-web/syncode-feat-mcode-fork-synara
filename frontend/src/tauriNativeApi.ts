@@ -126,6 +126,7 @@ import type {
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
   ProjectDevServerEvent,
+  ProjectCreateParams,
   ProjectDiscoverScriptsInput,
   ProjectDiscoverScriptsResult,
   ProjectListDevServersResult,
@@ -139,6 +140,7 @@ import type {
   ProjectSearchEntriesResult,
   ProjectSearchLocalEntriesInput,
   ProjectSearchLocalEntriesResult,
+  ProjectSummary,
   ProjectStopDevServerInput,
   ProjectStopDevServerResult,
   ProjectWriteFileInput,
@@ -410,6 +412,8 @@ export function createTauriNativeApi(
 
     // ─── projects (WS transport — no syncode-tauri command) ─────────────
     projects: {
+      create: (input: ProjectCreateParams) =>
+        callTransport<ProjectSummary>("project/create", input),
       discoverScripts: (input: ProjectDiscoverScriptsInput) =>
         callTransport<ProjectDiscoverScriptsResult>("project/discoverScripts", input),
       listDirectories: (input: ProjectListDirectoriesInput) =>

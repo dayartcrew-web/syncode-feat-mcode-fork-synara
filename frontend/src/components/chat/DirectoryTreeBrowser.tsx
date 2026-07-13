@@ -103,11 +103,21 @@ export const DirectoryTreeBrowser = memo(function DirectoryTreeBrowser({
     }
   }, [loadDirectory, loadingPaths, rootEntries.length]);
 
+  // Track the last rootPath we reset caches for. The cache reset must happen
+  // ONLY when rootPath actually changes — not on every effect re-run. The
+  // original code reset failedPathsRef/inFlightRef inside the effect
+  // unconditionally, which defeated the failed-path guard (the effect re-ran
+  // whenever loadDirectory's identity changed due to entriesByParent updates,
+  // clearing the failed cache each time → infinite load-fail loop → React's
+  // "Maximum update depth exceeded"). Gating the reset on a real rootPath
+  // change via a ref breaks the cycle.
+  const lastResetRootPathRef = useRef<string | null>(null);
   useEffect(() => {
-    // Reset failed/in-flight tracking when the root path changes so a new
-    // root gets a fresh load attempt.
-    failedPathsRef.current = new Set();
-    inFlightRef.current = new Set();
+    if (lastResetRootPathRef.current !== rootPath) {
+      lastResetRootPathRef.current = rootPath;
+      failedPathsRef.current = new Set();
+      inFlightRef.current = new Set();
+    }
     handleEnsureRootLoaded();
   }, [handleEnsureRootLoaded, rootPath]);
 

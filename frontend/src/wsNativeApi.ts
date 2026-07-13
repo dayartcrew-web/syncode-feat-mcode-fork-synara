@@ -493,6 +493,10 @@ export function createWsNativeApi(): NativeApi {
       },
     },
     projects: {
+      // Register a folder as a backend project (ProjectCreated event). Used by
+      // the "Work in a project" picker so a selected folder persists as a real
+      // sidebar project. Params: { name, rootPath } (absolute).
+      create: (input) => transport.request(WS_METHODS.projectCreate, input),
       discoverScripts: (input) => transport.request(WS_METHODS.projectsDiscoverScripts, input),
       listDirectories: (input) => transport.request(WS_METHODS.projectsListDirectories, input),
       searchEntries: (input) => transport.request(WS_METHODS.projectsSearchEntries, input),
