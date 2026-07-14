@@ -1824,6 +1824,149 @@ describe("composerDraftStore sticky composer settings", () => {
   });
 });
 
+describe("composerDraftStore sticky provider reload cycle", () => {
+  // Integration test for the "stuck on Codex/GPT provider after reload" bug
+  // fix (commit dc2bc2b). Exercises the full persist -> migrate -> merge
+  // cycle through public store APIs to verify that in-session sticky state
+  // applies to new drafts but is wiped on reload so settings.defaultProvider
+  // wins on app boot. This is the closest analog to an actual browser reload
+  // available without a Playwright driver.
+  type PersistApi = {
+    getOptions: () => {
+      partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
+      merge: (
+        persistedState: unknown,
+        currentState: ReturnType<typeof useComposerDraftStore.getState>,
+      ) => ReturnType<typeof useComposerDraftStore.getState>;
+      migrate: (persistedState: unknown, version: number) => unknown;
+    };
+  };
+
+  function persistApi(): PersistApi {
+    return useComposerDraftStore.persist as unknown as PersistApi;
+  }
+
+  beforeEach(() => {
+    removeLocalStorageItem(COMPOSER_DRAFT_STORAGE_KEY);
+    resetComposerDraftStore();
+  });
+
+  afterEach(() => {
+    removeLocalStorageItem(COMPOSER_DRAFT_STORAGE_KEY);
+    resetComposerDraftStore();
+  });
+
+  it("scenario A: settings.defaultProvider wins when no sticky or draft exists", () => {
+    // Empty persisted state -> after merge, sticky fields are null/empty.
+    // The composer's selectedProvider precedence chain
+    // (lockedProvider ?? selectedProviderByThreadId ?? threadProvider ??
+    //  settings.defaultProvider) resolves to settings.defaultProvider.
+    const merged = persistApi().getOptions().merge(
+      {
+        draftsByThreadId: {},
+        draftThreadsByThreadId: {},
+        projectDraftThreadIdByProjectId: {},
+      },
+      useComposerDraftStore.getInitialState(),
+    );
+
+    expect(merged.stickyActiveProvider).toBeNull();
+    expect(merged.stickyModelSelectionByProvider).toEqual({});
+    // With nothing sticky and nothing in the draft, the precedence chain
+    // falls through to settings.defaultProvider (claudeAgent). No in-memory
+    // override can persist past reload because partialize omits these fields.
+  });
+
+  it("scenario B: in-session sticky codex applies to a fresh draft", () => {
+    const store = useComposerDraftStore.getState();
+    store.setStickyModelSelection(modelSelection("codex", "gpt-5.3-codex"));
+
+    // A new draft thread picks up the sticky activeProvider in-session.
+    const newThreadId = ThreadId.makeUnsafe("thread-scenario-b");
+    store.applyStickyState(newThreadId);
+
+    const draft = useComposerDraftStore.getState().draftsByThreadId[newThreadId];
+    expect(draft?.activeProvider).toBe("codex");
+    expect(draft?.modelSelectionByProvider.codex).toEqual(
+      modelSelection("codex", "gpt-5.3-codex"),
+    );
+    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
+  });
+
+  it("scenario C: sticky codex from prior session is wiped on reload so settings win", () => {
+    // Simulate the bug scenario: user picked codex last session, app reloads.
+    // Pre-fix, sticky was persisted and would override settings.defaultProvider
+    // on boot. Post-fix, migrate strips it and partialize never wrote it.
+    // Step 1: previous session set sticky codex (only in memory now).
+    useComposerDraftStore.getState().setStickyModelSelection(
+      modelSelection("codex", "gpt-5.3-codex"),
+    );
+    // Step 2: partialize for storage. Sticky fields MUST be omitted.
+    const partialized = persistApi().getOptions().partialize(
+      useComposerDraftStore.getState(),
+    ) as {
+      stickyModelSelectionByProvider?: unknown;
+      stickyActiveProvider?: unknown;
+    };
+    expect(partialized.stickyModelSelectionByProvider).toBeUndefined();
+    expect(partialized.stickyActiveProvider).toBeUndefined();
+
+    // Step 3: even if a stale payload (e.g. legacy pre-v6 localStorage)
+    // contained sticky fields, migrate wipes them before merge.
+    const migrated = persistApi().getOptions().migrate(
+      {
+        ...partialized,
+        // Pretend a pre-fix build wrote these.
+        stickyModelSelectionByProvider: {
+          codex: modelSelection("codex", "gpt-5.3-codex"),
+        },
+        stickyActiveProvider: "codex",
+      },
+      5, // older version
+    ) as {
+      stickyModelSelectionByProvider?: unknown;
+      stickyActiveProvider?: unknown;
+    };
+    expect(migrated.stickyModelSelectionByProvider).toEqual({});
+    expect(migrated.stickyActiveProvider).toBeNull();
+
+    // Step 4: merging migrated state into a fresh store yields no sticky
+    // override. The composer falls back to settings.defaultProvider = claudeAgent.
+    const merged = persistApi().getOptions().merge(
+      migrated,
+      useComposerDraftStore.getInitialState(),
+    );
+    expect(merged.stickyActiveProvider).toBeNull();
+    expect(merged.stickyModelSelectionByProvider).toEqual({});
+  });
+
+  it("scenario D: per-draft activeProvider survives reload", () => {
+    // Distinct from sticky: a draft with an explicit provider/model
+    // selection (e.g. user picked codex for this specific thread) must
+    // survive reload. Only sticky state is wiped, not per-draft state.
+    const threadId = ThreadId.makeUnsafe("thread-scenario-d");
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadId, "draft with explicit provider");
+    store.setModelSelection(threadId, modelSelection("codex", "gpt-5.3-codex"));
+
+    const partialized = persistApi().getOptions().partialize(
+      useComposerDraftStore.getState(),
+    ) as {
+      draftsByThreadId: Record<string, { activeProvider?: string | null }>;
+    };
+    expect(partialized.draftsByThreadId[threadId]?.activeProvider).toBe("codex");
+
+    const merged = persistApi()
+      .getOptions()
+      .merge(partialized, useComposerDraftStore.getInitialState());
+
+    expect(merged.draftsByThreadId[threadId]?.activeProvider).toBe("codex");
+    // And the sticky fields are still empty -- they didn't sneak back in.
+    expect(merged.stickyActiveProvider).toBeNull();
+    expect(merged.stickyModelSelectionByProvider).toEqual({});
+  });
+});
+
 describe("composerDraftStore provider-scoped option updates", () => {
   const threadId = ThreadId.makeUnsafe("thread-provider");
 
