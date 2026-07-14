@@ -266,7 +266,7 @@ export function resolveGeminiApiModelId(
 
 /** Check whether a capabilities object includes a given effort value. */
 export function hasEffortLevel(caps: ModelCapabilities, value: string): boolean {
-  return caps.reasoningEffortLevels.some((l) => l.value === value);
+  return caps.reasoningEffortLevels?.some((l) => l.value === value) ?? false;
 }
 
 /** Return the default effort value for a capabilities object, or null if none. */
