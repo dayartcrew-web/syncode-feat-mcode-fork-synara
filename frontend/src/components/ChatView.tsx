@@ -1015,7 +1015,21 @@ export default function ChatView({
   const draftThread = useComposerDraftStore(
     (store) => store.draftThreadsByThreadId[threadId] ?? null,
   );
-  const serverThread = useStore(useMemo(() => createThreadSelector(threadId), [threadId]));
+  const rawServerThread = useStore(useMemo(() => createThreadSelector(threadId), [threadId]));
+  // The backend stores PROVIDER_CLAUDE = "claude" but the frontend ProviderKind
+  // union is "claudeAgent". Push events normalize this (push.rs to_mcode_provider_kind),
+  // but a thread read can still surface the raw "claude", which then leaks into
+  // selectedProvider and crashes modelOptionsByProvider["claude"], buildModelSelection,
+  // etc. Normalize once at the source so all downstream reads see "claudeAgent".
+  const serverThread =
+    rawServerThread &&
+    rawServerThread.modelSelection &&
+    (rawServerThread.modelSelection.provider as string) === "claude"
+      ? ({
+          ...rawServerThread,
+          modelSelection: { ...rawServerThread.modelSelection, provider: "claudeAgent" },
+        } as typeof rawServerThread)
+      : rawServerThread;
   const fallbackDraftProjectId = draftThread?.projectId ?? null;
   const fallbackDraftProject = useStore(
     useMemo(() => createProjectSelector(fallbackDraftProjectId), [fallbackDraftProjectId]),
@@ -4569,10 +4583,10 @@ export default function ChatView({
 
       if (
         input.modelSelection !== undefined &&
-        (input.modelSelection.model !== serverThread.modelSelection.model ||
-          input.modelSelection.provider !== serverThread.modelSelection.provider ||
+        (input.modelSelection.model !== serverThread.modelSelection?.model ||
+          input.modelSelection.provider !== serverThread.modelSelection?.provider ||
           JSON.stringify(input.modelSelection.options ?? null) !==
-            JSON.stringify(serverThread.modelSelection.options ?? null))
+            JSON.stringify(serverThread.modelSelection?.options ?? null))
       ) {
         await api.orchestration.dispatchCommand({
           type: "thread.meta.update",

@@ -363,6 +363,13 @@ export function buildModelSelection(
   model: string,
   options?: ProviderOptions | null | undefined,
 ): ModelSelection {
+  // The backend stores PROVIDER_CLAUDE = "claude", but the frontend ProviderKind
+  // union is "claudeAgent". Normalize so the switch below (which has no "claude"
+  // case) doesn't fall through and return undefined — which crashed
+  // selectedModelSelection.provider on send.
+  if ((provider as string) === "claude") {
+    provider = "claudeAgent";
+  }
   switch (provider) {
     case "codex":
       return options
