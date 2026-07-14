@@ -1066,6 +1066,23 @@ export function useAppSettings() {
     [localSettings, serverSettingsQuery.data],
   );
 
+  // Sync localStorage textGenerationProvider to the server value so it stays
+  // consistent even during a transient serverSettings refetch (invalidation in
+  // updateSettings catch blocks). Without this, localStorage textGenerationProvider
+  // keeps its DEFAULT "codex" value and surfaces during refetch — making the
+  // composer briefly revert to codex mid-turn.
+  useEffect(() => {
+    const serverProvider = serverSettingsQuery.data?.textGenerationModelSelection?.provider;
+    if (!serverProvider || serverProvider === localSettings.textGenerationProvider) {
+      return;
+    }
+    setSettings((prev) =>
+      prev.textGenerationProvider === serverProvider
+        ? prev
+        : { ...prev, textGenerationProvider: serverProvider },
+    );
+  }, [serverSettingsQuery.data, localSettings.textGenerationProvider, setSettings]);
+
   useEffect(() => {
     if (normalizedStoredSettingsRef.current) {
       return;
