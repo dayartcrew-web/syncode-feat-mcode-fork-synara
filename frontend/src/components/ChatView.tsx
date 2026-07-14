@@ -885,7 +885,6 @@ export default function ChatView({
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const setStoreThreadError = useStore((store) => store.setError);
   const setStoreThreadWorkspace = useStore((store) => store.setThreadWorkspace);
-  const setStoreThreadModelSelection = useStore((store) => store.setThreadModelSelection);
   const { settings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
@@ -6197,9 +6196,6 @@ export default function ChatView({
           });
           return null;
         }
-        // Optimistically set the thread's modelSelection (same rationale as the
-        // main send path above).
-        setStoreThreadModelSelection(activeThread.id, input.threadModelSelection);
 
         const inheritedProjectInstructions =
           useProjectInstructionsStore.getState().instructionsByProjectId[activeProject.id] ?? "";
@@ -7200,13 +7196,9 @@ export default function ChatView({
         selectedProviderForSend,
         selectedModelSelectionForSend.provider === selectedProviderForSend
           ? selectedModelSelectionForSend.model
-          : (selectedModelForSend ||
+          : selectedModelForSend ||
               targetProjectDefaultModelSelectionForSend?.model ||
-              (selectedProviderForSend in DEFAULT_MODEL_BY_PROVIDER
-                ? DEFAULT_MODEL_BY_PROVIDER[
-                    selectedProviderForSend as keyof typeof DEFAULT_MODEL_BY_PROVIDER
-                  ]
-                : undefined)) ?? DEFAULT_MODEL_BY_PROVIDER.codex,
+              DEFAULT_MODEL_BY_PROVIDER.codex,
         selectedModelSelectionForSend.options,
       );
 
@@ -7236,12 +7228,6 @@ export default function ChatView({
           },
           api,
         );
-        // Optimistically set the thread's modelSelection in the store so the
-        // composer's lockedProvider immediately reflects the chosen provider
-        // (e.g. Claude) — before the shell snapshot syncs. Without this, the
-        // model picker briefly falls back to the default provider (Codex)
-        // during the window between thread.create and the snapshot push.
-        setStoreThreadModelSelection(threadIdForSend, threadCreateModelSelection);
         // `thread.create` does not carry notes, so seed the freshly created
         // server thread's notepad with the inherited project instructions via a
         // dedicated meta update. Best-effort: a failure here must not abort the turn.
@@ -8086,6 +8072,10 @@ export default function ChatView({
   const onProviderModelSelect = useCallback(
     (provider: ProviderKind, model: ModelSlug) => {
       if (!activeThread) return;
+      if (lockedProvider !== null && provider !== lockedProvider) {
+        scheduleComposerFocus();
+        return;
+      }
       const resolvedModel = resolveCommittedProviderModel({
         selectedModel: model,
         availableOptions: modelOptionsByProvider[provider],
@@ -8096,26 +8086,6 @@ export default function ChatView({
         model: resolvedModel,
       };
       setComposerDraftModelSelection(activeThread.id, nextModelSelection);
-      // For started server threads, persist the provider/model change to the
-      // backend via `thread.meta.update` so `lockedProvider` (which reads
-      // `threadProvider` from the thread's modelSelection) picks up the new
-      // provider on the next render. Without this, `lockedProvider` stays at
-      // the thread's original provider and the picker change is silently
-      // ignored — the user picks Claude but the composer stays on Codex.
-      const threadModelSelection = activeThread.modelSelection;
-      const providerChanged = threadModelSelection?.provider !== provider;
-      const modelChanged = threadModelSelection?.model !== resolvedModel;
-      if ((providerChanged || modelChanged) && !isLocalDraftThread) {
-        const api = readNativeApi();
-        if (api) {
-          void api.orchestration.dispatchCommand({
-            type: "thread.meta.update",
-            commandId: newCommandId(),
-            threadId: activeThread.id,
-            modelSelection: { provider, model: resolvedModel },
-          });
-        }
-      }
       if (provider === "cursor" && !showExpandedCursorModelVariants) {
         setComposerDraftProviderModelOptions(activeThread.id, provider, undefined, {
           persistSticky: true,
@@ -8127,7 +8097,7 @@ export default function ChatView({
     },
     [
       activeThread,
-      isLocalDraftThread,
+      lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
       setComposerDraftProviderModelOptions,

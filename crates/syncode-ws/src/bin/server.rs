@@ -46,7 +46,6 @@
 //! The WS upgrade endpoint is `/ws` (see `build_ws_router`). The web UI's
 //! `wsTransport.ts` resolves to `ws://<host>:<port>/ws`.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -295,64 +294,7 @@ async fn build_orchestrator(
 
             // PR-1-2: pass the shared read model so the reactor can resolve
             // the session working directory from the thread's project root.
-            let mut orchestrator = Orchestrator::with_reactor_adapter_and_read_model(
-                repo, reactor, adapter, read_model,
-            );
-
-            // Per-thread provider dispatch: spawn + register adapters for
-            // every AVAILABLE provider (not just the default), so threads
-            // created with a different provider (e.g. Claude) dispatch to
-            // the correct adapter instead of the global default (Codex).
-            // The default provider is already spawned above; skip it here.
-            let mut registry_entries: Vec<(String, syncode_provider::registry::SharedAdapter)> =
-                Vec::new();
-            // Always include the default adapter in the registry.
-            registry_entries.push((
-                default_provider.clone(),
-                orchestrator.adapter().cloned().unwrap(),
-            ));
-            for &pid in syncode_provider::ALL_PROVIDERS {
-                // Skip the default (already registered) and HTTP-only providers.
-                if pid == default_provider.as_str()
-                    || pid == syncode_provider::PROVIDER_ANTHROPIC
-                    || pid == syncode_provider::PROVIDER_OPENAI
-                {
-                    continue;
-                }
-                if let Some(extra_adapter) = syncode_provider::registry::create_by_id(pid) {
-                    // Spawn the adapter so it's ready for sessions. Best-effort:
-                    // a spawn failure (CLI not installed) logs but doesn't abort —
-                    // threads using that provider will fail at turn time with a
-                    // clear adapter error, and other providers stay functional.
-                    let cfg = syncode_provider::ProviderConfig {
-                        provider_id: pid.to_string(),
-                        model: String::new(), // each provider uses its own default model
-                        api_key: None,
-                        base_url: None,
-                        max_tokens: Some(4096),
-                        extra: HashMap::new(),
-                    };
-                    {
-                        let mut guard = extra_adapter.write().await;
-                        if let Err(e) = guard.spawn(cfg).await {
-                            tracing::warn!(
-                                provider = pid,
-                                error = %e,
-                                "non-default provider adapter spawn failed — \
-                                 threads using this provider will fail at turn time"
-                            );
-                            continue; // don't register an unspawned adapter
-                        }
-                    }
-                    tracing::info!(
-                        provider = pid,
-                        "provider adapter spawned for per-thread dispatch"
-                    );
-                    registry_entries.push((pid.to_string(), extra_adapter));
-                }
-            }
-            orchestrator = orchestrator.with_adapter_registry(registry_entries);
-            orchestrator
+            Orchestrator::with_reactor_adapter_and_read_model(repo, reactor, adapter, read_model)
         }
         None => {
             tracing::warn!(

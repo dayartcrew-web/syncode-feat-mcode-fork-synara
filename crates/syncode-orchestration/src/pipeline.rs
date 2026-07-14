@@ -257,13 +257,6 @@ pub struct Orchestrator {
     /// actually dispatch (e.g. start a session on StartTurn, respond to an
     /// approval/user-input request).
     adapter: Option<syncode_provider::registry::SharedAdapter>,
-    /// Per-thread provider adapter registry. When populated, `handle_command`
-    /// resolves the adapter from the thread's `provider_id` (read from the
-    /// read model) instead of always using the single `adapter` fallback.
-    /// This lets different threads dispatch to different providers (e.g.
-    /// thread A uses Codex, thread B uses Claude). When a provider_id isn't
-    /// in the registry, the `adapter` (global default) is used.
-    adapter_registry: std::collections::HashMap<String, syncode_provider::registry::SharedAdapter>,
     /// Optional outbound domain-event publisher. When wired, every appended
     /// domain event (command- and provider-stream-sourced) is pushed to the
     /// bus (e.g. a WebSocket push channel) after append+project, so connected
@@ -281,7 +274,6 @@ impl Orchestrator {
             event_repo,
             command_reactor: None,
             adapter: None,
-            adapter_registry: std::collections::HashMap::new(),
             event_publisher: None,
         }
     }
@@ -300,7 +292,6 @@ impl Orchestrator {
             event_repo,
             command_reactor: Some(command_reactor),
             adapter: None,
-            adapter_registry: std::collections::HashMap::new(),
             event_publisher: None,
         }
     }
@@ -320,7 +311,6 @@ impl Orchestrator {
             event_repo,
             command_reactor: Some(command_reactor),
             adapter: Some(adapter),
-            adapter_registry: std::collections::HashMap::new(),
             event_publisher: None,
         }
     }
@@ -347,7 +337,6 @@ impl Orchestrator {
             event_repo,
             command_reactor: Some(command_reactor),
             adapter: Some(adapter),
-            adapter_registry: std::collections::HashMap::new(),
             event_publisher: None,
         }
     }
@@ -363,20 +352,6 @@ impl Orchestrator {
         self
     }
 
-    /// Register a provider adapter under its provider id so `handle_command`
-    /// can dispatch turns to the per-thread provider instead of the single
-    /// global `adapter`. The global adapter remains the fallback for
-    /// provider ids not in the registry (e.g. threads whose provider's CLI
-    /// isn't installed, or legacy threads created before per-thread dispatch).
-    /// Builder-style: chains after a constructor.
-    pub fn with_adapter_registry(
-        mut self,
-        registry: Vec<(String, syncode_provider::registry::SharedAdapter)>,
-    ) -> Self {
-        self.adapter_registry = registry.into_iter().collect();
-        self
-    }
-
     /// Create with an existing read model store (e.g., pre-loaded).
     pub fn with_read_model(
         event_repo: Arc<dyn EventRepository>,
@@ -387,7 +362,6 @@ impl Orchestrator {
             event_repo,
             command_reactor: None,
             adapter: None,
-            adapter_registry: std::collections::HashMap::new(),
             event_publisher: None,
         }
     }
@@ -545,18 +519,9 @@ impl Orchestrator {
         let mut side_effect_events: Vec<Envelope> = Vec::new();
         let mut side_effect_triggered = false;
 
-        if let (Some(reactor), Some(default_adapter)) = (&self.command_reactor, &self.adapter)
+        if let (Some(reactor), Some(adapter)) = (&self.command_reactor, &self.adapter)
             && self.needs_provider_interaction(&command)
         {
-            // Per-thread provider dispatch: resolve the adapter from the
-            // thread's provider_id (read from the read model) instead of
-            // always using the global default. When the thread's provider
-            // isn't in the registry (e.g. CLI not installed, or registry
-            // not populated), fall back to the global default adapter so
-            // existing behavior is preserved.
-            let adapter = self
-                .resolve_adapter_for_command(&command, default_adapter)
-                .await;
             // For StartTurn the reactor needs the freshly-assigned turn id
             // (it registers the provider session against it). Derive it from
             // the produced TurnStarted event; other commands ignore the hint.
@@ -568,7 +533,7 @@ impl Orchestrator {
                 }
             });
             let reaction = reactor
-                .react(&command, &adapter, turn_id_hint)
+                .react(&command, adapter, turn_id_hint)
                 .await
                 .map_err(|e| OrchestrationError::CommandReactor(e.to_string()))?;
             side_effect_triggered = reaction.handled;
@@ -1027,47 +992,6 @@ impl Orchestrator {
             // Thread-creation-by-import: the Decider trusts the command (project
             // and source-thread existence are enforced at the application layer).
             Command::HandoffCreateThread { .. } | Command::ForkCreateThread { .. } => None,
-        }
-    }
-
-    /// Resolve the provider adapter for a command. Reads the thread's
-    /// `provider_id` from the read model and looks it up in
-    /// `adapter_registry`. Falls back to `default_adapter` when:
-    /// - the command doesn't carry a thread id (e.g. CreateThread),
-    /// - the thread isn't in the read model yet (created in this command),
-    /// - the thread's provider isn't registered (CLI not installed).
-    async fn resolve_adapter_for_command(
-        &self,
-        command: &Command,
-        default_adapter: &syncode_provider::registry::SharedAdapter,
-    ) -> syncode_provider::registry::SharedAdapter {
-        // Extract the thread id from the command. StartTurn carries it
-        // directly; most other provider-interaction commands carry it as `id`.
-        let thread_id: Option<String> = match command {
-            Command::StartTurn { thread_id, .. } => Some(thread_id.as_str().to_string()),
-            Command::PauseThread { id, .. }
-            | Command::ResumeThread { id, .. }
-            | Command::StopThreadSession { id, .. }
-            | Command::RespondThreadApproval { id, .. }
-            | Command::RespondThreadUserInput { id, .. }
-            | Command::EditAndResendThreadMessage { id, .. } => Some(id.as_str().to_string()),
-            _ => None,
-        };
-        let Some(tid) = thread_id else {
-            return default_adapter.clone();
-        };
-        // Look up the thread's provider_id in the read model.
-        let provider_id = {
-            let rm = self.read_model.read().await;
-            rm.threads.get(tid.as_str()).map(|t| t.provider_id.clone())
-        };
-        let Some(pid) = provider_id else {
-            return default_adapter.clone();
-        };
-        // Resolve the adapter from the registry.
-        match self.adapter_registry.get(&pid) {
-            Some(adapter) => adapter.clone(),
-            None => default_adapter.clone(),
         }
     }
 
