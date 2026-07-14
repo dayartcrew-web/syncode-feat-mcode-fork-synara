@@ -678,18 +678,62 @@ pub fn resolve_default_provider(settings: &Value, env_value: Option<&str>) -> St
 /// [`resolve_default_provider`]: settings first, then env, then empty string
 /// (the provider adapter falls back to its built-in default model).
 pub fn resolve_default_model(settings: &Value, env_value: Option<&str>) -> String {
-    if let Some(m) = settings
-        .get("textGenerationModelSelection")
+    let selection = settings.get("textGenerationModelSelection");
+    let provider = selection
+        .and_then(|v| v.get("provider"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if let Some(m) = selection
         .and_then(|v| v.get("model"))
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     {
-        return m.to_string();
+        if model_matches_provider(m, provider) {
+            return m.to_string();
+        }
+        // The stored model belongs to a different provider (e.g. a codex
+        // "gpt-*" slug left in textGenerationModelSelection.model after the
+        // provider was switched to claude). Using it verbatim makes the claude
+        // CLI reject the model and can misroute per-thread dispatch. Fall back
+        // to the provider's default model.
+        let default = default_model_for_provider(provider);
+        if !default.is_empty() {
+            return default.to_string();
+        }
     }
     env_value
         .filter(|s| !s.is_empty())
         .unwrap_or_default()
         .to_string()
+}
+
+/// Whether a model slug looks like it belongs to `provider`. Used to detect a
+/// stale model left over from a different provider (e.g. `gpt-5.4-mini` when
+/// the provider is claude). Conservative: unknown providers are permissive.
+fn model_matches_provider(model: &str, provider: &str) -> bool {
+    let m = model.to_lowercase();
+    match provider {
+        "claude" | "claudeAgent" => {
+            m.contains("claude")
+                || m.contains("sonnet")
+                || m.contains("opus")
+                || m.contains("haiku")
+                || m.contains("fable")
+        }
+        "codex" => m.contains("gpt"),
+        _ => true,
+    }
+}
+
+/// The default model slug for a provider (mirrors the frontend
+/// `DEFAULT_MODEL_BY_PROVIDER`). Empty for providers without a known default —
+/// caller falls back to env/adapter default.
+fn default_model_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "claude" | "claudeAgent" => "claude-sonnet-4-6",
+        "codex" => "gpt-5.5",
+        _ => "",
+    }
 }
 
 /// Extract per-provider extras from the persisted `ServerSettings.providers`
@@ -1121,6 +1165,39 @@ mod tests {
         let settings = serde_json::json!({});
         let resolved = resolve_default_model(&settings, None);
         assert_eq!(resolved, "");
+    }
+
+    #[test]
+    fn resolve_default_model_resets_mismatched_model_to_provider_default() {
+        // provider=claude but model is a codex slug (left over from a provider
+        // switch) -> reset to the claude default model.
+        let settings = serde_json::json!({
+            "textGenerationModelSelection": { "provider": "claude", "model": "gpt-5.4-mini" }
+        });
+        let resolved = resolve_default_model(&settings, Some("env-model"));
+        assert_eq!(resolved, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn resolve_default_model_keeps_model_when_it_matches_provider() {
+        let settings = serde_json::json!({
+            "textGenerationModelSelection": { "provider": "claudeAgent", "model": "claude-sonnet-4-6" }
+        });
+        assert_eq!(resolve_default_model(&settings, None), "claude-sonnet-4-6");
+
+        let settings = serde_json::json!({
+            "textGenerationModelSelection": { "provider": "codex", "model": "gpt-5.4-mini" }
+        });
+        assert_eq!(resolve_default_model(&settings, None), "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn resolve_default_model_resets_codex_mismatch_to_codex_default() {
+        // provider=codex but model is a claude slug -> codex default.
+        let settings = serde_json::json!({
+            "textGenerationModelSelection": { "provider": "codex", "model": "claude-sonnet-4-6" }
+        });
+        assert_eq!(resolve_default_model(&settings, None), "gpt-5.5");
     }
 
     #[test]
