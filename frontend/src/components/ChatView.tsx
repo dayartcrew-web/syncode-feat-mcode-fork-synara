@@ -1377,7 +1377,29 @@ export default function ChatView({
       defaultDraftProvider,
     ],
   );
-  const activeThread = serverThread ?? localDraftThread;
+  const activeThread = useMemo(() => {
+    const thread = serverThread ?? localDraftThread;
+    if (!thread || thread.modelSelection) {
+      return thread;
+    }
+    // Defensive: a server thread may briefly lack modelSelection (e.g. created
+    // before its thread.meta.update lands, or a snapshot that omits it). Fall
+    // back to the draft default so downstream `.modelSelection.provider` reads
+    // (handoff targets, activeProvider props, threadProvider, etc.) don't crash
+    // with "Cannot read properties of undefined (reading 'provider')".
+    return {
+      ...thread,
+      modelSelection: {
+        provider: defaultDraftProvider,
+        model:
+          defaultDraftProvider in DEFAULT_MODEL_BY_PROVIDER
+            ? DEFAULT_MODEL_BY_PROVIDER[
+                defaultDraftProvider as keyof typeof DEFAULT_MODEL_BY_PROVIDER
+              ]
+            : DEFAULT_MODEL_BY_PROVIDER.codex,
+      },
+    };
+  }, [serverThread, localDraftThread, defaultDraftProvider]);
   const runtimeMode =
     composerDraft.runtimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
