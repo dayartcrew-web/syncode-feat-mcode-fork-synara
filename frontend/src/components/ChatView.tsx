@@ -8072,10 +8072,6 @@ export default function ChatView({
   const onProviderModelSelect = useCallback(
     (provider: ProviderKind, model: ModelSlug) => {
       if (!activeThread) return;
-      if (lockedProvider !== null && provider !== lockedProvider) {
-        scheduleComposerFocus();
-        return;
-      }
       const resolvedModel = resolveCommittedProviderModel({
         selectedModel: model,
         availableOptions: modelOptionsByProvider[provider],
@@ -8086,6 +8082,26 @@ export default function ChatView({
         model: resolvedModel,
       };
       setComposerDraftModelSelection(activeThread.id, nextModelSelection);
+      // For started server threads, persist the provider/model change to the
+      // backend via `thread.meta.update` so `lockedProvider` (which reads
+      // `threadProvider` from the thread's modelSelection) picks up the new
+      // provider on the next render. Without this, `lockedProvider` stays at
+      // the thread's original provider and the picker change is silently
+      // ignored — the user picks Claude but the composer stays on Codex.
+      const threadModelSelection = activeThread.modelSelection;
+      const providerChanged = threadModelSelection?.provider !== provider;
+      const modelChanged = threadModelSelection?.model !== resolvedModel;
+      if ((providerChanged || modelChanged) && !isLocalDraftThread) {
+        const api = readNativeApi();
+        if (api) {
+          void api.orchestration.dispatchCommand({
+            type: "thread.meta.update",
+            commandId: newCommandId(),
+            threadId: activeThread.id,
+            modelSelection: { provider, model: resolvedModel },
+          });
+        }
+      }
       if (provider === "cursor" && !showExpandedCursorModelVariants) {
         setComposerDraftProviderModelOptions(activeThread.id, provider, undefined, {
           persistSticky: true,
@@ -8097,7 +8113,7 @@ export default function ChatView({
     },
     [
       activeThread,
-      lockedProvider,
+      isLocalDraftThread,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
       setComposerDraftProviderModelOptions,
