@@ -101,10 +101,33 @@ describe("adaptPushEnvelope", () => {
     expect((activity.payload as { activity: { kind: string } }).activity.kind).toBe("turn.completed");
     expect((activity.payload as { threadId: string }).threadId).toBe(threadId);
     // finalize message-sent (streaming:false) clears latestTurn.state → spinner.
-    const fp = finalize!.payload as { streaming: boolean; role: string; messageId: string };
+    const fp = finalize!.payload as { streaming: boolean; role: string; messageId: string; text: string };
     expect(fp.streaming).toBe(false);
     expect(fp.role).toBe("assistant");
     expect(fp.messageId).toBe(turnId);
+    // assistant_output is carried as text so synchronous adapters (Claude)
+    // that emit no MessageDeltaAppended still produce a non-empty message.
+    expect(fp.text).toBe("PONG");
+  });
+
+  it("synthesizes finalize carrying assistant_output as text when no deltas arrived", () => {
+    const ctx = createPushAdaptContext();
+    adaptPushEnvelope(env("TurnStarted", turnId, { id: turnId, thread_id: threadId, sequence: 0, user_input: "hi", created_at: "t" }), ctx);
+    const out = adaptPushEnvelope(
+      env("TurnCompleted", turnId, {
+        id: turnId,
+        assistant_output: "pong",
+        completed_at: "tc",
+        duration_ms: 800,
+        usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+      }),
+      ctx,
+    );
+    const finalize = out.find((e) => e.type === "thread.message-sent");
+    expect(finalize).toBeTruthy();
+    const fp = finalize!.payload as { text: string; streaming: boolean };
+    expect(fp.text).toBe("pong");
+    expect(fp.streaming).toBe(false);
   });
 
   it("synthesizes error session from TurnFailed", () => {
