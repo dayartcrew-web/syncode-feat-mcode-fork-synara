@@ -145,7 +145,7 @@ export function KanbanNewTaskDialog({
     clearComposerAssistantSelections,
     clearComposerFileComments,
     removeComposerTerminalContext,
-  } = useKanbanTaskScratchDraft({ defaultProvider: settings.defaultProvider });
+  } = useKanbanTaskScratchDraft({ defaultProvider: settings.textGenerationProvider });
   const promptRef = useRef(prompt);
 
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(DEFAULT_RUNTIME_MODE);
@@ -220,7 +220,7 @@ export function KanbanNewTaskDialog({
     interactionMode,
     envMode,
     sendAsDraft,
-    defaultProvider: settings.defaultProvider,
+    defaultProvider: settings.textGenerationProvider,
     assistantDeliveryMode,
     providerOptionsForDispatch,
     providerStatuses,

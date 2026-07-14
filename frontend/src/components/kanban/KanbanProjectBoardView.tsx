@@ -94,7 +94,7 @@ export function KanbanProjectBoardView({
 
   const handleDispatchDrop = useCallback(
     async (card: KanbanCard) => {
-      const targetProvider = card.provider ?? settings.defaultProvider;
+      const targetProvider = card.provider ?? settings.textGenerationProvider;
       const sendAvailability = resolveProviderSendAvailability({
         provider: targetProvider,
         statuses: providerStatuses,
@@ -110,7 +110,7 @@ export function KanbanProjectBoardView({
       // to In Progress before any round-trip; failure results revert it.
       const result = await dispatchKanbanDraftCard({
         card,
-        defaultProvider: settings.defaultProvider,
+        defaultProvider: settings.textGenerationProvider,
         assistantDeliveryMode,
         providerOptions: providerOptionsForDispatch,
       });
@@ -156,7 +156,7 @@ export function KanbanProjectBoardView({
       onOpenCard,
       providerOptionsForDispatch,
       providerStatuses,
-      settings.defaultProvider,
+      settings.textGenerationProvider,
     ],
   );
 
