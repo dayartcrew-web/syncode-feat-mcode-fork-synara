@@ -431,15 +431,46 @@ impl ClaudeAdapter {
             .as_ref()
             .and_then(|p| p.get("model"))
             .and_then(|v| v.as_str())
-            .map(str::to_owned);
+            .map(str::to_owned)
+            .map(|m| self.resolve_model_slug(&m));
         let cfg_model = self
             .config
             .as_ref()
             .map(|c| c.model.clone())
-            .filter(|m| !m.is_empty());
+            .filter(|m| !m.is_empty())
+            .map(|m| self.resolve_model_slug(&m));
         req_model.or(cfg_model).or_else(|| {
             (!self.claude_config.model.is_empty()).then(|| self.claude_config.model.clone())
         })
+    }
+
+    /// Map a model slug to one the `claude` CLI accepts.
+    ///
+    /// The frontend `ProviderKind.claudeAgent` model list uses internal slugs
+    /// like `claude-sonnet-4-6`, `claude-opus-4-8` (future/hypothetical tiers)
+    /// which are NOT real `claude` CLI model ids — passing them verbatim to
+    /// `--model` makes the CLI reject with "Unknown Model" (400). Pass through
+    /// anything already in [`available_models`] (aliases + real ids), and map
+    /// other `claude-<tier>-*` slugs to the CLI alias for that tier.
+    fn resolve_model_slug(&self, model: &str) -> String {
+        if self.available_models().iter().any(|m| m == model) {
+            return model.to_string();
+        }
+        let lower = model.to_lowercase();
+        if lower.contains("sonnet") {
+            "sonnet".to_string()
+        } else if lower.contains("opus") {
+            "opus".to_string()
+        } else if lower.contains("haiku") {
+            "haiku".to_string()
+        } else if lower.contains("fable") {
+            // "fable" isn't a CLI tier; fall back to sonnet (the default tier).
+            "sonnet".to_string()
+        } else {
+            // Unknown slug — pass through so the CLI surfaces a clear error
+            // rather than silently substituting.
+            model.to_string()
+        }
     }
 
     /// Resolve the session id for a request: explicit `params.session_id`
@@ -1351,6 +1382,38 @@ mod tests {
             adapter.model_for(&req.params).as_deref(),
             Some("default-model")
         );
+    }
+
+    #[test]
+    fn resolve_model_slug_maps_frontend_slugs_to_cli_aliases() {
+        let adapter = ClaudeAdapter::with_claude_config(ClaudeConfig::default());
+        // Frontend UI slugs (future/hypothetical tiers) map to CLI aliases.
+        assert_eq!(adapter.resolve_model_slug("claude-sonnet-4-6"), "sonnet");
+        assert_eq!(adapter.resolve_model_slug("claude-opus-4-8"), "opus");
+        assert_eq!(adapter.resolve_model_slug("claude-haiku-4-5"), "haiku");
+        assert_eq!(adapter.resolve_model_slug("claude-fable-5"), "sonnet");
+        // CLI aliases and real ids pass through unchanged.
+        assert_eq!(adapter.resolve_model_slug("sonnet"), "sonnet");
+        assert_eq!(adapter.resolve_model_slug("opus"), "opus");
+        assert_eq!(
+            adapter.resolve_model_slug("claude-sonnet-4-5-20250929"),
+            "claude-sonnet-4-5-20250929"
+        );
+        // Unknown slugs pass through (CLI surfaces a clear error).
+        assert_eq!(
+            adapter.resolve_model_slug("some-unknown-model"),
+            "some-unknown-model"
+        );
+    }
+
+    #[test]
+    fn model_for_maps_frontend_slug_to_alias() {
+        let adapter = ClaudeAdapter::with_claude_config(ClaudeConfig::default());
+        let req = ProviderRequest::new(
+            "chat",
+            Some(json!({ "input": "x", "model": "claude-sonnet-4-6" })),
+        );
+        assert_eq!(adapter.model_for(&req.params).as_deref(), Some("sonnet"));
     }
 
     // -----------------------------------------------------------------------
