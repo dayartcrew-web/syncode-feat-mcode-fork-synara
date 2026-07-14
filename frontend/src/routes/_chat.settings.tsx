@@ -1513,25 +1513,40 @@ function SettingsRouteView() {
           title="Default provider"
           description="Choose the provider used for new chats."
           resetAction={
-            settings.defaultProvider !== defaults.defaultProvider ? (
+            (settings.textGenerationProvider ?? settings.defaultProvider) !==
+            (defaults.textGenerationProvider ?? defaults.defaultProvider) ? (
               <SettingResetButton
                 label="default provider"
-                onClick={() => updateSettings({ defaultProvider: defaults.defaultProvider })}
+                onClick={() =>
+                  updateSettings({
+                    textGenerationProvider:
+                      defaults.textGenerationProvider ?? defaults.defaultProvider,
+                    defaultProvider: defaults.defaultProvider,
+                  })
+                }
               />
             ) : null
           }
           control={
             <SettingsSelectControl
-              value={settings.defaultProvider}
+              value={settings.textGenerationProvider ?? settings.defaultProvider}
               onValueChange={(value) => {
                 if (!isProviderSelectOption(value)) return;
-                updateSettings({ defaultProvider: value });
+                // Write BOTH the server-backed textGenerationProvider (so the
+                // backend's armed chat provider follows via
+                // `textGenerationModelSelection`) and the localStorage
+                // defaultProvider (backward-compat fallback).
+                updateSettings({ textGenerationProvider: value, defaultProvider: value });
               }}
               ariaLabel="Default provider"
               valueContent={
                 <ProviderOptionLabel
-                  provider={settings.defaultProvider}
-                  label={PROVIDER_DISPLAY_NAMES[settings.defaultProvider]}
+                  provider={settings.textGenerationProvider ?? settings.defaultProvider}
+                  label={
+                    PROVIDER_DISPLAY_NAMES[
+                      settings.textGenerationProvider ?? settings.defaultProvider
+                    ]
+                  }
                 />
               }
             >

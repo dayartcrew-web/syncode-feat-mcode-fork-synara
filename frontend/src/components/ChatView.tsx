@@ -1689,7 +1689,14 @@ export default function ChatView({
     ? (sessionProvider ?? threadProvider ?? selectedProviderByThreadId ?? null)
     : null;
   const selectedProvider: ProviderKind =
-    lockedProvider ?? selectedProviderByThreadId ?? threadProvider ?? settings.defaultProvider;
+    lockedProvider ??
+    selectedProviderByThreadId ??
+    threadProvider ??
+    // Prefer the server-backed provider — syncode arms chat from
+    // `textGenerationModelSelection` (mirrored as `textGenerationProvider`),
+    // so the picker matches the armed provider. Fall back to the localStorage
+    // `defaultProvider` stub for backward-compat.
+    (settings.textGenerationProvider ?? settings.defaultProvider);
   const previousSelectedProviderRef = useRef<{
     threadId: ThreadId;
     provider: ProviderKind;
