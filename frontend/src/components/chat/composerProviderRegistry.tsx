@@ -288,7 +288,20 @@ const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
 };
 
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {
-  return composerProviderRegistry[input.provider].getState(input);
+  // Guard: the registry keys on the frontend `ProviderKind` union — notably
+  // "claudeAgent", not the backend's raw "claude" (PROVIDER_CLAUDE). A provider
+  // id that hasn't been normalized at the thread boundary (e.g. a raw "claude"
+  // returned by a thread read, or an unarmed provider) would otherwise crash on
+  // `.getState()` of undefined. Normalize the known claude alias and fall back to
+  // codex for anything else so the composer never hard-crashes on send.
+  const rawProvider = input.provider as string;
+  const provider: ProviderKind =
+    rawProvider === "claude"
+      ? "claudeAgent"
+      : rawProvider in composerProviderRegistry
+        ? (rawProvider as ProviderKind)
+        : "codex";
+  return composerProviderRegistry[provider].getState({ ...input, provider });
 }
 
 export function renderProviderTraitsMenuContent(input: {
