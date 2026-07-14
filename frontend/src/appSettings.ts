@@ -1106,6 +1106,22 @@ export function useAppSettings() {
       });
   }, [localSettings, queryClient, serverSettingsQuery.data]);
 
+  // Keep the localStorage defaultProvider in sync with the server-backed
+  // textGenerationProvider. syncode arms the chat pipeline from
+  // textGenerationModelSelection (server), so a stale localStorage
+  // defaultProvider ("codex") would otherwise make new threads diverge from
+  // the armed provider until the user re-saves Settings. This force-syncs it
+  // whenever the server value arrives, no explicit save required.
+  useEffect(() => {
+    const serverProvider = settings.textGenerationProvider;
+    if (!serverProvider || serverProvider === localSettings.defaultProvider) {
+      return;
+    }
+    setSettings((prev) =>
+      prev.defaultProvider === serverProvider ? prev : { ...prev, defaultProvider: serverProvider },
+    );
+  }, [settings.textGenerationProvider, localSettings.defaultProvider, setSettings]);
+
   const updateSettings = useCallback(
     (patch: Partial<AppSettings>) => {
       setSettings((prev) => normalizeAppSettings({ ...prev, ...patch }));
