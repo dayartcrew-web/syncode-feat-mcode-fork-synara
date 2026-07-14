@@ -15,6 +15,7 @@ import {
   type OrchestrationShellStreamEvent,
   type OrchestrationSessionStatus,
   type TurnId,
+  type ModelSelection,
 } from "@t3tools/contracts";
 import { resolveThreadBranchRegressionGuard } from "@t3tools/shared/git";
 import {
@@ -4426,6 +4427,7 @@ interface AppStore extends AppState {
   renameProjectLocally: (projectId: Project["id"], name: string | null) => void;
   setError: (threadId: ThreadId, error: string | null) => void;
   setThreadWorkspace: (threadId: ThreadId, patch: ThreadWorkspacePatch) => void;
+  setThreadModelSelection: (threadId: ThreadId, modelSelection: ModelSelection) => void;
 }
 
 export const useStore = create<AppStore>((set) => ({
@@ -4464,6 +4466,13 @@ export const useStore = create<AppStore>((set) => ({
   setError: (threadId, error) => set((state) => setError(state, threadId, error)),
   setThreadWorkspace: (threadId, patch) =>
     set((state) => setThreadWorkspace(state, threadId, patch)),
+  setThreadModelSelection: (threadId, modelSelection) =>
+    set((state) =>
+      applyThreadUpdate(state, threadId, (thread) => ({
+        ...thread,
+        modelSelection,
+      })),
+    ),
 }));
 
 // Persist state changes with debouncing to avoid localStorage thrashing
