@@ -7196,9 +7196,13 @@ export default function ChatView({
         selectedProviderForSend,
         selectedModelSelectionForSend.provider === selectedProviderForSend
           ? selectedModelSelectionForSend.model
-          : selectedModelForSend ||
+          : (selectedModelForSend ||
               targetProjectDefaultModelSelectionForSend?.model ||
-              DEFAULT_MODEL_BY_PROVIDER.codex,
+              (selectedProviderForSend in DEFAULT_MODEL_BY_PROVIDER
+                ? DEFAULT_MODEL_BY_PROVIDER[
+                    selectedProviderForSend as keyof typeof DEFAULT_MODEL_BY_PROVIDER
+                  ]
+                : undefined)) ?? DEFAULT_MODEL_BY_PROVIDER.codex,
         selectedModelSelectionForSend.options,
       );
 
