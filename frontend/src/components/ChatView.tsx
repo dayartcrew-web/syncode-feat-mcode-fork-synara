@@ -885,6 +885,7 @@ export default function ChatView({
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const setStoreThreadError = useStore((store) => store.setError);
   const setStoreThreadWorkspace = useStore((store) => store.setThreadWorkspace);
+  const setStoreThreadModelSelection = useStore((store) => store.setThreadModelSelection);
   const { settings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
@@ -6196,6 +6197,9 @@ export default function ChatView({
           });
           return null;
         }
+        // Optimistically set the thread's modelSelection (same rationale as the
+        // main send path above).
+        setStoreThreadModelSelection(activeThread.id, input.threadModelSelection);
 
         const inheritedProjectInstructions =
           useProjectInstructionsStore.getState().instructionsByProjectId[activeProject.id] ?? "";
@@ -7232,6 +7236,12 @@ export default function ChatView({
           },
           api,
         );
+        // Optimistically set the thread's modelSelection in the store so the
+        // composer's lockedProvider immediately reflects the chosen provider
+        // (e.g. Claude) — before the shell snapshot syncs. Without this, the
+        // model picker briefly falls back to the default provider (Codex)
+        // during the window between thread.create and the snapshot push.
+        setStoreThreadModelSelection(threadIdForSend, threadCreateModelSelection);
         // `thread.create` does not carry notes, so seed the freshly created
         // server thread's notepad with the inherited project instructions via a
         // dedicated meta update. Best-effort: a failure here must not abort the turn.
