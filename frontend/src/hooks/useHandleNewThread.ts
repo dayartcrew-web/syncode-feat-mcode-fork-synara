@@ -146,7 +146,8 @@ export function useHandleNewThread() {
         resolveTerminalThreadCreationState({
           activeDraftThread: activeDraftThreadSnapshot,
           activeThread: activeThreadSnapshot,
-          defaultProvider: options?.provider ?? settings.defaultProvider,
+          defaultProvider:
+            options?.provider ?? settings.textGenerationProvider ?? settings.defaultProvider,
           draftComposerState:
             useComposerDraftStore.getState().draftsByThreadId[targetThreadId] ?? null,
           draftThread,
