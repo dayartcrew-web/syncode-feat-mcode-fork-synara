@@ -69,7 +69,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "mcode:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 5;
+const COMPOSER_DRAFT_STORAGE_VERSION = 6;
 export type DraftThreadEnvMode = "local" | "worktree";
 type DraftThreadEntryPoint = "chat" | "terminal";
 const COMPOSER_PROVIDER_KINDS = [
@@ -2224,7 +2224,18 @@ function migratePersistedComposerDraftStoreState(
 ): PersistedComposerDraftStoreState {
   // Version bumps should sanitize persisted data without forcing users back
   // through the legacy sticky-model fields.
-  return normalizeCurrentPersistedComposerDraftStoreState(persistedState);
+  const normalized = normalizeCurrentPersistedComposerDraftStoreState(persistedState);
+  // v6: sticky provider/model selections are no longer persisted across
+  // sessions — they were silently overriding `settings.defaultProvider` on
+  // reload. Strip them here so any pre-v6 payload (from existing users on
+  // first reload after upgrade) is wiped before merge. In-session sticky
+  // behavior is preserved by `setStickyModelSelection` operating purely in
+  // memory.
+  return {
+    ...normalized,
+    stickyModelSelectionByProvider: {},
+    stickyActiveProvider: null,
+  };
 }
 
 function partializeComposerDraftStoreState(
@@ -2414,8 +2425,6 @@ function partializeComposerDraftStoreState(
     draftsByThreadId: persistedDraftsByThreadId,
     draftThreadsByThreadId: state.draftThreadsByThreadId,
     projectDraftThreadIdByProjectId: state.projectDraftThreadIdByProjectId,
-    stickyModelSelectionByProvider: state.stickyModelSelectionByProvider,
-    stickyActiveProvider: state.stickyActiveProvider,
   };
 }
 

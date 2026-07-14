@@ -1740,7 +1740,7 @@ describe("composerDraftStore sticky composer settings", () => {
     expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
   });
 
-  it("preserves current sticky model fields during storage-version migration", () => {
+  it("strips sticky model fields during storage-version migration", () => {
     const persistApi = useComposerDraftStore.persist as unknown as {
       getOptions: () => {
         migrate: (persistedState: unknown, version: number) => unknown;
@@ -1766,12 +1766,8 @@ describe("composerDraftStore sticky composer settings", () => {
       stickyActiveProvider: ModelSelection["provider"] | null;
     };
 
-    expect(migratedState.stickyModelSelectionByProvider.claudeAgent).toEqual(
-      modelSelection("claudeAgent", "claude-opus-4-6", {
-        effort: "max",
-      }),
-    );
-    expect(migratedState.stickyActiveProvider).toBe("claudeAgent");
+    expect(migratedState.stickyModelSelectionByProvider).toEqual({});
+    expect(migratedState.stickyActiveProvider).toBeNull();
   });
 
   it("applies sticky activeProvider to new drafts", () => {
@@ -1787,6 +1783,44 @@ describe("composerDraftStore sticky composer settings", () => {
       },
       activeProvider: "claudeAgent",
     });
+  });
+
+  it("does not persist sticky fields when partializing for storage", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setStickyModelSelection(modelSelection("codex", "gpt-5.3-codex"));
+
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => { partialize: (state: unknown) => unknown };
+    };
+    const partialized = persistApi.getOptions().partialize(
+      useComposerDraftStore.getState(),
+    ) as {
+      stickyModelSelectionByProvider?: unknown;
+      stickyActiveProvider?: unknown;
+    };
+
+    expect(partialized.stickyModelSelectionByProvider).toBeUndefined();
+    expect(partialized.stickyActiveProvider).toBeUndefined();
+  });
+
+  it("still persists per-draft activeProvider as draft content", () => {
+    removeLocalStorageItem(COMPOSER_DRAFT_STORAGE_KEY);
+    resetComposerDraftStore();
+
+    const threadId = ThreadId.makeUnsafe("thread-per-draft-active");
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(threadId, modelSelection("claudeAgent", "claude-opus-4-6"));
+
+    const partialized = (
+      useComposerDraftStore.persist as unknown as {
+        getOptions: () => { partialize: (state: unknown) => unknown };
+      }
+    ).getOptions().partialize(useComposerDraftStore.getState()) as {
+      draftsByThreadId: Record<string, { activeProvider?: string | null }>;
+    };
+
+    expect(partialized.draftsByThreadId[threadId]?.activeProvider).toBe("claudeAgent");
   });
 });
 
