@@ -326,6 +326,9 @@ export function adaptPushEnvelope(
       // "running" → spinner never clears. Synthesize a finalize message-sent
       // (streaming:false) keyed on the same messageId so coalesce merges it
       // with the deltas and the store flips latestTurn.state → "completed".
+      // For synchronous adapters (Claude) that emit no MessageDeltaAppended
+      // events for short turns, `assistant_output` is the only text source —
+      // carry it here so the message body isn't left empty.
       if (completed && turnId) {
         out.push(
           makeEvent(
@@ -335,7 +338,7 @@ export function adaptPushEnvelope(
               threadId: ThreadId.makeUnsafe(threadId),
               messageId: MessageId.makeUnsafe(turnId),
               role: "assistant",
-              text: "",
+              text: (raw?.["assistant_output"] as string | undefined) ?? "",
               streaming: false,
               turnId: TurnId.makeUnsafe(turnId),
               createdAt: updatedAt,
