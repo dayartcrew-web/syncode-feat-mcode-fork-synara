@@ -946,7 +946,7 @@ function SettingsRouteView() {
   const changedSettingLabels = [
     ...(theme !== "system" ? ["Theme"] : []),
     ...(!isDefaultActiveTheme ? [`${resolvedTheme === "dark" ? "Dark" : "Light"} theme pack`] : []),
-    ...(settings.defaultProvider !== defaults.defaultProvider ? ["Default provider"] : []),
+    ...(settings.textGenerationProvider !== defaults.textGenerationProvider ? ["Default provider"] : []),
     ...(settings.defaultThreadEnvMode !== defaults.defaultThreadEnvMode ? ["New thread mode"] : []),
     ...(settings.sidebarProjectSortOrder !== defaults.sidebarProjectSortOrder
       ? ["Project sort order"]
@@ -1515,13 +1515,11 @@ function SettingsRouteView() {
           title="Default provider"
           description="Choose the provider used for new chats."
           resetAction={
-            (settings.textGenerationProvider ?? settings.defaultProvider) !==
-            (defaults.textGenerationProvider ?? defaults.defaultProvider) ? (
+            settings.textGenerationProvider !== defaults.textGenerationProvider ? (
               <SettingResetButton
                 label="default provider"
                 onClick={() => {
-                  const resetProvider =
-                    defaults.textGenerationProvider ?? defaults.defaultProvider;
+                  const resetProvider = defaults.textGenerationProvider;
                   const resetModel =
                     resetProvider in DEFAULT_MODEL_BY_PROVIDER
                       ? DEFAULT_MODEL_BY_PROVIDER[
@@ -1531,7 +1529,6 @@ function SettingsRouteView() {
                   return updateSettings({
                     textGenerationProvider: resetProvider,
                     textGenerationModel: resetModel,
-                    defaultProvider: defaults.defaultProvider,
                   });
                 }}
               />
@@ -1539,7 +1536,7 @@ function SettingsRouteView() {
           }
           control={
             <SettingsSelectControl
-              value={settings.textGenerationProvider ?? settings.defaultProvider}
+              value={settings.textGenerationProvider}
               onValueChange={(value) => {
                 if (!isProviderSelectOption(value)) return;
                 // Reset the model to the new provider's default so the selection
@@ -1553,18 +1550,13 @@ function SettingsRouteView() {
                 updateSettings({
                   textGenerationProvider: value,
                   textGenerationModel: defaultModel,
-                  defaultProvider: value,
                 });
               }}
               ariaLabel="Default provider"
               valueContent={
                 <ProviderOptionLabel
-                  provider={settings.textGenerationProvider ?? settings.defaultProvider}
-                  label={
-                    PROVIDER_DISPLAY_NAMES[
-                      settings.textGenerationProvider ?? settings.defaultProvider
-                    ]
-                  }
+                  provider={settings.textGenerationProvider}
+                  label={PROVIDER_DISPLAY_NAMES[settings.textGenerationProvider]}
                 />
               }
             >
