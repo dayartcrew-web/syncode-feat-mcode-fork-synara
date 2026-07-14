@@ -467,9 +467,16 @@ impl ClaudeAdapter {
             // "fable" isn't a CLI tier; fall back to sonnet (the default tier).
             "sonnet".to_string()
         } else {
-            // Unknown slug — pass through so the CLI surfaces a clear error
-            // rather than silently substituting.
-            model.to_string()
+            // Not a claude model — e.g. a codex/openai slug like "gpt-5.4-mini"
+            // left over when the provider switched to claude but the model
+            // selection didn't reset. Passing it through makes the CLI reject
+            // with "Unknown Model". Fall back to the configured claude default.
+            let fallback = self.claude_config.model.clone();
+            if fallback.is_empty() {
+                "sonnet".to_string()
+            } else {
+                fallback
+            }
         }
     }
 
@@ -1358,30 +1365,29 @@ mod tests {
 
     #[test]
     fn model_resolution_prefers_request_then_config() {
+        // Use real claude CLI models (aliases) so resolve_model_slug passes them
+        // through unchanged — this test is about priority, not slug mapping.
         let mut adapter = ClaudeAdapter::with_claude_config(ClaudeConfig {
-            model: "default-model".to_string(),
+            model: "haiku".to_string(),
             ..ClaudeConfig::default()
         });
         adapter.config = Some(ProviderConfig {
-            model: "cfg-model".to_string(),
+            model: "opus".to_string(),
             ..ProviderConfig::default()
         });
 
         // No request model → spawn config model.
         let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));
-        assert_eq!(adapter.model_for(&req.params).as_deref(), Some("cfg-model"));
+        assert_eq!(adapter.model_for(&req.params).as_deref(), Some("opus"));
 
         // Request model wins.
-        let req = ProviderRequest::new("chat", Some(json!({ "input": "x", "model": "req-model" })));
-        assert_eq!(adapter.model_for(&req.params).as_deref(), Some("req-model"));
+        let req = ProviderRequest::new("chat", Some(json!({ "input": "x", "model": "sonnet" })));
+        assert_eq!(adapter.model_for(&req.params).as_deref(), Some("sonnet"));
 
         // No config model → claude_config default.
         adapter.config = None;
         let req = ProviderRequest::new("chat", Some(json!({ "input": "x" })));
-        assert_eq!(
-            adapter.model_for(&req.params).as_deref(),
-            Some("default-model")
-        );
+        assert_eq!(adapter.model_for(&req.params).as_deref(), Some("haiku"));
     }
 
     #[test]
@@ -1399,11 +1405,11 @@ mod tests {
             adapter.resolve_model_slug("claude-sonnet-4-5-20250929"),
             "claude-sonnet-4-5-20250929"
         );
-        // Unknown slugs pass through (CLI surfaces a clear error).
-        assert_eq!(
-            adapter.resolve_model_slug("some-unknown-model"),
-            "some-unknown-model"
-        );
+        // Non-claude slugs (e.g. a codex/gpt slug like "gpt-5.4-mini" left over
+        // when the provider switched to claude but the model didn't reset) fall
+        // back to the claude default instead of being rejected by the CLI.
+        assert_eq!(adapter.resolve_model_slug("gpt-5.4-mini"), "sonnet");
+        assert_eq!(adapter.resolve_model_slug("some-unknown-model"), "sonnet");
     }
 
     #[test]
