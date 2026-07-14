@@ -158,6 +158,7 @@ export function useThreadRecap(input: UseThreadRecapInput): UseThreadRecapResult
 
       void api.server
         .generateThreadRecap({
+          threadId: scheduledThreadId,
           cwd,
           newMaterial: payload.newMaterial,
           currentState: payload.currentState,
