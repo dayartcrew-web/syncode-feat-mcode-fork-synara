@@ -147,7 +147,7 @@ export function useHandleNewThread() {
           activeDraftThread: activeDraftThreadSnapshot,
           activeThread: activeThreadSnapshot,
           defaultProvider:
-            options?.provider ?? settings.textGenerationProvider ?? settings.defaultProvider,
+            options?.provider ?? settings.textGenerationProvider,
           draftComposerState:
             useComposerDraftStore.getState().draftsByThreadId[targetThreadId] ?? null,
           draftThread,
@@ -307,7 +307,7 @@ export function useHandleNewThread() {
       openTerminalThreadPage,
       focusedThreadId,
       markTemporaryThread,
-      settings.defaultProvider,
+      settings.textGenerationProvider,
     ],
   );
 

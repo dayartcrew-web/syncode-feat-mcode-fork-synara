@@ -1364,7 +1364,7 @@ export default function ChatView({
   // falling back to the localStorage defaultProvider. Previously this hardcoded
   // "codex", which made the composer button show codex for every new chat even
   // after the user picked a different default.
-  const defaultDraftProvider = settings.textGenerationProvider ?? settings.defaultProvider;
+  const defaultDraftProvider = settings.textGenerationProvider;
   const localDraftThread = useMemo(
     () =>
       draftThread
@@ -1748,9 +1748,8 @@ export default function ChatView({
     threadProvider ??
     // Prefer the server-backed provider — syncode arms chat from
     // `textGenerationModelSelection` (mirrored as `textGenerationProvider`),
-    // so the picker matches the armed provider. Fall back to the localStorage
-    // `defaultProvider` stub for backward-compat.
-    (settings.textGenerationProvider ?? settings.defaultProvider);
+    // so the picker matches the armed provider.
+    settings.textGenerationProvider;
   const previousSelectedProviderRef = useRef<{
     threadId: ThreadId;
     provider: ProviderKind;
