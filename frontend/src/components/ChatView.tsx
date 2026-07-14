@@ -1345,6 +1345,12 @@ export default function ChatView({
   );
 
   const localDraftError = serverThread ? null : (localDraftErrorsByThreadId[threadId] ?? null);
+  // Draft threads (not yet persisted) default to the server-backed provider
+  // (settings.textGenerationProvider — what syncode arms the chat pipeline from),
+  // falling back to the localStorage defaultProvider. Previously this hardcoded
+  // "codex", which made the composer button show codex for every new chat even
+  // after the user picked a different default.
+  const defaultDraftProvider = settings.textGenerationProvider ?? settings.defaultProvider;
   const localDraftThread = useMemo(
     () =>
       draftThread
@@ -1352,13 +1358,24 @@ export default function ChatView({
             threadId,
             draftThread,
             fallbackDraftProject?.defaultModelSelection ?? {
-              provider: "codex",
-              model: DEFAULT_MODEL_BY_PROVIDER.codex,
+              provider: defaultDraftProvider,
+              model:
+                defaultDraftProvider in DEFAULT_MODEL_BY_PROVIDER
+                  ? DEFAULT_MODEL_BY_PROVIDER[
+                      defaultDraftProvider as keyof typeof DEFAULT_MODEL_BY_PROVIDER
+                    ]
+                  : DEFAULT_MODEL_BY_PROVIDER.codex,
             },
             localDraftError,
           )
         : undefined,
-    [draftThread, fallbackDraftProject?.defaultModelSelection, localDraftError, threadId],
+    [
+      draftThread,
+      fallbackDraftProject?.defaultModelSelection,
+      localDraftError,
+      threadId,
+      defaultDraftProvider,
+    ],
   );
   const activeThread = serverThread ?? localDraftThread;
   const runtimeMode =
