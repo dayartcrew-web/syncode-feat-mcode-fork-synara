@@ -4,6 +4,7 @@
 // Exports: Settings route component for `/settings`
 
 import {
+  DEFAULT_MODEL_BY_PROVIDER,
   PROVIDER_DISPLAY_NAMES,
   type ProviderKind,
   type ServerProviderStatus,
@@ -1518,13 +1519,21 @@ function SettingsRouteView() {
             (defaults.textGenerationProvider ?? defaults.defaultProvider) ? (
               <SettingResetButton
                 label="default provider"
-                onClick={() =>
-                  updateSettings({
-                    textGenerationProvider:
-                      defaults.textGenerationProvider ?? defaults.defaultProvider,
+                onClick={() => {
+                  const resetProvider =
+                    defaults.textGenerationProvider ?? defaults.defaultProvider;
+                  const resetModel =
+                    resetProvider in DEFAULT_MODEL_BY_PROVIDER
+                      ? DEFAULT_MODEL_BY_PROVIDER[
+                          resetProvider as keyof typeof DEFAULT_MODEL_BY_PROVIDER
+                        ]
+                      : undefined;
+                  return updateSettings({
+                    textGenerationProvider: resetProvider,
+                    textGenerationModel: resetModel,
                     defaultProvider: defaults.defaultProvider,
-                  })
-                }
+                  });
+                }}
               />
             ) : null
           }
@@ -1533,11 +1542,19 @@ function SettingsRouteView() {
               value={settings.textGenerationProvider ?? settings.defaultProvider}
               onValueChange={(value) => {
                 if (!isProviderSelectOption(value)) return;
-                // Write BOTH the server-backed textGenerationProvider (so the
-                // backend's armed chat provider follows via
-                // `textGenerationModelSelection`) and the localStorage
-                // defaultProvider (backward-compat fallback).
-                updateSettings({ textGenerationProvider: value, defaultProvider: value });
+                // Reset the model to the new provider's default so the selection
+                // stays consistent — otherwise a stale model from the previous
+                // provider (e.g. a codex "gpt-*" slug after switching to claude)
+                // lingers, the composer reverts, and the CLI may reject it.
+                const defaultModel =
+                  value in DEFAULT_MODEL_BY_PROVIDER
+                    ? DEFAULT_MODEL_BY_PROVIDER[value as keyof typeof DEFAULT_MODEL_BY_PROVIDER]
+                    : undefined;
+                updateSettings({
+                  textGenerationProvider: value,
+                  textGenerationModel: defaultModel,
+                  defaultProvider: value,
+                });
               }}
               ariaLabel="Default provider"
               valueContent={
