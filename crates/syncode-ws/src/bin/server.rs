@@ -243,7 +243,7 @@ async fn build_orchestrator(
             .with_read_model(Arc::clone(&read_model)),
     );
 
-    match syncode_provider::registry::create_by_id(&default_provider) {
+    let orchestrator = match syncode_provider::registry::create_by_id(&default_provider) {
         Some(adapter) => {
             // Spawn the provider adapter (launches codex app-server / claude CLI).
             {
@@ -363,5 +363,24 @@ async fn build_orchestrator(
             );
             Orchestrator::new(repo)
         }
+    };
+
+    // Replay the read model from the event store so threads/projects from
+    // previous sessions appear in the shell snapshot on startup. Without this,
+    // the in-memory read model is empty and the frontend sees no existing
+    // threads — the root cause of "shell snapshot returns 0 threads".
+    match orchestrator.replay_read_model().await {
+        Ok((snapshots, events)) => {
+            tracing::info!(
+                snapshots_loaded = snapshots,
+                events_replayed = events,
+                "read model replayed from event store"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to replay read model — starting with empty store");
+        }
     }
+
+    orchestrator
 }
