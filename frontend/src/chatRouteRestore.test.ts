@@ -84,7 +84,7 @@ describe("resolveRestorableThreadRoute", () => {
     ).toBe(false);
   });
 
-  it("recovers a missing thread route only while no server threads are known", () => {
+  it("recovers a missing thread route regardless of whether server threads are known", () => {
     expect(
       shouldStartMissingThreadRouteRecovery({
         hasKnownServerThreads: false,
@@ -99,12 +99,15 @@ describe("resolveRestorableThreadRoute", () => {
         routeThreadExists: false,
       }),
     ).toBe(true);
+    // #181: recovery now runs whenever the route thread is missing, regardless
+    // of whether other server threads exist (the shell snapshot may not include
+    // the route thread on cold start / deep link). Previously this returned false.
     expect(
       shouldStartMissingThreadRouteRecovery({
         hasKnownServerThreads: true,
         recoveryState: "idle",
         routeThreadExists: false,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
