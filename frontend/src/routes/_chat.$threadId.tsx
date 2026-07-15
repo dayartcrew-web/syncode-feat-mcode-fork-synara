@@ -2359,9 +2359,13 @@ function ChatThreadRouteView() {
       return;
     }
 
-    if (!routeThreadExists) {
-      void navigate({ to: "/", replace: true });
-    }
+    // Don't redirect to "/" when the route thread isn't in the local store yet.
+    // The thread may still be loading (subscribeThread is async, shell snapshot
+    // may not include it on cold start). ChatView handles undefined activeThread
+    // gracefully — it renders a loading/empty state and updates when the thread
+    // data arrives. Redirecting here causes existing threads opened via URL to
+    // revert to the welcome screen.
+    // if (!routeThreadExists) { void navigate({ to: "/", replace: true }); }
   }, [
     hasKnownServerThreads,
     missingThreadRecoveryState,
