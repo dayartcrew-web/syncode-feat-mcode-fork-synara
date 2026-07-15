@@ -952,11 +952,16 @@ impl ProviderCommandReactor {
         // an explicit Completed/Error on the bus.
         match &send_result {
             Ok(_) => {
-                let saw_activity = !events.is_empty();
-                if !events.iter().any(is_terminal_provider_event) && saw_activity {
-                    // The turn ran (we observed non-terminal events) but no
-                    // terminal event was captured — synthesize Completed so the
-                    // turn cannot stick in pending. (Pure-async adapters that
+                if !events.iter().any(is_terminal_provider_event) {
+                    // send_request returned Ok — the turn completed. Synthesize
+                    // Completed regardless of whether non-terminal events were
+                    // captured. The pre-subscription may have missed events
+                    // (broadcast ring buffer full, subscription too late), but
+                    // the Ok result is authoritative: the turn finished.
+                    // (Pure-async adapters that return immediately also have
+                    // empty events; they leave the live stream consumer active
+                    // via the pipeline, so this is a harmless extra Completed
+                    // that the projector deduplicates by checking turn status.)
                     // return immediately emit no events, so `saw_activity` is
                     // false and we leave the stream consumer path active.)
                     events.push(ProviderEvent::Completed {
