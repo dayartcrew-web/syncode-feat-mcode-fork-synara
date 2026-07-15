@@ -2481,8 +2481,9 @@ export default function Sidebar() {
   );
 
   const handlePrimaryNewThread = useCallback(() => {
-    if (currentProjectShortcutTargetId) {
-      void handleNewThread(currentProjectShortcutTargetId, {
+    const targetProjectId = currentProjectShortcutTargetId ?? projects[0]?.id ?? null;
+    if (targetProjectId) {
+      void handleNewThread(targetProjectId, {
         envMode: resolveSidebarNewThreadEnvMode({
           defaultEnvMode: appSettings.defaultThreadEnvMode,
         }),
@@ -2496,6 +2497,7 @@ export default function Sidebar() {
     currentProjectShortcutTargetId,
     handleNewThread,
     handleStartAddProject,
+    projects,
   ]);
 
   const handleImportThread = useCallback(
