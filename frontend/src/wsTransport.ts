@@ -151,6 +151,12 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   // to register on the `orchestration` push channel. They map to served
   // slash-form dispatch keys.
   "orchestration.subscribeEvents": "orchestration/subscribeEvents",
+  // ORCH-4 thread-detail: `subscribeThread`/`unsubscribeThread` hydrate a
+  // single thread's conversation. Without this remap the transport rejects
+  // them client-side (MethodNotFound) and the backend handler never runs —
+  // the thread's messages never load on open/reload.
+  "orchestration.subscribeThread": "orchestration/subscribe-thread",
+  "orchestration.unsubscribeThread": "orchestration/unsubscribe-thread",
 
   // Git RPCs (T6c-3): the cloned MCode GitPanel calls `git.*` dot-strings
   // (`git.status`, `git.readWorkingTreeDiff`, `git.listBranches`, …). The

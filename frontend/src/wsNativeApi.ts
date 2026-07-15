@@ -427,6 +427,29 @@ export function createWsNativeApi(): NativeApi {
   transport.subscribe("orchestration", (message) => {
     const env = message.data as { eventType?: string; data?: unknown } | undefined;
     if (env && env.eventType === "snapshot") {
+      const snap = env.data as
+        | { scope?: string; thread?: unknown; snapshotSequence?: number }
+        | undefined;
+      // Thread-detail snapshot (subscribeThread) → onThreadEvent, which hydrates
+      // the conversation on thread open/reload. Distinguished from the shell
+      // snapshot by `scope === "thread"` (the shell snapshot carries no `scope`).
+      if (snap && snap.scope === "thread" && snap.thread !== undefined) {
+        for (const listener of orchestrationThreadEventListeners) {
+          try {
+            listener({
+              kind: "snapshot",
+              snapshot: {
+                snapshotSequence: snap.snapshotSequence ?? 0,
+                thread: snap.thread,
+              },
+            } as OrchestrationThreadStreamItem);
+          } catch {
+            // Swallow listener errors
+          }
+        }
+        return;
+      }
+      // Shell snapshot → onShellEvent (sidebar bootstrap).
       for (const listener of orchestrationShellEventListeners) {
         try {
           listener({ kind: "snapshot", snapshot: env.data } as OrchestrationShellStreamItem);

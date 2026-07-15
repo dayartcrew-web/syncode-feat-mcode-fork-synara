@@ -453,37 +453,54 @@ fn build_snapshot(
     match channel {
         crate::channels::CHANNEL_ORCHESTRATION => match thread_id {
             Some(tid) => {
-                // Thread-detail snapshot: the thread + its turns + messages.
+                // Thread-detail snapshot — MUST match `OrchestrationThreadDetailSnapshot`
+                // = `{ snapshotSequence, thread: OrchestrationThread }`. The frontend's
+                // `onThreadEvent` snapshot branch reads `item.snapshot.thread` (a FULL
+                // read-model thread handed to `syncServerThreadDetailHotPath`) and
+                // `item.snapshot.snapshotSequence`. Emitted on the same `push/orchestration`
+                // channel as the shell snapshot; the frontend demux distinguishes the two
+                // by `data.scope === "thread"` (the shell snapshot carries no `scope`).
+                // Reuse `thread_view_to_read_model` so the push and any future RPC
+                // thread-detail path emit an identical shape.
                 let thread = store.threads.get(tid)?;
                 let turns: Vec<_> = store
                     .turns
                     .values()
                     .filter(|t| t.thread_id == tid)
-                    .map(turn_summary)
                     .collect();
+                let turn_ids: std::collections::HashSet<&str> =
+                    turns.iter().map(|t| t.id.as_str()).collect();
                 let messages: Vec<_> = store
                     .messages
                     .values()
-                    .filter(|m| turns.iter().any(|t: &dto::TurnSummary| t.id == m.turn_id))
-                    .map(message_summary)
+                    .filter(|m| turn_ids.contains(m.turn_id.as_str()))
                     .collect();
                 let snap = serde_json::json!({
+                    "snapshotSequence": 0i64,
+                    "thread": crate::rpc::thread_view_to_read_model(thread, &turns, &messages),
                     "scope": "thread",
-                    "thread": thread_summary(thread),
-                    "turns": turns,
-                    "messages": messages,
-                    "snapshot_at": snapshot_at,
                 });
                 Some(snap)
             }
             None => {
-                // Build shell snapshot as raw JSON to use MCode-compatible
-                // thread shape (modelSelection instead of flat provider_id/model).
+                // Shell snapshot — MUST match the `OrchestrationShellSnapshot`
+                // shape produced by `handle_shell_get_snapshot` (rpc.rs) field
+                // for field. The frontend's `onShellEvent` snapshot branch reads
+                // `snapshot.snapshotSequence` and hands the snapshot to
+                // `syncServerShellSnapshot`, which expects the camelCase
+                // `project_view_to_shell`/`thread_view_to_shell` field names
+                // (`title`, `workspaceRoot`, `defaultModelSelection`, `modelSelection`,
+                // `latestTurn`, …). The previous shape (`{scope, projects:
+                // [project_summary snake_case], snapshot_at}`) mismatched the
+                // contract: the malformed push snapshot was applied first via
+                // `subscribe-shell`, set `threadsHydrated: true`, and then gated
+                // out the clean RPC snapshot (`shouldApplyBootstrapShellSnapshot`),
+                // leaving the sidebar empty on every load/reload.
                 let snap = serde_json::json!({
-                    "scope": "shell",
-                    "projects": store.projects.values().map(project_summary).collect::<Vec<_>>(),
-                    "threads": store.threads.values().map(thread_summary).collect::<Vec<_>>(),
-                    "snapshot_at": snapshot_at,
+                    "snapshotSequence": 0i64,
+                    "projects": store.projects.values().map(crate::rpc::project_view_to_shell).collect::<Vec<_>>(),
+                    "threads": store.threads.values().map(crate::rpc::thread_view_to_shell).collect::<Vec<_>>(),
+                    "updatedAt": snapshot_at,
                 });
                 Some(snap)
             }

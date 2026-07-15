@@ -1444,6 +1444,16 @@ export const SERVED_RPC = {
     request: null as unknown as Record<string, unknown>,
     result: null as unknown as Record<string, unknown>,
   },
+  // ORCH-4 thread-detail: `subscribeThread` hydrates a single thread's
+  // conversation (snapshot-then-stream). Mirrors `subscribe-shell`.
+  "orchestration/subscribe-thread": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
+  "orchestration/unsubscribe-thread": {
+    request: null as unknown as Record<string, unknown>,
+    result: null as unknown as Record<string, unknown>,
+  },
   // ORCH-6: `orchestration.getTurnDiff` loads two `CheckpointView`s for a
   // turn from the read model's `checkpoints` map and computes the diff via
   // `syncode_git::diff::compute_diff`. The turn's `checkpoint_ref` is the
