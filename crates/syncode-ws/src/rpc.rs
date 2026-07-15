@@ -471,6 +471,22 @@ async fn dispatch_method(
         | "orchestration/subscribe-events" => {
             handle_orchestration_subscribe_events(state, conn_id, id).await
         }
+        // `subscribeThread` hydrates a single thread's conversation on
+        // open/reload (snapshot-then-stream on the orchestration channel,
+        // distinguished from the shell snapshot by `data.scope === "thread"`).
+        "orchestration.subscribeThread"
+        | "orchestration/subscribeThread"
+        | "orchestration/subscribe-thread" => {
+            handle_orchestration_subscribe_thread(state, conn_id, id, &request.params).await
+        }
+        // `unsubscribeThread` drops a thread-detail subscription (best-effort;
+        // the connection's subscriptions are pruned on disconnect regardless).
+        "orchestration.unsubscribeThread"
+        | "orchestration/unsubscribeThread"
+        | "orchestration/unsubscribe-thread" => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "subscribed": false, "method": "unsubscribeThread" }),
+        ),
 
         // ─── Git Methods (syncode-git-backed) ─────────────────────
         // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
@@ -4524,7 +4540,7 @@ async fn handle_turn_complete(state: &WsState, id: Value, params: &Value) -> Jso
 ///   - `defaultModel`   → `defaultModelSelection` (null when unset)
 ///   - `providerId`     → folded into `defaultModelSelection.provider` when present
 ///   - id/createdAt/updatedAt carried through verbatim
-fn project_view_to_shell(p: &syncode_orchestration::ProjectView) -> Value {
+pub(crate) fn project_view_to_shell(p: &syncode_orchestration::ProjectView) -> Value {
     let default_model_selection = match (&p.provider_id, &p.default_model) {
         (Some(provider), Some(model)) => serde_json::json!({
             "provider": provider,
@@ -4567,7 +4583,7 @@ fn project_view_to_read_model(p: &syncode_orchestration::ProjectView) -> Value {
 /// is built from the thread status so the sidebar reflects the real state.
 /// Worktree/branch/latestTurn metadata the backend cannot populate default to
 /// null; the normalizers tolerate missing values.
-fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Value {
+pub(crate) fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Value {
     use syncode_orchestration::ThreadSessionView;
     let title = t.title.clone().unwrap_or_else(|| t.id.clone());
     let model_selection = serde_json::json!({
@@ -4624,6 +4640,118 @@ fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Value {
     })
 }
 
+/// Build a UI `OrchestrationThread` (read-model) JSON value — the FULL thread
+/// the frontend's `onThreadEvent` snapshot branch hands to
+/// `syncServerThreadDetailHotPath`. It is a superset of the shell projection:
+/// adds `messages` (the conversation history the transcript renders),
+/// `activities`, `checkpoints`, `proposedPlans`, and a materialized `latestTurn`.
+///
+/// `turns`/`messages` are the thread-scoped slices the caller already filtered
+/// from the read store. Messages map to `OrchestrationMessage`
+/// (`{id, role, text, turnId, streaming, source, createdAt, updatedAt}`). The UI
+/// normalizer (`normalizeThreadFromReadModel`) tolerates the absent optional
+/// collections (rendered as empty), so we emit empty arrays for
+/// activities/checkpoints/proposedPlans rather than omitting them.
+pub(crate) fn thread_view_to_read_model(
+    t: &syncode_orchestration::ThreadView,
+    turns: &[&syncode_orchestration::TurnView],
+    messages: &[&syncode_orchestration::MessageView],
+) -> Value {
+    // Start from the shell projection (id/projectId/title/modelSelection/
+    // runtimeMode/interactionMode/branch/worktreePath/latestTurn/session/
+    // isPinned/createdAt/updatedAt) and overlay the read-model-only collections.
+    let mut val = thread_view_to_shell(t);
+    let obj = val
+        .as_object_mut()
+        .expect("thread_view_to_shell yields a JSON object");
+
+    // `latestTurn` from the highest-sequence turn (sidebar preview; null when
+    // the thread has no turns — the normalizer tolerates null).
+    let latest_turn = turns
+        .iter()
+        .max_by_key(|turn| turn.sequence)
+        .map(|turn| {
+            serde_json::json!({
+                "id": turn.id,
+                "sequence": turn.sequence,
+                "status": turn.status,
+                "userInput": turn.user_input,
+                "assistantOutput": turn.assistant_output.clone().unwrap_or_default(),
+                "createdAt": turn.created_at,
+                "completedAt": turn.completed_at.clone().unwrap_or_default(),
+            })
+        })
+        .unwrap_or(Value::Null);
+    obj.insert("latestTurn".to_string(), latest_turn);
+
+    // Conversation messages — the field the transcript renders from. Prefer
+    // the granular projected `MessageView`s when present; otherwise derive the
+    // conversation from the thread's turns (`user_input` → user message,
+    // `assistant_output` → assistant message). The fallback guarantees the
+    // transcript renders even when `store.messages` isn't populated (e.g. the
+    // message projection isn't rebuilt on a snapshot-seeded replay), since
+    // `TurnView` reliably carries both sides of the exchange.
+    let msgs: Vec<Value> = if !messages.is_empty() {
+        messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "role": m.role,
+                    "text": m.content,
+                    "turnId": m.turn_id,
+                    "streaming": m.is_streaming,
+                    "source": "native",
+                    "createdAt": m.created_at,
+                    "updatedAt": m.created_at,
+                })
+            })
+            .collect()
+    } else {
+        turns
+            .iter()
+            .flat_map(|turn| {
+                let mut entries: Vec<Value> = vec![serde_json::json!({
+                    "id": format!("{}-user", turn.id),
+                    "role": "user",
+                    "text": turn.user_input,
+                    "turnId": turn.id,
+                    "streaming": false,
+                    "source": "native",
+                    "createdAt": turn.created_at,
+                    "updatedAt": turn.created_at,
+                })];
+                if let Some(out) = turn
+                    .assistant_output
+                    .as_deref()
+                    .filter(|out| !out.is_empty())
+                {
+                    let ts = turn.completed_at.as_deref().unwrap_or(&turn.created_at);
+                    entries.push(serde_json::json!({
+                        "id": format!("{}-assistant", turn.id),
+                        "role": "assistant",
+                        "text": out,
+                        "turnId": turn.id,
+                        "streaming": false,
+                        "source": "native",
+                        "createdAt": ts,
+                        "updatedAt": ts,
+                    }));
+                }
+                entries
+            })
+            .collect()
+    };
+    obj.insert("messages".to_string(), Value::Array(msgs));
+
+    // Optional collections the normalizer tolerates as empty.
+    obj.insert("activities".to_string(), Value::Array(Vec::new()));
+    obj.insert("checkpoints".to_string(), Value::Array(Vec::new()));
+    obj.insert("proposedPlans".to_string(), Value::Array(Vec::new()));
+
+    val
+}
+
 /// ISO-8601 timestamp for snapshot envelopes. Uses UTC now so the UI's
 /// `updatedAt` field is always present and well-formed. The UI only reads this
 /// for ordering/display, so a stable UTC string is sufficient (no chrono dep).
@@ -4678,6 +4806,61 @@ async fn handle_snapshot_get(state: &WsState, id: Value) -> JsonRpcResponse {
             "projects": projects,
             "threads": threads,
             "updatedAt": now_iso(),
+        }),
+    )
+}
+
+/// `orchestration.subscribeThread` — register the calling connection on the
+/// `orchestration` push channel and emit the initial thread-detail snapshot
+/// (`OrchestrationThreadDetailSnapshot = { snapshotSequence, thread }`) for the
+/// requested thread. This is the path the frontend's `requestThreadSnapshot`
+/// (`__root.tsx`) uses to hydrate a thread's conversation on open/reload —
+/// without it, opening a thread URL renders the project new-chat view instead
+/// of the thread's messages.
+///
+/// Live thread events continue to arrive via the global `push/orchestration` →
+/// `adaptPushEnvelope` → `onDomainEvent` path; this handler only owns the
+/// initial snapshot baseline (snapshot-then-stream, mirroring `subscribeShell`).
+async fn handle_orchestration_subscribe_thread(
+    state: &WsState,
+    conn_id: ConnectionId,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let thread_id = match params.get("threadId").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => {
+            return JsonRpcResponse::error(
+                Some(id),
+                crate::error_codes::INVALID_PARAMS,
+                "Missing 'threadId' parameter",
+            );
+        }
+    };
+    let added = state
+        .subscriptions
+        .write()
+        .await
+        .subscribe(conn_id, crate::channels::CHANNEL_ORCHESTRATION);
+    // Snapshot-then-stream: emit the thread-detail snapshot (scope:"thread") so
+    // the client has the conversation baseline. `snapshotEmitted` is false when
+    // the thread isn't projected yet (build_snapshot returns None) — the client
+    // retries on the next shell/detail update.
+    let snapshot_emitted = crate::push::emit_snapshot(
+        state,
+        conn_id,
+        crate::channels::CHANNEL_ORCHESTRATION,
+        Some(&thread_id),
+    )
+    .await;
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "subscribed": true,
+            "channel": crate::channels::CHANNEL_ORCHESTRATION,
+            "added": added,
+            "snapshotEmitted": snapshot_emitted,
+            "method": "subscribeThread",
         }),
     )
 }
