@@ -63,7 +63,12 @@ export function shouldStartMissingThreadRouteRecovery(input: {
   recoveryState: EmptyRouteRestoreRecoveryState;
   routeThreadExists: boolean;
 }): boolean {
-  return !input.routeThreadExists && !input.hasKnownServerThreads && input.recoveryState === "idle";
+  // Recovery should run whenever the route thread is missing, regardless of
+  // whether other threads exist. The previous `!hasKnownServerThreads` gate
+  // skipped recovery once ANY thread was in the store — but the shell snapshot
+  // may not include the route thread (pagination, race, deep link). That caused
+  // existing threads opened by URL to redirect to welcome.
+  return !input.routeThreadExists && input.recoveryState === "idle";
 }
 
 export function shouldHoldMissingThreadRouteFallback(input: {
@@ -71,5 +76,5 @@ export function shouldHoldMissingThreadRouteFallback(input: {
   recoveryState: EmptyRouteRestoreRecoveryState;
   routeThreadExists: boolean;
 }): boolean {
-  return !input.routeThreadExists && !input.hasKnownServerThreads && input.recoveryState !== "done";
+  return !input.routeThreadExists && input.recoveryState !== "done";
 }
