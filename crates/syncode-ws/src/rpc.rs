@@ -4721,20 +4721,22 @@ pub(crate) fn thread_view_to_read_model(
                     "createdAt": turn.created_at,
                     "updatedAt": turn.created_at,
                 })];
-                if let Some(out) = turn.assistant_output.as_deref() {
-                    if !out.is_empty() {
-                        let ts = turn.completed_at.as_deref().unwrap_or(&turn.created_at);
-                        entries.push(serde_json::json!({
-                            "id": format!("{}-assistant", turn.id),
-                            "role": "assistant",
-                            "text": out,
-                            "turnId": turn.id,
-                            "streaming": false,
-                            "source": "native",
-                            "createdAt": ts,
-                            "updatedAt": ts,
-                        }));
-                    }
+                if let Some(out) = turn
+                    .assistant_output
+                    .as_deref()
+                    .filter(|out| !out.is_empty())
+                {
+                    let ts = turn.completed_at.as_deref().unwrap_or(&turn.created_at);
+                    entries.push(serde_json::json!({
+                        "id": format!("{}-assistant", turn.id),
+                        "role": "assistant",
+                        "text": out,
+                        "turnId": turn.id,
+                        "streaming": false,
+                        "source": "native",
+                        "createdAt": ts,
+                        "updatedAt": ts,
+                    }));
                 }
                 entries
             })
