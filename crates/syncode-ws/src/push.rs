@@ -630,7 +630,10 @@ mod snapshot_tests {
         assert!(msg.contains("push/orchestration"));
         assert!(msg.contains("\"snapshot\""));
         assert!(msg.contains("Demo"));
-        assert!(msg.contains("\"shell\""));
+        // Shell snapshot is the `OrchestrationShellSnapshot` contract:
+        // `{snapshotSequence, projects, threads, updatedAt}` (no `scope`).
+        assert!(msg.contains("\"snapshotSequence\""));
+        assert!(!msg.contains("\"scope\""));
     }
 
     #[tokio::test]
@@ -649,8 +652,13 @@ mod snapshot_tests {
         assert!(emitted, "thread-detail snapshot should emit");
 
         let msg = rx.recv().await.unwrap();
+        // Thread-detail snapshot is the `OrchestrationThreadDetailSnapshot`
+        // contract: `{snapshotSequence, thread, scope:"thread"}`. The thread's
+        // turn data surfaces as `thread.messages` (derived from the turn's
+        // user_input/assistant_output), so the seeded "hello" user input appears
+        // there — not under a top-level `turns` array.
         assert!(msg.contains("\"thread\""));
-        assert!(msg.contains("turns"));
+        assert!(msg.contains("\"messages\""));
         assert!(msg.contains("hello"));
     }
 
