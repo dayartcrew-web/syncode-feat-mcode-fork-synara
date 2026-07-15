@@ -3031,31 +3031,23 @@ mod tests {
             dirs[0]
         );
 
-        // 5. MESSAGE APPEARS: complete the turn with the provider's response.
-        //    This simulates the provider's reply arriving (in production the
-        //    ingestion reactor would ingest the Completed provider event and
-        //    drive CompleteTurn). CompleteTurn persists TurnCompleted.
-        let assistant_reply =
-            "This codebase is a Rust workspace implementing a CQRS orchestration engine.";
-        orch.handle_command(Command::CompleteTurn {
-            id: turn_id,
-            assistant_output: assistant_reply.into(),
-            duration_ms: 1_200,
-        })
-        .await
-        .expect("complete turn");
-
-        // The turn read model now reflects the completed turn + reply.
+        // 5. TURN COMPLETES: this mock's `send_request` returns Ok with an empty
+        //    event stream (no terminal provider event). The reactor's safety net
+        //    (#184, the mcode `handleStreamExit` equivalent) therefore synthesizes
+        //    a `Completed` event, which the pipeline ingests to drive `CompleteTurn`
+        //    — so the turn reaches "completed" WITHOUT a manual `CompleteTurn`
+        //    call. (Previously this test called `CompleteTurn` manually; after
+        //    #184 that fails with `TurnAlreadyCompleted`.) The "provider response
+        //    text appears" path is covered by the event-emitting mock in
+        //    `start_turn_captures_events_from_synchronous_adapter`.
         let snapshot = orch.read_model_snapshot().await;
         let turn_view = snapshot
             .turns
             .get(&turn_id.as_str())
             .expect("turn exists in read model");
-        assert_eq!(turn_view.status, "completed");
         assert_eq!(
-            turn_view.assistant_output.as_deref(),
-            Some(assistant_reply),
-            "the provider's response must appear on the turn"
+            turn_view.status, "completed",
+            "the safety-net Completed must complete the turn"
         );
 
         // And the thread's turn_count advanced.
