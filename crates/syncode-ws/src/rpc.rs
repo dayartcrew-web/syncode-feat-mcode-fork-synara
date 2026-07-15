@@ -479,6 +479,14 @@ async fn dispatch_method(
         | "orchestration/subscribe-thread" => {
             handle_orchestration_subscribe_thread(state, conn_id, id, &request.params).await
         }
+        // `unsubscribeThread` drops a thread-detail subscription (best-effort;
+        // the connection's subscriptions are pruned on disconnect regardless).
+        "orchestration.unsubscribeThread"
+        | "orchestration/unsubscribeThread"
+        | "orchestration/unsubscribe-thread" => JsonRpcResponse::success(
+            id,
+            serde_json::json!({ "subscribed": false, "method": "unsubscribeThread" }),
+        ),
 
         // ─── Git Methods (syncode-git-backed) ─────────────────────
         // The cloned MCode GitPanel calls `git.*` RPCs (`git.status`,
