@@ -477,13 +477,24 @@ fn build_snapshot(
                 Some(snap)
             }
             None => {
-                // Build shell snapshot as raw JSON to use MCode-compatible
-                // thread shape (modelSelection instead of flat provider_id/model).
+                // Shell snapshot — MUST match the `OrchestrationShellSnapshot`
+                // shape produced by `handle_shell_get_snapshot` (rpc.rs) field
+                // for field. The frontend's `onShellEvent` snapshot branch reads
+                // `snapshot.snapshotSequence` and hands the snapshot to
+                // `syncServerShellSnapshot`, which expects the camelCase
+                // `project_view_to_shell`/`thread_view_to_shell` field names
+                // (`title`, `workspaceRoot`, `defaultModelSelection`, `modelSelection`,
+                // `latestTurn`, …). The previous shape (`{scope, projects:
+                // [project_summary snake_case], snapshot_at}`) mismatched the
+                // contract: the malformed push snapshot was applied first via
+                // `subscribe-shell`, set `threadsHydrated: true`, and then gated
+                // out the clean RPC snapshot (`shouldApplyBootstrapShellSnapshot`),
+                // leaving the sidebar empty on every load/reload.
                 let snap = serde_json::json!({
-                    "scope": "shell",
-                    "projects": store.projects.values().map(project_summary).collect::<Vec<_>>(),
-                    "threads": store.threads.values().map(thread_summary).collect::<Vec<_>>(),
-                    "snapshot_at": snapshot_at,
+                    "snapshotSequence": 0i64,
+                    "projects": store.projects.values().map(crate::rpc::project_view_to_shell).collect::<Vec<_>>(),
+                    "threads": store.threads.values().map(crate::rpc::thread_view_to_shell).collect::<Vec<_>>(),
+                    "updatedAt": snapshot_at,
                 });
                 Some(snap)
             }

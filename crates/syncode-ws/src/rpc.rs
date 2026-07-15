@@ -4524,7 +4524,7 @@ async fn handle_turn_complete(state: &WsState, id: Value, params: &Value) -> Jso
 ///   - `defaultModel`   → `defaultModelSelection` (null when unset)
 ///   - `providerId`     → folded into `defaultModelSelection.provider` when present
 ///   - id/createdAt/updatedAt carried through verbatim
-fn project_view_to_shell(p: &syncode_orchestration::ProjectView) -> Value {
+pub(crate) fn project_view_to_shell(p: &syncode_orchestration::ProjectView) -> Value {
     let default_model_selection = match (&p.provider_id, &p.default_model) {
         (Some(provider), Some(model)) => serde_json::json!({
             "provider": provider,
@@ -4567,7 +4567,7 @@ fn project_view_to_read_model(p: &syncode_orchestration::ProjectView) -> Value {
 /// is built from the thread status so the sidebar reflects the real state.
 /// Worktree/branch/latestTurn metadata the backend cannot populate default to
 /// null; the normalizers tolerate missing values.
-fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Value {
+pub(crate) fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Value {
     use syncode_orchestration::ThreadSessionView;
     let title = t.title.clone().unwrap_or_else(|| t.id.clone());
     let model_selection = serde_json::json!({
