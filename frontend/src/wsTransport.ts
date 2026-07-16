@@ -318,17 +318,18 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "git.worktreeRemove": "git/worktree-remove",
   "git.removeWorktree": "git/worktree-remove",
 
-  // Server write-side stub RPCs (T6c-10): the cloned MCode UI's Settings
-  // panel "Apply"/"Reset", provider re-probe buttons, and keybinding editor
-  // call these `server.*` dot-strings. The syncode-ws backend serves them as
-  // stubs — they validate the params shape and echo the default read-side
-  // payload (no persistence: syncode has no settings/keybindings subsystem).
-  // Map every MCode dot-name the UI uses to the served slash dispatch key so
-  // the calls reach the backend instead of being client-stubbed with
-  // MethodNotFound (which would leave the Settings panel's save buttons
-  // erroring). The backend dispatch also accepts the dot-name directly (arms
-  // cover both forms) so this remap is belt-and-braces robustness. Entries
-  // appended at the END to ease parallel-merge conflict resolution.
+  // Server write-side RPCs (T6c-10): the cloned MCode UI's Settings panel
+  // "Apply"/"Reset", provider re-probe buttons, and keybinding editor call
+  // these `server.*` dot-strings. The syncode-ws backend serves them via REAL
+  // handlers (`handle_server_*` in `crates/syncode-ws/src/rpc.rs`) that
+  // persist to the `ServerSettingsState` + disk and broadcast push events —
+  // not stubs. Map every MCode dot-name the UI uses to the served slash
+  // dispatch key so the calls reach the backend instead of being
+  // client-stubbed with MethodNotFound (which would leave the Settings
+  // panel's save buttons erroring). The backend dispatch also accepts the
+  // dot-name directly (arms cover both forms) so this remap is belt-and-
+  // braces robustness. Entries appended at the END to ease parallel-merge
+  // conflict resolution.
   "server.setConfig": "server/set-config",
   "server.updateSettings": "server/update-settings",
   "server.refreshProviders": "server/refresh-providers",

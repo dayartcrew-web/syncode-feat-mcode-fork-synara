@@ -1195,22 +1195,26 @@ export const SERVED_RPC = {
   // editor). The transport remaps the MCode dot-strings (`server.setConfig`,
   // `server.updateSettings`, `server.refreshProviders`, `server.updateProvider`,
   // `server.upsertKeybinding`) onto these slash keys (see `MCODE_TO_SERVED` in
-  // `wsTransport.ts`). The backend handlers in
-  // `crates/syncode-ws/src/rpc.rs` `handle_server_*` are STUBS: they validate
-  // the params shape (where required) and echo the default read-side payload
-  // — no persistence (syncode has no settings/keybindings subsystem). The
-  // UI's optimistic update is overwritten by the echoed default on the next
-  // read, converging to "no changes persisted".
+  // `wsTransport.ts`). The backend handlers in `crates/syncode-ws/src/rpc.rs`
+  // `handle_server_*` are REAL and server-backed: they mutate the in-memory
+  // `ServerSettingsState`, write through to disk
+  // (`persist_config`/`persist_settings`), and broadcast the change on the
+  // `server.*Updated` push channels (and the `server.subscribeLifecycle`
+  // channel). The UI's optimistic update is confirmed by the returned payload.
   //
-  // Known gaps (documented in `handle_server_*`):
-  //   - `server/set-config` echoes the default `ServerConfig` (write ignored).
-  //   - `server/update-settings` echoes the default `ServerSettings` (patch
-  //     NOT applied).
-  //   - `server/refresh-providers` returns `{ providers: [] }` (no probe).
-  //   - `server/update-provider` validates `provider` non-empty, then returns
-  //     `{ providers: [] }` (no probe).
-  //   - `server/upsert-keybinding` validates params is an object, then returns
-  //     `{ keybindings: [], issues: [] }` (no resolver).
+  // Backend behavior (verified in `handle_server_*`):
+  //   - `server/set-config` replaces the stored `ServerConfig` wholesale and
+  //     returns the full config.
+  //   - `server/update-settings` deep-merges the patch into `ServerSettings`
+  //     and returns the resolved settings.
+  //   - `server/refresh-providers` re-probes every provider binary (honoring
+  //     custom `binaryPath`), attaches a `versionAdvisory` per provider
+  //     (parallel npm-registry lookups), and returns `{ providers: [...] }`.
+  //   - `server/update-provider` runs the one-click CLI update
+  //     (`npm install -g <pkg>@latest`), re-probes, refreshes the targeted
+  //     entry's `updateState` + `versionAdvisory`, and returns the provider list.
+  //   - `server/upsert-keybinding` appends/replaces the rule in the config's
+  //     `keybindings` array and returns `{ keybindings, issues }`.
   // Entries appended at the END to ease parallel-merge conflict resolution.
   "server/set-config": {
     request: null as unknown as ServerSetConfigInput,
