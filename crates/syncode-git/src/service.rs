@@ -189,6 +189,83 @@ fn ahead_behind(repo: &Repository, upstream_ref: &str) -> Option<(usize, usize)>
         .ok()
 }
 
+/// Resolve a symbolic reference like `origin/HEAD` to its concrete target
+/// (e.g. `origin/master`).
+///
+/// libgit2's `revparse_ext` does not follow unresolved symrefs the same way
+/// the `git` CLI's DWIM does. When the remote's default branch symref
+/// (`.git/refs/remotes/origin/HEAD`) exists but its target (e.g.
+/// `refs/remotes/origin/master`) is not yet known to libgit2, the CLI still
+/// resolves it via DWIM while libgit2 returns
+/// `reference not found; class=Reference (4); code=NotFound (-3)`.
+///
+/// This helper bridges that gap by reading the symref directly via
+/// `find_reference` and following its `symbolic_target()`. Returns the
+/// shortened target name (e.g. `origin/master`) on success, or `None` if
+/// `name` is not a symref or cannot be resolved — callers fall back to the
+/// original ref name in that case.
+fn resolve_symref(repo: &Repository, name: &str) -> Option<String> {
+    // Try both the fully-qualified refs/remotes/... form and the raw input
+    // (covers "origin/HEAD" as well as "refs/remotes/origin/HEAD").
+    let candidates = [format!("refs/remotes/{name}"), name.to_string()];
+    for cand in &candidates {
+        let Ok(r) = repo.find_reference(cand) else {
+            continue;
+        };
+        if let Some(target) = r.symbolic_target() {
+            let short = target
+                .strip_prefix("refs/remotes/")
+                .or_else(|| target.strip_prefix("refs/heads/"))
+                .unwrap_or(target);
+            return Some(short.to_string());
+        }
+    }
+    None
+}
+
+/// If `name` is a remote-tracking shorthand like `origin/main`, return the
+/// matching local branch name (`main`) when a local `refs/heads/main` exists.
+/// This lets `checkout("origin/main")` switch to the local `main` branch
+/// rather than detaching HEAD at the remote commit — matching the `git`
+/// CLI's DWIM behavior for `git checkout origin/main` when a local branch
+/// of the same name is present.
+fn pick_local_branch_if_any(repo: &Repository, name: &str) -> Option<String> {
+    let branch_name = name.strip_prefix("refs/remotes/").unwrap_or(name);
+    let branch_name = branch_name
+        .split_once('/')
+        .map(|(_, b)| b)
+        .unwrap_or(branch_name);
+    if branch_name == name {
+        return None;
+    }
+    let local_ref = format!("refs/heads/{branch_name}");
+    if repo.find_reference(&local_ref).is_ok() {
+        Some(branch_name.to_string())
+    } else {
+        None
+    }
+}
+
+/// Return the canonical HEAD target string for `set_head`, if `name` refers
+/// to a local branch or tag. Returns `None` for remote-tracking refs and raw
+/// OIDs — callers should use `set_head_detached` in those cases.
+fn canonical_head_target(repo: &Repository, name: &str) -> Option<String> {
+    if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
+        return Some(name.to_string());
+    }
+    // Shorthand branch name? `find_reference` on `refs/heads/X` confirms it.
+    let local = format!("refs/heads/{name}");
+    if repo.find_reference(&local).is_ok() {
+        return Some(local);
+    }
+    // Tag shorthand.
+    let tag = format!("refs/tags/{name}");
+    if repo.find_reference(&tag).is_ok() {
+        return Some(tag);
+    }
+    None
+}
+
 /// The GitService trait — defines all git operations
 pub trait GitService: Send + Sync {
     /// Get the full repository status
@@ -605,7 +682,20 @@ impl GitService for Git2Service {
 
     fn checkout(&self, ref_name: &str) -> Result<(), GitError> {
         let repo = self.repo()?;
-        let (obj, _) = repo.revparse_ext(ref_name)?;
+        // libgit2's `revparse_ext` does not follow unresolved symrefs the way
+        // the `git` CLI's DWIM does — so `revparse_ext("origin/HEAD")` fails
+        // with `reference not found` even when `.git/refs/remotes/origin/HEAD`
+        // exists and points to `refs/remotes/origin/master`. Resolve the symref
+        // to its concrete target first; fall back to the raw input if it isn't
+        // a symref (so normal branch names still work).
+        let resolved = resolve_symref(&repo, ref_name).unwrap_or_else(|| ref_name.to_string());
+        // DWIM: if the user passed a remote-tracking ref (e.g. `origin/main`
+        // or `origin/HEAD` resolved to `origin/main`), prefer the matching
+        // local branch if one exists. This mirrors `git checkout origin/main`
+        // when a local `main` is present, instead of detaching HEAD at the
+        // remote commit (which is rarely what UI users want).
+        let effective = pick_local_branch_if_any(&repo, &resolved).unwrap_or(resolved.clone());
+        let (obj, _) = repo.revparse_ext(&effective)?;
         // Pass explicit CheckoutBuilder so git2 uses its SAFE strategy (the
         // standard `git checkout <branch>` behavior): uncommitted modifications
         // are carried across the switch when they don't conflict with the
@@ -617,7 +707,15 @@ impl GitService for Git2Service {
         // (`CheckoutBuilder::new()` defaults to GIT_CHECKOUT_SAFE.)
         let mut opts = git2::build::CheckoutBuilder::new();
         repo.checkout_tree(&obj, Some(&mut opts))?;
-        repo.set_head(ref_name)?;
+        // `set_head` accepts a canonical ref name (`refs/heads/X`, `refs/tags/X`)
+        // or a detached OID. Remote-tracking refs (`refs/remotes/...`) are not
+        // permitted — fall back to detached HEAD at the commit OID, matching
+        // `git checkout <remote-ref>` when no local branch exists.
+        if let Some(canonical) = canonical_head_target(&repo, &effective) {
+            repo.set_head(&canonical)?;
+        } else {
+            repo.set_head_detached(obj.id())?;
+        }
         Ok(())
     }
 
@@ -980,6 +1078,109 @@ mod tests {
     }
 
     #[test]
+    fn resolve_symref_returns_none_for_non_symref() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let repo = git2::Repository::open(&clone).expect("open");
+
+        // No symref with this name → should return None.
+        assert_eq!(resolve_symref(&repo, "origin/HEAD"), None);
+        // Garbage input → None.
+        assert_eq!(resolve_symref(&repo, "does/not/exist"), None);
+    }
+
+    #[test]
+    fn resolve_symref_follows_origin_head_to_target() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+
+        // Create the `origin/HEAD` → `origin/main` symref manually, mirroring
+        // what `git clone` does on a fresh clone. We write the loose symref
+        // file directly so we don't need a working `git remote set-head` call.
+        let head_path = clone
+            .join(".git")
+            .join("refs")
+            .join("remotes")
+            .join("origin")
+            .join("HEAD");
+        std::fs::create_dir_all(head_path.parent().expect("parent"))
+            .expect("create remotes/origin dir");
+        std::fs::write(&head_path, "ref: refs/remotes/origin/main\n").expect("write HEAD");
+
+        let repo = git2::Repository::open(&clone).expect("open");
+        // libgit2 reads the symref back via find_reference, so we can follow it.
+        assert_eq!(
+            resolve_symref(&repo, "origin/HEAD"),
+            Some("origin/main".into())
+        );
+        // Fully-qualified form should also work.
+        assert_eq!(
+            resolve_symref(&repo, "refs/remotes/origin/HEAD"),
+            Some("origin/main".into())
+        );
+    }
+
+    #[test]
+    fn pick_local_branch_picks_matching_local_for_remote() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let repo = git2::Repository::open(&clone).expect("open");
+
+        // `main` exists locally and matches `origin/main` → DWIM should pick it.
+        assert_eq!(
+            pick_local_branch_if_any(&repo, "origin/main"),
+            Some("main".into())
+        );
+        // Fully-qualified form works too.
+        assert_eq!(
+            pick_local_branch_if_any(&repo, "refs/remotes/origin/main"),
+            Some("main".into())
+        );
+        // No local branch matching `origin/nonexistent` → None.
+        assert_eq!(pick_local_branch_if_any(&repo, "origin/nonexistent"), None);
+        // Local branch shorthand is not a remote ref → None.
+        assert_eq!(pick_local_branch_if_any(&repo, "main"), None);
+    }
+
+    #[test]
+    fn canonical_head_target_recognizes_local_and_tag_refs() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let repo = git2::Repository::open(&clone).expect("open");
+
+        // Shorthand local branch → refs/heads/main.
+        assert_eq!(
+            canonical_head_target(&repo, "main"),
+            Some("refs/heads/main".into())
+        );
+        // Fully-qualified heads form is passed through.
+        assert_eq!(
+            canonical_head_target(&repo, "refs/heads/main"),
+            Some("refs/heads/main".into())
+        );
+        // Remote-tracking ref → None (caller must use set_head_detached).
+        assert_eq!(canonical_head_target(&repo, "origin/main"), None);
+        // Unknown ref → None.
+        assert_eq!(canonical_head_target(&repo, "does-not-exist"), None);
+    }
+
+    #[test]
     fn push_result_serialization() {
         let pushed = PushResult::Pushed {
             branch: "feat/x".into(),
@@ -1279,6 +1480,69 @@ mod tests {
             matches!(err, GitError::NoUpstream),
             "expected NoUpstream, got {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn integration_checkout_resolves_origin_head_symref() {
+        // Regression: libgit2's `revparse_ext("origin/HEAD")` returns
+        // `reference not found` even when the symref exists, while the `git`
+        // CLI resolves it via DWIM. Without `resolve_symref`, the branch
+        // selector errors when a user picks the remote's default branch.
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+
+        // Create a second branch on the remote so we have something to switch
+        // away from and back to. Then point origin/HEAD at it via a loose
+        // symref file (mirrors what `git clone` does).
+        std::process::Command::new("git")
+            .args(["branch", "feature"])
+            .current_dir(&clone)
+            .output()
+            .expect("git branch feature");
+        std::process::Command::new("git")
+            .args(["push", "origin", "feature"])
+            .current_dir(&clone)
+            .output()
+            .expect("git push feature");
+        // Switch the local clone off `main` so we have to come back.
+        std::process::Command::new("git")
+            .args(["checkout", "feature"])
+            .current_dir(&clone)
+            .output()
+            .expect("git checkout feature");
+
+        // Write the `origin/HEAD` → `origin/main` symref.
+        let head_path = clone
+            .join(".git")
+            .join("refs")
+            .join("remotes")
+            .join("origin")
+            .join("HEAD");
+        std::fs::create_dir_all(head_path.parent().expect("parent"))
+            .expect("create remotes/origin dir");
+        std::fs::write(&head_path, "ref: refs/remotes/origin/main\n").expect("write HEAD");
+
+        // The bug: this used to fail with `reference 'origin/HEAD' not found`.
+        let service = Git2Service::open(&clone).expect("open");
+        service
+            .checkout("origin/HEAD")
+            .expect("checkout via symref");
+
+        // HEAD should now point at `main` (the symref target's branch).
+        let head_branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&clone)
+            .output()
+            .expect("git rev-parse HEAD");
+        assert_eq!(
+            String::from_utf8_lossy(&head_branch.stdout).trim(),
+            "main",
+            "origin/HEAD checkout should land on the symref's target branch"
         );
     }
 }
