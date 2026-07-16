@@ -572,12 +572,19 @@ impl GitService for Git2Service {
     fn branches(&self) -> Result<Vec<GitBranch>, GitError> {
         let repo = self.repo()?;
         let mut branches = Vec::new();
-        let head_target = repo.head().ok().and_then(|h| h.target());
 
         for branch_result in repo.branches(None)? {
             let (branch, branch_type) = branch_result?;
             let name = branch.name()?.unwrap_or_default().to_string();
-            let is_current = branch.get().target() == head_target;
+            // `is_current` must reflect whether HEAD actually points at this
+            // branch's ref — not mere commit-OID equality. The previous
+            // `branch.get().target() == head_target` check stamped every
+            // branch sharing HEAD's commit (e.g. `origin/main` when in sync
+            // with local `main`) as current, which made the picker show two
+            // "current" entries. `Branch::is_head()` returns true only for
+            // the local branch HEAD resolves to, so remote-tracking branches
+            // are correctly excluded.
+            let is_current = branch_type == git2::BranchType::Local && branch.is_head();
             let commit = branch.get().peel_to_commit()?;
             let message = String::from_utf8_lossy(commit.message_bytes())
                 .lines()
@@ -1544,5 +1551,42 @@ mod tests {
             "main",
             "origin/HEAD checkout should land on the symref's target branch"
         );
+    }
+
+    #[test]
+    fn branches_does_not_mark_remote_as_current() {
+        // Regression: the old implementation compared commit OIDs, so when
+        // local `main` and remote-tracking `origin/main` pointed at the same
+        // commit, both got `is_current: true`. Only the local branch that
+        // HEAD actually resolves to may carry `is_current: true`.
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_pair();
+        let clone = dir.path().join("clone");
+        let service = Git2Service::open(&clone).expect("open");
+
+        let list = service.branches().expect("branches");
+
+        let current_branches: Vec<_> = list.iter().filter(|b| b.is_current).collect();
+        assert_eq!(
+            current_branches.len(),
+            1,
+            "exactly one branch should be current; got {current_branches:?}"
+        );
+        let current = current_branches[0];
+        assert_eq!(current.name, "main");
+        assert!(!current.is_remote, "current branch must be local");
+
+        let origin_main = list
+            .iter()
+            .find(|b| b.name == "origin/main")
+            .expect("origin/main should appear in list");
+        assert!(
+            !origin_main.is_current,
+            "remote-tracking origin/main must never be tagged is_current"
+        );
+        assert!(origin_main.is_remote);
     }
 }
