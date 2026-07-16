@@ -2248,10 +2248,13 @@ async fn handle_orchestration_get_turn_diff(
             );
         }
     };
-    // Compute the diff via the canonical `syncode_git::diff::compute_diff`
-    // helper: `from_ref` is the turn's checkpoint (before-state); `to_ref`
-    // (Option) is the next checkpoint or None (= HEAD / working tree).
-    let summary = match syncode_git::diff::compute_diff(&svc, Some(&from_ref), to_ref.as_deref()) {
+    // Compute the diff via `compute_diff_with_patches` so real `@@ ... @@`
+    // hunks and per-file line_stats flow through (previously this called the
+    // delta-only `compute_diff`, which emitted `+0/-0` and no patch body, so
+    // the turn-diff UI rendered every turn as if it changed nothing).
+    // `from_ref` is the turn's checkpoint (before-state); `to_ref` (Option)
+    // is the next checkpoint or None (= HEAD / working tree).
+    let summary = match syncode_git::diff::compute_diff_with_patches(&svc, Some(&from_ref), to_ref.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return JsonRpcResponse::success(
@@ -2383,7 +2386,7 @@ async fn handle_orchestration_get_full_thread_diff(
         // The "next" turn's checkpoint (if any) is the after-state; else HEAD.
         let to_ref = cps.get(idx + 1).map(|n| n.checkpoint_ref.clone());
         let (diff_text, note) =
-            match syncode_git::diff::compute_diff(&svc, Some(&from_ref), to_ref.as_deref()) {
+            match syncode_git::diff::compute_diff_with_patches(&svc, Some(&from_ref), to_ref.as_deref()) {
                 Ok(summary) => {
                     // Render the `DiffSummary` entries with the SAME format used by
                     // ORCH-6's `handle_orchestration_get_turn_diff` so the two RPCs
@@ -6731,30 +6734,68 @@ fn handle_git_status(id: Value, params: &Value) -> JsonRpcResponse {
         }
     };
 
-    // Map syncode `GitFileStatus` → MCode `GitStatusFile` (path +
-    // insertions/deletions, defaulting to 0 — see module-level caveats).
+    // Compute real per-file insertions/deletions for the working tree via
+    // `diff_with_patches` (the same real `git2::Patch::line_stats` path the
+    // working-tree-diff RPC uses). Previously every file was emitted as
+    // `+0/-0` because syncode-git's `GitStatus` only walks deltas; this makes
+    // the Changes panel render real line counts. One numstats call for the
+    // whole tree; matched by path. Binary files fall back to 0/0 gracefully.
+    let diff_entries = svc.diff_with_patches(None, None).unwrap_or_default();
+    let mut line_stats_by_path: std::collections::HashMap<&str, (u32, u32)> =
+        std::collections::HashMap::with_capacity(diff_entries.len());
+    for entry in &diff_entries {
+        line_stats_by_path.insert(entry.new_path.as_str(), (entry.additions, entry.deletions));
+    }
+
+    // Map syncode `GitFileStatus` → MCode `GitStatusFile` (path + real stats).
+    let mut total_insertions: u32 = 0;
+    let mut total_deletions: u32 = 0;
     let files: Vec<Value> = status
         .files
         .iter()
         .map(|f| {
+            let (insertions, deletions) = line_stats_by_path
+                .get(f.path.as_str())
+                .copied()
+                .unwrap_or((0, 0));
+            total_insertions = total_insertions.saturating_add(insertions);
+            total_deletions = total_deletions.saturating_add(deletions);
             serde_json::json!({
                 "path": f.path,
-                "insertions": 0u32,
-                "deletions": 0u32,
+                "insertions": insertions,
+                "deletions": deletions,
             })
         })
         .collect();
+
+    // Real upstream state from `branch_upstream_name` (lifted into GitStatus).
+    // Previously hardcoded `hasUpstream: false` / `upstreamBranch: null`, which
+    // gated push/PR availability incorrectly for tracking branches.
+    let has_upstream = status.upstream_branch.is_some();
+    let upstream_branch_value = status
+        .upstream_branch
+        .as_deref()
+        // Report the shorthand (e.g. `origin/master`) rather than the full
+        // `refs/remotes/...` ref — matches MCode's `upstreamBranch` contract.
+        .and_then(|full_ref| {
+            full_ref
+                .strip_prefix("refs/remotes/")
+                .map(str::to_string)
+                .or_else(|| Some(full_ref.to_string()))
+        })
+        .map(Value::from)
+        .unwrap_or(Value::Null);
 
     let result = serde_json::json!({
         "branch": status.branch,
         "hasWorkingTreeChanges": !status.files.is_empty(),
         "workingTree": {
             "files": files,
-            "insertions": 0u32,
-            "deletions": 0u32,
+            "insertions": total_insertions,
+            "deletions": total_deletions,
         },
-        "hasUpstream": false,
-        "upstreamBranch": Value::Null,
+        "hasUpstream": has_upstream,
+        "upstreamBranch": upstream_branch_value,
         "aheadCount": status.ahead,
         "behindCount": status.behind,
         "pr": Value::Null,
@@ -6848,12 +6889,17 @@ fn handle_git_branches(id: Value, params: &Value) -> JsonRpcResponse {
         })
         .collect();
 
+    // Whether a publishable remote (origin preferred, any accepted) is configured.
+    // Previously hardcoded `false`, which dimmed the "Commit and Push" row whenever a
+    // branch lacked an upstream — even for repos with a real origin remote.
+    let has_origin_remote = svc.has_origin_remote();
+
     JsonRpcResponse::success(
         id,
         serde_json::json!({
             "branches": mapped,
             "isRepo": true,
-            "hasOriginRemote": false,
+            "hasOriginRemote": has_origin_remote,
         }),
     )
 }
@@ -7459,7 +7505,12 @@ fn handle_git_stash_and_checkout(id: Value, params: &Value) -> JsonRpcResponse {
     // InvalidSpec on newer versions, so resolve the full ref before set_head.
     let checkout_result = (|| -> Result<(), git2::Error> {
         let (obj, reference) = repo.revparse_ext(&branch)?;
-        repo.checkout_tree(&obj, None)?;
+        // Default CheckoutBuilder → git2 SAFE strategy (carry non-conflicting
+        // changes across the switch). The preceding stash already removed
+        // conflicting modifications; this covers edge cases where a stash left
+        // unrelated changes. Mirrors Git2Service::checkout.
+        let mut opts = git2::build::CheckoutBuilder::new();
+        repo.checkout_tree(&obj, Some(&mut opts))?;
         // Prefer the resolved reference's full name (works for branch refs,
         // tags, and remote-tracking refs); fall back to the raw input for
         // detached-HEAD / OID checkouts where revparse yields no reference.
@@ -11099,7 +11150,10 @@ async fn handle_git_summarize_diff(state: &WsState, id: Value, params: &Value) -
             Ok(svc) => {
                 let old_ref = params.get("oldRef").and_then(|v| v.as_str());
                 let new_ref = params.get("newRef").and_then(|v| v.as_str());
-                match svc.diff(old_ref, new_ref) {
+                // Use the real patch-bearing path so the summarizer LLM sees
+                // actual `+`/`-` hunks (previously fell back to the delta-only
+                // `.diff()` stub which emitted `+0/-0` and no patch body).
+                match svc.diff_with_patches(old_ref, new_ref) {
                     Ok(entries) => {
                         if entries.is_empty() {
                             return JsonRpcResponse::success(

@@ -9441,6 +9441,7 @@ export default function ChatView({
     onRenameThreadMarker: handleRenameThreadMarker,
     onNotesChange: handleNotesChange,
     onOpenEditorView: viewModeAction?.onClick ?? null,
+    onOpenTerminal: onOpenEditorTerminal,
     onClose: () => setEnvironmentPanelActionDismissedThreadId(threadId),
   };
   // Full-width single chat: overlay plus transcript/composer inset. Floating overlay when the

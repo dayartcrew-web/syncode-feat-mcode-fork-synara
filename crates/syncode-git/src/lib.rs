@@ -41,6 +41,12 @@ pub struct GitStatus {
     pub files: Vec<GitFileStatus>,
     pub ahead: u32,
     pub behind: u32,
+    /// The configured upstream ref name (e.g. `origin/master`) for the current
+    /// branch, or `None` when no upstream is configured. `ahead`/`behind` are
+    /// computed against this ref. Previously the WS handler hardcoded
+    /// `hasUpstream: false` / `upstreamBranch: null`; this lifts the real value
+    /// (resolved via `git2::Repository::branch_upstream_name`).
+    pub upstream_branch: Option<String>,
 }
 
 /// A git branch
