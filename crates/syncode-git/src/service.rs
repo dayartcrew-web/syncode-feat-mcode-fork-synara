@@ -264,6 +264,23 @@ impl Git2Service {
             .map_err(|_| GitError::RepoNotFound(self.repo_path.display().to_string()))
     }
 
+    /// Whether the repo has a publishable remote configured (`origin` preferred,
+    /// any remote accepted as fallback). The MCode UI's
+    /// `GitListBranchesResult.hasOriginRemote` gates push/PR availability for
+    /// branches without an upstream (`canPushWithoutUpstream = hasOriginRemote
+    /// && !hasUpstream`) — hardcoding `false` here dims the "Commit and Push"
+    /// row even when a remote exists, so this resolves the real remotes list.
+    /// Falls back to `false` on repo errors (graceful — caller treats as "no remote").
+    pub fn has_origin_remote(&self) -> bool {
+        let Ok(repo) = self.repo() else {
+            return false;
+        };
+        let Ok(array) = repo.remotes() else {
+            return false;
+        };
+        array.iter().flatten().next().is_some()
+    }
+
     /// Compute a diff with REAL unified-diff hunks (patch text) and per-file
     /// additions/deletions. Uses `git2::Patch` plumbing — vs the delta-only
     /// walk in [`GitService::diff`], which leaves `patch: None` and
@@ -400,12 +417,44 @@ impl GitService for Git2Service {
             });
         }
 
+        // Resolve the current branch's configured upstream and compute
+        // ahead/behind against it. Previously these were hardcoded to 0/0 and
+        // the upstream was always reported as absent — so the UI's branch-sync
+        // indicator and the "Commit and Push" availability were wrong for any
+        // tracking branch. We resolve via `Branch::upstream()` (not
+        // `branch_upstream_name`, which needs a full `refs/heads/...` input and
+        // rejects bare shorthand names).
+        let (upstream_branch, ahead, behind) = match branch.as_deref() {
+            Some(name) => match repo.find_branch(name, git2::BranchType::Local) {
+                Ok(local) => match local.upstream() {
+                    Ok(upstream_branch_ref) => {
+                        let upstream_name = upstream_branch_ref
+                            .name()
+                            .ok()
+                            .flatten()
+                            .map(|n| n.to_string());
+                        // `ahead_behind` needs a ref name it can revparse; use
+                        // the shorthand (e.g. `origin/main`) which resolves fine.
+                        let (a, b) = upstream_name
+                            .as_deref()
+                            .and_then(|up| ahead_behind(&repo, up))
+                            .unwrap_or((0, 0));
+                        (upstream_name, a as u32, b as u32)
+                    }
+                    Err(_) => (None, 0, 0),
+                },
+                Err(_) => (None, 0, 0),
+            },
+            None => (None, 0, 0),
+        };
+
         Ok(GitStatus {
             branch,
             head_detached,
             files,
-            ahead: 0,
-            behind: 0,
+            ahead,
+            behind,
+            upstream_branch,
         })
     }
 
@@ -449,7 +498,7 @@ impl GitService for Git2Service {
         let head_target = repo.head().ok().and_then(|h| h.target());
 
         for branch_result in repo.branches(None)? {
-            let (branch, _) = branch_result?;
+            let (branch, branch_type) = branch_result?;
             let name = branch.name()?.unwrap_or_default().to_string();
             let is_current = branch.get().target() == head_target;
             let commit = branch.get().peel_to_commit()?;
@@ -459,10 +508,16 @@ impl GitService for Git2Service {
                 .unwrap_or_default()
                 .to_string();
 
+            // `repo.branches(None)` yields both local and remote-tracking
+            // branches; the second tuple element tells us which. Previously
+            // every branch was stamped `is_remote: false`, so `origin/master`
+            // et al. appeared in the picker mislabelled as local.
+            let is_remote = branch_type == git2::BranchType::Remote;
+
             branches.push(GitBranch {
                 name,
                 is_current,
-                is_remote: false,
+                is_remote,
                 commit_hash: commit.id().to_string(),
                 commit_message: message,
             });
@@ -551,7 +606,17 @@ impl GitService for Git2Service {
     fn checkout(&self, ref_name: &str) -> Result<(), GitError> {
         let repo = self.repo()?;
         let (obj, _) = repo.revparse_ext(ref_name)?;
-        repo.checkout_tree(&obj, None)?;
+        // Pass explicit CheckoutBuilder so git2 uses its SAFE strategy (the
+        // standard `git checkout <branch>` behavior): uncommitted modifications
+        // are carried across the switch when they don't conflict with the
+        // target, and only fail on genuine conflicts where both sides modified
+        // the same file. Passing `None` options uses git2's NONE strategy,
+        // which rejects *any* uncommitted change — so switching branches with
+        // work-in-progress always errored with "N conflicts prevent checkout"
+        // even when `git checkout` would have succeeded.
+        // (`CheckoutBuilder::new()` defaults to GIT_CHECKOUT_SAFE.)
+        let mut opts = git2::build::CheckoutBuilder::new();
+        repo.checkout_tree(&obj, Some(&mut opts))?;
         repo.set_head(ref_name)?;
         Ok(())
     }
@@ -782,12 +847,14 @@ mod tests {
             }],
             ahead: 2,
             behind: 1,
+            upstream_branch: Some("refs/remotes/origin/main".to_string()),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("main"));
         let back: GitStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back.files.len(), 1);
         assert_eq!(back.ahead, 2);
+        assert_eq!(back.upstream_branch.as_deref(), Some("refs/remotes/origin/main"));
     }
 
     #[test]

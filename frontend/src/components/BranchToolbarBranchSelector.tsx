@@ -138,6 +138,20 @@ function isStashConflictError(error: unknown): boolean {
   return STASH_CONFLICT_PATTERN.test(message);
 }
 
+/**
+ * The libgit2 (git2) raw error for a checkout that would overwrite uncommitted
+ * changes, e.g. `"1 conflict prevents checkout; class=Checkout (20); code=Conflict (-13)"`.
+ * Unlike MCode's formatted `"Uncommitted changes block checkout to …"` string, this is
+ * what the syncode Rust backend forwards when `git2::Repository::checkout_tree`
+ * fails on a dirty worktree. Recognizing it lets the toolbar offer the same
+ * "Stash & Switch" recovery flow as the parsed-dirty-worktree path.
+ */
+const CHECKOUT_CONFLICT_PATTERN = /\bconflict[s]?\s+prevent[s]?\s+checkout\b/i;
+function isCheckoutBlockedByConflicts(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return CHECKOUT_CONFLICT_PATTERN.test(message);
+}
+
 function isUnresolvedIndexError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return UNRESOLVED_INDEX_PATTERN.test(message);
@@ -235,14 +249,20 @@ function handleCheckoutError(
   };
 
   const dirtyWorktree = parseDirtyWorktreeError(error);
-  if (dirtyWorktree) {
+  // Raw libgit2 checkout conflict (the syncode Rust backend forwards git2's
+  // verbatim "N conflict(s) prevent(s) checkout" error). Treat it the same way
+  // as a parsed dirty-worktree block and offer the Stash & Switch flow instead
+  // of failing silently.
+  const checkoutBlockedByConflicts = !dirtyWorktree && isCheckoutBlockedByConflicts(error);
+  if (dirtyWorktree || checkoutBlockedByConflicts) {
     const copyText = toBranchActionErrorMessage(error);
     addBranchRecoveryToast({
       type: "warning",
       title: "Uncommitted changes block checkout.",
-      description: formatDirtyWorktreeDescription(dirtyWorktree.files),
-      data: { copyText },
-      actionProps: {
+      description: dirtyWorktree
+        ? formatDirtyWorktreeDescription(dirtyWorktree.files)
+        : "Your working tree has uncommitted changes. Stash them to switch branches.",
+      data: { copyText },      actionProps: {
         children: "Stash & Switch",
         onClick: () => {
           closeActiveBranchRecoveryToast();
@@ -733,6 +753,30 @@ export function BranchToolbarBranchSelector({
     resolvedActiveBranch,
   });
 
+  // Ahead/behind badge for the current branch vs its upstream. `git.status`
+  // now reports real `aheadCount`/`behindCount`/`hasUpstream` (previously the
+  // backend hardcoded these to 0/false); surface them in the trigger so a
+  // branch that's 3 commits ahead of origin reads "↑3" at a glance.
+  const branchStatus = branchStatusQuery.data;
+  const aheadCount = branchStatus?.aheadCount ?? 0;
+  const behindCount = branchStatus?.behindCount ?? 0;
+  const hasSyncDelta = aheadCount > 0 || behindCount > 0;
+  const syncBadge = hasSyncDelta ? (
+    <span
+      className="inline-flex shrink-0 items-center gap-0.5 tabular-nums text-muted-foreground/80"
+      title={
+        aheadCount > 0 && behindCount > 0
+          ? `${aheadCount} ahead, ${behindCount} behind upstream`
+          : aheadCount > 0
+            ? `${aheadCount} commit${aheadCount === 1 ? "" : "s"} ahead of upstream`
+            : `${behindCount} commit${behindCount === 1 ? "" : "s"} behind upstream`
+      }
+    >
+      {aheadCount > 0 ? <span>↑{aheadCount}</span> : null}
+      {behindCount > 0 ? <span>↓{behindCount}</span> : null}
+    </span>
+  ) : null;
+
   function renderPickerItem(itemValue: string, index: number, style?: CSSProperties) {
     if (checkoutPullRequestItemValue && itemValue === checkoutPullRequestItemValue) {
       return (
@@ -845,12 +889,18 @@ export function BranchToolbarBranchSelector({
           <EnvironmentRowBody
             icon={<CentralIcon name="branch" className={ENVIRONMENT_ROW_ICON_CLASS_NAME} />}
             label={triggerLabel}
-            trailing={<EnvironmentRowChevron />}
+            trailing={
+              <>
+                {syncBadge}
+                <EnvironmentRowChevron />
+              </>
+            }
           />
         ) : (
           <>
             <CentralIcon name="branch" className="size-4 shrink-0" />
             <span className="max-w-[240px] truncate">{triggerLabel}</span>
+            {syncBadge}
             <ChevronDownIcon className="size-3.5 opacity-60" />
           </>
         )}

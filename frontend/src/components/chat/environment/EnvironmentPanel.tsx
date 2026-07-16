@@ -33,7 +33,7 @@ import ChatMarkdown from "~/components/ChatMarkdown";
 import GitActionsControl from "~/components/GitActionsControl";
 import { IconButton } from "~/components/ui/icon-button";
 import type { RepoDiffTotals } from "~/hooks/useRepoDiffTotals";
-import { ArrowUpRightIcon, ChangesIcon, GitHubIcon, SettingsIcon } from "~/lib/icons";
+import { ArrowUpRightIcon, ChangesIcon, GitHubIcon, SettingsIcon, TerminalIcon } from "~/lib/icons";
 import { cn } from "~/lib/utils";
 
 import { EnvironmentEditorSection } from "./EnvironmentEditorSection";
@@ -152,6 +152,13 @@ export interface EnvironmentPanelProps {
   onNotesChange: (threadId: ThreadId, notes: string) => Promise<void>;
   /** Open the in-app editor workspace view (the Editor section's default first row). */
   onOpenEditorView?: (() => void) | null;
+  /**
+   * Open the integrated terminal at the repo cwd. Mirrors {@link onOpenEditorView}:
+   * omitted on surfaces that can't host the terminal (e.g. browser-only without a
+   * thread scope). When present, renders an "Open in Terminal" row beneath the
+   * Editor section.
+   */
+  onOpenTerminal?: (() => void) | null;
   /** Dismiss the panel overlay — invoked after actions that open the dock. */
   onClose: () => void;
 }
@@ -227,6 +234,7 @@ export function EnvironmentPanel({
   onRenameThreadMarker,
   onNotesChange,
   onOpenEditorView = null,
+  onOpenTerminal = null,
   onClose,
 }: EnvironmentPanelProps) {
   const navigate = useNavigate();
@@ -332,6 +340,17 @@ export function EnvironmentPanel({
                 },
               }
             : {})}
+        />
+      ) : null}
+
+      {onOpenTerminal ? (
+        <EnvironmentRow
+          icon={<TerminalIcon className={ENVIRONMENT_ROW_ICON_CLASS_NAME} aria-hidden />}
+          label="Integrated Terminal"
+          onClick={() => {
+            onOpenTerminal();
+            onClose();
+          }}
         />
       ) : null}
 
