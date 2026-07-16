@@ -854,7 +854,10 @@ mod tests {
         let back: GitStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back.files.len(), 1);
         assert_eq!(back.ahead, 2);
-        assert_eq!(back.upstream_branch.as_deref(), Some("refs/remotes/origin/main"));
+        assert_eq!(
+            back.upstream_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
     }
 
     #[test]

@@ -2254,7 +2254,11 @@ async fn handle_orchestration_get_turn_diff(
     // the turn-diff UI rendered every turn as if it changed nothing).
     // `from_ref` is the turn's checkpoint (before-state); `to_ref` (Option)
     // is the next checkpoint or None (= HEAD / working tree).
-    let summary = match syncode_git::diff::compute_diff_with_patches(&svc, Some(&from_ref), to_ref.as_deref()) {
+    let summary = match syncode_git::diff::compute_diff_with_patches(
+        &svc,
+        Some(&from_ref),
+        to_ref.as_deref(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             return JsonRpcResponse::success(
@@ -2385,22 +2389,25 @@ async fn handle_orchestration_get_full_thread_diff(
         let from_ref = cp.checkpoint_ref.clone();
         // The "next" turn's checkpoint (if any) is the after-state; else HEAD.
         let to_ref = cps.get(idx + 1).map(|n| n.checkpoint_ref.clone());
-        let (diff_text, note) =
-            match syncode_git::diff::compute_diff_with_patches(&svc, Some(&from_ref), to_ref.as_deref()) {
-                Ok(summary) => {
-                    // Render the `DiffSummary` entries with the SAME format used by
-                    // ORCH-6's `handle_orchestration_get_turn_diff` so the two RPCs
-                    // produce byte-identical per-turn patches.
-                    let patch = render_diff_summary(&summary);
-                    let note = if patch.is_empty() {
-                        Some("no changes".to_string())
-                    } else {
-                        None
-                    };
-                    (patch, note)
-                }
-                Err(e) => (String::new(), Some(format!("git diff failed: {e}"))),
-            };
+        let (diff_text, note) = match syncode_git::diff::compute_diff_with_patches(
+            &svc,
+            Some(&from_ref),
+            to_ref.as_deref(),
+        ) {
+            Ok(summary) => {
+                // Render the `DiffSummary` entries with the SAME format used by
+                // ORCH-6's `handle_orchestration_get_turn_diff` so the two RPCs
+                // produce byte-identical per-turn patches.
+                let patch = render_diff_summary(&summary);
+                let note = if patch.is_empty() {
+                    Some("no changes".to_string())
+                } else {
+                    None
+                };
+                (patch, note)
+            }
+            Err(e) => (String::new(), Some(format!("git diff failed: {e}"))),
+        };
         total_diff.push_str(&diff_text);
         let mut entry = serde_json::json!({
             "turnId": cp.turn_id,
