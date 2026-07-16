@@ -1,5 +1,7 @@
-//! End-to-end test — real SQLite file-backed database with the full persistence
-//! surface (event store, projections, read-model queries, snapshots).
+//! End-to-end test — real SQLite file-backed database with the live persistence
+//! surface (event store + snapshots). The former `view_*` projection /
+//! read-model-adapter e2e cases were removed alongside the dead projection
+//! layer (never wired into production).
 //!
 //! Gating: `SYNICODE_PERSISTENCE_E2E=1`.
 
@@ -114,62 +116,6 @@ async fn persistence_real_db_survives_reopen() {
 }
 
 #[tokio::test]
-async fn persistence_real_db_projection_end_to_end() {
-    if !e2e_enabled() {
-        eprintln!("[skip] persistence e2e");
-        return;
-    }
-    let dir = TempDir::new().expect("temp dir");
-    let pool = open_db(&dir).await;
-
-    let proj_mgr = syncode_persistence::projections::ProjectionManager::from_pool(pool.clone());
-    let project_id = EntityId::new();
-    let thread_id = EntityId::new();
-
-    let env1 = syncode_core::Envelope::new(
-        DomainEvent::ProjectCreated {
-            id: project_id,
-            name: "proj-e2e".into(),
-            root_path: "/tmp/proj".into(),
-            created_at: Timestamp::now(),
-        },
-        1,
-    );
-    let env2 = syncode_core::Envelope::new(
-        DomainEvent::ThreadCreated {
-            id: thread_id,
-            project_id,
-            provider_id: "test".into(),
-            model: "default".into(),
-            created_at: Timestamp::now(),
-        },
-        1,
-    );
-
-    proj_mgr
-        .project_many(&[env1, env2])
-        .await
-        .expect("project_many");
-
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT id, name FROM view_projects WHERE id = ?")
-            .bind(project_id.as_str())
-            .fetch_optional(&pool)
-            .await
-            .expect("query view_projects");
-    assert!(row.is_some());
-    assert_eq!(row.unwrap().1, "proj-e2e");
-
-    let thread_row: Option<(String, String)> =
-        sqlx::query_as("SELECT id, project_id FROM view_threads WHERE id = ?")
-            .bind(thread_id.as_str())
-            .fetch_optional(&pool)
-            .await
-            .expect("query view_threads");
-    assert!(thread_row.is_some());
-}
-
-#[tokio::test]
 async fn persistence_real_db_snapshot_save_load() {
     if !e2e_enabled() {
         eprintln!("[skip] persistence e2e");
@@ -192,35 +138,4 @@ async fn persistence_real_db_snapshot_save_load() {
     let (state, version) = loaded.unwrap();
     assert_eq!(version, 5);
     assert_eq!(state, state_json);
-}
-
-#[tokio::test]
-async fn persistence_real_db_read_model_adapter() {
-    if !e2e_enabled() {
-        eprintln!("[skip] persistence e2e");
-        return;
-    }
-    let dir = TempDir::new().expect("temp dir");
-    let pool = open_db(&dir).await;
-
-    let rm_repo = syncode_persistence::adapters::SqliteReadModelRepository::from_pool(pool.clone());
-    let proj_mgr = syncode_persistence::projections::ProjectionManager::from_pool(pool.clone());
-
-    let project_id = EntityId::new();
-    let env = syncode_core::Envelope::new(
-        DomainEvent::ProjectCreated {
-            id: project_id,
-            name: "adapter-test".into(),
-            root_path: "/tmp".into(),
-            created_at: Timestamp::now(),
-        },
-        1,
-    );
-    proj_mgr.project_many(&[env]).await.expect("project");
-
-    let project = syncode_core::ports::ReadModelRepository::get_project(&rm_repo, project_id)
-        .await
-        .expect("get_project");
-    assert!(project.is_some());
-    assert_eq!(project.unwrap()["name"], "adapter-test");
 }

@@ -1,12 +1,17 @@
-//! Syncode Persistence — Event Store & Projections
+//! Syncode Persistence — Event Store & Snapshots
 //!
-//! Append-only event store, read model projection tables,
-//! SQLx migrations, and snapshot queries.
+//! Append-only event store, SQLx migrations, and snapshot queries.
+//!
+//! NOTE: the read-model projection layer (`view_*` tables +
+//! `SqliteReadModelRepository`) was fully implemented and unit-tested but never
+//! wired into production — the pipeline projects to the in-memory
+//! `ReadModelStore` only. It has been removed to avoid audit/maintenance
+//! confusion. The durable surface is the event store (`domain_events`) and
+//! `snapshots`/`server_config`/`server_settings` tables.
 
 pub mod adapters;
 pub mod event_store;
 pub mod migrations;
-pub mod projections;
 pub mod settings_store;
 pub mod snapshot;
 
