@@ -221,12 +221,13 @@ impl ProviderAdapter for AnthropicAdapter {
     }
 
     fn capabilities(&self) -> Vec<ProviderCapability> {
-        vec![
-            ProviderCapability::Streaming,
-            ProviderCapability::ToolUse,
-            ProviderCapability::Vision,
-            ProviderCapability::SystemPrompt,
-        ]
+        // Honest advertisement: this adapter is a non-streaming, single-turn
+        // HTTP client for the Anthropic Messages API. It does NOT implement
+        // token streaming (sends `stream: false`), tool-use wire format,
+        // vision/image inputs, code execution, or filesystem operations.
+        // Only `SystemPrompt` is honoured today (passed as the top-level
+        // `system` field on the outbound request body).
+        vec![ProviderCapability::SystemPrompt]
     }
 
     fn status(&self) -> ProviderStatus {
@@ -733,11 +734,34 @@ mod tests {
     async fn anthropic_adapter_capabilities() {
         let adapter = AnthropicAdapter::new();
         let caps = adapter.capabilities();
-        assert!(caps.contains(&ProviderCapability::Streaming));
-        assert!(caps.contains(&ProviderCapability::ToolUse));
-        assert!(caps.contains(&ProviderCapability::Vision));
-        assert!(caps.contains(&ProviderCapability::SystemPrompt));
-        assert!(!caps.contains(&ProviderCapability::CodeExecution));
+        // The HTTP adapter only does non-streaming single-turn text
+        // completions with a system prompt. It must NOT advertise the
+        // unimplemented features (streaming, tool-use, vision, code
+        // execution, filesystem, steering).
+        assert!(
+            caps.contains(&ProviderCapability::SystemPrompt),
+            "anthropic adapter honours system prompts, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::Streaming),
+            "anthropic HTTP adapter does not stream, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::ToolUse),
+            "anthropic HTTP adapter has no tool-use wire format, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::Vision),
+            "anthropic HTTP adapter does not handle image inputs, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::CodeExecution),
+            "anthropic HTTP adapter does not execute code, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::FileSystem),
+            "anthropic HTTP adapter does not touch the filesystem, got {caps:?}"
+        );
     }
 
     #[tokio::test]
