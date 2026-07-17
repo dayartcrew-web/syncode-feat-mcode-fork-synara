@@ -15382,7 +15382,7 @@ mod tests {
         // GIT-4: subscribeActionProgress / unsubscribeActionProgress are now REAL
         // — they register/unregister the connection on CHANNEL_GIT without
         // opening a repo, so they return success regardless of cwd.
-        let stub_methods = [
+        let registered_methods = [
             (
                 "git.subscribeActionProgress",
                 "git/subscribe-action-progress",
@@ -15392,7 +15392,7 @@ mod tests {
                 "git/unsubscribe-action-progress",
             ),
         ];
-        for (dot, slash) in stub_methods {
+        for (dot, slash) in registered_methods {
             for method in [dot, slash] {
                 let req = serde_json::json!({
                     "jsonrpc": "2.0", "id": 1, "method": method,
@@ -15401,7 +15401,7 @@ mod tests {
                 let resp = rpc(&state, 1, &req).await;
                 assert!(
                     resp.error.is_none(),
-                    "{}: stub should return success, got {:?}",
+                    "{}: registered method should return success, got {:?}",
                     method,
                     resp.error
                 );
