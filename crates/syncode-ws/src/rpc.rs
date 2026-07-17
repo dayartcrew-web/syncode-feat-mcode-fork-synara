@@ -7047,12 +7047,10 @@ fn handle_git_stage(id: Value, params: &Value) -> JsonRpcResponse {
     }
 }
 
-/// `git.unstageFiles` — unstage files. syncode-git has no dedicated unstage
-/// op (`git reset HEAD -- <paths>` semantics require index/HEAD plumbing the
-/// `GitService` trait doesn't expose). We surface an OK stub for an empty
-/// file list (the common no-op case — defensive; the UI's mutation guard
-/// already rejects empty arrays) and a not-implemented error for actual
-/// unstage requests. Documented as a partial gap.
+/// `git.unstageFiles` / `git.unstage` — unstage files via
+/// `git restore --staged`. UI sends `{ cwd, paths: string[] }`. Returns MCode
+/// `GitStageFilesResult { ok: boolean }`. An empty `paths` array unstages ALL
+/// staged changes (mirrors `git reset HEAD` / `git restore --staged .`).
 fn handle_git_unstage(id: Value, params: &Value) -> JsonRpcResponse {
     let files: Vec<String> = params
         .get("paths")
@@ -7064,15 +7062,19 @@ fn handle_git_unstage(id: Value, params: &Value) -> JsonRpcResponse {
                 .collect()
         })
         .unwrap_or_default();
-    if files.is_empty() {
-        // No-op unstage of zero files — return OK.
-        return JsonRpcResponse::success(id, serde_json::json!({ "ok": true }));
+    let svc = match open_git_service(id.clone(), params) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    match svc.unstage(&refs) {
+        Ok(_) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Err(e) => git_error(
+            id,
+            crate::error_codes::INTERNAL_ERROR,
+            format!("git unstageFiles: {e}"),
+        ),
     }
-    git_error(
-        id,
-        crate::error_codes::INTERNAL_ERROR,
-        "git unstage: not implemented (syncode-git has no unstage op; deferred)",
-    )
 }
 
 /// `git.commit` — commit staged changes. UI sends `{ cwd, message }` (the
@@ -13898,6 +13900,22 @@ mod tests {
         path
     }
 
+    /// List staged file paths via `git diff --cached --name-only`. Unambiguous
+    /// (no XY column parsing) — a path appears here iff it is staged. Used by
+    /// the unstage tests to verify index state directly against the CLI rather
+    /// than the RPC status shape (which collapses index/working-tree status).
+    fn staged_files(repo: &std::path::Path) -> Vec<String> {
+        let out = std::process::Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(repo)
+            .output()
+            .expect("git diff --cached --name-only");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
     #[tokio::test]
     async fn git_status_dispatches_dot_and_slash_forms() {
         if !git_available() {
@@ -14237,25 +14255,141 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_unstage_empty_is_ok_real_unstage_errors() {
+    async fn git_unstage_dispatch_smoke_non_repo() {
+        // Dispatch smoke: the handler is wired and returns a well-formed
+        // response (echoes the rpc id) even when cwd isn't a git repo. The
+        // old stub returned a no-op OK for empty paths; the real impl now
+        // requires a valid repo, so we only assert the response shape.
         let state = WsState::new_in_memory(16);
-        // Empty paths → no-op OK.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "git.unstageFiles",
             "params": { "cwd": "/tmp", "paths": [] }
         });
         let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.id, Some(serde_json::json!(1)));
+    }
+
+    #[tokio::test]
+    async fn git_unstage_specific_path_real_repo() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        // Modify the tracked README + add a new file, stage both.
+        std::fs::write(repo.join("README.md"), "changed\n").expect("write");
+        std::fs::write(repo.join("new.txt"), "new\n").expect("write");
+        let state = WsState::new_in_memory(16);
+        let stage = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.stageFiles",
+            "params": { "cwd": repo.to_string_lossy(), "paths": ["README.md", "new.txt"] }
+        });
+        let resp = rpc(&state, 1, &stage).await;
+        assert!(resp.error.is_none(), "stage: {:?}", resp.error);
         assert_eq!(resp.result.unwrap()["ok"], true);
 
-        // Non-empty paths → not-implemented (syncode-git has no unstage op).
-        let req = serde_json::json!({
+        // Sanity: both staged.
+        let staged = staged_files(&repo);
+        assert!(staged.contains(&"README.md".to_string()), "README staged");
+        assert!(staged.contains(&"new.txt".to_string()), "new.txt staged");
+
+        // Unstage just README.md.
+        let unstage = serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "git.unstageFiles",
-            "params": { "cwd": "/tmp", "paths": ["a.txt"] }
+            "params": { "cwd": repo.to_string_lossy(), "paths": ["README.md"] }
         });
-        let resp = rpc(&state, 1, &req).await;
-        assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap().code, crate::error_codes::INTERNAL_ERROR);
+        let resp = rpc(&state, 1, &unstage).await;
+        assert!(resp.error.is_none(), "unstage: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        // README.md no longer staged; new.txt still staged.
+        let staged = staged_files(&repo);
+        assert!(
+            !staged.contains(&"README.md".to_string()),
+            "README.md should be unstaged: {staged:?}"
+        );
+        assert!(
+            staged.contains(&"new.txt".to_string()),
+            "new.txt should still be staged: {staged:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_unstage_all_when_paths_empty_real_repo() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        std::fs::write(repo.join("a.txt"), "a\n").expect("write");
+        std::fs::write(repo.join("b.txt"), "b\n").expect("write");
+        let state = WsState::new_in_memory(16);
+        let stage = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git.stageFiles",
+            "params": { "cwd": repo.to_string_lossy(), "paths": ["a.txt", "b.txt"] }
+        });
+        let resp = rpc(&state, 1, &stage).await;
+        assert!(resp.error.is_none(), "stage: {:?}", resp.error);
+
+        // Sanity: both staged.
+        let staged = staged_files(&repo);
+        assert!(staged.contains(&"a.txt".to_string()), "a staged");
+        assert!(staged.contains(&"b.txt".to_string()), "b staged");
+
+        // Empty paths → unstage ALL (git restore --staged .).
+        let unstage = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "git.unstageFiles",
+            "params": { "cwd": repo.to_string_lossy(), "paths": [] }
+        });
+        let resp = rpc(&state, 1, &unstage).await;
+        assert!(resp.error.is_none(), "unstage all: {:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        // Nothing should remain staged.
+        let staged = staged_files(&repo);
+        assert!(
+            staged.is_empty(),
+            "no files should be staged after unstage-all: {staged:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_unstage_accepts_dot_and_slash_aliases() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let repo = temp_git_repo();
+        std::fs::write(repo.join("c.txt"), "c\n").expect("write");
+        let state = WsState::new_in_memory(16);
+        let stage = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "git/add",
+            "params": { "cwd": repo.to_string_lossy(), "paths": ["c.txt"] }
+        });
+        let resp = rpc(&state, 1, &stage).await;
+        assert!(resp.error.is_none(), "stage: {:?}", resp.error);
+
+        // All four method aliases route to the same handler.
+        for method in [
+            "git.unstage",
+            "git.unstageFiles",
+            "git/unstageFiles",
+            "git/unstage",
+        ] {
+            // Re-stage before each unstage so there's something to unstage.
+            std::process::Command::new("git")
+                .args(["add", "c.txt"])
+                .current_dir(&repo)
+                .output()
+                .expect("git add");
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": method,
+                "params": { "cwd": repo.to_string_lossy(), "paths": ["c.txt"] }
+            });
+            let resp = rpc(&state, 1, &req).await;
+            assert!(resp.error.is_none(), "{method}: {:?}", resp.error);
+            assert_eq!(resp.result.unwrap()["ok"], true);
+        }
     }
 
     #[tokio::test]
