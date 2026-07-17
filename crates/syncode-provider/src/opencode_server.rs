@@ -23,12 +23,26 @@
 //!
 //! # Auth
 //!
-//! A locally-spawned server runs **without** auth (mcode never sends a password
-//! to a server it started itself). [`OpenCodeAuth`] is therefore optional and
-//! only applied (HTTP Basic via [`reqwest::RequestBuilder::basic_auth`]) when a
-//! password is supplied — reserved for an externally-managed server. Every
-//! request carries the `x-opencode-directory` header and a `?directory=<cwd>`
-//! query parameter (the SDK's directory scoping).
+//! `opencode serve` reads HTTP Basic auth credentials from its environment
+//! (verified v1.17.11; source: <https://opencode.ai/docs/server/>):
+//! - `OPENCODE_SERVER_PASSWORD` — when set, the server returns
+//!   `401 Unauthorized` (`www-authenticate: Basic realm="Secure Area"`) on
+//!   every endpoint until a matching Basic header is sent. When **unset**, the
+//!   server is unsecured (no auth header needed) and prints
+//!   `Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.` to
+//!   stdout before the ready line.
+//! - `OPENCODE_SERVER_USERNAME` — optional; defaults to `opencode`.
+//!
+//! Because [`spawn`](OpenCodeServerClient::spawn) / [`spawn_with`] inherit the
+//! parent process env (so the server finds its config/auth), the spawned server
+//! MAY require auth if the caller's env has `OPENCODE_SERVER_PASSWORD` set. The
+//! client therefore auto-discovers the matching credential from the same env
+//! via [`OpenCodeAuth::from_env`] — the spawner and the HTTP client read one
+//! source of truth, so a locally-spawned server can never 401 on its own
+//! inherited credential. An explicit `auth` passed to [`spawn_with`] (for an
+//! externally-managed server) still wins. Every request also carries the
+//! `x-opencode-directory` header and a `?directory=<cwd>` query parameter (the
+//! SDK's directory scoping).
 //!
 //! # Streaming
 //!
@@ -93,6 +107,15 @@ pub const KILO_CLI_SPEC: OpenCodeCompatibleCliSpec = OpenCodeCompatibleCliSpec {
     default_agent: "code",
 };
 
+/// Env var read by `opencode serve` to enable HTTP Basic auth
+/// (verified v1.17.11; <https://opencode.ai/docs/server/>). When set, every
+/// endpoint requires a matching Basic header; when unset, the server is
+/// unsecured.
+pub const ENV_OPENCODE_SERVER_PASSWORD: &str = "OPENCODE_SERVER_PASSWORD";
+
+/// Env var overriding the Basic-auth username (default `opencode`).
+pub const ENV_OPENCODE_SERVER_USERNAME: &str = "OPENCODE_SERVER_USERNAME";
+
 /// Optional HTTP Basic auth for the server. A locally-spawned server has
 /// `password: None` (no auth). Construct with [`OpenCodeAuth::for_external`]
 /// when driving an externally-managed server that requires a password.
@@ -118,6 +141,49 @@ impl OpenCodeAuth {
             password: Some(password.into()),
         }
     }
+
+    /// Derive auth for a locally-spawned server from the process environment.
+    ///
+    /// `opencode serve` reads `OPENCODE_SERVER_PASSWORD` (HTTP Basic auth,
+    /// realm `"Secure Area"`). The username defaults to
+    /// `OPENCODE_SERVER_USERNAME` or, if that is also unset, the provided
+    /// `default_username` (typically the spec's `server_auth_username`, e.g.
+    /// `"opencode"`). When `OPENCODE_SERVER_PASSWORD` is unset the server is
+    /// unsecured and this returns `None` — no auth header is sent, which is
+    /// correct for an unsecured server.
+    ///
+    /// Calling this from a spawner makes the spawner and the HTTP client read
+    /// one source of truth (the inherited env), so a locally-spawned server
+    /// never 401s on its own inherited credential. Verified against opencode
+    /// v1.17.11; see <https://opencode.ai/docs/server/>.
+    ///
+    /// Pure decision logic is split into [`auth_from_env_values`] so it can be
+    /// unit-tested without mutating process-global env vars.
+    pub fn from_env(default_username: &str) -> Option<Self> {
+        auth_from_env_values(
+            std::env::var(ENV_OPENCODE_SERVER_PASSWORD).ok(),
+            std::env::var(ENV_OPENCODE_SERVER_USERNAME).ok(),
+            default_username,
+        )
+    }
+}
+
+/// Pure core of [`OpenCodeAuth::from_env`]: map already-extracted env values
+/// to an optional [`OpenCodeAuth`]. Extracted so the decision logic is testable
+/// without mutating process-global env vars (which is unsafe under cargo's
+/// parallel test runner).
+///
+/// - `password = None` → `None` (server is unsecured; no header needed).
+/// - `password = Some(pw)` → `Some(for_external(username, pw))` where
+///   `username` is the explicit value or the `default_username`.
+fn auth_from_env_values(
+    password: Option<String>,
+    username: Option<String>,
+    default_username: &str,
+) -> Option<OpenCodeAuth> {
+    let password = password?;
+    let username = username.unwrap_or_else(|| default_username.to_string());
+    Some(OpenCodeAuth::for_external(username, password))
 }
 
 /// Reference to a model in OpenCode's `{providerID, id/modelID}` shape.
@@ -169,7 +235,9 @@ pub struct OpenCodeServerClient {
 impl OpenCodeServerClient {
     /// Spawn the local `{binary} serve` server described by `spec`, wait for its
     /// ready line, and return a client rooted at `cwd`. Uses the spec's default
-    /// binary path and no extra args.
+    /// binary path and no extra args. Auth is auto-discovered from the inherited
+    /// env via [`OpenCodeAuth::from_env`] (the spawner and client share one
+    /// source of truth) — pass [`OpenCodeServerClient::spawn_with`] to override.
     pub async fn spawn(
         spec: &OpenCodeCompatibleCliSpec,
         cwd: &str,
@@ -179,7 +247,7 @@ impl OpenCodeServerClient {
             spec.default_binary_path,
             &[],
             cwd,
-            None,
+            OpenCodeAuth::from_env(spec.server_auth_username),
             DEFAULT_SERVER_TIMEOUT_MS,
         )
         .await
@@ -188,6 +256,13 @@ impl OpenCodeServerClient {
     /// Like [`spawn`](Self::spawn) but with an explicit `binary` (override the
     /// spec's default), trailing `extra_args` (appended after the standard
     /// `serve --hostname … --port …`), optional auth, and a startup timeout.
+    ///
+    /// `auth`: when `Some`, every request carries this Basic credential (for an
+    /// externally-managed server). When `None`, the client sends no auth header
+    /// — correct only if you know the spawned server is unsecured
+    /// (`OPENCODE_SERVER_PASSWORD` unset in the inherited env). Prefer
+    /// [`OpenCodeAuth::from_env`] for a locally-spawned server so the client
+    /// matches whatever the inherited env configured; see [`spawn`](Self::spawn).
     pub async fn spawn_with(
         spec: &OpenCodeCompatibleCliSpec,
         binary: &str,
@@ -1345,6 +1420,63 @@ mod tests {
         assert_eq!(KILO_CLI_SPEC.default_binary_path, "kilo");
         assert_eq!(KILO_CLI_SPEC.server_ready_prefix, "kilo server listening");
         assert_eq!(KILO_CLI_SPEC.default_agent, "code");
+    }
+
+    // ---- env-derived auth (pure decision logic) ----
+    //
+    // `OpenCodeAuth::from_env` is a thin wrapper over `auth_from_env_values`
+    // that reads `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME`. The
+    // decision logic is tested here WITHOUT touching process-global env vars
+    // (unsafe under cargo's parallel test runner).
+
+    #[test]
+    fn env_auth_none_when_password_unset() {
+        // No password → server is unsecured → no auth header (None).
+        assert!(auth_from_env_values(None, None, "opencode").is_none());
+        // Username present but no password → still None (password is the gate).
+        assert!(auth_from_env_values(None, Some("u".into()), "opencode").is_none());
+    }
+
+    #[test]
+    fn env_auth_uses_default_username_when_password_set() {
+        // Password set, no explicit username → default_username ("opencode").
+        let auth = auth_from_env_values(Some("s3cret".into()), None, "opencode")
+            .expect("password set → Some auth");
+        assert_eq!(auth.username, "opencode");
+        assert_eq!(auth.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn env_auth_explicit_username_wins_over_default() {
+        let auth = auth_from_env_values(Some("s3cret".into()), Some("vibe-dev".into()), "opencode")
+            .expect("password set → Some auth");
+        assert_eq!(auth.username, "vibe-dev");
+        assert_eq!(auth.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn env_auth_default_username_threads_through_spec() {
+        // Kilo uses a different default username — confirm it threads through.
+        let auth = auth_from_env_values(Some("pw".into()), None, "kilo").unwrap();
+        assert_eq!(auth.username, "kilo");
+        assert_eq!(auth.password.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn env_auth_empty_password_is_treated_as_set() {
+        // An empty-but-present password is still Some → server requires auth
+        // with an empty password. Don't silently drop it: the caller set it.
+        let auth = auth_from_env_values(Some(String::new()), None, "opencode").unwrap();
+        assert_eq!(auth.username, "opencode");
+        assert_eq!(auth.password.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn env_auth_constants_match_documented_names() {
+        // Guard against accidentally renaming the env vars — these are a
+        // documented public contract (https://opencode.ai/docs/server/).
+        assert_eq!(ENV_OPENCODE_SERVER_PASSWORD, "OPENCODE_SERVER_PASSWORD");
+        assert_eq!(ENV_OPENCODE_SERVER_USERNAME, "OPENCODE_SERVER_USERNAME");
     }
 
     // allow the `props` helper to compile (keeps the test module self-contained

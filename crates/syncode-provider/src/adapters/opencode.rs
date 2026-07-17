@@ -46,14 +46,14 @@
 //!
 //! # Defensive one-shot fallback
 //!
-//! Some `opencode serve` builds require HTTP Basic auth even on localhost
-//! (observed: `opencode serve` returns `401 Unauthorized`, `www-authenticate:
-//! Basic realm="Secure Area"` on every endpoint, with no credential the client
-//! can discover). To stay resilient, the serve path is **primary** but each
-//! turn falls back to a one-shot `opencode run --format json` subprocess when
-//! the serve client is unavailable or the turn errors (typically 401). The
-//! fallback is armed in `spawn` (if the server won't start) and re-armed on the
-//! first failing turn, so streaming/interrupt/health degrade gracefully to the
+//! The serve path is **primary**: auth is auto-discovered from the inherited
+//! env ([`OpenCodeAuth::from_env`]), so a locally-spawned server matches its
+//! own `OPENCODE_SERVER_PASSWORD` and does not 401. The one-shot
+//! `opencode run --format json` subprocess remains as a defensive fallback for
+//! when the serve client is unavailable or a turn errors for any other reason
+//! (binary missing, no ready line, mid-flight server crash). The fallback is
+//! armed in `spawn` (if the server won't start) and re-armed on the first
+//! failing turn, so streaming/interrupt/health degrade gracefully to the
 //! proven one-shot path instead of failing the turn. See
 //! [`OpenCodeAdapter::one_shot_fallback`] and [`run_opencode_turn`].
 
@@ -69,7 +69,8 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use super::super::trait_def::*;
 use crate::bin_resolver::resolve_binary;
 use crate::opencode_server::{
-    ModelRef, OPENCODE_CLI_SPEC, OpenCodeCompatibleCliSpec, OpenCodeServerClient, TurnStatus,
+    ModelRef, OPENCODE_CLI_SPEC, OpenCodeAuth, OpenCodeCompatibleCliSpec, OpenCodeServerClient,
+    TurnStatus,
 };
 
 /// Startup-wait timeout for the local `opencode serve` server (mcode uses 20s).
@@ -583,12 +584,21 @@ impl ProviderAdapter for OpenCodeAdapter {
         // no ready line, …) arm the one-shot fallback so spawn still succeeds —
         // each turn will then drive `opencode run` directly. A serve that
         // starts but 401s at request time is detected lazily in `send_request`.
+        //
+        // Auth: `opencode serve` inherits this process's env, so if
+        // `OPENCODE_SERVER_PASSWORD` is set the server requires HTTP Basic auth
+        // (realm "Secure Area"). Discover the matching credential from the SAME
+        // env via `OpenCodeAuth::from_env` — the spawner and HTTP client share
+        // one source of truth, so a locally-spawned server never 401s on its
+        // own inherited credential. Returns `None` when the password is unset
+        // (server is unsecured; no header needed). Verified opencode v1.17.11.
+        let auth = OpenCodeAuth::from_env(self.spec.server_auth_username);
         match OpenCodeServerClient::spawn_with(
             self.spec,
             &self.oc_config.bin_path,
             &self.oc_config.extra_args,
             &cwd,
-            None,
+            auth,
             SERVER_TIMEOUT_MS,
         )
         .await
