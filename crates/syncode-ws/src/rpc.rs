@@ -12386,8 +12386,13 @@ async fn handle_stats_get_profile_stats(state: &WsState, id: Value) -> JsonRpcRe
 ///   - `unavailableProviders`: empty. We can't enumerate providers that
 ///     *lack* usage without a registry snapshot, and the panel treats an
 ///     empty list as "no known-gaps" (correct given our data).
-///   - `heatmap`: empty. A per-day heatmap needs the daily-rollup subsystem
-///     (deferred — same gap as `getProfileStats.activity.heatmap`).
+///   - `heatmap`: REAL — a 274-day window (ending today) of per-day
+///     `total_tokens`, mirroring the activity heatmap in
+///     `handle_stats_get_profile_stats`. Each cell uses the MCode
+///     `ProfileHeatmapCell` shape (`day`/`count`/`weekday`/`intensity`);
+///     `count` is the day's aggregate tokens, `intensity` is a 0..4 ramp
+///     scaled against the peak day. The per-day rollup reuses the same
+///     `by_day` map computed for `peakDay`.
 async fn handle_stats_get_profile_token_stats(state: &WsState, id: Value) -> JsonRpcResponse {
     // Aggregate per-provider. `aggregate_by_provider()` returns one entry
     // per provider with at least one recorded usage entry, sorted by id.
@@ -12419,31 +12424,73 @@ async fn handle_stats_get_profile_token_stats(state: &WsState, id: Value) -> Jso
         .map(|a| Value::String(a.provider_id.clone()))
         .collect();
 
-    // Peak-day approximation: re-walk the raw entries, group total_tokens by
-    // UTC date, and pick the max. We re-read the log for the per-entry
-    // timestamps (the aggregate loses the day dimension).
-    let (peak_day_tokens, peak_day): (Value, Value) = {
+    // Per-day token rollup over the raw entries (UTC date → total_tokens).
+    // Computed once and shared by BOTH the peak-day highlight and the 274-day
+    // heatmap. Mirrors the activity heatmap's `days` accumulation in
+    // `handle_stats_get_profile_stats`, but keyed on usage-log tokens instead
+    // of read-store turn counts.
+    let by_day: std::collections::HashMap<chrono::NaiveDate, u64> = {
         let usage = state.usage.read().await;
-        let mut by_day: std::collections::HashMap<chrono::NaiveDate, u64> =
+        let mut map: std::collections::HashMap<chrono::NaiveDate, u64> =
             std::collections::HashMap::new();
         for entry in usage.entries().iter() {
             let date = entry.timestamp.with_timezone(&chrono::Utc).date_naive();
-            *by_day.entry(date).or_insert(0) += entry.total_tokens as u64;
+            *map.entry(date).or_insert(0) += entry.total_tokens as u64;
         }
-        if by_day.len() < 2 {
-            // Fewer than two distinct days → no meaningful "peak" yet.
-            (Value::Null, Value::Null)
-        } else {
-            let (day, tokens) = by_day
-                .into_iter()
-                .max_by_key(|(_, t)| *t)
-                .unwrap_or((chrono::Utc::now().date_naive(), 0));
-            (
-                serde_json::json!(tokens),
-                Value::String(day.format("%Y-%m-%d").to_string()),
-            )
-        }
+        map
     };
+
+    // Peak-day: the single UTC day with the highest aggregate total_tokens.
+    // Null when fewer than two distinct days are present (one day isn't a
+    // meaningful "peak"; the shape's null state is preserved for the low-data
+    // case).
+    let (peak_day_tokens, peak_day): (Value, Value) = if by_day.len() < 2 {
+        (Value::Null, Value::Null)
+    } else {
+        let (day, tokens) = by_day
+            .iter()
+            .max_by_key(|(_, t)| *t)
+            .map(|(d, t)| (*d, *t))
+            .unwrap_or((chrono::Utc::now().date_naive(), 0));
+        (
+            serde_json::json!(tokens),
+            Value::String(day.format("%Y-%m-%d").to_string()),
+        )
+    };
+
+    // Token heatmap: 274-day window ending today (mirrors the activity heatmap
+    // in `handle_stats_get_profile_stats`). Each cell uses the MCode
+    // `ProfileHeatmapCell` field names — `day`, `count`, `weekday`,
+    // `intensity` — so the frontend's token-dimension heatmap reads the same
+    // fields as the activity heatmap (`cell.day.split("-")` + `cell.weekday`).
+    // `count` is the day's aggregate total_tokens; the 5-bucket intensity ramp
+    // (0..4, matching APP_HEATMAP_INTENSITY_CLASSES) scales against the peak
+    // day so the brightest cell always reflects the highest-token day.
+    use chrono::Datelike;
+    let today = chrono::Utc::now().date_naive();
+    let max_tokens = by_day.values().copied().max().unwrap_or(0);
+    let heatmap: Vec<Value> = (0..274i64)
+        .rev()
+        .map(|offset| {
+            let date = today - chrono::Duration::days(offset);
+            let value = by_day.get(&date).copied().unwrap_or(0);
+            // 0 for zero-token days (or when there is no usage at all, so
+            // max_tokens == 0); else ceil(value / max * 4) clamped to 1..=4 so
+            // any nonzero day shows at least level 1.
+            let intensity: u32 = if value == 0 || max_tokens == 0 {
+                0
+            } else {
+                let bucket = ((value as f64) / (max_tokens as f64) * 4.0).ceil() as u32;
+                bucket.clamp(1, 4)
+            };
+            serde_json::json!({
+                "day": date.format("%Y-%m-%d").to_string(),
+                "count": value,
+                "weekday": date.weekday().num_days_from_monday(),
+                "intensity": intensity,
+            })
+        })
+        .collect();
 
     JsonRpcResponse::success(
         id,
@@ -12455,7 +12502,7 @@ async fn handle_stats_get_profile_token_stats(state: &WsState, id: Value) -> Jso
             "providers": providers,
             "unavailableProviders": [],
             "heatmapMetric": "tokens",
-            "heatmap": [],
+            "heatmap": heatmap,
         }),
     )
 }
@@ -18834,6 +18881,53 @@ mod tests {
         assert!(!result["peakDay"].is_null(), "peak day label");
         let peak = result["peakDayTokens"].as_u64().unwrap();
         assert_eq!(peak, 300, "peak = highest-day total");
+
+        // Heatmap: 274-day window (MCode buildHeatmap), non-empty with the
+        // per-day token rollup. Today + yesterday cells carry the seeded
+        // tokens (150 + 300); every cell uses the ProfileHeatmapCell shape.
+        let heatmap = result["heatmap"].as_array().expect("heatmap array");
+        assert_eq!(heatmap.len(), 274, "274-day window");
+        let today_str = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let yesterday_str = (chrono::Utc::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        let today_cell = heatmap
+            .iter()
+            .find(|c| c["day"] == today_str)
+            .expect("today cell present");
+        assert_eq!(today_cell["count"].as_u64().unwrap(), 150, "today tokens");
+        assert!(
+            today_cell["weekday"].as_u64().is_some(),
+            "weekday field present"
+        );
+        assert!(
+            (1..=4).contains(&today_cell["intensity"].as_u64().unwrap()),
+            "nonzero day → intensity 1..=4"
+        );
+        let yesterday_cell = heatmap
+            .iter()
+            .find(|c| c["day"] == yesterday_str)
+            .expect("yesterday cell present");
+        assert_eq!(
+            yesterday_cell["count"].as_u64().unwrap(),
+            300,
+            "yesterday tokens"
+        );
+        // Peak day (yesterday) must have the highest intensity (4).
+        assert_eq!(
+            yesterday_cell["intensity"].as_u64().unwrap(),
+            4,
+            "peak day → max intensity"
+        );
+        // Sum of all cell counts equals the lifetime total (no tokens dropped).
+        let heatmap_total: u64 = heatmap
+            .iter()
+            .map(|c| c["count"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(
+            heatmap_total, 450,
+            "heatmap token total == lifetimeTotalTokens"
+        );
     }
 
     /// `getProfileTokenStats` with no usage → available=false + null totals
@@ -18876,6 +18970,23 @@ mod tests {
         assert_eq!(result["lifetimeTotalTokens"], 150);
         assert!(result["peakDayTokens"].is_null(), "single day → no peak");
         assert!(result["peakDay"].is_null());
+
+        // Even with a single day, the heatmap is populated (274 cells, the
+        // today cell carries 150 tokens). Peak stays null (not enough days),
+        // but the heatmap reflects the recorded usage.
+        let heatmap = result["heatmap"].as_array().expect("heatmap array");
+        assert_eq!(heatmap.len(), 274, "274-day window");
+        let today_str = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today_cell = heatmap
+            .iter()
+            .find(|c| c["day"] == today_str)
+            .expect("today cell present");
+        assert_eq!(today_cell["count"].as_u64().unwrap(), 150, "today tokens");
+        assert_eq!(
+            today_cell["intensity"].as_u64().unwrap(),
+            4,
+            "sole nonzero day → max intensity"
+        );
     }
 
     /// getProviderUsageSnapshot returns null when the provider has no usage,
