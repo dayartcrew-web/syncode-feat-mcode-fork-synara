@@ -31,6 +31,9 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
+import { adaptPushEnvelope, createPushAdaptContext } from "./contracts/adaptPushEvent";
+import { WS_CHANNELS } from "./contracts/tier3/ws";
+
 import type {
   AuthBootstrapInput,
   AuthBootstrapResult,
@@ -230,13 +233,139 @@ function unsupported<T>(capability: string, reason: string): Promise<T> {
  * When omitted, those methods reject with `UnsupportedError("ws-transport",
  * "requires JSON-RPC WebSocket transport")`. The `wsNativeApi` adapter
  * supplies this hook by delegating to its `WsTransport` instance.
+ *
+ * `subscribe` is optional: when present, `createTauriNativeApi` registers a
+ * one-time push demux (mirroring `wsNativeApi`) so live push frames from the
+ * embedded desktop WS server reach `onDomainEvent`/`onShellEvent`/
+ * `onThreadEvent`/`onEvent`/`onActionProgress`/`onDevServerEvent`. Without
+ * it, those subscriptions stay no-ops (the desktop shell receives no live
+ * push and chat appears stuck).
  */
 export interface TransportDispatcher {
   call: <R = unknown>(method: string, params?: unknown) => Promise<R>;
+  subscribe?: (
+    channel: string,
+    listener: (message: { readonly data: unknown }) => void,
+  ) => () => void;
 }
 
 const NO_TRANSPORT_REASON =
   "requires JSON-RPC WebSocket transport — wire createTauriNativeApi({ transport }) from wsNativeApi";
+
+// ─── Push delivery (mirrors wsNativeApi demux) ───────────────────────────
+//
+// The desktop shell boots its own embedded axum WS server
+// (`crates/syncode-tauri/src/ws_setup.rs`, default 127.0.0.1:30101) and the
+// frontend reaches it via the SAME `WsTransport` the browser uses. Push
+// frames therefore arrive on `WsTransport`'s channel-keyed subscribe surface
+// — this module demuxes them exactly like `wsNativeApi.ts` and routes to the
+// per-surface listener Sets consumed by the NativeApi callbacks.
+//
+// Listener sets are module-level so a single demux registration (per transport
+// lifetime) fans out to every callback added via the returned `api`.
+
+const orchestrationDomainEventListeners = new Set<(event: OrchestrationEvent) => void>();
+const orchestrationShellEventListeners = new Set<
+  (event: OrchestrationShellStreamItem) => void
+>();
+const orchestrationThreadEventListeners = new Set<
+  (event: OrchestrationThreadStreamItem) => void
+>();
+const terminalEventListeners = new Set<(event: TerminalEvent) => void>();
+const gitActionProgressListeners = new Set<(event: GitActionProgressEvent) => void>();
+const automationEventListeners = new Set<(event: AutomationStreamEvent) => void>();
+const projectDevServerEventListeners = new Set<(event: ProjectDevServerEvent) => void>();
+
+// Per-connection push adapter context (resets on page reload; reconnect
+// mid-turn is a known edge case — see adaptPushEvent.ts risks). Mirrors
+// wsNativeApi.
+const pushAdaptCtx = createPushAdaptContext();
+
+// Guard so the demux is wired at most once per transport (idempotent across
+// repeat createTauriNativeApi calls during hot reload / singleton reset).
+let demuxRegistered = false;
+
+function fanout<T>(listeners: Set<(event: T) => void>, event: T): void {
+  for (const listener of listeners) {
+    try {
+      listener(event);
+    } catch {
+      // Swallow listener errors so one bad subscriber can't break the demux.
+    }
+  }
+}
+
+/**
+ * Register the push channel demux on the supplied transport. Idempotent —
+ * repeated calls with the same (or a new) transport are a no-op once the
+ * demux is wired. Mirrors the channel subscription block in
+ * `wsNativeApi.ts::createWsNativeApi` exactly (same channels, same
+ * snapshot/domain demux on the bare `orchestration` channel, same
+ * `adaptPushEnvelope` for domain events).
+ */
+function registerPushDemux(transport: TransportDispatcher): void {
+  if (demuxRegistered || !transport.subscribe) return;
+  demuxRegistered = true;
+
+  const subscribe = transport.subscribe.bind(transport);
+
+  subscribe(WS_CHANNELS.terminalEvent, (message) => {
+    fanout(terminalEventListeners, message.data as TerminalEvent);
+  });
+  subscribe(WS_CHANNELS.gitActionProgress, (message) => {
+    fanout(gitActionProgressListeners, message.data as GitActionProgressEvent);
+  });
+  subscribe(WS_CHANNELS.projectDevServerEvent, (message) => {
+    fanout(projectDevServerEventListeners, message.data as ProjectDevServerEvent);
+  });
+  subscribe(WS_CHANNELS.automationEvent, (message) => {
+    fanout(automationEventListeners, message.data as AutomationStreamEvent);
+  });
+
+  // The backend publishes every domain event on the bare `orchestration`
+  // channel (`push/orchestration`); wsTransport emits on that exact key.
+  // Demux: snapshot frames → shell/thread listeners; domain frames → adapt
+  // → domain listeners. Mirrors wsNativeApi's branch logic verbatim.
+  subscribe("orchestration", (message) => {
+    const env = message.data as { eventType?: string; data?: unknown } | undefined;
+    if (env && env.eventType === "snapshot") {
+      const snap = env.data as
+        | { scope?: string; thread?: unknown; snapshotSequence?: number }
+        | undefined;
+      // Thread-detail snapshot (subscribeThread) → onThreadEvent (hydrates
+      // the conversation on thread open/reload). Distinguished from the
+      // shell snapshot by `scope === "thread"`.
+      if (snap && snap.scope === "thread" && snap.thread !== undefined) {
+        fanout(orchestrationThreadEventListeners, {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence: snap.snapshotSequence ?? 0,
+            thread: snap.thread,
+          },
+        } as OrchestrationThreadStreamItem);
+        return;
+      }
+      // Shell snapshot → onShellEvent (sidebar bootstrap).
+      fanout(orchestrationShellEventListeners, {
+        kind: "snapshot",
+        snapshot: env.data,
+      } as OrchestrationShellStreamItem);
+      return;
+    }
+    if (!env || typeof env.eventType !== "string") return;
+    const events = adaptPushEnvelope(
+      {
+        eventType: env.eventType,
+        aggregateId: (env as { aggregateId?: string }).aggregateId ?? null,
+        data: env.data,
+      },
+      pushAdaptCtx,
+    );
+    for (const event of events) {
+      fanout(orchestrationDomainEventListeners, event);
+    }
+  });
+}
 
 function noTransport<T>(): Promise<T> {
   return unsupported<T>("ws-transport", NO_TRANSPORT_REASON);
@@ -289,6 +418,26 @@ export function createTauriNativeApi(
     return transport.call<R>(method, params);
   };
 
+  // Wire the one-time push demux if the transport exposes `subscribe`. Until
+  // a transport is supplied the push callbacks below stay no-op (chat stuck).
+  if (transport) {
+    registerPushDemux(transport);
+  }
+
+  const api: NativeApi = makeTauriNativeApi(callTransport);
+
+  return api;
+}
+
+/**
+ * Build the NativeApi surface over the supplied transport dispatcher. Split
+ * from `createTauriNativeApi` so the demux registration stays co-located
+ * with the listener Sets above and the surface assembly reads as a flat
+ * block (no nested-function indentation drift).
+ */
+function makeTauriNativeApi(
+  callTransport: <R>(method: string, params?: unknown) => Promise<R>,
+): NativeApi {
   const api: NativeApi = {
     // ─── dialogs ────────────────────────────────────────────────────────
     dialogs: {
@@ -402,11 +551,11 @@ export function createTauriNativeApi(
           sessionId: params.sessionId ?? "",
         });
       },
-      onEvent: (_callback: (event: TerminalEvent) => void) => {
-        // Tauri events for terminal output would require an event subscription
-        // wired in syncode-tauri (terminal_read_output is pull-based today).
-        // Deferred to T6b — return a no-op unsubscribe.
-        return noopUnsubscribe();
+      onEvent: (callback: (event: TerminalEvent) => void) => {
+        terminalEventListeners.add(callback);
+        return () => {
+          terminalEventListeners.delete(callback);
+        };
       },
     },
 
@@ -432,8 +581,12 @@ export function createTauriNativeApi(
         callTransport<ProjectStopDevServerResult>("project/stopDevServer", input),
       listDevServers: () =>
         callTransport<ProjectListDevServersResult>("project/listDevServers"),
-      onDevServerEvent: (_callback: (event: ProjectDevServerEvent) => void) =>
-        noopUnsubscribe(),
+      onDevServerEvent: (callback: (event: ProjectDevServerEvent) => void) => {
+        projectDevServerEventListeners.add(callback);
+        return () => {
+          projectDevServerEventListeners.delete(callback);
+        };
+      },
     },
 
     // ─── filesystem (WS transport) ──────────────────────────────────────
@@ -573,8 +726,12 @@ export function createTauriNativeApi(
           "git.runStackedAction",
           "no syncode-tauri command — needs T6b backend addition",
         ),
-      onActionProgress: (_callback: (event: GitActionProgressEvent) => void) =>
-        noopUnsubscribe(),
+      onActionProgress: (callback: (event: GitActionProgressEvent) => void) => {
+        gitActionProgressListeners.add(callback);
+        return () => {
+          gitActionProgressListeners.delete(callback);
+        };
+      },
     },
 
     // ─── contextMenu (renderer fallback) ────────────────────────────────
@@ -710,11 +867,24 @@ export function createTauriNativeApi(
         callTransport<void>("push/subscribe", { ...input, channel: "thread" }),
       unsubscribeThread: (input: OrchestrationSubscribeThreadInput) =>
         callTransport<void>("push/unsubscribe", { ...input, channel: "thread" }),
-      onDomainEvent: (_callback: (event: OrchestrationEvent) => void) => noopUnsubscribe(),
-      onShellEvent: (_callback: (event: OrchestrationShellStreamItem) => void) =>
-        noopUnsubscribe(),
-      onThreadEvent: (_callback: (event: OrchestrationThreadStreamItem) => void) =>
-        noopUnsubscribe(),
+      onDomainEvent: (callback: (event: OrchestrationEvent) => void) => {
+        orchestrationDomainEventListeners.add(callback);
+        return () => {
+          orchestrationDomainEventListeners.delete(callback);
+        };
+      },
+      onShellEvent: (callback: (event: OrchestrationShellStreamItem) => void) => {
+        orchestrationShellEventListeners.add(callback);
+        return () => {
+          orchestrationShellEventListeners.delete(callback);
+        };
+      },
+      onThreadEvent: (callback: (event: OrchestrationThreadStreamItem) => void) => {
+        orchestrationThreadEventListeners.add(callback);
+        return () => {
+          orchestrationThreadEventListeners.delete(callback);
+        };
+      },
     },
 
     // ─── automation (WS transport) ──────────────────────────────────────
@@ -735,7 +905,12 @@ export function createTauriNativeApi(
         callTransport<AutomationRunActionResult>("automation/markRunRead", input),
       archiveRun: (input: AutomationArchiveRunInput) =>
         callTransport<AutomationRunActionResult>("automation/archiveRun", input),
-      onEvent: (_callback: (event: AutomationStreamEvent) => void) => noopUnsubscribe(),
+      onEvent: (callback: (event: AutomationStreamEvent) => void) => {
+        automationEventListeners.add(callback);
+        return () => {
+          automationEventListeners.delete(callback);
+        };
+      },
     },
 
     // ─── browser (UNSUPPORTED — Electron-only embedded webview panels) ──
