@@ -125,6 +125,26 @@ impl AcpProvider {
         vec![json!({ "type": "text", "text": text })]
     }
 
+    /// Extract the `mcpServers` array to expose to the ACP agent for a session,
+    /// read from the stored [`ProviderConfig::extra`] (populated from persisted
+    /// settings via `extract_provider_extras`). Returns an empty vec when unset
+    /// — providers then spawn with no external MCP tool servers, matching the
+    /// prior hardcoded `[]` behavior (backward compatible).
+    ///
+    /// The value is forwarded verbatim to ACP's `session/new` `mcpServers`
+    /// param. Shape per the mcode integration: an array of
+    /// `{ "name", "transport", "config" }` entries. Non-array values (mis-typed
+    /// settings) are ignored defensively rather than erroring, so a malformed
+    /// config never blocks session creation.
+    fn mcp_servers(&self) -> Vec<Value> {
+        self.provider_config
+            .as_ref()
+            .and_then(|c| c.extra.get("mcpServers"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Resolve the session id for a request. An explicit `params.session_id`
     /// (injected by the command reactor's dispatcher) wins; otherwise the
     /// session opened by the last `start_session`.
@@ -240,7 +260,11 @@ impl ProviderAdapter for AcpProvider {
         let Some(client) = guard.as_mut() else {
             return Err(ProviderAdapterError::NotSpawned);
         };
-        let session_id = client.new_session(&ctx.working_dir).await?;
+        // Forward configured MCP tool servers (from ProviderConfig.extra) to the
+        // agent's `session/new` so ACP providers can use external MCP servers.
+        // Empty when unconfigured — backward-compatible with the prior `[]`.
+        let mcp_servers = self.mcp_servers();
+        let session_id = client.new_session(&ctx.working_dir, &mcp_servers).await?;
         drop(guard);
 
         *self.current_session.lock().await = Some(session_id.clone());

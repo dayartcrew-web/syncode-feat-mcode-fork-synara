@@ -613,6 +613,11 @@ pub const DEFAULT_PROVIDER: &str = "opencode";
 /// the MCode schema has many more fields (`customModels`, `apiKey`, …) that
 /// the adapter doesn't consume from `extra` and that may carry secrets we
 /// don't want to leak into adapter logs.
+///
+/// `mcpServers` is the array of external MCP tool-server definitions forwarded
+/// to ACP-speaking providers (cursor/grok/gemini) at `session/new` time — the
+/// masday parity gap: mcode passes real `mcpServers` from settings while
+/// syncode previously hardcoded `[]`.
 const PROVIDER_EXTRA_FIELDS: &[&str] = &[
     "binaryPath",
     "homePath",
@@ -622,6 +627,7 @@ const PROVIDER_EXTRA_FIELDS: &[&str] = &[
     "apiEndpoint",
     "agentDir",
     "experimentalWebSockets",
+    "mcpServers",
 ];
 
 /// Normalize an MCode frontend provider kind to the backend's provider id.
@@ -1244,6 +1250,40 @@ mod tests {
             extras.get("launchArgs").and_then(|v| v.as_str()),
             Some("--debug")
         );
+    }
+
+    #[test]
+    fn extract_provider_extras_forwards_mcp_servers_for_acp_provider() {
+        // mcpServers must be allowlisted through into ProviderConfig.extra so
+        // ACP providers (cursor/grok/gemini) receive external MCP tool-server
+        // definitions at session/new time (the masday parity gap: mcode passes
+        // real mcpServers; syncode previously hardcoded []).
+        let settings = serde_json::json!({
+            "providers": {
+                "cursor": {
+                    "enabled": true,
+                    "binaryPath": "cursor-agent",
+                    "customModels": [],
+                    "mcpServers": [
+                        {
+                            "name": "filesystem",
+                            "transport": {
+                                "type": "stdio",
+                                "command": "npx",
+                                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+        let extras = extract_provider_extras(PROVIDER_CURSOR, &settings);
+        let servers = extras
+            .get("mcpServers")
+            .and_then(|v| v.as_array())
+            .expect("mcpServers must be allowlisted into extras");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0]["name"], "filesystem");
     }
 
     #[test]

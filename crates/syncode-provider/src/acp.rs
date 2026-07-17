@@ -146,8 +146,19 @@ impl AcpClient {
 
     /// `session/new` — opens a session rooted at `cwd`. Returns the agent-assigned
     /// `sessionId`. Call [`initialize`](Self::initialize) first.
-    pub async fn new_session(&mut self, cwd: &str) -> Result<String, ProviderAdapterError> {
-        let params = json!({ "cwd": cwd, "mcpServers": [] });
+    ///
+    /// `mcp_servers` is the array of MCP-server definitions (per the ACP spec's
+    /// `NewSessionRequest.mcpServers`) to expose to the agent for this session.
+    /// Each entry is forwarded verbatim as written by the caller (the mcode
+    /// shape: `{ "name": "...", "transport": {...}, "config": {...} }`). Pass an
+    /// empty slice when no external MCP tool servers are configured — this
+    /// matches the previous hardcoded `[]` behavior (backward compatible).
+    pub async fn new_session(
+        &mut self,
+        cwd: &str,
+        mcp_servers: &[Value],
+    ) -> Result<String, ProviderAdapterError> {
+        let params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
         let resp = self
             .transport
             .send_request(methods::SESSION_NEW, Some(params))
@@ -528,7 +539,10 @@ mod tests {
             .expect("initialize");
         assert_eq!(info["agentInfo"]["name"], "fake-agent");
 
-        let session_id = client.new_session("/tmp/proj").await.expect("new_session");
+        let session_id = client
+            .new_session("/tmp/proj", &[])
+            .await
+            .expect("new_session");
         assert_eq!(session_id, "sess-1");
 
         peer.await.unwrap();
@@ -633,12 +647,58 @@ mod tests {
             .await;
         });
 
-        let err = client.new_session("/tmp/proj").await.unwrap_err();
+        let err = client.new_session("/tmp/proj", &[]).await.unwrap_err();
         assert!(
             matches!(err, ProviderAdapterError::Internal(ref m) if m.contains("sessionId")),
             "got {err:?}"
         );
         peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_session_forwards_mcp_servers_in_params() {
+        // The mcpServers array passed to new_session must reach the agent
+        // verbatim inside the `session/new` params — previously this was
+        // hardcoded to `[]`, dropping any configured MCP tool servers.
+        let (mut client, peer_reader, peer_writer) = acp_harness();
+        // Mirror the production call shape: `AcpProvider::mcp_servers()` reads
+        // `extra["mcpServers"]` (a JSON array) via `as_array()`, yielding a
+        // `Vec<Value>` of the per-server objects passed as a slice here.
+        let mcp_servers: Vec<Value> = json!([
+            {
+                "name": "filesystem",
+                "transport": { "type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] }
+            }
+        ])
+        .as_array()
+        .unwrap()
+        .clone();
+
+        let peer = tokio::spawn(async move {
+            let mut reader = BufReader::new(peer_reader);
+            let mut writer = peer_writer;
+            let req = peer_read(&mut reader).await;
+            assert_eq!(req["method"], "session/new");
+            assert_eq!(req["params"]["cwd"], "/tmp/proj");
+            assert_eq!(
+                req["params"]["mcpServers"][0]["name"], "filesystem",
+                "mcpServers must be forwarded verbatim: {}",
+                req["params"]["mcpServers"]
+            );
+            peer_write(
+                &mut writer,
+                &json!({ "jsonrpc": "2.0", "id": req["id"], "result": { "sessionId": "sess-mcp" } }),
+            )
+            .await;
+        });
+
+        let session_id = client
+            .new_session("/tmp/proj", &mcp_servers)
+            .await
+            .expect("new_session");
+        assert_eq!(session_id, "sess-mcp");
+        peer.await.unwrap();
+        client.shutdown().await.unwrap();
     }
 
     #[tokio::test]
