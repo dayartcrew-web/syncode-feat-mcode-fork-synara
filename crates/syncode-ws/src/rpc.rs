@@ -1893,12 +1893,14 @@ async fn handle_orchestration_dispatch_command(
                 .append_thread_activity(id, activity_type, description)
                 .await
         }
-        // `project.meta.update` — frontend ships `title` intending to rename
-        // the project. `Command::UpdateProjectConfig` only carries
-        // `provider_id`/`default_model`; there is NO `RenameProject` command
-        // yet (plan §4 risk #3). Dispatch with both optional fields as `None`
-        // so the call resolves cleanly; the `title` field is intentionally
-        // dropped (logged for observability).
+        // `project.meta.update` — faithful to mcode: a `title` field routes to
+        // the rename flow (mcode emits `project.renamed` via
+        // `Command::RenameProject` → `DomainEvent::ProjectRenamed`), while
+        // `providerId`/`defaultModel` route to the config-update flow
+        // (`Command::UpdateProjectConfig` → `DomainEvent::ProjectUpdated`).
+        // When both are present, the rename is dispatched first; if it fails the
+        // error propagates without attempting the config update. When neither is
+        // present the call resolves as a no-op (prior behavior).
         "project.meta.update" => {
             let project_id = match pctx
                 .require_id_any(&["projectId", "project_id", "id"], "project.meta.update")
@@ -1906,13 +1908,23 @@ async fn handle_orchestration_dispatch_command(
                 Ok(v) => v,
                 Err(r) => return *r,
             };
-            tracing::debug!(
-                project_id = %project_id,
-                "project.meta.update received; title field not yet supported"
-            );
-            // title field is intentionally dropped — no RenameProject command
-            // exists yet. Tracked in plan §4 risk #3.
-            service.update_project_config(project_id, None, None).await
+            let title = pctx.optional_str_any(&["title", "name"]);
+            let provider_id = pctx.optional_str_any(&["providerId", "provider_id"]);
+            let default_model = pctx.optional_str_any(&["defaultModel", "default_model"]);
+            if let Some(name) = title {
+                match service.rename_project(project_id, name).await {
+                    Ok(_) if provider_id.is_some() || default_model.is_some() => {
+                        service
+                            .update_project_config(project_id, provider_id, default_model)
+                            .await
+                    }
+                    other => other,
+                }
+            } else {
+                service
+                    .update_project_config(project_id, provider_id, default_model)
+                    .await
+            }
         }
         other => {
             // Phase 0 (dot-notation bridge): emit a server-side warn log so

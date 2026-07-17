@@ -101,6 +101,13 @@ pub enum DomainEventDto {
         default_model: Option<String>,
         updated_at: Timestamp,
     },
+    /// Mirror of `DomainEvent::ProjectRenamed`. Emitted by
+    /// `Command::RenameProject` (mcode `project.meta.update` with a `title`).
+    ProjectRenamed {
+        id: EntityId,
+        name: String,
+        updated_at: Timestamp,
+    },
     ProjectDeleted {
         id: EntityId,
         deleted_at: Timestamp,
@@ -411,6 +418,15 @@ impl From<&syncode_core::DomainEvent> for DomainEventDto {
                 id: to_id(*id),
                 provider_id: provider_id.clone(),
                 default_model: default_model.clone(),
+                updated_at: to_ts(*updated_at),
+            },
+            E::ProjectRenamed {
+                id,
+                name,
+                updated_at,
+            } => Self::ProjectRenamed {
+                id: to_id(*id),
+                name: name.clone(),
                 updated_at: to_ts(*updated_at),
             },
             E::ProjectDeleted { id, deleted_at } => Self::ProjectDeleted {

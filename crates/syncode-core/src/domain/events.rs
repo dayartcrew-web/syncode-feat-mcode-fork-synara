@@ -42,6 +42,15 @@ pub enum DomainEvent {
         default_model: Option<String>,
         updated_at: Timestamp,
     },
+    /// A project was renamed. Faithful to mcode `project.meta.update` carrying a
+    /// `title` field (mcode emits `project.renamed` {projectId, name, updatedAt}).
+    /// `Command::UpdateProjectConfig` only carries provider/model, so renaming is
+    /// a distinct [`Command::RenameProject`] → `ProjectRenamed` flow.
+    ProjectRenamed {
+        id: EntityId,
+        name: String,
+        updated_at: Timestamp,
+    },
     /// A project was deleted (tombstone). Faithful to mcode `project.deleted`
     /// payload `{ projectId, deletedAt }` — hard, event-sourced delete.
     ProjectDeleted {
@@ -426,6 +435,7 @@ impl DomainEvent {
         match self {
             Self::ProjectCreated { id, .. }
             | Self::ProjectUpdated { id, .. }
+            | Self::ProjectRenamed { id, .. }
             | Self::ProjectDeleted { id, .. }
             | Self::ThreadCreated { id, .. }
             | Self::ThreadStatusChanged { id, .. }
@@ -479,6 +489,7 @@ impl DomainEvent {
         match self {
             Self::ProjectCreated { .. } => "ProjectCreated",
             Self::ProjectUpdated { .. } => "ProjectUpdated",
+            Self::ProjectRenamed { .. } => "ProjectRenamed",
             Self::ProjectDeleted { .. } => "ProjectDeleted",
             Self::ThreadCreated { .. } => "ThreadCreated",
             Self::ThreadStatusChanged { .. } => "ThreadStatusChanged",
@@ -607,6 +618,14 @@ mod tests {
                     created_at: Timestamp::now(),
                 },
                 "ProjectCreated",
+            ),
+            (
+                DomainEvent::ProjectRenamed {
+                    id,
+                    name: "renamed".into(),
+                    updated_at: Timestamp::now(),
+                },
+                "ProjectRenamed",
             ),
             (
                 DomainEvent::ThreadCreated {

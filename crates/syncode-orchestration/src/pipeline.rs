@@ -863,9 +863,9 @@ impl Orchestrator {
             | Command::AddMessage { .. } => None,
 
             // Commands targeting an existing project
-            Command::UpdateProjectConfig { id, .. } | Command::DeleteProject { id, .. } => {
-                Some(*id)
-            }
+            Command::UpdateProjectConfig { id, .. }
+            | Command::RenameProject { id, .. }
+            | Command::DeleteProject { id, .. } => Some(*id),
             Command::SetThreadTitle { id, .. } => Some(*id),
 
             // Thread-level commands
@@ -938,7 +938,9 @@ impl Orchestrator {
         match command {
             Command::CreateProject { .. } => None,
 
-            Command::UpdateProjectConfig { .. } | Command::DeleteProject { .. } => read_model
+            Command::UpdateProjectConfig { .. }
+            | Command::RenameProject { .. }
+            | Command::DeleteProject { .. } => read_model
                 .projects
                 .get(&id.as_str())
                 .map(|p| serde_json::to_value(p).unwrap_or_default()),

@@ -82,6 +82,17 @@ impl Projector {
                 store.projects.remove(&id.as_str());
             }
 
+            DomainEvent::ProjectRenamed {
+                id,
+                name,
+                updated_at,
+            } => {
+                if let Some(project) = store.projects.get_mut(&id.as_str()) {
+                    project.name = name.clone();
+                    project.updated_at = updated_at.to_string();
+                }
+            }
+
             DomainEvent::ThreadCreated {
                 id,
                 project_id,
@@ -722,6 +733,22 @@ mod tests {
         let project = store.projects.get(&id.as_str()).unwrap();
         assert_eq!(project.provider_id.as_deref(), Some("anthropic"));
         assert_eq!(project.default_model.as_deref(), Some("claude-3"));
+    }
+
+    #[test]
+    fn project_renamed_updates_name() {
+        let (id, mut store) = create_project("old-name", "/test");
+        let events = crate::decider::Decider::decide(
+            Command::RenameProject {
+                id,
+                name: "new-name".to_string(),
+            },
+            Some(&serde_json::json!({"id": id.as_str()})),
+        )
+        .unwrap();
+        Projector::project_many(&events, &mut store);
+        let project = store.projects.get(&id.as_str()).unwrap();
+        assert_eq!(project.name, "new-name");
     }
 
     #[test]

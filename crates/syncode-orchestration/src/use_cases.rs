@@ -91,6 +91,20 @@ impl ApplicationService {
             .await
     }
 
+    /// Rename a project. Faithful to mcode `project.meta.update` when it carries
+    /// a `title` field (mcode routes the rename to `project.renamed`). The
+    /// Decider trims the name and rejects empty names; the pipeline enforces the
+    /// project-existence guard via its read-model state lookup.
+    pub async fn rename_project(
+        &self,
+        id: EntityId,
+        name: String,
+    ) -> Result<CommandResult, OrchestrationError> {
+        self.orchestrator
+            .handle_command(Command::RenameProject { id, name })
+            .await
+    }
+
     /// Delete a project (tombstone). Faithful to mcode `project.delete`.
     ///
     /// Rejects with [`OrchestrationError::ProjectNotFound`] if the project does

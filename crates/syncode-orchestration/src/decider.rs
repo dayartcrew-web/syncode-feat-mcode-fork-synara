@@ -52,6 +52,13 @@ pub enum Command {
         provider_id: Option<String>,
         default_model: Option<String>,
     },
+    /// Rename a project. Faithful to mcode `project.meta.update` when it carries
+    /// a `title` field (mcode routes the rename to `project.renamed`). Distinct
+    /// from [`Command::UpdateProjectConfig`], which only carries provider/model.
+    RenameProject {
+        id: EntityId,
+        name: String,
+    },
     /// Delete a project (tombstone). Faithful to mcode `project.delete` { projectId }.
     DeleteProject {
         id: EntityId,
@@ -335,6 +342,17 @@ pub enum Command {
     /// decider.ts:1303-1340): {threadId, messageId, numTurns}. Requested-style
     /// async — syncode omits mcode's target-message invariant validation (the
     /// authoritative removed turns are carried by `rollback.complete`).
+    ///
+    /// **Intentional design choice (do not "fix" by adding validation here):**
+    /// In mcode's `decider.ts:1303-1340`, the rollback request is a fire-and-
+    /// forget *Requested* — the decider does NOT synchronously validate that
+    /// `message_id` is a valid rollback target or that `num_turns` matches the
+    /// thread's current turn count. Validation/removal happens asynchronously,
+    /// and the authoritative set of actually-removed turn ids is carried by the
+    /// subsequent [`DomainEvent::ConversationRolledBack`] event
+    /// (`rollback.complete`), whose `removed_turn_ids` is the source of truth.
+    /// syncode faithfully mirrors this two-phase Requested→Complete shape rather
+    /// than eagerly enforcing the target-message invariant at request time.
     ConversationRollback {
         thread_id: EntityId,
         message_id: EntityId,
@@ -466,6 +484,9 @@ impl Decider {
                 provider_id,
                 default_model,
             } => Self::decide_update_project(id, current_state, provider_id, default_model),
+            Command::RenameProject { id, name } => {
+                Self::decide_rename_project(id, name, current_state)
+            }
             Command::DeleteProject { id } => Self::decide_delete_project(id, current_state),
             Command::CreateThread {
                 project_id,
@@ -759,6 +780,29 @@ impl Decider {
             id,
             provider_id,
             default_model,
+            updated_at: Timestamp::now(),
+        }])
+    }
+
+    /// Decide a project rename. Mirrors `decide_create_project` validation: the
+    /// trimmed name must be non-empty, and the project must already exist (guard
+    /// via `state.is_none()`, identical to `decide_update_project`).
+    fn decide_rename_project(
+        id: EntityId,
+        name: String,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Vec<DomainEvent>, DeciderError> {
+        if state.is_none() {
+            return Err(DeciderError::ProjectNotFound(id));
+        }
+        let name_trimmed = name.trim().to_string();
+        if name_trimmed.is_empty() {
+            return Err(DeciderError::EmptyProjectName);
+        }
+
+        Ok(vec![DomainEvent::ProjectRenamed {
+            id,
+            name: name_trimmed,
             updated_at: Timestamp::now(),
         }])
     }
@@ -1853,6 +1897,63 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             DeciderError::ProjectNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn rename_project_success() {
+        let id = EntityId::new();
+        let state = serde_json::json!({ "id": id.as_str() });
+        let events = Decider::decide(
+            Command::RenameProject {
+                id,
+                name: "  New Name  ".to_string(),
+            },
+            Some(&state),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DomainEvent::ProjectRenamed {
+                name, updated_at, ..
+            } => {
+                assert_eq!(name, "New Name");
+                assert!(updated_at.to_millis() > 0);
+            }
+            _ => panic!("expected ProjectRenamed"),
+        }
+    }
+
+    #[test]
+    fn rename_project_not_found() {
+        let id = EntityId::new();
+        let result = Decider::decide(
+            Command::RenameProject {
+                id,
+                name: "x".to_string(),
+            },
+            None,
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::ProjectNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn rename_project_empty_name_rejected() {
+        let id = EntityId::new();
+        let state = serde_json::json!({ "id": id.as_str() });
+        let result = Decider::decide(
+            Command::RenameProject {
+                id,
+                name: "   ".to_string(),
+            },
+            Some(&state),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            DeciderError::EmptyProjectName
         ));
     }
 
