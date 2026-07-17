@@ -583,6 +583,7 @@ impl ProviderCommandReactor {
             // Commands that don't need provider interaction
             Command::CreateProject { .. }
             | Command::UpdateProjectConfig { .. }
+            | Command::RenameProject { .. }
             | Command::DeleteProject { .. }
             | Command::CreateThread { .. }
             | Command::ResumeThread { .. }
