@@ -290,6 +290,13 @@ pub trait GitService: Send + Sync {
     /// Stage files
     fn add(&self, paths: &[&str]) -> Result<(), GitError>;
 
+    /// Unstage files (`git restore --staged <paths>`). An empty `paths` slice
+    /// unstages ALL staged changes (mirrors `git reset HEAD` /
+    /// `git restore --staged .`). Uses the `git` CLI — like `push`/`pull` —
+    /// because libgit2's index plumbing doesn't expose a direct "unstage"
+    /// primitive that matches the CLI's pathspec semantics.
+    fn unstage(&self, paths: &[&str]) -> Result<(), GitError>;
+
     /// Commit staged changes
     fn commit(&self, message: &str) -> Result<GitCommit, GitError>;
 
@@ -657,6 +664,25 @@ impl GitService for Git2Service {
             index.add_path(std::path::Path::new(path))?;
         }
         index.write()?;
+        Ok(())
+    }
+
+    fn unstage(&self, paths: &[&str]) -> Result<(), GitError> {
+        // `git restore --staged <paths>` (or `git restore --staged .` when no
+        // paths are given, to unstage everything). Mirrors how `push`/`pull`
+        // shell out to the CLI via `run_git`. `git restore --staged` is the
+        // modern equivalent of `git reset HEAD -- <paths>` and is preferred
+        // because it doesn't touch the working tree.
+        let mut args: Vec<&str> = vec!["restore", "--staged"];
+        if paths.is_empty() {
+            args.push(".");
+        } else {
+            args.extend_from_slice(paths);
+        }
+        let output = run_git(&self.repo_path, &args)?;
+        if output.status != 0 {
+            return Err(classify_cli_error(&output.stderr));
+        }
         Ok(())
     }
 
@@ -1487,6 +1513,134 @@ mod tests {
             matches!(err, GitError::NoUpstream),
             "expected NoUpstream, got {:?}",
             err
+        );
+    }
+
+    // ─── unstage integration tests (git-gated; skip if `git` binary absent) ─
+
+    /// Build a simple local (non-bare) repo with one commit on `main`.
+    /// Lighter than `local_repo_pair` (no remote needed for unstage tests).
+    fn local_repo_with_commit() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init");
+        for (k, v) in [("user.name", "Test"), ("user.email", "t@t.test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(dir.path())
+                .output()
+                .expect("git config");
+        }
+        std::fs::write(dir.path().join("README.md"), "init\n").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git commit");
+        dir
+    }
+
+    /// Look up a single file's index/workdir status in a `GitStatus`. Returns
+    /// `(index_status, working_tree_status)` or panics if the path is absent.
+    fn status_for(status: &GitStatus, path: &str) -> (FileStatus, FileStatus) {
+        let f = status
+            .files
+            .iter()
+            .find(|f| f.path == path)
+            .unwrap_or_else(|| panic!("path {path} not in status: {:?}", status.files));
+        (f.index_status, f.working_tree_status)
+    }
+
+    #[test]
+    fn integration_unstage_specific_path() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_with_commit();
+        let service = Git2Service::open(dir.path()).expect("open");
+
+        // Modify README + add new.txt, stage both.
+        std::fs::write(dir.path().join("README.md"), "changed\n").expect("write");
+        std::fs::write(dir.path().join("new.txt"), "new\n").expect("write");
+        service.add(&["README.md", "new.txt"]).expect("add");
+
+        // Sanity: both staged.
+        let (idx, _) = status_for(&service.status().expect("status"), "new.txt");
+        assert_eq!(idx, FileStatus::Added, "new.txt should be staged");
+
+        // Unstage just new.txt.
+        service.unstage(&["new.txt"]).expect("unstage");
+
+        // new.txt: index now clean (Unmodified), workdir Untracked.
+        let status = service.status().expect("status");
+        let (idx, wts) = status_for(&status, "new.txt");
+        assert_eq!(
+            idx,
+            FileStatus::Unmodified,
+            "new.txt index should be unstaged"
+        );
+        assert_eq!(wts, FileStatus::Untracked);
+
+        // README.md still staged (Modified in index).
+        let (idx, _) = status_for(&status, "README.md");
+        assert_eq!(idx, FileStatus::Modified, "README still staged");
+    }
+
+    #[test]
+    fn integration_unstage_all_when_paths_empty() {
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_with_commit();
+        let service = Git2Service::open(dir.path()).expect("open");
+
+        std::fs::write(dir.path().join("a.txt"), "a\n").expect("write");
+        std::fs::write(dir.path().join("b.txt"), "b\n").expect("write");
+        service.add(&["a.txt", "b.txt"]).expect("add");
+
+        // Empty slice → unstage everything.
+        service.unstage(&[]).expect("unstage all");
+
+        let status = service.status().expect("status");
+        for name in ["a.txt", "b.txt"] {
+            let (idx, wts) = status_for(&status, name);
+            assert_eq!(
+                idx,
+                FileStatus::Unmodified,
+                "{name} index should be unstaged"
+            );
+            assert_eq!(wts, FileStatus::Untracked, "{name} should be untracked");
+        }
+    }
+
+    #[test]
+    fn integration_unstage_unknown_path_errors() {
+        // Unstaging a path that was never staged should still succeed for the
+        // CLI (`git restore --staged` is idempotent on clean paths) OR error
+        // — we only assert it doesn't panic and returns a consistent Result.
+        if !git_available() {
+            eprintln!("skipping: git binary not on PATH");
+            return;
+        }
+        let dir = local_repo_with_commit();
+        let service = Git2Service::open(dir.path()).expect("open");
+        // `git restore --staged nonexistent` exits non-zero; the impl maps
+        // that to a GitError.
+        let result = service.unstage(&["does-not-exist.txt"]);
+        assert!(
+            result.is_err(),
+            "unstaging a nonexistent path should error: {:?}",
+            result
         );
     }
 
