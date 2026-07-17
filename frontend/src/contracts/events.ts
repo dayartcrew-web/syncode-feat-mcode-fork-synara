@@ -49,6 +49,7 @@ export const EVENT_TYPES = [
   // Project (3)
   "projectCreated",
   "projectUpdated",
+  "projectRenamed",
   "projectDeleted",
   // Thread (18)
   "threadCreated",
