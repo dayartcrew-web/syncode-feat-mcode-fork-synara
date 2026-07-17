@@ -225,14 +225,13 @@ impl ProviderAdapter for OpenAIAdapter {
     }
 
     fn capabilities(&self) -> Vec<ProviderCapability> {
-        vec![
-            ProviderCapability::Streaming,
-            ProviderCapability::ToolUse,
-            ProviderCapability::Vision,
-            ProviderCapability::CodeExecution,
-            ProviderCapability::FileSystem,
-            ProviderCapability::SystemPrompt,
-        ]
+        // Honest advertisement: this adapter is a non-streaming, single-turn
+        // HTTP client for the OpenAI Chat Completions API. It does NOT
+        // implement token streaming (sends `stream: false`), tool/function
+        // calling wire format, vision/image inputs, code execution, or
+        // filesystem operations. Only `SystemPrompt` is honoured today
+        // (emitted as a leading `system` chat message).
+        vec![ProviderCapability::SystemPrompt]
     }
 
     fn status(&self) -> ProviderStatus {
@@ -756,12 +755,34 @@ mod tests {
     async fn openai_adapter_capabilities() {
         let adapter = OpenAIAdapter::new();
         let caps = adapter.capabilities();
-        assert!(caps.contains(&ProviderCapability::Streaming));
-        assert!(caps.contains(&ProviderCapability::ToolUse));
-        assert!(caps.contains(&ProviderCapability::Vision));
-        assert!(caps.contains(&ProviderCapability::CodeExecution));
-        assert!(caps.contains(&ProviderCapability::FileSystem));
-        assert!(caps.contains(&ProviderCapability::SystemPrompt));
+        // The HTTP adapter only does non-streaming single-turn text
+        // completions with a system prompt. It must NOT advertise the
+        // unimplemented features (streaming, tool-use, vision, code
+        // execution, filesystem, steering).
+        assert!(
+            caps.contains(&ProviderCapability::SystemPrompt),
+            "openai adapter honours system prompts, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::Streaming),
+            "openai HTTP adapter does not stream, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::ToolUse),
+            "openai HTTP adapter has no tool-use wire format, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::Vision),
+            "openai HTTP adapter does not handle image inputs, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::CodeExecution),
+            "openai HTTP adapter does not execute code, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::FileSystem),
+            "openai HTTP adapter does not touch the filesystem, got {caps:?}"
+        );
     }
 
     #[tokio::test]

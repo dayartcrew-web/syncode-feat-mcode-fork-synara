@@ -770,9 +770,15 @@ mod tests {
             !caps.is_empty(),
             "anthropic adapter must advertise capabilities"
         );
+        // The Anthropic HTTP adapter is non-streaming single-turn; it must
+        // surface an honest capability set (SystemPrompt only, no Streaming).
         assert!(
-            caps.contains(&ProviderCapability::Streaming),
-            "anthropic streams"
+            caps.contains(&ProviderCapability::SystemPrompt),
+            "anthropic adapter honours system prompts, got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&ProviderCapability::Streaming),
+            "anthropic HTTP adapter must not advertise streaming, got {caps:?}"
         );
     }
 
