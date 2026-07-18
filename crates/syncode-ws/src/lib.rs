@@ -12,6 +12,7 @@ pub mod channels;
 pub mod completion;
 pub mod llm;
 pub mod local_server;
+pub mod mcp_catalog;
 pub mod orchestration_executor;
 pub mod project_fs;
 pub mod provider_versions;

@@ -37,15 +37,16 @@
 //! appended).
 
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use syncode_persistence::SqlitePool;
 use syncode_provider::PROVIDER_CLAUDE;
+// Provider-id constants are used at runtime by `extract_provider_extras` (to
+// detect ACP-speaking providers and forward the discovered MCP catalog) and
+// by the test module.
 #[cfg(test)]
-use syncode_provider::{
-    PROVIDER_CODEX, PROVIDER_CURSOR, PROVIDER_GEMINI, PROVIDER_GROK, PROVIDER_KILO,
-    PROVIDER_OPENCODE, PROVIDER_PI,
-};
+use syncode_provider::{PROVIDER_CODEX, PROVIDER_KILO, PROVIDER_OPENCODE, PROVIDER_PI};
+use syncode_provider::{PROVIDER_CURSOR, PROVIDER_GEMINI, PROVIDER_GROK};
 
 /// In-memory server settings — persists during the server session, with
 /// optional on-disk write-through (SRV-1).
@@ -481,6 +482,7 @@ pub fn build_default_server_settings() -> Value {
             "pi": { "enabled": true, "binaryPath": "pi", "customModels": [], "agentDir": "" },
         },
         "skills": { "disabled": [] },
+        "mcp": { "disabled": [] },
     })
 }
 
@@ -750,6 +752,12 @@ fn default_model_for_provider(provider: &str) -> &'static str {
 ///   - the `providers` object is missing entirely.
 ///
 /// Only the allowlisted fields in [`PROVIDER_EXTRA_FIELDS`] are copied.
+///
+/// For ACP-speaking providers (cursor/grok/gemini), the MCP catalog is
+/// discovered at this point and appended to `mcpServers` — see
+/// [`crate::mcp_catalog::build_mcp_servers_for_acp`]. Catalog entries take
+/// precedence on name collisions; user-pinned entries are preserved
+/// otherwise so existing hand-edited configs keep working.
 pub fn extract_provider_extras(provider_id: &str, settings: &Value) -> HashMap<String, Value> {
     let key = provider_settings_key(provider_id);
     let Some(entry) = settings.get("providers").and_then(|v| v.get(key)) else {
@@ -769,7 +777,62 @@ pub fn extract_provider_extras(provider_id: &str, settings: &Value) -> HashMap<S
             }
         }
     }
+    // ACP integration — only for ACP-speaking providers. The catalog is the
+    // source of truth for MCP servers; user-pinned entries in
+    // `providers.<id>.mcpServers` are appended as a fallback (catalog wins
+    // on name collisions).
+    if is_acp_provider(provider_id) {
+        let catalog = crate::mcp_catalog::build_mcp_servers_for_acp(
+            settings,
+            server_home_dir().as_deref(),
+            Some(&server_cwd()),
+        );
+        if !catalog.is_empty() {
+            let merged = merge_mcp_servers(catalog, extras.get("mcpServers"));
+            extras.insert("mcpServers".to_string(), Value::Array(merged));
+        }
+    }
     extras
+}
+
+/// Whether a provider id speaks ACP and therefore accepts the `mcpServers`
+/// array at `session/new` time. Today this is cursor, grok, and gemini per
+/// their adapter implementations.
+fn is_acp_provider(provider_id: &str) -> bool {
+    matches!(
+        provider_id,
+        PROVIDER_CURSOR | PROVIDER_GROK | PROVIDER_GEMINI
+    )
+}
+
+/// Merge catalog MCP servers with optional user-pinned ones. Catalog entries
+/// win on lowercased-name collisions; user entries are appended otherwise so
+/// hand-edited configs keep working.
+fn merge_mcp_servers(catalog: Vec<Value>, user_pinned: Option<&Value>) -> Vec<Value> {
+    let mut merged: Vec<Value> = catalog;
+    let catalog_names: HashSet<String> = merged
+        .iter()
+        .filter_map(|v| {
+            v.get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.trim().to_lowercase())
+        })
+        .collect();
+    if let Some(Value::Array(user)) = user_pinned {
+        for entry in user {
+            let Some(name) = entry
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.trim().to_lowercase())
+            else {
+                continue;
+            };
+            if !catalog_names.contains(&name) {
+                merged.push(entry.clone());
+            }
+        }
+    }
+    merged
 }
 
 #[cfg(test)]

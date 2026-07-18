@@ -252,6 +252,12 @@ async fn dispatch_method(
                     "project.stopDevServer",
                     "project.list-dev-servers",
                     "project.listDevServers",
+                    // MCP discovery + syncode-store CRUD + reachability probe.
+                    "provider/list-mcp-catalog",
+                    "mcp/create",
+                    "mcp/update",
+                    "mcp/delete",
+                    "mcp/test-connection",
                 ]
             }),
         ),
@@ -818,6 +824,15 @@ async fn dispatch_method(
         }
         "provider.listSkillsCatalog" | "provider/list-skills-catalog" => {
             handle_provider_list_skills_catalog(state, id, &request.params).await
+        }
+        "provider.listMcpCatalog" | "provider/list-mcp-catalog" => {
+            handle_provider_list_mcp_catalog(state, id, &request.params).await
+        }
+        "mcp.create" | "mcp/create" => handle_mcp_create(state, id, &request.params).await,
+        "mcp.update" | "mcp/update" => handle_mcp_update(state, id, &request.params).await,
+        "mcp.delete" | "mcp/delete" => handle_mcp_delete(state, id, &request.params).await,
+        "mcp.testConnection" | "mcp/test-connection" => {
+            handle_mcp_test_connection(state, id, &request.params).await
         }
         "provider.listPlugins" | "provider/list-plugins" => {
             handle_provider_list_plugins(id, &request.params)
@@ -10305,6 +10320,351 @@ async fn handle_provider_list_skills_catalog(
             "mcodeSkillsDir": dir_field,
         }),
     )
+}
+
+// ── MCP catalog RPCs ─────────────────────────────────────────────────
+//
+// Five handlers backed by `crate::mcp_catalog`:
+//   - provider/list-mcp-catalog — aggregated discovery from all four sources
+//     + syncode-owned store. Best-effort: returns an empty catalog on failure
+//     rather than an error, so the Settings panel renders an empty state.
+//   - mcp/create / mcp/update / mcp/delete — CRUD against the syncode-owned
+//     store at `~/.syncode/mcp.json`. Errors surface as JsonRpcResponse::error
+//     with a descriptive message (name collisions, not-found, etc).
+//   - mcp/test-connection — spawns the MCP `initialize` handshake (stdio or
+//     HTTP), awaits first response inside `tokio::time::timeout`, kills the
+//     child on drop. Runs in `tokio::spawn` so it can't block the WS task.
+
+/// `provider.listMcpCatalog` — returns `{servers, syncodeMcpPath}` for the
+/// Settings panel. The servers array carries the unified descriptor shape
+/// (env-var VALUES are never serialized — only NAMES).
+async fn handle_provider_list_mcp_catalog(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let cwd = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let home = server_home_dir();
+    let disabled = read_disabled_mcp(state).await;
+    let input = crate::mcp_catalog::McpDiscoveryInput {
+        cwd: cwd.as_deref(),
+        home_dir: home.clone(),
+        disabled,
+    };
+    let servers = crate::mcp_catalog::discover_mcp_catalog(input);
+    let servers_value =
+        serde_json::to_value(&servers).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+    let syncode_path = home
+        .as_deref()
+        .map(|h| {
+            crate::mcp_catalog::syncode_mcp_path(h)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "servers": servers_value,
+            "syncodeMcpPath": syncode_path,
+        }),
+    )
+}
+
+/// Read `settings.mcp.disabled` (array of lowercased server names). Absent or
+/// malformed → empty vec.
+async fn read_disabled_mcp(state: &WsState) -> std::collections::HashSet<String> {
+    let settings = state.settings.read().await.settings.clone();
+    settings
+        .get("mcp")
+        .and_then(|m| m.get("disabled"))
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.trim().to_lowercase()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Extracts a string field from a params object. Returns `None` when missing
+/// or empty — used by the MCP CRUD handlers.
+fn param_string(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extracts a string array field. Absent or wrong-typed → empty vec.
+fn param_string_array(params: &Value, key: &str) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Extracts an env-var array. Accepts both `[{name, value}]` and `{NAME: VALUE}`
+/// (matching the wire shapes the editor sends). Returns Vec<(name, value)>.
+fn param_env_array(params: &Value, key: &str) -> Vec<(String, String)> {
+    let Some(field) = params.get(key) else {
+        return Vec::new();
+    };
+    if let Some(arr) = field.as_array() {
+        return arr
+            .iter()
+            .filter_map(|v| {
+                let name = v.get("name").and_then(|n| n.as_str())?.to_string();
+                let value = v
+                    .get("value")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some((name, value))
+            })
+            .collect();
+    }
+    if let Some(obj) = field.as_object() {
+        return obj
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Parse a transport string from params. Accepts "stdio" | "http" | "sse".
+/// Defaults to stdio when missing or unknown.
+fn param_transport(params: &Value) -> crate::mcp_catalog::McpTransport {
+    use crate::mcp_catalog::McpTransport;
+    match params
+        .get("transport")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .as_deref()
+    {
+        Some("http") => McpTransport::Http,
+        Some("sse") => McpTransport::Sse,
+        _ => McpTransport::Stdio,
+    }
+}
+
+/// Owned intermediate extracted from RPC params for create/update. Holds the
+/// backing memory so we can build an `McpServerInput<'_>` referencing it
+/// afterwards.
+struct McpInputParts {
+    name: String,
+    name_override: Option<String>,
+    transport: crate::mcp_catalog::McpTransport,
+    transport_override: Option<crate::mcp_catalog::McpTransport>,
+    command: Option<String>,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    url: Option<String>,
+    set_command: bool,
+    set_args: bool,
+    set_env: bool,
+    set_url: bool,
+}
+
+/// Builds an `McpInputParts` from a params object for create/update. The
+/// `set_default = true` flag is the create semantics (every field present is
+/// set); `false` is update semantics (only provided fields are set).
+fn build_mcp_input_parts(params: &Value, set_default: bool) -> McpInputParts {
+    let transport = param_transport(params);
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name_override = params
+        .get("newName")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let transport_override = if params.get("transport").and_then(|v| v.as_str()).is_some() {
+        Some(transport)
+    } else {
+        None
+    };
+    let command = params
+        .get("command")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let url = params
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    McpInputParts {
+        name,
+        name_override,
+        transport,
+        transport_override,
+        command,
+        args: param_string_array(params, "args"),
+        env: param_env_array(params, "env"),
+        url,
+        set_command: set_default || params.get("command").is_some(),
+        set_args: set_default || params.get("args").is_some(),
+        set_env: set_default || params.get("env").is_some(),
+        set_url: set_default || params.get("url").is_some(),
+    }
+}
+
+impl McpInputParts {
+    fn as_input(&self) -> crate::mcp_catalog::McpServerInput<'_> {
+        crate::mcp_catalog::McpServerInput {
+            name: &self.name,
+            name_override: self.name_override.as_deref(),
+            transport: self.transport,
+            transport_override: self.transport_override,
+            command: self.command.as_deref(),
+            args: &self.args,
+            env: &self.env,
+            url: self.url.as_deref(),
+            set_command: self.set_command,
+            set_args: self.set_args,
+            set_env: self.set_env,
+            set_url: self.set_url,
+        }
+    }
+}
+
+/// `mcp.create` — writes a new entry to `~/.syncode/mcp.json`. Errors:
+///   - `-32602` invalid params (name missing or transport-required field absent)
+///   - `-32000` server error (name collision, write failure)
+async fn handle_mcp_create(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let Some(home) = server_home_dir() else {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            "home directory could not be resolved",
+        );
+    };
+    let parts = build_mcp_input_parts(params, true);
+    let input = parts.as_input();
+    // Touch state so the read of `mcp.disabled` is consistent with future
+    // updates — not strictly necessary, but lets the handler signature take
+    // `&WsState` for uniformity with the other discovery handlers.
+    let _ = state.settings.read().await.settings.get("mcp");
+    match crate::mcp_catalog::create_syncode_server(&home, &input) {
+        Ok(descriptor) => {
+            let value = serde_json::to_value(&descriptor).unwrap_or_else(|_| serde_json::json!({}));
+            JsonRpcResponse::success(id, serde_json::json!({ "server": value }))
+        }
+        Err(message) => {
+            let code = if message.contains("already exists") || message.contains("is required") {
+                crate::error_codes::INVALID_PARAMS
+            } else {
+                -32000
+            };
+            JsonRpcResponse::error(Some(id), code, message)
+        }
+    }
+}
+
+/// `mcp.update` — patches an existing syncode-owned entry. Errors:
+///   - `-32602` invalid params (name missing)
+///   - `-32603` not found (server doesn't exist or is from an external source)
+///   - `-32000` other server errors
+async fn handle_mcp_update(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let Some(home) = server_home_dir() else {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            "home directory could not be resolved",
+        );
+    };
+    let Some(name) = param_string(params, "name") else {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "name is required",
+        );
+    };
+    let parts = build_mcp_input_parts(params, false);
+    let input = parts.as_input();
+    let _ = state.settings.read().await.settings.get("mcp");
+    match crate::mcp_catalog::update_syncode_server(&home, &name, &input) {
+        Ok(descriptor) => {
+            let value = serde_json::to_value(&descriptor).unwrap_or_else(|_| serde_json::json!({}));
+            JsonRpcResponse::success(id, serde_json::json!({ "server": value }))
+        }
+        Err(message) => {
+            let code = if message.contains("not found") {
+                crate::error_codes::INTERNAL_ERROR
+            } else if message.contains("already exists") || message.contains("is required") {
+                crate::error_codes::INVALID_PARAMS
+            } else {
+                -32000
+            };
+            JsonRpcResponse::error(Some(id), code, message)
+        }
+    }
+}
+
+/// `mcp.delete` — removes a syncode-owned entry. Errors:
+///   - `-32603` not found / discovered entry (non-editable)
+async fn handle_mcp_delete(state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let Some(home) = server_home_dir() else {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INTERNAL_ERROR,
+            "home directory could not be resolved",
+        );
+    };
+    let Some(name) = param_string(params, "name") else {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "name is required",
+        );
+    };
+    let _ = state.settings.read().await.settings.get("mcp");
+    match crate::mcp_catalog::delete_syncode_server(&home, &name) {
+        Ok(()) => JsonRpcResponse::success(id, serde_json::json!({ "ok": true })),
+        Err(message) => {
+            let code = if message.contains("not found") {
+                crate::error_codes::INTERNAL_ERROR
+            } else {
+                -32000
+            };
+            JsonRpcResponse::error(Some(id), code, message)
+        }
+    }
+}
+
+/// `mcp.testConnection` — probes reachability of an MCP server. Returns
+/// `{status: "reachable" | "unreachable", latencyMs?, error?}`. Never returns
+/// a JSON-RPC error — unreachable is a normal result, not an RPC failure.
+async fn handle_mcp_test_connection(
+    _state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let timeout_ms = params
+        .get("timeoutMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000)
+        .min(10_000);
+    // Build a probe descriptor from the params — accept either an inline
+    // descriptor (transport/command/url) or a `name` to look up in the
+    // catalog. Inline is what the editor sends when testing before save.
+    let probe = crate::mcp_catalog::probe_mcp_server(params, timeout_ms).await;
+    JsonRpcResponse::success(id, probe)
 }
 
 /// Read `settings.skills.disabled` (array of lowercased skill names) from the

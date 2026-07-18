@@ -153,10 +153,20 @@ import type {
   ProviderGetComposerCapabilitiesInput,
   ProviderListAgentsInput,
   ProviderListAgentsResult,
+  ProviderListMcpCatalogInput,
   ProviderListCommandsInput,
   ProviderListCommandsResult,
   ProviderListModelsInput,
   ProviderListModelsResult,
+  McpCatalogResponse,
+  McpCreateResult,
+  McpDeleteInput,
+  McpDeleteResult,
+  McpServerInput,
+  McpTestConnectionInput,
+  McpTestConnectionResult,
+  McpUpdateInput,
+  McpUpdateResult,
   ProviderListPluginsInput,
   ProviderListPluginsResult,
   ProviderListSkillsInput,
@@ -839,6 +849,18 @@ function makeTauriNativeApi(
         callTransport<ProviderListModelsResult>("provider/listModels", input),
       listAgents: (input: ProviderListAgentsInput) =>
         callTransport<ProviderListAgentsResult>("provider/listAgents", input),
+      listMcpCatalog: (input: ProviderListMcpCatalogInput) =>
+        callTransport<McpCatalogResponse>("provider/listMcpCatalog", input),
+    },
+    mcp: {
+      create: (input: McpServerInput) =>
+        callTransport<McpCreateResult>("mcp/create", input),
+      update: (input: McpUpdateInput) =>
+        callTransport<McpUpdateResult>("mcp/update", input),
+      delete: (input: McpDeleteInput) =>
+        callTransport<McpDeleteResult>("mcp/delete", input),
+      testConnection: (input: McpTestConnectionInput) =>
+        callTransport<McpTestConnectionResult>("mcp/testConnection", input),
     },
 
     // ─── orchestration (WS transport — primary served surface) ──────────

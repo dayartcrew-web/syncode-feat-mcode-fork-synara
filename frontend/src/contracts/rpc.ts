@@ -97,6 +97,18 @@ import type {
   ServerSettingsPatch,
   ServerStopLocalServerInput,
 } from "./tier3/server";
+import type {
+  McpCatalogResponse,
+  McpCreateResult,
+  McpDeleteInput,
+  McpDeleteResult,
+  McpServerInput,
+  McpTestConnectionInput,
+  McpTestConnectionResult,
+  McpUpdateInput,
+  McpUpdateResult,
+  ProviderListMcpCatalogInput,
+} from "./tier3/mcp";
 // Terminal Tier-3 result type (T6c-5 terminal PTY RPC exposure). The backend
 // `crates/syncode-ws/src/rpc.rs` `handle_terminal_*` handlers reuse
 // `syncode-terminal::SessionManager` and map its `SessionInfo` into the MCode
@@ -1062,6 +1074,26 @@ export const SERVED_RPC = {
   "provider/list-skills-catalog": {
     request: null as unknown as null,
     result: null as unknown as ProviderSkillsCatalogResult,
+  },
+  "provider/list-mcp-catalog": {
+    request: null as unknown as ProviderListMcpCatalogInput,
+    result: null as unknown as McpCatalogResponse,
+  },
+  "mcp/create": {
+    request: null as unknown as McpServerInput,
+    result: null as unknown as McpCreateResult,
+  },
+  "mcp/update": {
+    request: null as unknown as McpUpdateInput,
+    result: null as unknown as McpUpdateResult,
+  },
+  "mcp/delete": {
+    request: null as unknown as McpDeleteInput,
+    result: null as unknown as McpDeleteResult,
+  },
+  "mcp/test-connection": {
+    request: null as unknown as McpTestConnectionInput,
+    result: null as unknown as McpTestConnectionResult,
   },
   "provider/list-plugins": {
     request: null as unknown as null,

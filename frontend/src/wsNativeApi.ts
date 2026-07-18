@@ -700,6 +700,13 @@ export function createWsNativeApi(): NativeApi {
       readPlugin: (input) => transport.request(WS_METHODS.providerReadPlugin, input),
       listModels: (input) => transport.request(WS_METHODS.providerListModels, input),
       listAgents: (input) => transport.request(WS_METHODS.providerListAgents, input),
+      listMcpCatalog: (input) => transport.request(WS_METHODS.providerListMcpCatalog, input),
+    },
+    mcp: {
+      create: (input) => transport.request(WS_METHODS.mcpCreate, input),
+      update: (input) => transport.request(WS_METHODS.mcpUpdate, input),
+      delete: (input) => transport.request(WS_METHODS.mcpDelete, input),
+      testConnection: (input) => transport.request(WS_METHODS.mcpTestConnection, input),
     },
     orchestration: {
       getSnapshot: () => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot),

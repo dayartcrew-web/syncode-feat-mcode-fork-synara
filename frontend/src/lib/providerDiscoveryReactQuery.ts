@@ -1,4 +1,5 @@
 import type {
+  McpCatalogResponse,
   ProviderComposerCapabilities,
   ProviderKind,
   ProviderListAgentsResult,
@@ -60,6 +61,7 @@ export const providerDiscoveryQueryKeys = {
   skills: (provider: ProviderKind, cwd: string | null, agentDir: string | null) =>
     ["provider-discovery", "skills", provider, cwd, agentDir] as const,
   skillsCatalog: (cwd: string | null) => ["provider-discovery", "skills-catalog", cwd] as const,
+  mcpCatalog: (cwd: string | null) => ["provider-discovery", "mcp-catalog", cwd] as const,
   plugins: (provider: ProviderKind, cwd: string | null) =>
     ["provider-discovery", "plugins", provider, cwd] as const,
   plugin: (provider: ProviderKind, marketplacePath: string, pluginName: string) =>
@@ -125,6 +127,23 @@ export function skillsCatalogQueryOptions(input?: { cwd?: string | null; enabled
     queryFn: async (): Promise<ProviderSkillsCatalogResult> => {
       const api = ensureNativeApi();
       return api.provider.listSkillsCatalog(cwd ? { cwd } : {});
+    },
+    enabled: input?.enabled ?? true,
+    staleTime: 30_000,
+    placeholderData: (previous) => previous,
+  });
+}
+
+// Aggregated MCP catalog (settings page) — discovered sources + syncode-owned
+// store entries. Like the skills catalog, keep prior data during refetches so
+// toggles don't visibly flicker while the server reloads.
+export function mcpCatalogQueryOptions(input?: { cwd?: string | null; enabled?: boolean }) {
+  const cwd = input?.cwd ?? null;
+  return queryOptions({
+    queryKey: providerDiscoveryQueryKeys.mcpCatalog(cwd),
+    queryFn: async (): Promise<McpCatalogResponse> => {
+      const api = ensureNativeApi();
+      return api.provider.listMcpCatalog(cwd ? { cwd } : {});
     },
     enabled: input?.enabled ?? true,
     staleTime: 30_000,

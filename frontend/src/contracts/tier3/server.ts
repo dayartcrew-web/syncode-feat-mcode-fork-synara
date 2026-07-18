@@ -176,6 +176,10 @@ export interface SkillsServerSettings {
   disabled: readonly string[];
 }
 
+export interface McpServerSettings {
+  disabled: readonly string[];
+}
+
 export interface ServerSettings {
   enableAssistantStreaming: boolean;
   defaultThreadEnvMode: ThreadEnvironmentMode;
@@ -192,6 +196,7 @@ export interface ServerSettings {
     pi: PiServerProviderSettings;
   };
   skills: SkillsServerSettings;
+  mcp: McpServerSettings;
 }
 
 /** Patch for partial settings update. */
@@ -215,6 +220,7 @@ export interface ServerSettingsPatch {
     pi?: Partial<PiServerProviderSettings>;
   };
   skills?: { disabled?: readonly string[] };
+  mcp?: { disabled?: readonly string[] };
 }
 
 // MCode derives DEFAULT_SERVER_SETTINGS via Schema.decodeSync at runtime. The
@@ -242,6 +248,7 @@ export const DEFAULT_SERVER_SETTINGS: ServerSettings = {
     pi: { enabled: true, binaryPath: "pi", customModels: [], agentDir: "" },
   },
   skills: { disabled: [] },
+  mcp: { disabled: [] },
 };
 
 // ─── Push payloads + lifecycle ────────────────────────────────────────

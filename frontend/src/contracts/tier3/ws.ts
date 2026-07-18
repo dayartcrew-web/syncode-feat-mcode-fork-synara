@@ -129,6 +129,13 @@ export const WS_METHODS = {
   providerReadPlugin: "provider.readPlugin",
   providerListModels: "provider.listModels",
   providerListAgents: "provider.listAgents",
+  providerListMcpCatalog: "provider.listMcpCatalog",
+
+  // MCP server management
+  mcpCreate: "mcp.create",
+  mcpUpdate: "mcp.update",
+  mcpDelete: "mcp.delete",
+  mcpTestConnection: "mcp.testConnection",
 
   // Automation methods
   automationList: "automation.list",

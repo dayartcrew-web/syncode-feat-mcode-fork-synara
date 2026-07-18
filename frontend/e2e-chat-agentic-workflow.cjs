@@ -53,6 +53,11 @@ const TURN1_PROMPT = `My secret token is ${SECRET_TOKEN}. Reply with exactly: AC
 const TURN2_PROMPT = 'What was the secret token I just gave you? Reply with exactly: TOKEN: <value>';
 
 fs.mkdirSync(SHOT_DIR, { recursive: true });
+// Backend validates project root existence on disk before creating the project
+// row. On Windows, `/tmp/e2e-agentic` resolves to `C:\tmp\e2e-agentic`, which
+// doesn't exist by default — so the project/create RPC silently rejects and
+// the picker never materializes. Pre-create it.
+fs.mkdirSync(PROJECT_ROOT, { recursive: true });
 
 // Browser-side tap: capture WS frames + console errors for diagnostics.
 const INJECT = `

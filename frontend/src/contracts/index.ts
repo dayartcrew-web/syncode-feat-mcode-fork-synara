@@ -609,6 +609,7 @@ export type {
   KiloServerProviderSettings,
   PiServerProviderSettings,
   SkillsServerSettings,
+  McpServerSettings,
   ServerSettings,
   ServerSettingsPatch,
   ServerConfigUpdatedPayload,
@@ -627,6 +628,26 @@ export type {
   ServerStopLocalServerInput as ServerStopLocalServerInputT3,
 } from "./tier3/server";
 export { DEFAULT_SERVER_SETTINGS } from "./tier3/server";
+
+// mcp domain
+export type {
+  McpCatalogResponse,
+  McpCreateResult,
+  McpDeleteInput,
+  McpDeleteResult,
+  McpEnvVar,
+  McpServerDescriptor,
+  McpServerInput,
+  McpServerPatch,
+  McpStatus,
+  McpTestConnectionInput,
+  McpTestConnectionResult,
+  McpTransport,
+  McpScope,
+  McpUpdateInput,
+  McpUpdateResult,
+  ProviderListMcpCatalogInput,
+} from "./tier3/mcp";
 
 // project domain
 export type {

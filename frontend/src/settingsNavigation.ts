@@ -15,6 +15,7 @@ export const SETTINGS_SECTION_IDS = [
   "providers",
   "skills",
   "agents",
+  "mcp",
   "usage",
   "advanced",
 ] as const;
@@ -142,6 +143,14 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     description: "Agents from .agents/skills, provider agents/ folders, and portable ~/.syncode/agents.",
     icon: "robot",
     eyebrow: "Shared agents",
+  },
+  {
+    id: "mcp",
+    group: "mcode",
+    label: "MCP Servers",
+    description: "Discover MCP servers from Claude / Cursor / Codex configs, add your own, and forward them to ACP providers.",
+    icon: "server",
+    eyebrow: "Model Context Protocol",
   },
   {
     id: "usage",

@@ -92,6 +92,7 @@ import {
 import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsageSettingsPanel";
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
+import { McpSettingsPanel } from "../components/settings/McpSettingsPanel";
 import { AgentsSettingsPanel } from "../components/settings/AgentsSettingsPanel";
 import {
   CHAT_CONTENT_CARD_CLASS_NAME,
@@ -3330,6 +3331,8 @@ function SettingsRouteView() {
         return <SkillsSettingsPanel />;
       case "agents":
         return <AgentsSettingsPanel />;
+      case "mcp":
+        return <McpSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
       case "advanced":
