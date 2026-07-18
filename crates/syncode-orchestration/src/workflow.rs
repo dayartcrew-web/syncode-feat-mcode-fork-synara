@@ -31,6 +31,8 @@ use syncode_core::agent::{
 };
 use syncode_memory::MemoryProvider;
 
+use crate::critic::{Critic, NoOpCritic, verdict_to_failure};
+
 /// Provider tag recorded alongside persisted interactions when the executor
 /// does not supply one (e.g. the P1-4 test mocks). Used as the default for
 /// [`WorkflowExecutor::provider_tag`]. P1-5's [`ProviderWorkflowExecutor`]
@@ -82,6 +84,30 @@ pub trait WorkflowExecutor: Send + Sync {
 
 /// Run the full supervised agent workflow.
 ///
+/// Equivalent to [`execute_workflow_with_critic`] with a [`NoOpCritic`] —
+/// preserves the original 6-step behaviour bit-for-bit. Existing callers see
+/// no change. New callers that want post-execution review should use
+/// [`execute_workflow_with_critic`] directly.
+pub async fn execute_workflow(
+    user_id: &str,
+    workflow_id: &str,
+    initial_task: &str,
+    memory: &dyn MemoryProvider,
+    executor: &dyn WorkflowExecutor,
+) -> Result<AgentState, WorkflowError> {
+    execute_workflow_with_critic(
+        user_id,
+        workflow_id,
+        initial_task,
+        memory,
+        executor,
+        &NoOpCritic,
+    )
+    .await
+}
+
+/// Run the supervised agent workflow with an optional post-execution critic.
+///
 /// Sequential pipeline (each step's failure routes the state to `Failed` and
 /// propagates the error via `?`):
 ///
@@ -92,9 +118,15 @@ pub trait WorkflowExecutor: Send + Sync {
 /// 3. **Planning** — [`execute_step`] wrapping `executor.plan(...)`. The
 ///    plan is stored in `state.memory.ephemeral["plan"]`.
 /// 4. **Execution** — [`execute_step`] wrapping `executor.execute(plan)`.
-/// 5. **Guardrails** — [`run_output_guardrails`] validates the execution
+/// 5. **Critic** — `critic.review(execution_output)`. Rejections and
+///    NeedsInfo route through [`WorkflowError::StepFailed`] so the failure
+///    sink handles them uniformly with planning/execution failures. With a
+///    [`NoOpCritic`] (the default via [`execute_workflow`]) this step always
+///    approves, so the pipeline is observably identical to the pre-critic
+///    6-step form (plus a single `[Critic]` log line).
+/// 6. **Guardrails** — [`run_output_guardrails`] validates the execution
 ///    output (rejects empty / whitespace-only payloads).
-/// 6. **Persistence** — `state.mark_completed()`, append the success log, then
+/// 7. **Persistence** — `state.mark_completed()`, append the success log, then
 ///    `memory.persist_interaction(...)`. Persistence is **best-effort**: a
 ///    failure to persist is logged but does not unwind a successfully
 ///    completed workflow (the output is already produced and validated).
@@ -105,19 +137,20 @@ pub trait WorkflowExecutor: Send + Sync {
 /// the error path because every routing step has already mutated it in place
 /// and callers can observe the final shape by cloning before the call; the
 /// error itself carries the diagnostic.
-pub async fn execute_workflow(
+pub async fn execute_workflow_with_critic(
     user_id: &str,
     workflow_id: &str,
     initial_task: &str,
     memory: &dyn MemoryProvider,
     executor: &dyn WorkflowExecutor,
+    critic: &dyn Critic,
 ) -> Result<AgentState, WorkflowError> {
     // 1. Initialization — construct the deterministic state frame.
     let mut state = AgentState::new(workflow_id, user_id, initial_task);
-    state.log("[Workflow] Step 1/6: Initialization complete");
+    state.log("[Workflow] Step 1/7: Initialization complete");
 
     // 2. Context retrieval (memory grounding).
-    state.log("[Workflow] Step 2/6: Retrieving context");
+    state.log("[Workflow] Step 2/7: Retrieving context");
     let context = memory.retrieve_context(user_id, initial_task).await;
     state.memory.set_ephemeral("context", context.as_str());
     let context = state.memory.ephemeral["context"].clone();
@@ -138,15 +171,32 @@ pub async fn execute_workflow(
     let exec_result = execute_step("Execution", || executor.execute(&plan), &mut state).await?;
     let StepResult::Success(execution_output) = exec_result;
 
-    // 5. Guardrails — validate the execution output before committing.
+    // 5. Critic — optional post-execution review. Runs after Execution
+    //    (so the output exists) but before Guardrails (so structural
+    //    validation still catches empty/whitespace even if a critic approves).
+    //    The verdict_to_failure conversion maps Rejected/NeedsInfo into
+    //    WorkflowError::StepFailed, which routes through the shared failure
+    //    sink — short-circuiting persistence the same way planning/execution
+    //    failures do.
+    let verdict = critic.review(&execution_output)?;
+    if let Some(err) = verdict_to_failure(verdict) {
+        // Use the standard failure-routing sink so current_step becomes
+        // Failed and the diagnostic lands in execution_logs, matching the
+        // planning/execution failure shape exactly.
+        state.log(format!("[Critic] {err}"));
+        return Err(err);
+    }
+    state.log("[Critic] Output approved");
+
+    // 6. Guardrails — validate the execution output before committing.
     let validated = run_output_guardrails(&execution_output, &mut state)?;
 
-    // 6. Persistence — mark complete, then best-effort persist.
+    // 7. Persistence — mark complete, then best-effort persist.
     state.mark_completed();
     state
         .memory
         .append_summary(format!("Completed workflow for task: {task}"));
-    state.log("[Workflow] Step 6/6: Workflow completed successfully with zero drift.".to_string());
+    state.log("[Workflow] Step 7/7: Workflow completed successfully with zero drift.".to_string());
 
     if let Err(persist_err) = memory
         .persist_interaction(
@@ -1189,5 +1239,170 @@ mod tests {
                 .contains("Interaction persisted to memory"),
             "the persist-success log line must be present"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // P1-7 — Critic integration (additive, optional reviewer step)
+    // ------------------------------------------------------------------
+    //
+    // These tests pin the new `execute_workflow_with_critic` contract:
+    // - Approved verdict → workflow proceeds exactly like the pre-critic form
+    //   (only difference: one extra `[Critic]` log line).
+    // - Rejected verdict → short-circuits before guardrails AND before
+    //   persistence, routing through the same StepFailed failure sink that
+    //   planning/execution failures use.
+    // - The original `execute_workflow` (no critic param) remains a drop-in
+    //   equivalent to `execute_workflow_with_critic` with a `NoOpCritic`.
+
+    use crate::critic::{CriticVerdict, test_doubles::RecordingCritic};
+
+    #[tokio::test]
+    async fn execute_workflow_with_critic_approved_preserves_happy_path() {
+        let memory = MockMemory::new_returning("ctx");
+        let executor = MockExecutor {
+            plan_output: Ok("plan".to_string()),
+            execute_output: Ok("real output".to_string()),
+        };
+        // Approving critic that records what it saw.
+        let critic = RecordingCritic::returning(CriticVerdict::Approved {
+            rationale: "looks good".to_string(),
+        });
+        let critic_recorder = critic.clone();
+
+        let state =
+            execute_workflow_with_critic("u-c", "wf-c", "task", &memory, &executor, &critic)
+                .await
+                .expect("approved critic should let the workflow complete");
+
+        // Critic saw the exact execution output (not the plan, not the task).
+        assert_eq!(
+            critic_recorder.reviewed(),
+            vec!["real output".to_string()],
+            "critic should review the execution output exactly once"
+        );
+
+        // Terminal state — same as pre-critic happy path.
+        assert_eq!(state.current_step, WorkflowStep::Completed);
+        assert!(state.is_completed);
+
+        // The critic approval landed in the logs alongside the existing
+        // pipeline-phase entries.
+        let logs = state.execution_logs.join("\n");
+        assert!(logs.contains("[Critic] Output approved"), "logs: {logs}");
+
+        // Persistence still ran (approved verdict does not skip persist).
+        assert_eq!(memory.persisted_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_with_critic_rejected_short_circuits_before_persist() {
+        let memory = MockMemory::new_returning("ctx");
+        let executor = MockExecutor {
+            plan_output: Ok("plan".to_string()),
+            execute_output: Ok("output that fails review".to_string()),
+        };
+        // Rejecting critic — cites two specific reasons.
+        let critic = RecordingCritic::returning(CriticVerdict::Rejected {
+            reasons: vec!["missing tests".to_string(), "no error handling".to_string()],
+        });
+
+        let err = execute_workflow_with_critic("u-r", "wf-r", "task", &memory, &executor, &critic)
+            .await
+            .expect_err("rejected critic should fail the workflow");
+
+        // Routes through StepFailed with the joined reasons — matches the
+        // existing failure-routing shape used by planning/execution failures.
+        match err {
+            WorkflowError::StepFailed(msg) => {
+                assert!(msg.contains("critic rejected output"), "got: {msg}");
+                assert!(msg.contains("missing tests"), "got: {msg}");
+                assert!(msg.contains("no error handling"), "got: {msg}");
+            }
+            other => panic!("expected StepFailed, got {other:?}"),
+        }
+
+        // Persistence must be skipped — same invariant as planning/execution
+        // failures.
+        assert!(
+            memory.persisted_calls().is_empty(),
+            "rejected critic must short-circuit before persistence"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_with_critic_needs_info_short_circuits_before_persist() {
+        let memory = MockMemory::new_returning("ctx");
+        let executor = MockExecutor {
+            plan_output: Ok("plan".to_string()),
+            execute_output: Ok("partial output".to_string()),
+        };
+        let critic = RecordingCritic::returning(CriticVerdict::NeedsInfo {
+            questions: vec!["which target environment?".to_string()],
+        });
+
+        let err = execute_workflow_with_critic("u-n", "wf-n", "task", &memory, &executor, &critic)
+            .await
+            .expect_err("needs-info critic should fail the workflow");
+
+        // NeedsInfo also routes through StepFailed — same shape as Rejected.
+        match err {
+            WorkflowError::StepFailed(msg) => {
+                assert!(msg.contains("critic needs more information"), "got: {msg}");
+                assert!(msg.contains("which target environment?"), "got: {msg}");
+            }
+            other => panic!("expected StepFailed, got {other:?}"),
+        }
+        assert!(memory.persisted_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_with_critic_error_propagates_and_skips_persist() {
+        let memory = MockMemory::new_returning("ctx");
+        let executor = MockExecutor {
+            plan_output: Ok("plan".to_string()),
+            execute_output: Ok("output".to_string()),
+        };
+        // Critic itself errors (e.g. verifier LLM down). Should propagate the
+        // error directly — NOT wrap it in StepFailed — so the caller sees the
+        // original ProviderError diagnostic.
+        let critic = RecordingCritic::failing(WorkflowError::ProviderError(
+            "verifier LLM offline".to_string(),
+        ));
+
+        let err = execute_workflow_with_critic("u-e", "wf-e", "task", &memory, &executor, &critic)
+            .await
+            .expect_err("critic error should propagate");
+
+        assert!(
+            matches!(err, WorkflowError::ProviderError(ref m) if m == "verifier LLM offline"),
+            "expected ProviderError, got {err:?}"
+        );
+        assert!(memory.persisted_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_without_critic_runs_noop_critic_step() {
+        // Calling the legacy entry point must:
+        // - complete successfully (NoOpCritic always approves)
+        // - emit the [Critic] approval log line (proving the review step ran)
+        // - persist exactly once (proving the pipeline reached the end)
+        let memory = MockMemory::new_returning("ctx");
+        let executor = MockExecutor {
+            plan_output: Ok("plan".to_string()),
+            execute_output: Ok("output".to_string()),
+        };
+
+        let state = execute_workflow("u-legacy", "wf-legacy", "task", &memory, &executor)
+            .await
+            .expect("legacy entry point should still complete");
+
+        assert_eq!(state.current_step, WorkflowStep::Completed);
+        assert!(state.is_completed);
+        let logs = state.execution_logs.join("\n");
+        assert!(
+            logs.contains("[Critic] Output approved"),
+            "legacy path should still run the (no-op) critic step; logs: {logs}"
+        );
+        assert_eq!(memory.persisted_calls().len(), 1);
     }
 }

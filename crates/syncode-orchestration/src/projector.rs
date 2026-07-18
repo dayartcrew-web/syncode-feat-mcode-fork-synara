@@ -657,6 +657,12 @@ impl Projector {
                 };
                 store.activities.push(view);
             }
+
+            // Forward-compat: skip projection of unrecognized event types.
+            // The event store still persists them so future binaries can
+            // replay the stream with full knowledge; this binary's read
+            // model simply doesn't know how to materialize them.
+            DomainEvent::Unknown => {}
         }
     }
 
@@ -922,6 +928,41 @@ mod tests {
         Projector::project(&event, &mut store);
         assert_eq!(store.activities.len(), 1);
         assert_eq!(store.activities[0].thread_id, Some(thread_id.as_str()));
+    }
+
+    #[test]
+    fn projector_skips_unknown_variant_without_touching_read_model() {
+        // Forward-compat: an Unknown event (from a future binary) must not
+        // panic the projector nor pollute any read-model collection.
+        let mut store = ReadModelStore::new();
+
+        // Seed the store with one known event so we can prove "unchanged"
+        // is a real assertion, not just "empty stayed empty".
+        let id = EntityId::new();
+        let seed = DomainEvent::ActivityLogged {
+            id,
+            activity_type: "seed".to_string(),
+            description: "seed activity".to_string(),
+            thread_id: None,
+            created_at: Timestamp::now(),
+        };
+        Projector::project(&seed, &mut store);
+        let activities_before = store.activities.len();
+        let threads_before = store.threads.len();
+        let turns_before = store.turns.len();
+        let messages_before = store.messages.len();
+        assert_eq!(activities_before, 1);
+
+        // Act: project Unknown.
+        Projector::project(&DomainEvent::Unknown, &mut store);
+
+        // Assert: every collection is byte-for-byte unchanged.
+        assert_eq!(store.activities.len(), activities_before);
+        assert_eq!(store.threads.len(), threads_before);
+        assert_eq!(store.turns.len(), turns_before);
+        assert_eq!(store.messages.len(), messages_before);
+        // No new keys appeared anywhere.
+        assert_eq!(store.activities[0].activity_type, "seed");
     }
 
     #[test]
