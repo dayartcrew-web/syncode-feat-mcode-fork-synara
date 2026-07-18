@@ -385,27 +385,31 @@ pub enum DomainEventDto {
         thread_id: Option<EntityId>,
         created_at: Timestamp,
     },
-
-    // ─── Forward Compatibility ──────────────────────────────────────────
-    /// DTO mirror of `syncode_core::DomainEvent::Unknown`. See the source
-    /// enum's doc comment for the full rationale, including why this is
-    /// NOT an auto-catch-all for unknown `eventType` tags (serde's adjacent
-    /// tagging requires content to match the catch-all variant's fields,
-    /// and `Unknown` is a unit variant — true catch-all behaviour needs a
-    /// custom `Deserialize`, deferred).
-    Unknown,
+    // NOTE: `syncode_core::DomainEvent::Unknown` has no DTO mirror. The
+    // variant exists in core for internal pipeline plumbing (projector
+    // skips it, event store persists it for forward-compat replays), but
+    // exposing it on the wire would (a) break ts-rs's uniform `{eventType,
+    // data}` shape because Unknown is a unit variant, and (b) give the
+    // frontend an event it cannot act on. The conversion below returns
+    // `Err` for Unknown so callers can filter it out at the WS-push boundary.
 }
 
-impl From<&syncode_core::DomainEvent> for DomainEventDto {
+impl TryFrom<&syncode_core::DomainEvent> for DomainEventDto {
+    type Error = ();
+
     /// Project a domain `DomainEvent` into the TS-facing DTO mirror.
     ///
     /// Field-by-field: primitive types map directly; core's typed `EntityId`/
     /// `Timestamp` primitives convert to the contracts string wrappers via the
     /// `id`/`ts` helpers above; `CheckpointFile` (core) → `CheckpointFileDto`.
-    fn from(ev: &syncode_core::DomainEvent) -> Self {
+    ///
+    /// Returns `Err(())` for `DomainEvent::Unknown`. The Unknown variant has
+    /// no DTO mirror (see the enum doc above) — callers at the WS-push
+    /// boundary must filter it out before attempting conversion.
+    fn try_from(ev: &syncode_core::DomainEvent) -> Result<Self, Self::Error> {
         use syncode_core::DomainEvent as E;
 
-        match ev {
+        let dto = match ev {
             // ─── Project ────────────────────────────────────────────────
             E::ProjectCreated {
                 id,
@@ -898,10 +902,11 @@ impl From<&syncode_core::DomainEvent> for DomainEventDto {
             },
 
             // ─── Forward-compat sentinel ───────────────────────────────
-            // Lossy by design: the source already dropped the original
-            // payload, so the DTO mirror carries the same loss forward.
-            E::Unknown => Self::Unknown,
-        }
+            // Unknown has no DTO mirror (see enum docs) — surface an `Err`
+            // so the WS-push boundary can filter it out before serialization.
+            E::Unknown => return Err(()),
+        };
+        Ok(dto)
     }
 }
 
@@ -1310,7 +1315,7 @@ mod tests {
         ];
 
         for (core_ev, expected_tag) in cases {
-            let dto: DomainEventDto = (&core_ev).into();
+            let dto: DomainEventDto = (&core_ev).try_into().unwrap();
             let json = serde_json::to_string(&dto).unwrap();
             assert!(
                 json.contains(&format!("\"eventType\":\"{expected_tag}\"")),
@@ -1358,7 +1363,7 @@ mod tests {
             ),
         ];
         for (core_ev, expected_tag) in cases {
-            let dto: DomainEventDto = (&core_ev).into();
+            let dto: DomainEventDto = (&core_ev).try_into().unwrap();
             let json = serde_json::to_string(&dto).unwrap();
             assert!(
                 json.contains(&format!("\"eventType\":\"{expected_tag}\"")),
@@ -1368,19 +1373,19 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Forward-compat Unknown variant
+    // Forward-compat Unknown handling
     // ------------------------------------------------------------------
 
     #[test]
     fn unknown_event_type_with_payload_does_not_deserialize_via_serde_other() {
         // Pin the known serde limitation: with adjacent tagging (tag +
-        // content) and `Unknown` as a unit variant, `#[serde(other)]` does
-        // NOT catch unknown eventType tags carrying a payload, because
-        // serde tries to deserialize the content into the catch-all variant
-        // (which expects unit). We removed `#[serde(other)]` for this
-        // reason — see the variant's doc comment. This test pins the
-        // current lossy behaviour and would need updating if/when a custom
-        // Deserialize impl lands.
+        // content) and no DTO mirror for `Unknown`, an unknown eventType
+        // tag carrying a payload must fail loudly. We previously tried
+        // `#[serde(other)]` to catch this, but it does not work for unit
+        // variants under adjacent tagging — serde attempts to deserialize
+        // the content into the catch-all variant and errors. This test
+        // pins the current loud-failure behaviour and would need updating
+        // if/when a custom Deserialize impl lands.
         let json = r#"{"eventType":"someFutureEvent","data":{"x":1}}"#;
         let result: Result<DomainEventDto, _> = serde_json::from_str(json);
         assert!(
@@ -1391,21 +1396,11 @@ mod tests {
     }
 
     #[test]
-    fn from_core_unknown_projects_to_dto_unknown() {
-        // The From<&DomainEvent> bridge must preserve the forward-compat
-        // sentinel — a core Unknown yields a DTO Unknown, not a panic.
-        let dto: DomainEventDto = (&syncode_core::DomainEvent::Unknown).into();
-        assert!(matches!(dto, DomainEventDto::Unknown));
-    }
-
-    #[test]
-    fn unknown_dto_round_trips_through_serde() {
-        // Explicit Unknown emission round-trips cleanly. This is the
-        // canonical forward-compat path — code that wants to record
-        // "unknown" emits Unknown directly.
-        let dto = DomainEventDto::Unknown;
-        let json = serde_json::to_string(&dto).expect("serialize");
-        let back: DomainEventDto = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(back, DomainEventDto::Unknown));
+    fn try_from_core_unknown_returns_err_so_callers_can_filter() {
+        // Unknown has no DTO mirror (see enum docs). The TryFrom bridge
+        // must surface `Err(())` so the WS-push boundary can filter it
+        // out before serializing events to clients.
+        let result: Result<DomainEventDto, ()> = (&syncode_core::DomainEvent::Unknown).try_into();
+        assert!(result.is_err());
     }
 }

@@ -58,6 +58,7 @@ contracts/generated/
 
 # Playwright MCP artifacts (browser snapshots + screenshots from audits)
 .playwright-mcp/
+*.png
 
 # Local agent/tooling runtimes (session state, caches — not source)
 .zcode/
