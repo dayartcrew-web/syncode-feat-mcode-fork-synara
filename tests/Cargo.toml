@@ -8,6 +8,10 @@ publish = false
 name = "workspace_integration"
 path = "workspace_integration.rs"
 
+[[test]]
+name = "agentic_smoke"
+path = "agentic_smoke.rs"
+
 [dev-dependencies]
 syncode-core = { workspace = true }
 syncode-contracts = { workspace = true }
