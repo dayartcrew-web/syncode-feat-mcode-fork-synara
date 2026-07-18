@@ -2,6 +2,9 @@
 //!
 //! Stores prompt/response pairs in an `interactions` table and retrieves
 //! the N most recent rows per user/project as a formatted markdown string.
+//! When the caller passes a non-empty `query`, retrieval is ranked by FTS5
+//! relevance over `prompt` + `response`; an empty query falls back to the
+//! most-recent-N contract.
 //!
 //! # Table Schema
 //!
@@ -18,6 +21,17 @@
 //! );
 //! CREATE INDEX IF NOT EXISTS idx_interactions_user_project_ts
 //!     ON interactions(user_id, project_id, timestamp DESC);
+//!
+//! -- FTS5 sidecar (content linked to interactions so writes stay single-table).
+//! CREATE VIRTUAL TABLE IF NOT EXISTS interactions_fts USING fts5(
+//!     prompt, response,
+//!     content='interactions', content_rowid='id'
+//! );
+//! -- Triggers keep the FTS index in sync with INSERTs on interactions.
+//! CREATE TRIGGER IF NOT EXISTS interactions_ai AFTER INSERT ON interactions BEGIN
+//!     INSERT INTO interactions_fts(rowid, prompt, response)
+//!     VALUES (new.id, new.prompt, new.response);
+//! END;
 //! ```
 //!
 //! The schema is created idempotently via [`SqliteMemoryStore::init_schema`]
@@ -98,9 +112,15 @@ impl SqliteMemoryStore {
         &self.pool
     }
 
-    /// Create the `interactions` table and its index if they don't exist.
-    /// Idempotent — safe to call on a database that already has the schema.
+    /// Create the `interactions` table, its index, and the FTS5 sidecar if
+    /// they don't exist. Idempotent — safe to call on a database that already
+    /// has the schema. The FTS5 virtual table + INSERT trigger enable MATCH
+    /// retrieval when the caller passes a non-empty `query` to
+    /// [`MemoryProvider::retrieve_context`].
     async fn init_schema(&self) -> Result<()> {
+        // Base table + index — split from the FTS5 DDL because SQLite's
+        // `execute` only runs the first statement when multiple are concatenated
+        // with `;` depending on the driver's statement-splitting mode.
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS interactions (
@@ -113,9 +133,33 @@ impl SqliteMemoryStore {
                 tokens      INTEGER NOT NULL,
                 timestamp   TEXT    NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_interactions_user_project_ts
-                ON interactions(user_id, project_id, timestamp DESC);
             "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_interactions_user_project_ts
+                ON interactions(user_id, project_id, timestamp DESC);"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        // FTS5 sidecar linked to `interactions` so the base table remains the
+        // source of truth and writes don't need a separate code path. The
+        // AFTER INSERT trigger mirrors each row into the FTS index; we don't
+        // need DELETE/UPDATE triggers because the store never mutates rows.
+        sqlx::query(
+            r#"CREATE VIRTUAL TABLE IF NOT EXISTS interactions_fts USING fts5(
+                prompt, response,
+                content='interactions', content_rowid='id'
+            );"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE TRIGGER IF NOT EXISTS interactions_ai AFTER INSERT ON interactions BEGIN
+                INSERT INTO interactions_fts(rowid, prompt, response)
+                VALUES (new.id, new.prompt, new.response);
+            END;"#,
         )
         .execute(&self.pool)
         .await?;
@@ -139,6 +183,37 @@ impl SqliteMemoryStore {
     /// the database for budget/audit queries. Returns
     /// [`NO_PRIOR_CONTEXT`] when `rows` is empty so the result can be
     /// rendered unconditionally without a separate emptiness check.
+    /// Most-recent-N rows for the (user_id, project_id) scope, ordered by
+    /// timestamp DESC. Shared by the empty-query path and the FTS5-zero-
+    /// matches fallback so both produce identical recency-ranked output.
+    ///
+    /// Returns an empty `Vec` on store error (which surfaces as
+    /// [`NO_PRIOR_CONTEXT`] via [`Self::format_context`]) rather than
+    /// propagating the error — retrieval is best-effort.
+    async fn fetch_recent(&self, user_id: &str) -> Vec<InteractionRow> {
+        match sqlx::query_as(
+            r#"
+            SELECT prompt, response, provider, tokens, timestamp
+            FROM interactions
+            WHERE user_id = ? AND project_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(user_id)
+        .bind(&self.project_id)
+        .bind(self.limit)
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "memory: fetch_recent failed");
+                Vec::new()
+            }
+        }
+    }
+
     fn format_context(rows: &[InteractionRow]) -> String {
         if rows.is_empty() {
             return String::from(NO_PRIOR_CONTEXT);
@@ -168,34 +243,56 @@ impl SqliteMemoryStore {
 
 #[async_trait]
 impl MemoryProvider for SqliteMemoryStore {
-    async fn retrieve_context(&self, user_id: &str, _query: &str) -> String {
-        // The `query` argument is reserved for future semantic-search retrieval
-        // (PRD P3-2 lists context retrieval as a separate follow-on task).
-        // For P3-1 we return the N most recent interactions for the scope,
-        // which is the contract documented in the PRD target design.
-        let rows: std::result::Result<Vec<InteractionRow>, sqlx::Error> = sqlx::query_as(
+    async fn retrieve_context(&self, user_id: &str, query: &str) -> String {
+        // Three retrieval modes:
+        //   - empty `query`: most-recent-N for the scope (PRD P3-1 contract).
+        //   - non-empty `query` with FTS5 matches: MATCH against prompt+response,
+        //     ranked by bm25 relevance then recency, capped at N.
+        //   - non-empty `query` with ZERO FTS5 matches: fall back to most-recent-N
+        //     so callers passing a "context hint" rather than a strict search
+        //     query still receive prior context instead of NO_PRIOR_CONTEXT.
+        //
+        // FTS5 query syntax errors fall through to recency-N too (via the
+        // `Ok(vec![])` arm after a swallowed inner error) — a bad query never
+        // breaks the provider turn.
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Self::format_context(&self.fetch_recent(user_id).await);
+        }
+
+        // FTS5 ranking: bm25() returns a relevance score (lower = more
+        // relevant, hence ASC). Ties fall back to recency (timestamp DESC).
+        // The MATCH pattern is parameterized — sqlx bind ensures the value
+        // cannot escape into SQL syntax. We do NOT massage the query here;
+        // FTS5 query syntax (e.g. `prefix*`, `"phrase"`, `OR`) is supported
+        // end-to-end.
+        let fts_rows: std::result::Result<Vec<InteractionRow>, sqlx::Error> = sqlx::query_as(
             r#"
-            SELECT prompt, response, provider, tokens, timestamp
-            FROM interactions
-            WHERE user_id = ? AND project_id = ?
-            ORDER BY timestamp DESC
+            SELECT i.prompt, i.response, i.provider, i.tokens, i.timestamp
+            FROM interactions i
+            JOIN interactions_fts f ON f.rowid = i.id
+            WHERE i.user_id = ? AND i.project_id = ?
+              AND interactions_fts MATCH ?
+            ORDER BY bm25(interactions_fts) ASC, i.timestamp DESC
             LIMIT ?
             "#,
         )
         .bind(user_id)
         .bind(&self.project_id)
+        .bind(trimmed)
         .bind(self.limit)
         .fetch_all(&self.pool)
         .await;
 
-        match rows {
-            Ok(rows) => Self::format_context(&rows),
-            // Surface the error via tracing and degrade to no-context rather
-            // than panicking; a transient store failure should not break the
-            // provider turn.
+        match fts_rows {
+            Ok(rows) if !rows.is_empty() => Self::format_context(&rows),
+            // Zero matches OR FTS5 syntax error: fall back to recency-N.
+            // Recency-N returns NO_PRIOR_CONTEXT on its own when the user has
+            // no rows, preserving the sentinel contract.
+            Ok(_) => Self::format_context(&self.fetch_recent(user_id).await),
             Err(e) => {
-                tracing::warn!(error = %e, "memory: retrieve_context failed");
-                String::new()
+                tracing::warn!(error = %e, "memory: FTS5 query failed, falling back to recency");
+                Self::format_context(&self.fetch_recent(user_id).await)
             }
         }
     }
@@ -533,6 +630,165 @@ mod tests {
         assert!(
             pos_second < pos_first,
             "expected most-recent first, got second={pos_second} first={pos_first}"
+        );
+    }
+
+    // ───────────────────── FTS5 query path (semantic retrieval) ──────────────
+
+    /// A non-empty `query` exercises the FTS5 MATCH path. Rows whose
+    /// prompt/response contain the query term are returned; rows that don't
+    /// contain the term are filtered out even when they're more recent. This
+    /// is the core production-readiness upgrade over the most-recent-N
+    /// contract — agents can now pull *relevant* context, not just *recent*
+    /// context.
+    #[tokio::test]
+    async fn retrieve_context_with_query_returns_only_matching_rows() {
+        let store = SqliteMemoryStore::new_in_memory()
+            .await
+            .unwrap()
+            .with_limit(5);
+        store
+            .persist_interaction(
+                "fts-user",
+                "How do I configure auth?",
+                "Use the auth middleware",
+                "claude",
+                10,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        store
+            .persist_interaction(
+                "fts-user",
+                "Tell me a joke",
+                "Why did the chicken cross the road?",
+                "claude",
+                5,
+            )
+            .await
+            .unwrap();
+
+        // Query for "auth" — only the auth-related interaction matches.
+        let ctx = store.retrieve_context("fts-user", "auth").await;
+        assert!(
+            ctx.contains("configure auth"),
+            "matching prompt should appear: {ctx}"
+        );
+        assert!(
+            ctx.contains("auth middleware"),
+            "matching response should appear: {ctx}"
+        );
+        assert!(
+            !ctx.contains("chicken"),
+            "non-matching row leaked into FTS results: {ctx}"
+        );
+    }
+
+    /// An empty query still returns most-recent-N (the legacy contract).
+    /// Guards against accidental breakage of existing call sites that pass "".
+    #[tokio::test]
+    async fn retrieve_context_with_empty_query_falls_back_to_recent_n() {
+        let store = SqliteMemoryStore::new_in_memory()
+            .await
+            .unwrap()
+            .with_limit(3);
+        for prompt in ["alpha", "beta", "gamma"] {
+            store
+                .persist_interaction("empty-q-user", prompt, "resp", "claude", 1)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let ctx = store.retrieve_context("empty-q-user", "").await;
+        // All three rows surface (limit=3, only 3 stored) — proves the
+        // FTS path is NOT engaged for empty queries.
+        assert!(ctx.contains("alpha"), "missing alpha: {ctx}");
+        assert!(ctx.contains("beta"), "missing beta: {ctx}");
+        assert!(ctx.contains("gamma"), "missing gamma: {ctx}");
+    }
+
+    /// A non-empty query that FTS5 cannot match falls back to most-recent-N
+    /// for the scope — the prior-context contract is "if there's any data,
+    /// return it", and a non-matching query is treated as a hint, not a
+    /// strict filter. The fallback preserves the orchestration pipeline's
+    /// behavior where the query is often a task description rather than a
+    /// search term.
+    #[tokio::test]
+    async fn retrieve_context_with_non_matching_query_falls_back_to_recent_n() {
+        let store = SqliteMemoryStore::new_in_memory()
+            .await
+            .unwrap()
+            .with_limit(3);
+        store
+            .persist_interaction(
+                "no-match-user",
+                "talks about rust",
+                "rust is great",
+                "claude",
+                1,
+            )
+            .await
+            .unwrap();
+
+        let ctx = store.retrieve_context("no-match-user", "kotlin").await;
+        assert!(
+            ctx.contains("talks about rust"),
+            "non-matching query should fall back to recency-N and return prior data: {ctx}"
+        );
+        assert!(
+            ctx.contains("rust is great"),
+            "non-matching query should also surface the response: {ctx}"
+        );
+    }
+
+    /// A non-empty query against an empty store still surfaces
+    /// [`NO_PRIOR_CONTEXT`] — the fallback path doesn't manufacture data.
+    #[tokio::test]
+    async fn retrieve_context_with_non_matching_query_on_empty_store_returns_sentinel() {
+        let store = SqliteMemoryStore::new_in_memory().await.unwrap();
+        let ctx = store.retrieve_context("ghost-user", "anything").await;
+        assert_eq!(
+            ctx, NO_PRIOR_CONTEXT,
+            "empty store should surface no-prior-context sentinel, got: {ctx}"
+        );
+    }
+
+    /// A query that matches some rows but not others only surfaces the
+    /// matching rows — the recency-N fallback only triggers on ZERO matches.
+    /// This guards against the fallback accidentally shadowing the FTS5
+    /// ranking when a partial match exists.
+    #[tokio::test]
+    async fn retrieve_context_partial_match_does_not_trigger_fallback() {
+        let store = SqliteMemoryStore::new_in_memory()
+            .await
+            .unwrap()
+            .with_limit(5);
+        store
+            .persist_interaction("partial-user", "rust question", "rust answer", "claude", 1)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        store
+            .persist_interaction(
+                "partial-user",
+                "kotlin question",
+                "kotlin answer",
+                "claude",
+                1,
+            )
+            .await
+            .unwrap();
+
+        // "rust" matches row 1 only — fallback should NOT trigger, so the
+        // kotlin row stays filtered out.
+        let ctx = store.retrieve_context("partial-user", "rust").await;
+        assert!(ctx.contains("rust question"));
+        assert!(ctx.contains("rust answer"));
+        assert!(
+            !ctx.contains("kotlin"),
+            "partial match should NOT fall back to recency-N: {ctx}"
         );
     }
 }

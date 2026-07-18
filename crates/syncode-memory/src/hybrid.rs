@@ -34,6 +34,7 @@
 
 use crate::provider::{MemoryProvider, MemoryProviderError, NO_PRIOR_CONTEXT, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -43,7 +44,7 @@ use tokio::sync::Mutex;
 /// Mirrors the source project's scope taxonomy (scope.rs:17-27). Narrower
 /// scopes shadow broader ones only when the backend chooses; the hybrid
 /// provider passes the same scope to every backend and merges results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scope {
     /// Per-session — ephemeral, single conversation.
     Session,
@@ -69,7 +70,7 @@ impl Scope {
 
 /// A memory entry to be persisted. The shape mirrors the fields
 /// [`MemoryProvider::persist_interaction`] accepts, plus a [`Scope`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub user_id: String,
     pub prompt: String,
