@@ -92,8 +92,32 @@ async fn retrieve_with_fts_query_returns_only_matching_rows() {
     assert!(ctx_match.contains("rustup"));
     assert!(!ctx_match.contains("kubectl"));
 
+    // A non-matching query now falls back to recency-N (preserving the
+    // "if there's data, return it" contract). NO_PRIOR_CONTEXT only surfaces
+    // for a genuinely empty store. Verify both rows surface here.
     let ctx_no_match = store.retrieve_context("u", "javascript webpack").await;
-    assert_eq!(ctx_no_match, NO_PRIOR_CONTEXT);
+    assert_ne!(ctx_no_match, NO_PRIOR_CONTEXT);
+    assert!(
+        ctx_no_match.contains("rustup") || ctx_no_match.contains("kubectl"),
+        "non-matching query should fall back to recency-N: {ctx_no_match}"
+    );
+}
+
+#[tokio::test]
+async fn retrieve_with_non_matching_query_on_empty_store_returns_sentinel() {
+    let (store, _tmp) = fresh_store().await;
+    store
+        .persist_interaction("u", "configure rust toolchain", "use rustup", "test", 1)
+        .await
+        .unwrap();
+
+    // A user with NO rows — even when other users have data — must surface
+    // NO_PRIOR_CONTEXT for a non-matching query. The fallback path doesn't
+    // manufacture data.
+    let ctx = store
+        .retrieve_context("ghost-user", "javascript webpack")
+        .await;
+    assert_eq!(ctx, NO_PRIOR_CONTEXT);
 }
 
 #[tokio::test]
