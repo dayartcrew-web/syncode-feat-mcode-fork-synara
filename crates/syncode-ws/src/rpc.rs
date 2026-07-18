@@ -828,15 +828,9 @@ async fn dispatch_method(
         "provider.listMcpCatalog" | "provider/list-mcp-catalog" => {
             handle_provider_list_mcp_catalog(state, id, &request.params).await
         }
-        "mcp.create" | "mcp/create" => {
-            handle_mcp_create(state, id, &request.params).await
-        }
-        "mcp.update" | "mcp/update" => {
-            handle_mcp_update(state, id, &request.params).await
-        }
-        "mcp.delete" | "mcp/delete" => {
-            handle_mcp_delete(state, id, &request.params).await
-        }
+        "mcp.create" | "mcp/create" => handle_mcp_create(state, id, &request.params).await,
+        "mcp.update" | "mcp/update" => handle_mcp_update(state, id, &request.params).await,
+        "mcp.delete" | "mcp/delete" => handle_mcp_delete(state, id, &request.params).await,
         "mcp.testConnection" | "mcp/test-connection" => {
             handle_mcp_test_connection(state, id, &request.params).await
         }
@@ -10366,7 +10360,11 @@ async fn handle_provider_list_mcp_catalog(
         serde_json::to_value(&servers).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
     let syncode_path = home
         .as_deref()
-        .map(|h| crate::mcp_catalog::syncode_mcp_path(h).to_string_lossy().into_owned())
+        .map(|h| {
+            crate::mcp_catalog::syncode_mcp_path(h)
+                .to_string_lossy()
+                .into_owned()
+        })
         .map(Value::String)
         .unwrap_or(Value::Null);
     JsonRpcResponse::success(
@@ -10564,8 +10562,7 @@ async fn handle_mcp_create(state: &WsState, id: Value, params: &Value) -> JsonRp
     let _ = state.settings.read().await.settings.get("mcp");
     match crate::mcp_catalog::create_syncode_server(&home, &input) {
         Ok(descriptor) => {
-            let value = serde_json::to_value(&descriptor)
-                .unwrap_or_else(|_| serde_json::json!({}));
+            let value = serde_json::to_value(&descriptor).unwrap_or_else(|_| serde_json::json!({}));
             JsonRpcResponse::success(id, serde_json::json!({ "server": value }))
         }
         Err(message) => {
@@ -10603,8 +10600,7 @@ async fn handle_mcp_update(state: &WsState, id: Value, params: &Value) -> JsonRp
     let _ = state.settings.read().await.settings.get("mcp");
     match crate::mcp_catalog::update_syncode_server(&home, &name, &input) {
         Ok(descriptor) => {
-            let value = serde_json::to_value(&descriptor)
-                .unwrap_or_else(|_| serde_json::json!({}));
+            let value = serde_json::to_value(&descriptor).unwrap_or_else(|_| serde_json::json!({}));
             JsonRpcResponse::success(id, serde_json::json!({ "server": value }))
         }
         Err(message) => {

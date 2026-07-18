@@ -14,9 +14,7 @@
 
 use serde_json::json;
 use std::collections::HashSet;
-use syncode_ws::mcp_catalog::{
-    self, McpDiscoveryInput, McpServerInput, McpTransport,
-};
+use syncode_ws::mcp_catalog::{self, McpDiscoveryInput, McpServerInput, McpTransport};
 
 /// Makes a temp dir under `std::env::temp_dir()` with a unique suffix.
 fn tmp_home(label: &str) -> String {
@@ -89,7 +87,10 @@ fn discover_returns_aggregated_across_sources() {
 #[test]
 fn create_persists_to_syncode_store() {
     let home = tmp_home("create");
-    let args: Vec<String> = vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()];
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "@modelcontextprotocol/server-filesystem".into(),
+    ];
     let env: Vec<(String, String)> = vec![("GITHUB_TOKEN".into(), "ghp_xxx".into())];
     let input = stdio_input("filesystem", "npx", &args, &env);
     let descriptor = mcp_catalog::create_syncode_server(&home, &input).expect("create succeeds");
@@ -104,8 +105,13 @@ fn create_persists_to_syncode_store() {
     assert_eq!(descriptor.env[0].name, "GITHUB_TOKEN");
 
     // The store file was actually created at the expected path.
-    let store_path = std::path::Path::new(&home).join(".syncode").join("mcp.json");
-    assert!(store_path.exists(), "store file should exist at {store_path:?}");
+    let store_path = std::path::Path::new(&home)
+        .join(".syncode")
+        .join("mcp.json");
+    assert!(
+        store_path.exists(),
+        "store file should exist at {store_path:?}"
+    );
     let raw = std::fs::read_to_string(&store_path).unwrap();
     assert!(raw.contains("filesystem"), "store should contain the name");
     assert!(
@@ -124,8 +130,8 @@ fn create_rejects_duplicate_name() {
     let input = stdio_input("github", "gh-mcp", &args, &env);
     mcp_catalog::create_syncode_server(&home, &input).expect("first create");
 
-    let err = mcp_catalog::create_syncode_server(&home, &input)
-        .expect_err("duplicate create must fail");
+    let err =
+        mcp_catalog::create_syncode_server(&home, &input).expect_err("duplicate create must fail");
     assert!(err.contains("already exists"), "wrong error: {err}");
 
     std::fs::remove_dir_all(&home).ok();

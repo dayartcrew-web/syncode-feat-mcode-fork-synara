@@ -207,8 +207,7 @@ pub(crate) fn write_syncode_mcp_store(
         .lock()
         .map_err(|e| format!("store lock poisoned: {e}"))?;
     let path = ensure_syncode_mcp_file(home_dir).ok_or_else(|| "home dir unknown".to_string())?;
-    let json =
-        serde_json::to_string_pretty(store).map_err(|e| format!("serialize failed: {e}"))?;
+    let json = serde_json::to_string_pretty(store).map_err(|e| format!("serialize failed: {e}"))?;
     let parent = path
         .parent()
         .ok_or_else(|| "store path has no parent".to_string())?;
@@ -702,7 +701,10 @@ pub fn build_mcp_servers_for_acp(
     // docs). Filter accordingly so we don't send shapes the providers reject.
     let mut out = Vec::new();
     let store = read_syncode_mcp_store(home);
-    for entry in catalog.iter().filter(|e| e.enabled && e.transport == McpTransport::Stdio) {
+    for entry in catalog
+        .iter()
+        .filter(|e| e.enabled && e.transport == McpTransport::Stdio)
+    {
         // Recover env values. For syncode-owned entries, look up in the store.
         // For external entries, re-read the source file. We don't currently
         // forward external entries (we only forward syncode-owned) to keep the
@@ -719,7 +721,10 @@ pub fn build_mcp_servers_for_acp(
         } else {
             let mut map = serde_json::Map::new();
             for var in &stored.env {
-                map.insert(var.name.clone(), serde_json::Value::String(var.value.clone()));
+                map.insert(
+                    var.name.clone(),
+                    serde_json::Value::String(var.value.clone()),
+                );
             }
             serde_json::Value::Object(map)
         };
@@ -885,10 +890,7 @@ const MCP_INITIALIZE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initia
 /// `{transport, command?, args?, env?, url?, timeoutMs?}`. Returns a JSON
 /// object: `{status: "reachable" | "unreachable", latencyMs?, error?}`.
 /// Never errors — unreachable is a normal result, not an RPC failure.
-pub async fn probe_mcp_server(
-    params: &serde_json::Value,
-    timeout_ms: u64,
-) -> serde_json::Value {
+pub async fn probe_mcp_server(params: &serde_json::Value, timeout_ms: u64) -> serde_json::Value {
     let timeout_ms = timeout_ms.min(PROBE_TIMEOUT_CAP_MS);
     let transport = match params
         .get("transport")
@@ -967,34 +969,31 @@ async fn probe_stdio(params: &serde_json::Value, timeout_ms: u64) -> Result<u64,
         .ok_or_else(|| "no stdout pipe".to_string())?;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let write_result = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        async {
-            let mut stdin = stdin;
-            let mut stdout = stdout;
-            stdin
-                .write_all(MCP_INITIALIZE_REQUEST.as_bytes())
+    let write_result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+        let mut stdin = stdin;
+        let mut stdout = stdout;
+        stdin
+            .write_all(MCP_INITIALIZE_REQUEST.as_bytes())
+            .await
+            .map_err(|e| format!("write failed: {e}"))?;
+        stdin.write_all(b"\n").await.ok();
+        stdin.flush().await.ok();
+        // Read until we see a non-empty line — the initialize response.
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = stdout
+                .read(&mut buf)
                 .await
-                .map_err(|e| format!("write failed: {e}"))?;
-            stdin.write_all(b"\n").await.ok();
-            stdin.flush().await.ok();
-            // Read until we see a non-empty line — the initialize response.
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = stdout
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| format!("read failed: {e}"))?;
-                if n == 0 {
-                    return Err("eof before response".to_string());
-                }
-                let chunk = std::str::from_utf8(&buf[..n]).unwrap_or("");
-                if chunk.contains(r#""result""#) {
-                    return Ok(());
-                }
+                .map_err(|e| format!("read failed: {e}"))?;
+            if n == 0 {
+                return Err("eof before response".to_string());
             }
-        },
-    )
+            let chunk = std::str::from_utf8(&buf[..n]).unwrap_or("");
+            if chunk.contains(r#""result""#) {
+                return Ok(());
+            }
+        }
+    })
     .await;
 
     match write_result {
@@ -1045,25 +1044,13 @@ impl<'a> McpServerInput<'a> {
         }
     }
     pub fn args_value(&self) -> Option<&[String]> {
-        if self.set_args {
-            Some(self.args)
-        } else {
-            None
-        }
+        if self.set_args { Some(self.args) } else { None }
     }
     pub fn env_value(&self) -> Option<&[(String, String)]> {
-        if self.set_env {
-            Some(self.env)
-        } else {
-            None
-        }
+        if self.set_env { Some(self.env) } else { None }
     }
     pub fn url_value(&self) -> Option<Option<&str>> {
-        if self.set_url {
-            Some(self.url)
-        } else {
-            None
-        }
+        if self.set_url { Some(self.url) } else { None }
     }
     /// Validates required fields for a create. Returns `Err` with a
     /// human-readable message.
@@ -1133,7 +1120,10 @@ mod tests {
         assert_eq!(srv.name, "filesystem");
         assert_eq!(srv.transport, McpTransport::Stdio);
         assert_eq!(srv.command.as_deref(), Some("npx"));
-        assert_eq!(srv.args, vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]);
+        assert_eq!(
+            srv.args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        );
         // Env values redacted — only names.
         assert_eq!(srv.env.len(), 2);
         let env_names: Vec<&str> = srv.env.iter().map(|e| e.name.as_str()).collect();
@@ -1285,7 +1275,10 @@ ROOT = "/data"
         let reloaded = read_syncode_mcp_store(tmp.to_string_lossy().as_ref());
         assert_eq!(reloaded.servers.len(), 1);
         assert_eq!(reloaded.servers[0].name, "s1");
-        assert_eq!(reloaded.servers[0].env[0].value, "V", "values preserved on disk");
+        assert_eq!(
+            reloaded.servers[0].env[0].value, "V",
+            "values preserved on disk"
+        );
         fs::remove_dir_all(&tmp).ok();
     }
 
@@ -1352,7 +1345,10 @@ ROOT = "/data"
             transport: McpTransport::Stdio,
             transport_override: None,
             command: Some("npx"),
-            args: &["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+            args: &[
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
             env: &[("ROOT".to_string(), "/data".to_string())],
             url: None,
             set_command: true,
@@ -1376,7 +1372,11 @@ ROOT = "/data"
             transport: McpTransport::Stdio,
             transport_override: None,
             command: None,
-            args: &["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string(), "/data".to_string()],
+            args: &[
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                "/data".to_string(),
+            ],
             env: &[],
             url: None,
             set_command: false,

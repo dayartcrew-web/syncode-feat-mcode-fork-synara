@@ -44,11 +44,9 @@ use syncode_provider::PROVIDER_CLAUDE;
 // Provider-id constants are used at runtime by `extract_provider_extras` (to
 // detect ACP-speaking providers and forward the discovered MCP catalog) and
 // by the test module.
-use syncode_provider::{PROVIDER_CURSOR, PROVIDER_GEMINI, PROVIDER_GROK};
 #[cfg(test)]
-use syncode_provider::{
-    PROVIDER_CODEX, PROVIDER_KILO, PROVIDER_OPENCODE, PROVIDER_PI,
-};
+use syncode_provider::{PROVIDER_CODEX, PROVIDER_KILO, PROVIDER_OPENCODE, PROVIDER_PI};
+use syncode_provider::{PROVIDER_CURSOR, PROVIDER_GEMINI, PROVIDER_GROK};
 
 /// In-memory server settings — persists during the server session, with
 /// optional on-disk write-through (SRV-1).
@@ -810,10 +808,7 @@ fn is_acp_provider(provider_id: &str) -> bool {
 /// Merge catalog MCP servers with optional user-pinned ones. Catalog entries
 /// win on lowercased-name collisions; user entries are appended otherwise so
 /// hand-edited configs keep working.
-fn merge_mcp_servers(
-    catalog: Vec<Value>,
-    user_pinned: Option<&Value>,
-) -> Vec<Value> {
+fn merge_mcp_servers(catalog: Vec<Value>, user_pinned: Option<&Value>) -> Vec<Value> {
     let mut merged: Vec<Value> = catalog;
     let catalog_names: HashSet<String> = merged
         .iter()
