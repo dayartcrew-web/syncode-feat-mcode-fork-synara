@@ -126,6 +126,18 @@ import type {
   ProviderSkillsCatalogResult,
 } from "./tier3/provider";
 import type {
+  McpCatalogResponse,
+  McpCreateResult,
+  McpDeleteInput,
+  McpDeleteResult,
+  McpServerInput,
+  McpTestConnectionInput,
+  McpTestConnectionResult,
+  McpUpdateInput,
+  McpUpdateResult,
+  ProviderListMcpCatalogInput,
+} from "./tier3/mcp";
+import type {
   StatsGetProfileStatsInput,
   StatsGetProfileStatsResult,
   StatsGetProfileTokenStatsInput,
@@ -423,6 +435,16 @@ export interface ProviderListModelsInput extends OpaqueTransportInput {}
 export type { ProviderListModelsResult } from "./tier3/provider";
 export interface ProviderListAgentsInput extends OpaqueTransportInput {}
 export type { ProviderListAgentsResult } from "./tier3/provider";
+export type { ProviderListMcpCatalogInput } from "./tier3/mcp";
+export type { McpCatalogResponse } from "./tier3/mcp";
+export type { McpServerInput } from "./tier3/mcp";
+export type { McpCreateResult } from "./tier3/mcp";
+export type { McpUpdateInput } from "./tier3/mcp";
+export type { McpUpdateResult } from "./tier3/mcp";
+export type { McpDeleteInput } from "./tier3/mcp";
+export type { McpDeleteResult } from "./tier3/mcp";
+export type { McpTestConnectionInput } from "./tier3/mcp";
+export type { McpTestConnectionResult } from "./tier3/mcp";
 
 /** MCode `orchestration.ts` types (the aggregate stream surface). */
 // Per MCode `packages/contracts/src/orchestration.ts`: `OrchestrationReadModel`
@@ -815,6 +837,17 @@ export interface NativeApi {
     readPlugin: (input: ProviderReadPluginInput) => Promise<ProviderReadPluginResult>;
     listModels: (input: ProviderListModelsInput) => Promise<ProviderListModelsResult>;
     listAgents: (input: ProviderListAgentsInput) => Promise<ProviderListAgentsResult>;
+    listMcpCatalog: (
+      input: ProviderListMcpCatalogInput,
+    ) => Promise<McpCatalogResponse>;
+  };
+  mcp: {
+    create: (input: McpServerInput) => Promise<McpCreateResult>;
+    update: (input: McpUpdateInput) => Promise<McpUpdateResult>;
+    delete: (input: McpDeleteInput) => Promise<McpDeleteResult>;
+    testConnection: (
+      input: McpTestConnectionInput,
+    ) => Promise<McpTestConnectionResult>;
   };
   orchestration: {
     getSnapshot: () => Promise<OrchestrationReadModel>;

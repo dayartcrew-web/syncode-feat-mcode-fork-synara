@@ -120,6 +120,10 @@ export const ComposerSendArrowIcon: LucideIcon = centralIconWrapper("arrow-up");
 export const HandoffIcon: LucideIcon = centralIconWrapper("arrow-left-right");
 export const SkillCubeIcon: LucideIcon = centralIconWrapper("building-blocks");
 export const AgentIcon: LucideIcon = centralIconWrapper("robot");
+// No dedicated mcp-servers.svg asset exists yet (see plan risk #6). The
+// generic "server" icon is the closest semantic match — it conveys "remote
+// process I delegate to", which is exactly what an MCP server is.
+export const McpServersIcon: LucideIcon = centralIconWrapper("server");
 export const NewThreadIcon: LucideIcon = centralIconWrapper("compose-pencil");
 export const EraserIcon: LucideIcon = centralIconWrapper("eraser");
 export const ArrowLeftIcon = adaptIcon(IconArrowLeft);
