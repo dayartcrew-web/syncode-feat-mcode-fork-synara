@@ -6,7 +6,7 @@ orchestration engine. Syncode reimplements the orchestration core of
 WebSocket JSON-RPC server that a Tauri desktop shell (and any other client) can
 talk to.
 
-- **Backend** — Rust 2024 edition workspace (12 crates), Tokio + Axum + SQLx/SQLite.
+- **Backend** — Rust 2024 edition workspace (13 crates), Tokio + Axum + SQLx/SQLite.
 - **Frontend** — React 19 + Vite 6 + TypeScript 5.7, served inside the Tauri shell.
 - **Provider bridge** — pluggable `ProviderAdapter` trait with real adapters for
   Claude, Codex, OpenCode, Gemini, Cursor, Grok, Kilo, and Pi, plus HTTP
@@ -20,11 +20,18 @@ talk to.
 - **CQRS engine** — 48 commands, 44 domain events, pure Decider, optimistic-
   concurrency-controlled event store, projector-backed read models, and reactor-
   driven provider side effects.
+- **Agentic subsystems** — supervised `WorkflowExecutor` pipelines with an
+  optional `Critic` review step, a structure-only DAG runtime (cycle-safe +
+  idempotent), and a hybrid `MemoryProvider` for multi-store context retrieval
+  (vector / graph / episodic — backend trait ready, concrete backends deferred).
 - **WebSocket JSON-RPC server** — ~97 RPCs across all MCode domains (project,
   thread, turn, message, git, terminal, automation, server config) plus push
   channels for live updates.
 - **Provider orchestration** — start/stop/interrupt provider sessions, stream
   tokens, queued-turn pipeline, steering support, memory-augmented system prompts.
+- **Skill discovery** — filesystem catalog across 10 provider origins
+  (mcode/codex/claude/cursor/gemini/grok/kilo/opencode/pi/agents) with dedupe
+  and a 15s TTL cache.
 - **Git integration** — status, diff, branch, commit, checkpoint, worktree, and
   stacked PR actions via `git2` + `gh`.
 - **Terminal** — portable-PTY sessions with ack-buffered live output push.
@@ -144,13 +151,14 @@ crates/
   syncode-contracts/     L0 shared DTOs + ts-rs codegen
   syncode-provider/      L1 ProviderAdapter trait + 10 adapters + registry
   syncode-persistence/   L1 SQLite event store + projections + snapshots
+  syncode-memory/        L1 MemoryProvider trait + SQLite store + HybridMemoryProvider
   syncode-git/           L1 git2: status/diff/branch/commit/checkpoint/worktree
   syncode-terminal/      L1 portable-pty PTY + ack-buffered output
   syncode-automation/    L1 scheduler + retry/misfire/completion
   syncode-auth/          L1 credentials, auth policy, secret store
-  syncode-http/          L1 (stub) future REST surface
-  syncode-orchestration/ L2 CQRS: Decider, Orchestrator, Projector, Reactors
-  syncode-ws/            L3 WebSocket JSON-RPC server + push bus
+  syncode-http/          L1 REST routes (/health, /api/project-favicon) + middleware
+  syncode-orchestration/ L2 CQRS: Decider, Orchestrator, Projector, Reactors + Critic + DAG
+  syncode-ws/            L3 WebSocket JSON-RPC server + push bus + skills_catalog
   syncode-tauri/         L4 Tauri desktop shell
 frontend/                React 19 + Vite UI
 docs/                    ARCHITECTURE.md, STATUS.md, CRATES.md

@@ -14,6 +14,10 @@ for server-initiated events, channel management, and a connection state machine.
 | `auth` | Auth middleware — validates `AuthenticatedSession` before dispatch |
 | `channels` | Named channels for multiplexed push subscriptions |
 | `push` | `PushBus` — fan-out server-initiated events to subscribed connections |
+| `skills_catalog` | Filesystem skill discovery across 10 provider origins (mcode/codex/claude/cursor/gemini/grok/kilo/opencode/pi/agents); 15s TTL cache, dedupe by lowercased name |
+| `llm` | LLM invocation via provider CLI (`invoke_llm_oneshot`) — used by `server.generateAutomationIntent`, `server.generateThreadRecap`, `git.summarizeDiff` |
+| `voice` | Optional whisper-CLI STT behind the `stt` Cargo feature (graceful "not configured" stub when off) |
+| `local_server` | `LocalServerManager` — spawn / reap child WS servers (`server.startLocalServer` / `stopLocalServer`) |
 | `error_codes` | JSON-RPC error code constants |
 
 ## Key types
@@ -47,6 +51,17 @@ for server-initiated events, channel management, and a connection state machine.
 - Authenticates via `syncode-auth::Authenticator`.
 - Pushes events to the frontend through the `PushBus`.
 - Mounted by `syncode-tauri` at startup on a configurable port.
+
+## Notable fixes
+
+- **PR #206 — skills_catalog case-sensitivity (Windows / pi-origin flat scan):**
+  The `pi` origin accepts flat `*.md` skill files at depth 0. Previously
+  `metadata(dir.join("SKILL.md"))` matched lowercase `skill.md` on Windows'
+  case-insensitive filesystem, causing duplicate catalog entries and missed
+  exact-case matches. The probe now iterates `read_dir` and matches the exact
+  `"SKILL.md"` byte string via `is_readable_skill_md(path)`, so behaviour is
+  identical on case-sensitive (Linux/macOS) and case-insensitive (Windows)
+  filesystems. Pinned by `skills_catalog::tests::collects_flat_markdown_for_pi_origin`.
 
 ## Stub status
 
