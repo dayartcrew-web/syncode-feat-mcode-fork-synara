@@ -206,25 +206,31 @@ fn collect_skill_markdown_paths(root: &Path, include_markdown_files: bool) -> Ve
     fn visit(dir: &Path, depth: u8, include_markdown_files: bool) -> Vec<PathBuf> {
         let mut out = Vec::new();
 
-        // A `SKILL.md` directly in this directory marks the whole dir as a skill.
-        let skill_path = dir.join("SKILL.md");
-        if std::fs::metadata(&skill_path)
-            .map(|m| m.is_file())
-            .unwrap_or(false)
-        {
-            out.push(skill_path);
+        let dirents = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return out,
+        };
+        let entries: Vec<PathBuf> = dirents.flatten().map(|e| e.path()).collect();
+
+        // A `SKILL.md` (exact case) directly in this directory marks the whole
+        // dir as a skill. Match by reading directory entries rather than
+        // `metadata(dir.join("SKILL.md"))` so that on case-insensitive
+        // filesystems (Windows, macOS default) a lowercase `skill.md` does not
+        // short-circuit discovery.
+        if let Some(skill_path) = entries.iter().find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == "SKILL.md")
+                .unwrap_or(false)
+                && is_readable_skill_md(p)
+        }) {
+            out.push(skill_path.clone());
             return out;
         }
 
         if depth >= 2 {
             return out;
         }
-
-        let dirents = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return out,
-        };
-        let entries: Vec<PathBuf> = dirents.flatten().map(|e| e.path()).collect();
 
         // depth 0 + include_markdown_files: direct markdown files (sorted).
         if depth == 0 && include_markdown_files {
@@ -252,6 +258,15 @@ fn collect_skill_markdown_paths(root: &Path, include_markdown_files: bool) -> Ve
     }
 
     visit(root, 0, include_markdown_files)
+}
+
+/// True if `path` is a readable file — used for the exact-case `SKILL.md` probe
+/// (does not reject lowercase `skill.md`; the caller already matched the name
+/// byte-for-byte).
+fn is_readable_skill_md(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 /// Read one `SKILL.md` and build a `SkillDescriptor` tagged with `scope`.
