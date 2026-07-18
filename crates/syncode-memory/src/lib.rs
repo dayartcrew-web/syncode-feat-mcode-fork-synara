@@ -27,10 +27,18 @@
 //! interactions exist, it returns [`NO_PRIOR_CONTEXT`] instead of an empty
 //! string so the result is renderable without a separate emptiness check.
 
+pub mod backends;
 pub mod hybrid;
 pub mod provider;
 pub mod sqlite_store;
 
+pub use backends::EpisodicBackend;
+
+#[cfg(feature = "pgvector")]
+pub use backends::VectorBackend;
+
+#[cfg(feature = "age")]
+pub use backends::GraphBackend;
 pub use hybrid::{
     HybridMemoryProvider, InMemoryBackend, MemoryBackend, MemoryEntry, MemoryRecord, Scope,
 };
