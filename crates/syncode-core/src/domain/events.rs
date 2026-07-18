@@ -418,6 +418,30 @@ pub enum DomainEvent {
         thread_id: Option<EntityId>,
         created_at: Timestamp,
     },
+
+    // ─── Forward Compatibility ──────────────────────────────────────────
+    /// Sentinel for unrecognized event types.
+    ///
+    /// Forward-compatibility marker: future binaries can emit `Unknown`
+    /// explicitly (e.g. when forwarding events from a different source that
+    /// doesn't fit the known taxonomy), and the projector / read model /
+    /// event-store pipeline handle it without panic.
+    ///
+    /// **What this is NOT:** an auto-catch-all for arbitrary unknown tags
+    /// during deserialization. We initially tried `#[serde(other)]`, but
+    /// serde's adjacent-tagging (`tag` + `content` together) requires the
+    /// content to deserialize cleanly into the catch-all variant's fields —
+    /// for a unit variant, that means the content must be absent or `null`,
+    /// so any unknown tag carrying a real payload (the realistic case)
+    /// still fails to deserialize. True forward-compat catching of unknown
+    /// tags requires a custom `Deserialize` impl, deferred to a follow-up.
+    ///
+    /// Until then, the variant exists for:
+    /// - **Explicit emission** — code that wants to record "something
+    ///   happened that we can't model" can emit `Unknown`.
+    /// - **Lossless pipeline plumbing** — projector skips it, event store
+    ///   persists it, `From<&DomainEvent>` projects it to the DTO mirror.
+    Unknown,
 }
 
 /// A file in a turn-diff checkpoint summary (mcode OrchestrationCheckpointFile).
@@ -481,6 +505,11 @@ impl DomainEvent {
             | Self::ConversationRollbackRequested { thread_id, .. }
             | Self::ConversationRolledBack { thread_id, .. }
             | Self::ThreadMetaUpdated { thread_id, .. } => *thread_id,
+
+            // Unknown has no real aggregate; return the nil sentinel so the
+            // event store and projector can still route it (projector drops
+            // it; event store persists it for forward-compat replays).
+            Self::Unknown => EntityId::nil(),
         }
     }
 
@@ -533,6 +562,7 @@ impl DomainEvent {
             Self::ConversationRollbackRequested { .. } => "ConversationRollbackRequested",
             Self::ConversationRolledBack { .. } => "ConversationRolledBack",
             Self::ActivityLogged { .. } => "ActivityLogged",
+            Self::Unknown => "Unknown",
         }
     }
 }
@@ -752,5 +782,72 @@ mod tests {
         let envelope = Envelope::with_timestamp(event, 10, ts);
         assert_eq!(envelope.timestamp(), ts);
         assert_eq!(envelope.sequence(), 10);
+    }
+
+    // ------------------------------------------------------------------
+    // Forward-compat Unknown variant
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn unknown_variant_roundtrips_through_serde() {
+        // Explicit emission of Unknown round-trips cleanly: serialize then
+        // deserialize returns Unknown. This is the canonical forward-compat
+        // path — code that wants to record "unknown" emits Unknown directly.
+        let ev = DomainEvent::Unknown;
+        let json = serde_json::to_string(&ev).expect("serialize Unknown");
+        let back: DomainEvent = serde_json::from_str(&json).expect("deserialize Unknown");
+        assert!(matches!(back, DomainEvent::Unknown));
+    }
+
+    #[test]
+    fn unknown_event_type_name_is_unknown() {
+        assert_eq!(DomainEvent::Unknown.event_type_name(), "Unknown");
+    }
+
+    #[test]
+    fn unknown_aggregate_id_is_nil_sentinel() {
+        // Nil UUID = all-zeros — the conventional sentinel for "no aggregate".
+        let nil = EntityId::nil();
+        assert_eq!(
+            nil.as_uuid().as_bytes(),
+            &[0u8; 16],
+            "EntityId::nil() must be the all-zeros UUID"
+        );
+        assert_eq!(DomainEvent::Unknown.aggregate_id(), nil);
+    }
+
+    #[test]
+    fn unknown_tag_with_payload_does_not_deserialize_via_serde_other() {
+        // Documents a known serde limitation: `#[serde(other)]` on an
+        // adjacently-tagged enum (tag + content) cannot catch unknown tags
+        // when content is present, because serde tries to deserialize the
+        // content into the catch-all variant — and Unknown is a unit
+        // variant, so any non-absent content fails. We removed `#[serde(other)]`
+        // for this reason. True forward-compat catching requires a custom
+        // Deserialize impl (deferred to a follow-up task).
+        //
+        // This test pins the *current* (lossy) behaviour so we notice if
+        // serde ever changes the semantics.
+        let json = r#"{"event_type":"SomeFutureEvent","data":{"futureField":"x"}}"#;
+        let result: Result<DomainEvent, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown tag with payload must fail loudly under current serde semantics; \
+             got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn known_event_type_still_parses_normally() {
+        // Regression guard: removing `#[serde(other)]` must not break the
+        // happy path for known variants.
+        let id = EntityId::new();
+        let ev = DomainEvent::ThreadTitleSet {
+            id,
+            title: "t".into(),
+        };
+        let json = serde_json::to_string(&ev).expect("serialize");
+        let back: DomainEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back, DomainEvent::ThreadTitleSet { .. }));
     }
 }

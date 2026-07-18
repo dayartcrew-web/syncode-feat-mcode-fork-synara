@@ -16,6 +16,13 @@ impl EntityId {
         Self(Uuid::new_v4())
     }
 
+    /// All-zeros sentinel EntityId. Used as a placeholder when an aggregate
+    /// id is structurally required but no real aggregate exists (e.g.
+    /// [`crate::DomainEvent::Unknown`]'s `aggregate_id()` implementation).
+    pub fn nil() -> Self {
+        Self(Uuid::nil())
+    }
+
     /// Create an EntityId from a specific UUID string
     pub fn parse(s: &str) -> Result<Self, uuid::Error> {
         Uuid::parse_str(s).map(Self)

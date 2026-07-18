@@ -27,9 +27,13 @@
 //! interactions exist, it returns [`NO_PRIOR_CONTEXT`] instead of an empty
 //! string so the result is renderable without a separate emptiness check.
 
+pub mod hybrid;
 pub mod provider;
 pub mod sqlite_store;
 
+pub use hybrid::{
+    HybridMemoryProvider, InMemoryBackend, MemoryBackend, MemoryEntry, MemoryRecord, Scope,
+};
 pub use provider::{MemoryProvider, MemoryProviderError, NO_PRIOR_CONTEXT};
 pub use sqlite_store::{DEFAULT_CONTEXT_LIMIT, SqliteMemoryStore};
 

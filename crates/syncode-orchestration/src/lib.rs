@@ -7,6 +7,8 @@
 //! - Orchestrator pipeline wiring everything together
 //! - Supervised agent workflow (`execute_workflow`)
 
+pub mod critic;
+pub mod dag;
 pub mod decider;
 pub mod events;
 pub mod log;
@@ -18,6 +20,11 @@ pub mod use_cases;
 pub mod workflow;
 
 // Re-exports for convenience
+pub use critic::{Critic, CriticVerdict, NoOpCritic};
+pub use dag::{
+    DagError, DagGraph, DagNode, DagRunSummary, DagSnapshot, DagSnapshotEdge, DagSnapshotNode,
+    DagSnapshotRebuild, EdgeKind, NodeId, NodeKind, NodeState, TaskSpec, execute_dag_workflow,
+};
 pub use decider::{Command, Decider, DeciderError};
 pub use events::DomainEvent;
 pub use pipeline::{CommandResult, OrchestrationError, Orchestrator};
@@ -30,4 +37,6 @@ pub use read_model::{
     ActivityView, CheckpointView, MessageView, ProjectView, ThreadSessionView, ThreadView, TurnView,
 };
 pub use use_cases::{ApplicationService, ProjectDashboard, ThreadDetail};
-pub use workflow::{ProviderWorkflowExecutor, WorkflowExecutor, execute_workflow};
+pub use workflow::{
+    ProviderWorkflowExecutor, WorkflowExecutor, execute_workflow, execute_workflow_with_critic,
+};

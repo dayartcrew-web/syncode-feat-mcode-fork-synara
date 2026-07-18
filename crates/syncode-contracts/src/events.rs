@@ -385,6 +385,15 @@ pub enum DomainEventDto {
         thread_id: Option<EntityId>,
         created_at: Timestamp,
     },
+
+    // ─── Forward Compatibility ──────────────────────────────────────────
+    /// DTO mirror of `syncode_core::DomainEvent::Unknown`. See the source
+    /// enum's doc comment for the full rationale, including why this is
+    /// NOT an auto-catch-all for unknown `eventType` tags (serde's adjacent
+    /// tagging requires content to match the catch-all variant's fields,
+    /// and `Unknown` is a unit variant — true catch-all behaviour needs a
+    /// custom `Deserialize`, deferred).
+    Unknown,
 }
 
 impl From<&syncode_core::DomainEvent> for DomainEventDto {
@@ -887,6 +896,11 @@ impl From<&syncode_core::DomainEvent> for DomainEventDto {
                 thread_id: thread_id.map(to_id),
                 created_at: to_ts(*created_at),
             },
+
+            // ─── Forward-compat sentinel ───────────────────────────────
+            // Lossy by design: the source already dropped the original
+            // payload, so the DTO mirror carries the same loss forward.
+            E::Unknown => Self::Unknown,
         }
     }
 }
@@ -1351,5 +1365,47 @@ mod tests {
                 "{expected_tag}: {json}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Forward-compat Unknown variant
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn unknown_event_type_with_payload_does_not_deserialize_via_serde_other() {
+        // Pin the known serde limitation: with adjacent tagging (tag +
+        // content) and `Unknown` as a unit variant, `#[serde(other)]` does
+        // NOT catch unknown eventType tags carrying a payload, because
+        // serde tries to deserialize the content into the catch-all variant
+        // (which expects unit). We removed `#[serde(other)]` for this
+        // reason — see the variant's doc comment. This test pins the
+        // current lossy behaviour and would need updating if/when a custom
+        // Deserialize impl lands.
+        let json = r#"{"eventType":"someFutureEvent","data":{"x":1}}"#;
+        let result: Result<DomainEventDto, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown eventType with payload must fail loudly under current serde semantics; \
+             got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn from_core_unknown_projects_to_dto_unknown() {
+        // The From<&DomainEvent> bridge must preserve the forward-compat
+        // sentinel — a core Unknown yields a DTO Unknown, not a panic.
+        let dto: DomainEventDto = (&syncode_core::DomainEvent::Unknown).into();
+        assert!(matches!(dto, DomainEventDto::Unknown));
+    }
+
+    #[test]
+    fn unknown_dto_round_trips_through_serde() {
+        // Explicit Unknown emission round-trips cleanly. This is the
+        // canonical forward-compat path — code that wants to record
+        // "unknown" emits Unknown directly.
+        let dto = DomainEventDto::Unknown;
+        let json = serde_json::to_string(&dto).expect("serialize");
+        let back: DomainEventDto = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back, DomainEventDto::Unknown));
     }
 }

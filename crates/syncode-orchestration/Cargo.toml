@@ -19,6 +19,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 async-trait = "0.1"
 tokio-stream = "0.1"
+petgraph = { workspace = true }
 
 [dev-dependencies]
 syncode-persistence = { path = "../syncode-persistence" }
