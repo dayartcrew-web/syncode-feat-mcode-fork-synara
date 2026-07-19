@@ -121,7 +121,7 @@ impl ServerSettingsState {
             }
         };
         let settings = match syncode_persistence::settings_store::load_settings(&pool).await {
-            Ok(Some(stored)) => stored,
+            Ok(Some(stored)) => merge_with_defaults(stored, build_default_server_settings()),
             Ok(None) => build_default_server_settings(),
             Err(e) => {
                 tracing::warn!(
@@ -153,7 +153,7 @@ impl ServerSettingsState {
             self.config = stored;
         }
         if let Ok(Some(stored)) = syncode_persistence::settings_store::load_settings(&pool).await {
-            self.settings = stored;
+            self.settings = merge_with_defaults(stored, build_default_server_settings());
         }
         self.pool = Some(pool);
         // Re-probe provider availability now that both the persisted `config`
@@ -484,6 +484,32 @@ pub fn build_default_server_settings() -> Value {
         "skills": { "disabled": [] },
         "mcp": { "disabled": [] },
     })
+}
+
+/// Merge a persisted settings document with the current defaults so newly
+/// added fields land at their default value instead of being missing. This is
+/// a top-level (shallow) merge:
+///
+/// - Persisted keys always win — even when their value is `null` or an empty
+///   container — so user edits are never silently overwritten.
+/// - Missing top-level keys fall back to the default's value. This is what
+///   unblocks older DBs that were written before a feature shipped (e.g. the
+///   `mcp` field added with the MCP catalog feature).
+/// - We deliberately do NOT deep-merge: nested objects inside persisted keys
+///   stay verbatim, which keeps user customisations stable when the default
+///   for a nested field changes.
+pub(crate) fn merge_with_defaults(persisted: Value, defaults: Value) -> Value {
+    let Value::Object(mut persisted_map) = persisted else {
+        // Non-object persisted value is malformed — surface defaults rather
+        // than propagate the broken shape. The caller persists objects only.
+        return defaults;
+    };
+    if let Value::Object(defaults_map) = defaults {
+        for (key, default_value) in defaults_map {
+            persisted_map.entry(key).or_insert(default_value);
+        }
+    }
+    Value::Object(persisted_map)
 }
 
 /// Resolve the server's process cwd as a non-empty string. Falls back to
@@ -848,6 +874,55 @@ mod tests {
         assert_eq!(state.settings["defaultThreadEnvMode"], "local");
         // Provider map should be populated by the default.
         assert!(state.settings["providers"]["codex"].is_object());
+    }
+
+    #[test]
+    fn merge_with_defaults_fills_missing_top_level_keys() {
+        // Simulate an older persisted document written before the `mcp`
+        // field shipped — load-side merge should fill it in.
+        let persisted = serde_json::json!({
+            "enableAssistantStreaming": false,
+            "skills": { "disabled": ["foo"] },
+        });
+        let defaults = serde_json::json!({
+            "enableAssistantStreaming": true,
+            "skills": { "disabled": [] },
+            "mcp": { "disabled": [] },
+        });
+        let merged = merge_with_defaults(persisted, defaults);
+        // Persisted value wins.
+        assert_eq!(merged["enableAssistantStreaming"], false);
+        assert_eq!(merged["skills"]["disabled"][0], "foo");
+        // Missing persisted key falls back to default.
+        assert_eq!(merged["mcp"]["disabled"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn merge_with_defaults_passes_through_non_object_persisted_as_defaults() {
+        // A malformed persisted doc (not an object) should surface defaults
+        // verbatim rather than propagate the broken shape.
+        let persisted = serde_json::json!("broken-string");
+        let defaults = serde_json::json!({ "mcp": { "disabled": [] } });
+        let merged = merge_with_defaults(persisted, defaults);
+        assert_eq!(merged["mcp"]["disabled"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn merge_with_defaults_does_not_deep_merge_nested_objects() {
+        // Persisted nested value wins verbatim; nested default keys are NOT
+        // merged in. This protects user customisations from being silently
+        // mutated when defaults shift.
+        let persisted = serde_json::json!({
+            "skills": { "disabled": ["a"] },
+        });
+        let defaults = serde_json::json!({
+            "skills": { "disabled": [], "extra": true },
+        });
+        let merged = merge_with_defaults(persisted, defaults);
+        assert_eq!(merged["skills"]["disabled"][0], "a");
+        // The `extra` field in defaults is NOT merged into the persisted
+        // `skills` object because we don't deep-merge.
+        assert!(merged["skills"].get("extra").is_none());
     }
 
     #[test]

@@ -145,7 +145,7 @@ export function McpSettingsPanel() {
     readonly error?: string;
   } | null>(null);
 
-  const disabledList = serverSettingsQuery.data?.mcp.disabled ?? [];
+  const disabledList = serverSettingsQuery.data?.mcp?.disabled ?? [];
   const disabledSet = useMemo(() => new Set(disabledList.map(mcpDisabledKey)), [disabledList]);
 
   const sections = useMemo(
@@ -157,7 +157,7 @@ export function McpSettingsPanel() {
 
   const setEnabled = (serverName: string, nextEnabled: boolean) => {
     const latestSettings = queryClient.getQueryData<ServerSettings>(serverQueryKeys.settings());
-    const currentDisabled = latestSettings?.mcp.disabled ?? [...disabledList];
+    const currentDisabled = latestSettings?.mcp?.disabled ?? [...disabledList];
     const patch = patchForToggle(currentDisabled, serverName, nextEnabled);
     if (latestSettings) {
       queryClient.setQueryData(serverQueryKeys.settings(), {
