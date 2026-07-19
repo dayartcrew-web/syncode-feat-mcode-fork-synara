@@ -14,6 +14,7 @@ pub mod event_store;
 pub mod migrations;
 pub mod settings_store;
 pub mod snapshot;
+pub mod thread_workflow_link;
 
 pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

@@ -83,6 +83,15 @@ pub struct AcpProvider {
     /// ACP `sessionId` of the most recently opened session. Used as the
     /// correlation fallback when a request omits an explicit `session_id`.
     current_session: Mutex<Option<String>>,
+    /// Workflow context preamble captured from `SessionContext.system_prompt`
+    /// during `start_session`. Prepended to every `session/prompt` as a
+    /// leading text ContentBlock so the ACP-speaking agent (cursor, grok,
+    /// gemini) observes syncode's active workflow state — phase, current
+    /// task, total tasks, TDD/coverage constraints — without depending on
+    /// the agent's own CLAUDE.md / AGENTS.md conventions. `None`/empty when
+    /// the orchestrator forwards no workflow state (back-compat with prior
+    /// behavior).
+    workflow_preamble: Mutex<Option<String>>,
     event_tx: broadcast::Sender<ProviderEvent>,
 }
 
@@ -97,6 +106,7 @@ impl AcpProvider {
             status: AtomicU64::new(ProviderStatus::Disconnected.into()),
             spawned: AtomicBool::new(false),
             current_session: Mutex::new(None),
+            workflow_preamble: Mutex::new(None),
             event_tx,
         }
     }
@@ -105,12 +115,21 @@ impl AcpProvider {
         self.status.store(status.into(), Ordering::Release);
     }
 
-    /// Build the ACP `ContentBlock` array for a prompt from a request's params.
+    /// Build the ACP `ContentBlock` array for a prompt.
     ///
-    /// Prefers `params.input` (the orchestrator's `StartTurn` convention); falls
-    /// back to a textual rendering of the params object so a turn is never
-    /// silently empty.
-    fn prompt_blocks(params: &Option<Value>) -> Vec<Value> {
+    /// When a workflow preamble was captured during `start_session`, it is
+    /// emitted as the **first** text block so the downstream agent reads the
+    /// workflow context (phase, current task, constraints) before the user's
+    /// input. The user input itself is then appended. Prefers `params.input`
+    /// (the orchestrator's `StartTurn` convention); falls back to a textual
+    /// rendering of the params object so a turn is never silently empty.
+    async fn prompt_blocks(&self, params: &Option<Value>) -> Vec<Value> {
+        let mut blocks = Vec::with_capacity(2);
+        if let Some(preamble) = self.workflow_preamble.lock().await.clone()
+            && !preamble.is_empty()
+        {
+            blocks.push(json!({ "type": "text", "text": preamble }));
+        }
         let text = params
             .as_ref()
             .and_then(|p| match p {
@@ -122,7 +141,8 @@ impl AcpProvider {
                     .or_else(|| Some(other.to_string())),
             })
             .unwrap_or_default();
-        vec![json!({ "type": "text", "text": text })]
+        blocks.push(json!({ "type": "text", "text": text }));
+        blocks
     }
 
     /// Extract the `mcpServers` array to expose to the ACP agent for a session,
@@ -267,6 +287,21 @@ impl ProviderAdapter for AcpProvider {
         let session_id = client.new_session(&ctx.working_dir, &mcp_servers).await?;
         drop(guard);
 
+        // Capture any workflow preamble from the orchestrator. The text is
+        // generated upstream (syncode-ws `workflow_preamble::build_workflow_preamble`)
+        // and forwarded via `SessionContext.system_prompt`. ACP v1 has no
+        // dedicated field for workflow context, so we re-emit it on every
+        // turn as a leading text ContentBlock inside `prompt_blocks`. Empty
+        // system_prompts collapse to "no preamble" so legacy callers behave
+        // exactly as before.
+        let next_preamble = ctx
+            .system_prompt
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let has_preamble = next_preamble.is_some();
+        *self.workflow_preamble.lock().await = next_preamble;
+
         *self.current_session.lock().await = Some(session_id.clone());
         self.set_status(ProviderStatus::Busy);
         let _ = self.event_tx.send(ProviderEvent::Started {
@@ -277,6 +312,7 @@ impl ProviderAdapter for AcpProvider {
             session_id = %session_id,
             thread_id = %ctx.thread_id.as_str(),
             turn_id = %ctx.turn_id.as_str(),
+            has_workflow_preamble = has_preamble,
             "ACP session opened"
         );
         Ok(session_id)
@@ -326,7 +362,7 @@ impl ProviderAdapter for AcpProvider {
                 "send_request has no session_id — call start_session first".to_string(),
             )
         })?;
-        let blocks = Self::prompt_blocks(&request.params);
+        let blocks = self.prompt_blocks(&request.params).await;
 
         // Bridge the prompt's mpsc events onto the shared broadcast bus so
         // event_stream subscribers observe streaming output live. The forwarder
@@ -462,6 +498,7 @@ mod tests {
             status: AtomicU64::new(ProviderStatus::Idle.into()),
             spawned: AtomicBool::new(true),
             current_session: Mutex::new(None),
+            workflow_preamble: Mutex::new(None),
             event_tx,
         };
         (provider, peer_reader, peer_writer)
@@ -486,7 +523,11 @@ mod tests {
             thread_id: EntityId::new(),
             turn_id: EntityId::new(),
             working_dir: "/tmp/proj".to_string(),
-            system_prompt: Some("Be helpful.".to_string()),
+            // No workflow preamble by default — streaming tests assert the
+            // user input shows up verbatim as the first prompt block. The
+            // preamble injection path is exercised by the dedicated
+            // `prompt_blocks_prepends_workflow_preamble_when_set` test.
+            system_prompt: None,
             user_input: "fix the bug".to_string(),
             context_files: vec![],
         }
@@ -704,25 +745,91 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn prompt_blocks_uses_input_field() {
-        let blocks = AcpProvider::prompt_blocks(&Some(json!({ "input": "hi", "sequence": 2 })));
+    #[tokio::test]
+    async fn prompt_blocks_uses_input_field() {
+        let (provider, _peer_reader, _peer_writer) = provider_harness();
+        let blocks = provider
+            .prompt_blocks(&Some(json!({ "input": "hi", "sequence": 2 })))
+            .await;
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "hi");
     }
 
-    #[test]
-    fn prompt_blocks_falls_back_to_params_rendering() {
+    #[tokio::test]
+    async fn prompt_blocks_falls_back_to_params_rendering() {
         // No `input` key → textual rendering of the object.
-        let blocks = AcpProvider::prompt_blocks(&Some(json!({ "foo": "bar" })));
+        let (provider, _peer_reader, _peer_writer) = provider_harness();
+        let blocks = provider.prompt_blocks(&Some(json!({ "foo": "bar" }))).await;
         assert!(blocks[0]["text"].as_str().unwrap().contains("foo"));
     }
 
-    #[test]
-    fn prompt_blocks_empty_when_null() {
-        let blocks = AcpProvider::prompt_blocks(&None);
+    #[tokio::test]
+    async fn prompt_blocks_empty_when_null() {
+        let (provider, _peer_reader, _peer_writer) = provider_harness();
+        let blocks = provider.prompt_blocks(&None).await;
         assert_eq!(blocks[0]["text"], "");
+    }
+
+    #[tokio::test]
+    async fn prompt_blocks_prepends_workflow_preamble_when_set() {
+        // When start_session captures a system_prompt, every prompt_blocks
+        // call emits the preamble as a leading text block, followed by the
+        // user input.
+        let (mut provider, peer_reader, peer_writer) = provider_harness();
+        let ctx = SessionContext {
+            thread_id: EntityId::new(),
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/proj".to_string(),
+            system_prompt: Some("--- WORKFLOW CONTEXT ---\nPhase: EXECUTE\n--- END ---".to_string()),
+            user_input: "fix the bug".to_string(),
+            context_files: vec![],
+        };
+        let peer = tokio::spawn(async move {
+            let mut reader = BufReader::new(peer_reader);
+            let mut writer = peer_writer;
+            fake_new_session(&mut reader, &mut writer, "wf-sess").await;
+        });
+        provider.start_session(ctx).await.unwrap();
+        peer.await.unwrap();
+
+        let blocks = provider
+            .prompt_blocks(&Some(json!({ "input": "do step 1" })))
+            .await;
+        assert_eq!(blocks.len(), 2, "preamble + input: {blocks:?}");
+        assert_eq!(blocks[0]["type"], "text");
+        assert!(
+            blocks[0]["text"].as_str().unwrap().contains("WORKFLOW CONTEXT"),
+            "preamble must be first: {blocks:?}"
+        );
+        assert_eq!(blocks[1]["text"], "do step 1");
+        provider.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prompt_blocks_omits_preamble_when_system_prompt_empty() {
+        // An empty/whitespace system_prompt collapses to "no preamble" so
+        // legacy callers observe exactly one text block per turn.
+        let (mut provider, peer_reader, peer_writer) = provider_harness();
+        let ctx = SessionContext {
+            thread_id: EntityId::new(),
+            turn_id: EntityId::new(),
+            working_dir: "/tmp/proj".to_string(),
+            system_prompt: Some("   \n  ".to_string()),
+            user_input: "fix".to_string(),
+            context_files: vec![],
+        };
+        let peer = tokio::spawn(async move {
+            let mut reader = BufReader::new(peer_reader);
+            let mut writer = peer_writer;
+            fake_new_session(&mut reader, &mut writer, "empty-sess").await;
+        });
+        provider.start_session(ctx).await.unwrap();
+        peer.await.unwrap();
+
+        let blocks = provider.prompt_blocks(&Some(json!({ "input": "x" }))).await;
+        assert_eq!(blocks.len(), 1, "no preamble when system_prompt empty: {blocks:?}");
+        provider.shutdown().await.unwrap();
     }
 
     #[test]

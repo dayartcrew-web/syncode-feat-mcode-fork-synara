@@ -21,8 +21,10 @@ pub mod rpc;
 pub mod server;
 pub mod settings;
 pub mod skills_catalog;
+pub mod thread_workflow_bridge;
 pub mod transport;
 pub mod usage;
+pub mod workflow_preamble;
 pub mod voice;
 
 // Re-export the completion-harness host wiring so callers can construct the
