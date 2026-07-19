@@ -18,6 +18,7 @@ pub mod reactors;
 pub mod read_model;
 pub mod use_cases;
 pub mod workflow;
+pub mod workflow_state;
 
 // Re-exports for convenience
 pub use critic::{Critic, CriticVerdict, NoOpCritic};

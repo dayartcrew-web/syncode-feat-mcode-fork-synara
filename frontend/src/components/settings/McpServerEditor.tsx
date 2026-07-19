@@ -14,10 +14,22 @@ import {
   type McpServerPatch,
   type McpTransport,
 } from "@t3tools/contracts";
-import { Dialog, DialogClose, DialogPopup, DialogTitle } from "~/components/ui/dialog";
+import {
+  Dialog,
+  DialogClose,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "~/components/ui/dialog";
+import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
-import { Label } from "~/components/ui/label";
+import { Field, FieldDescription, FieldLabel } from "~/components/ui/field";
 import { Input } from "~/components/ui/input";
+import { Separator } from "~/components/ui/separator";
+import { Textarea } from "~/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -25,6 +37,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
+import { TriangleAlertIcon } from "~/lib/icons";
 import { ensureNativeApi } from "~/nativeApi";
 
 interface McpServerEditorProps {
@@ -54,10 +67,28 @@ const EMPTY_DRAFT: DraftState = {
   url: "",
 };
 
-const TRANSPORTS: ReadonlyArray<{ readonly value: McpTransport; readonly label: string }> = [
-  { value: "stdio", label: "Stdio (local command)" },
-  { value: "http", label: "HTTP" },
-  { value: "sse", label: "SSE" },
+interface TransportOption {
+  readonly value: McpTransport;
+  readonly label: string;
+  readonly description: string;
+}
+
+const TRANSPORTS: ReadonlyArray<TransportOption> = [
+  {
+    value: "stdio",
+    label: "Stdio (local command)",
+    description: "Syncode spawns a local process and speaks JSON-RPC over stdin/stdout.",
+  },
+  {
+    value: "http",
+    label: "HTTP",
+    description: "Remote server reachable at a single URL. Syncode POSTs JSON-RPC envelopes.",
+  },
+  {
+    value: "sse",
+    label: "SSE",
+    description: "Remote server using Server-Sent Events for streaming responses.",
+  },
 ];
 
 function parseArgs(text: string): string[] {
@@ -179,128 +210,181 @@ export function McpServerEditor({ open, onOpenChange, initial, onSaved }: McpSer
     }
   };
 
-  const transportLabel = useMemo(() => {
-    return TRANSPORTS.find((entry) => entry.value === draft.transport)?.label ?? draft.transport;
-  }, [draft.transport]);
+  const transportOption = useMemo(
+    () => TRANSPORTS.find((entry) => entry.value === draft.transport),
+    [draft.transport],
+  );
+
+  const placeholderUrl =
+    draft.transport === "sse" ? "https://example.com/events" : "https://example.com/mcp";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogClose />
-      <DialogPopup className="max-w-lg">
-        <DialogTitle>{isEdit ? `Edit ${initial?.name}` : "Add MCP server"}</DialogTitle>
+      <DialogPopup className="max-w-xl" surface="solid">
+        <DialogHeader>
+          <DialogTitle>{isEdit ? `Edit ${initial?.name}` : "Add MCP server"}</DialogTitle>
+          <DialogDescription>
+            Servers added here are persisted to <code className="font-chat-code">~/.syncode/mcp.json</code>{" "}
+            and forwarded to every ACP-speaking provider (cursor / grok / gemini).
+          </DialogDescription>
+        </DialogHeader>
 
-        <div className="space-y-4 pt-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="mcp-name">Name</Label>
-            <Input
-              id="mcp-name"
-              value={draft.name}
-              onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
-              placeholder="filesystem"
-              disabled={submitting}
-            />
-            {!nameValid && draft.name.length > 0 ? (
-              <p className="text-xs text-destructive">
-                Use letters, digits, underscores, or hyphens only.
-              </p>
-            ) : null}
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="mcp-transport">Transport</Label>
-            <Select
-              value={draft.transport}
-              onValueChange={(value: string | null) =>
-                value
-                  ? setDraft((prev) => ({ ...prev, transport: value as McpTransport }))
-                  : undefined
-              }
-              disabled={submitting}
-            >
-              <SelectTrigger id="mcp-transport">
-                <SelectValue>{transportLabel}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {TRANSPORTS.map((entry) => (
-                  <SelectItem key={entry.value} value={entry.value}>
-                    {entry.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {draft.transport === "stdio" ? (
-            <>
-              <div className="space-y-1.5">
-                <Label htmlFor="mcp-command">Command</Label>
-                <Input
-                  id="mcp-command"
-                  value={draft.command}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, command: e.target.value }))}
-                  placeholder="npx"
-                  disabled={submitting}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="mcp-args">Arguments (space-separated)</Label>
-                <Input
-                  id="mcp-args"
-                  value={draft.argsText}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, argsText: e.target.value }))}
-                  placeholder="-y @modelcontextprotocol/server-filesystem /tmp"
-                  disabled={submitting}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="mcp-env">Environment variables (NAME=value, one per line)</Label>
-                <textarea
-                  id="mcp-env"
-                  className="flex min-h-[80px] w-full rounded-md border border-foreground/12 bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  value={draft.envText}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, envText: e.target.value }))}
-                  placeholder={"GITHUB_TOKEN=ghp_xxx\nAPI_KEY=sk-xxx"}
-                  disabled={submitting}
-                />
-                {isEdit ? (
-                  <p className="text-[11px] text-muted-foreground">
-                    Existing values are not shown for security. Re-enter any value you want to keep.
-                  </p>
-                ) : null}
-              </div>
-            </>
-          ) : (
-            <div className="space-y-1.5">
-              <Label htmlFor="mcp-url">URL</Label>
+        <DialogPanel className="gap-5">
+          {/* ── Identity ─────────────────────────────────────────── */}
+          <section className="flex flex-col gap-4">
+            <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Identity
+            </h4>
+            <Field>
+              <FieldLabel htmlFor="mcp-name">Name</FieldLabel>
               <Input
-                id="mcp-url"
-                value={draft.url}
-                onChange={(e) => setDraft((prev) => ({ ...prev, url: e.target.value }))}
-                placeholder={
-                  draft.transport === "sse"
-                    ? "https://example.com/events"
-                    : "https://example.com/mcp"
-                }
+                id="mcp-name"
+                value={draft.name}
+                onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
+                placeholder="filesystem"
+                aria-invalid={!nameValid && draft.name.length > 0}
                 disabled={submitting}
               />
-            </div>
-          )}
+              <FieldDescription>
+                Use letters, digits, underscores, or hyphens. This is how the server appears in
+                provider config files.
+              </FieldDescription>
+            </Field>
 
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            <Field>
+              <FieldLabel htmlFor="mcp-transport">Transport</FieldLabel>
+              <Select
+                value={draft.transport}
+                onValueChange={(value: string | null) =>
+                  value
+                    ? setDraft((prev) => ({ ...prev, transport: value as McpTransport }))
+                    : undefined
+                }
+                disabled={submitting}
+              >
+                <SelectTrigger id="mcp-transport">
+                  <SelectValue>{transportOption?.label ?? draft.transport}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {TRANSPORTS.map((entry) => (
+                    <SelectItem key={entry.value} value={entry.value}>
+                      {entry.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {transportOption ? (
+                <FieldDescription>{transportOption.description}</FieldDescription>
+              ) : null}
+            </Field>
+          </section>
 
-          <div className="flex justify-end gap-2 pt-2">
-            <Button
-              variant="ghost"
-              onClick={() => onOpenChange(false)}
-              disabled={submitting}
-            >
-              Cancel
-            </Button>
-            <Button onClick={handleSubmit} disabled={!canSubmit}>
-              {submitting ? "Saving…" : isEdit ? "Save changes" : "Add server"}
-            </Button>
-          </div>
-        </div>
+          <Separator />
+
+          {/* ── Connection ──────────────────────────────────────── */}
+          <section className="flex flex-col gap-4">
+            <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Connection
+            </h4>
+
+            {draft.transport === "stdio" ? (
+              <>
+                <Field>
+                  <FieldLabel htmlFor="mcp-command">Command</FieldLabel>
+                  <Input
+                    id="mcp-command"
+                    value={draft.command}
+                    onChange={(e) =>
+                      setDraft((prev) => ({ ...prev, command: e.target.value }))
+                    }
+                    placeholder="npx"
+                    aria-required
+                    disabled={submitting}
+                  />
+                  <FieldDescription>
+                    The executable syncode launches (e.g. <code className="font-chat-code">npx</code>,{" "}
+                    <code className="font-chat-code">node</code>,{" "}
+                    <code className="font-chat-code">python</code>).
+                  </FieldDescription>
+                </Field>
+
+                <Field>
+                  <FieldLabel htmlFor="mcp-args">Arguments</FieldLabel>
+                  <Input
+                    id="mcp-args"
+                    value={draft.argsText}
+                    onChange={(e) =>
+                      setDraft((prev) => ({ ...prev, argsText: e.target.value }))
+                    }
+                    placeholder="-y @modelcontextprotocol/server-filesystem /tmp"
+                    disabled={submitting}
+                  />
+                  <FieldDescription>Whitespace-separated CLI arguments.</FieldDescription>
+                </Field>
+
+                <Field>
+                  <FieldLabel htmlFor="mcp-env">Environment variables</FieldLabel>
+                  <Textarea
+                    id="mcp-env"
+                    value={draft.envText}
+                    onChange={(e) => setDraft((prev) => ({ ...prev, envText: e.target.value }))}
+                    placeholder={"GITHUB_TOKEN=ghp_xxx\nAPI_KEY=sk-xxx"}
+                    disabled={submitting}
+                    rows={4}
+                  />
+                  <FieldDescription>
+                    One <code className="font-chat-code">NAME=value</code> per line. Lines starting
+                    with <code className="font-chat-code">#</code> are ignored.
+                    {isEdit
+                      ? " Existing values are redacted on read — re-enter any value you want to keep."
+                      : " Values are stored locally only and never forwarded beyond the launched process."}
+                  </FieldDescription>
+                </Field>
+              </>
+            ) : (
+              <Field>
+                <FieldLabel htmlFor="mcp-url">URL</FieldLabel>
+                <Input
+                  id="mcp-url"
+                  value={draft.url}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, url: e.target.value }))}
+                  placeholder={placeholderUrl}
+                  aria-required
+                  disabled={submitting}
+                />
+                <FieldDescription>
+                  {draft.transport === "sse"
+                    ? "SSE endpoint — syncode opens the stream and POSTs commands to it."
+                    : "HTTP endpoint accepting JSON-RPC 2.0 POST requests."}
+                </FieldDescription>
+              </Field>
+            )}
+          </section>
+
+          {error ? (
+            <Alert variant="error">
+              <TriangleAlertIcon />
+              <AlertTitle>Couldn&apos;t save the server</AlertTitle>
+              <AlertDescription>
+                <code className="break-all font-chat-code text-xs">{error}</code>
+              </AlertDescription>
+            </Alert>
+          ) : null}
+        </DialogPanel>
+
+        <DialogFooter>
+          <DialogClose
+            render={
+              <Button variant="ghost" type="button" disabled={submitting}>
+                Cancel
+              </Button>
+            }
+          />
+          <Button onClick={handleSubmit} disabled={!canSubmit}>
+            {submitting ? "Saving…" : isEdit ? "Save changes" : "Add server"}
+          </Button>
+        </DialogFooter>
       </DialogPopup>
     </Dialog>
   );

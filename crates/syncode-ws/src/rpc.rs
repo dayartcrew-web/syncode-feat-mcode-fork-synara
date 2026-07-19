@@ -1648,6 +1648,21 @@ async fn handle_orchestration_dispatch_command(
                 Ok(v) => v,
                 Err(r) => return *r,
             };
+            // C1: ensure the thread has a workflow link before the turn flows
+            // through the orchestrator. C2 (turn binding) and A2 (preamble
+            // injection) consume this link downstream. Best-effort — a sidecar
+            // failure must never block the turn.
+            //
+            // C3: emit a `workflow.contextBound` push event so the frontend
+            // can render a workflow badge without polling. The snapshot is
+            // built from the sidecar row that C1 just ensured. Best-effort —
+            // a missing snapshot (in-memory mode, orphan thread) is silent.
+            let thread_id_str = thread_id.as_str();
+            let pool = state.settings.read().await.pool.clone();
+            let _ = crate::thread_workflow_bridge::ensure_link_for_thread(pool.as_ref(), &thread_id_str).await;
+            if let Some(snapshot) = crate::thread_workflow_bridge::build_workflow_snapshot(pool.as_ref(), &thread_id_str, &user_input).await {
+                crate::thread_workflow_bridge::emit_workflow_context_push(&state.push_tx, &snapshot);
+            }
             service.start_turn(thread_id, sequence, user_input).await
         }
         // `thread.turn.start` (MCode dot-form) — alias for `StartTurn`.
@@ -1686,6 +1701,15 @@ async fn handle_orchestration_dispatch_command(
                 Ok(v) => v,
                 Err(r) => return *r,
             };
+            // C1: ensure the thread has a workflow link before the turn flows
+            // through the orchestrator (mirrors the StartTurn arm). C3: emit
+            // the `workflow.contextBound` push event for the frontend badge.
+            let thread_id_str = thread_id.as_str();
+            let pool = state.settings.read().await.pool.clone();
+            let _ = crate::thread_workflow_bridge::ensure_link_for_thread(pool.as_ref(), &thread_id_str).await;
+            if let Some(snapshot) = crate::thread_workflow_bridge::build_workflow_snapshot(pool.as_ref(), &thread_id_str, &user_input).await {
+                crate::thread_workflow_bridge::emit_workflow_context_push(&state.push_tx, &snapshot);
+            }
             service.start_turn(thread_id, sequence, user_input).await
         }
         "CompleteTurn" => {

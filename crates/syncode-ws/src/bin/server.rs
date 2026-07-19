@@ -238,9 +238,19 @@ async fn build_orchestrator(
     );
 
     let session_manager = SessionManager::new();
+    // C2: attach a workflow-state provider so freshly started chat sessions
+    // carry syncode's workflow context (phase, current task, constraints) as
+    // a leading block in their system prompt. Backed by the
+    // `thread_workflow_links` sidecar — None when no SQLite pool is attached
+    // (in-memory mode) → identical to prior behavior.
+    let workflow_state: Arc<dyn syncode_orchestration::workflow_state::WorkflowStateProvider> =
+        Arc::new(syncode_ws::thread_workflow_bridge::ThreadWorkflowPreamble::new(Some(
+            settings_pool.clone(),
+        )));
     let reactor = Arc::new(
         syncode_orchestration::ProviderCommandReactor::new(session_manager)
-            .with_read_model(Arc::clone(&read_model)),
+            .with_read_model(Arc::clone(&read_model))
+            .with_workflow_state(workflow_state),
     );
 
     let orchestrator = match syncode_provider::registry::create_by_id(&default_provider) {

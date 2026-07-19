@@ -1128,6 +1128,29 @@ type ThreadProposedPlanUpsertedPayload = Omit<OrchestrationEventPayload, "propos
   readonly threadId: ThreadId;
   readonly proposedPlan: OrchestrationProposedPlan;
 };
+/**
+ * `thread.workflow-context-bound` (chat-workflow bridge C3/C4): emitted by the
+ * backend on every `StartTurn` / `thread.turn.start` after the thread's
+ * workflow link is ensured. Carries the workflowId bound to the thread, the
+ * current phase (v1 always `"EXECUTE"` — chat-driven workflows run in execute
+ * mode by default), and the current task (the user input). The frontend
+ * renders a workflow badge in `ChatHeader` from this payload.
+ *
+ * Wire shape (from `crates/syncode-ws/src/thread_workflow_bridge.rs`):
+ * `{ eventType: "WorkflowContextBound", aggregateId: threadId,
+ *    data: { threadId, workflowId, phase, currentTask, totalTasks, currentTaskIndex } }`.
+ */
+export type ThreadWorkflowContextBoundPayload = Omit<
+  OrchestrationEventPayload,
+  "workflowId" | "phase" | "currentTask" | "totalTasks" | "currentTaskIndex"
+> & {
+  readonly threadId: ThreadId;
+  readonly workflowId: string;
+  readonly phase: string;
+  readonly currentTask: string | null;
+  readonly totalTasks: number | null;
+  readonly currentTaskIndex: number | null;
+};
 /** Payload for `thread.reverted`: required `turnCount`. */
 type ThreadRevertedPayload = Omit<OrchestrationEventPayload, "turnCount"> & {
   readonly threadId: ThreadId;
@@ -1536,4 +1559,8 @@ export type OrchestrationEvent =
   | (OrchestrationEventBase & {
       readonly type: "thread.proposed-plan-upserted";
       readonly payload: ThreadProposedPlanUpsertedPayload;
+    })
+  | (OrchestrationEventBase & {
+      readonly type: "thread.workflow-context-bound";
+      readonly payload: ThreadWorkflowContextBoundPayload;
     });

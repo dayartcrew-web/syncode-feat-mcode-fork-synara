@@ -275,6 +275,18 @@ const MCODE_TO_SERVED: Readonly<Record<string, ServedRpcMethod>> = {
   "provider.readSkill": "provider/read-skill",
   "provider.compactThread": "provider/compact-thread",
 
+  // MCP catalog + CRUD RPCs: the Settings → MCP Servers panel calls
+  // `provider.listMcpCatalog` for aggregated discovery + `mcp.create/update/
+  // delete/testConnection` for syncode-owned entries. Without this remap the
+  // transport rejects them client-side with `MethodNotFound (-32601)` and the
+  // panel renders "MCP discovery failed" — the backend handler never runs.
+  // Backend dispatch accepts both forms (arms cover dot and slash shapes).
+  "provider.listMcpCatalog": "provider/list-mcp-catalog",
+  "mcp.create": "mcp/create",
+  "mcp.update": "mcp/update",
+  "mcp.delete": "mcp/delete",
+  "mcp.testConnection": "mcp/test-connection",
+
   // Profile stats RPCs (T6c-8): the cloned MCode UI's Profile page calls these
   // `stats.*` dot-strings (`wsNativeApi.ts` →
   // `callTransport("stats.getProfileStats", …)`) to render the activity

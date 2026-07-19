@@ -21,6 +21,7 @@ use syncode_provider::{
 };
 
 use crate::decider::Command;
+use crate::workflow_state::WorkflowStateProvider;
 
 /// Result of executing a command on a provider
 #[derive(Debug, Clone)]
@@ -236,6 +237,13 @@ pub struct ProviderCommandReactor {
     /// projector's latest view — a thread created in the same command batch is
     /// visible by the time `StartTurn` reaches `react()`.
     read_model: Option<Arc<tokio::sync::RwLock<crate::projector::ReadModelStore>>>,
+    /// Optional workflow-state provider (C2 of chat-workflow bridge). When
+    /// `Some`, the returned preamble text is prepended to the system prompt
+    /// of every freshly started session so the chat AI sees the active
+    /// workflow context (phase, current task, constraints). Reused sessions
+    /// are left untouched — their prompt was already grounded when they
+    /// started.
+    workflow_state: Option<Arc<dyn WorkflowStateProvider>>,
 }
 
 impl ProviderCommandReactor {
@@ -246,6 +254,7 @@ impl ProviderCommandReactor {
             turn_queue: TurnQueue::new(),
             memory: None,
             read_model: None,
+            workflow_state: None,
         }
     }
 
@@ -283,6 +292,29 @@ impl ProviderCommandReactor {
     #[must_use]
     pub fn with_memory(mut self, memory: Arc<dyn MemoryProvider>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    /// Attach a workflow-state provider so freshly started provider sessions
+    /// carry the active workflow context (phase, current task, constraints)
+    /// as a leading block in their system prompt (C2 of chat-workflow bridge).
+    ///
+    /// On the Fresh and Restarted paths of `ensure_session_for_thread`, the
+    /// reactor queries `workflow_state.workflow_preamble(thread_id, user_input)`
+    /// and prepends the returned text to `ctx.system_prompt`. The Reused path
+    /// skips injection — that session was already grounded when it started,
+    /// and re-querying on every turn would bloat an in-flight conversation.
+    ///
+    /// Consumes `self` and returns the configured reactor (builder style),
+    /// mirroring [`Self::with_memory`]. `new()` remains the zero-arg default
+    /// for callers that don't yet wire workflow state, so existing
+    /// construction sites compile unchanged.
+    #[must_use]
+    pub fn with_workflow_state(
+        mut self,
+        workflow_state: Arc<dyn WorkflowStateProvider>,
+    ) -> Self {
+        self.workflow_state = Some(workflow_state);
         self
     }
 
@@ -746,6 +778,7 @@ impl ProviderCommandReactor {
             // context for this thread (P3-4). Retrieval happens only on the
             // start paths so a reused session is not re-queried.
             ctx = self.augment_ctx_with_memory(ctx).await;
+            ctx = self.augment_ctx_with_workflow(ctx).await;
             let session = self.start_and_stamp(ctx, requested, None, adapter).await?;
             return Ok(EnsureOutcome::Fresh {
                 session_id: session.id.clone(),
@@ -772,6 +805,7 @@ impl ProviderCommandReactor {
             .stop_session(adapter, &old_session_id)
             .await;
         ctx = self.augment_ctx_with_memory(ctx).await;
+        ctx = self.augment_ctx_with_workflow(ctx).await;
         let session = self
             .start_and_stamp(ctx, requested, resume_cursor.clone(), adapter)
             .await?;
@@ -817,6 +851,42 @@ impl ProviderCommandReactor {
         let augmented = match ctx.system_prompt.take() {
             Some(existing) => format!("{existing}\n\n{retrieved}"),
             None => retrieved,
+        };
+        ctx.system_prompt = Some(augmented);
+        ctx
+    }
+
+    /// Prepend the workflow preamble (if any) to `ctx.system_prompt` (C2).
+    ///
+    /// Called on the Fresh and Restarted paths of
+    /// [`Self::ensure_session_for_thread`] — i.e. only when a brand-new
+    /// provider session is about to start. The preamble is queried from the
+    /// attached [`WorkflowStateProvider`] and inserted as a leading block so
+    /// the chat AI reads the workflow context (phase, current task,
+    /// constraints) before any other prompt content. When the provider
+    /// returns `None`/empty (no active workflow for this thread, or no
+    /// provider attached), the prompt is left untouched.
+    ///
+    /// The preamble deliberately comes BEFORE memory context — workflow
+    /// constraints (TDD, coverage, no secrets) are more load-bearing for
+    /// agent behavior than recalled history, and many agents weight the
+    /// earliest tokens most heavily.
+    async fn augment_ctx_with_workflow(&self, mut ctx: SessionContext) -> SessionContext {
+        let Some(workflow_state) = self.workflow_state.as_ref() else {
+            return ctx;
+        };
+        let Some(preamble) = workflow_state
+            .workflow_preamble(&ctx.thread_id.as_str(), &ctx.user_input)
+            .await
+        else {
+            return ctx;
+        };
+        if preamble.trim().is_empty() {
+            return ctx;
+        }
+        let augmented = match ctx.system_prompt.take() {
+            Some(existing) => format!("{preamble}\n\n{existing}"),
+            None => preamble,
         };
         ctx.system_prompt = Some(augmented);
         ctx

@@ -538,6 +538,37 @@ export function adaptPushEnvelope(
       return out;
     }
 
+    // ── Chat-workflow bridge (C3/C4): workflow context per turn ────────
+    // The backend emits this fresh on every StartTurn / thread.turn.start
+    // after the thread_workflow_links sidecar is ensured. Payload is already
+    // camelCase on the wire (no snake_case unwrapping needed), but we still
+    // pass through `normalizeValue` to keep null→undefined semantics
+    // consistent with other events.
+    case "workflowContextBound": {
+      const threadId =
+        (raw ? (raw["threadId"] as string | undefined) : undefined) ?? env.aggregateId ?? undefined;
+      if (!threadId || !raw) return out;
+      const workflowId = raw["workflowId"];
+      const phase = raw["phase"];
+      if (typeof workflowId !== "string" || typeof phase !== "string") return out;
+      out.push(
+        makeEvent(
+          "thread.workflow-context-bound",
+          { sequence: seq, occurredAt, aggregateId: threadId, aggregateKind: "thread" },
+          {
+            threadId: ThreadId.makeUnsafe(threadId),
+            workflowId,
+            phase,
+            currentTask: typeof raw["currentTask"] === "string" ? raw["currentTask"] : null,
+            totalTasks: typeof raw["totalTasks"] === "number" ? raw["totalTasks"] : null,
+            currentTaskIndex: typeof raw["currentTaskIndex"] === "number" ? raw["currentTaskIndex"] : null,
+            updatedAt: occurredAt,
+          },
+        ),
+      );
+      return out;
+    }
+
     default:
       // Unrecognized / server-internal tag → no store case anyway (default
       // no-op). Dropping is safe; future store cases can add a mapping here.

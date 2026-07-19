@@ -64,6 +64,8 @@ import type { RepoDiffTotals } from "~/hooks/useRepoDiffTotals";
 import { ProviderIcon } from "../ProviderIcon";
 import { ProviderUsageMenuControl } from "../ProviderUsageMenuControl";
 import { EnvironmentToggle, type EnvironmentToggleState } from "./environment/EnvironmentToggle";
+import { useThreadWorkflowState } from "../../hooks/useThreadWorkflowState";
+import { WorkflowBadge } from "./WorkflowBadge";
 
 /**
  * Width (px) below which collapsible header controls drop their text labels and
@@ -531,6 +533,7 @@ export const ChatHeader = memo(function ChatHeader({
     hasChanges: showDiffTotals,
   } = diffTotals;
   const isDisposableThread = useIsDisposableThread(activeThreadId);
+  const workflowState = useThreadWorkflowState(activeThreadId);
 
   // Own the open-favorite editor shortcut here so it survives regardless of which editor UI
   // is mounted (the legacy Open-in button, the Environment panel's Editor section, or
@@ -685,6 +688,7 @@ export const ChatHeader = memo(function ChatHeader({
                 >
                   {activeThreadTitle}
                 </h2>
+                <WorkflowBadge workflow={workflowState} />
                 {showSidechatTitleChip && onCloseThreadPane ? (
                   <IconButton
                     variant="chrome"
