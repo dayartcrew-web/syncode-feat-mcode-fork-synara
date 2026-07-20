@@ -15,7 +15,7 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            args: "--target aarch64-apple-darwin"
           - platform: ubuntu-22.04
             args: ""
           - platform: windows-latest
@@ -41,11 +41,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: Install universal macOS target
-        if: matrix.platform == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
