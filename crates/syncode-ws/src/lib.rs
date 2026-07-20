@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod channels;
+pub mod code_search;
 pub mod completion;
 pub mod llm;
 pub mod local_server;
@@ -24,8 +25,8 @@ pub mod skills_catalog;
 pub mod thread_workflow_bridge;
 pub mod transport;
 pub mod usage;
-pub mod workflow_preamble;
 pub mod voice;
+pub mod workflow_preamble;
 
 // Re-export the completion-harness host wiring so callers can construct the
 // LLM/disable implementations directly (e.g. tests, alternate schedulers).

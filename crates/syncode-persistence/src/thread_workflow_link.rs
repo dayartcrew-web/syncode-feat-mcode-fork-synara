@@ -30,10 +30,7 @@ pub struct ThreadWorkflowLink {
 }
 
 /// Returns the active workflow_id for a thread, if any.
-pub async fn lookup(
-    pool: &SqlitePool,
-    thread_id: &str,
-) -> Result<Option<String>> {
+pub async fn lookup(pool: &SqlitePool, thread_id: &str) -> Result<Option<String>> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT workflow_id FROM thread_workflow_links WHERE thread_id = ?")
             .bind(thread_id)
@@ -44,11 +41,7 @@ pub async fn lookup(
 
 /// Upserts the active workflow_id for a thread. If a row already exists,
 /// its workflow_id and updated_at are replaced.
-pub async fn upsert(
-    pool: &SqlitePool,
-    thread_id: &str,
-    workflow_id: &str,
-) -> Result<()> {
+pub async fn upsert(pool: &SqlitePool, thread_id: &str, workflow_id: &str) -> Result<()> {
     let now = Utc::now().timestamp();
     sqlx::query(
         "INSERT INTO thread_workflow_links (thread_id, workflow_id, linked_at, updated_at)
@@ -69,11 +62,10 @@ pub async fn upsert(
 /// Clears the active workflow link for a thread (e.g., when workflow is
 /// completed or archived). Returns true if a row was deleted.
 pub async fn clear(pool: &SqlitePool, thread_id: &str) -> Result<bool> {
-    let result =
-        sqlx::query("DELETE FROM thread_workflow_links WHERE thread_id = ?")
-            .bind(thread_id)
-            .execute(pool)
-            .await?;
+    let result = sqlx::query("DELETE FROM thread_workflow_links WHERE thread_id = ?")
+        .bind(thread_id)
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected() > 0)
 }
 

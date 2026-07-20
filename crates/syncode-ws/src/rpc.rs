@@ -258,6 +258,8 @@ async fn dispatch_method(
                     "mcp/update",
                     "mcp/delete",
                     "mcp/test-connection",
+                    // Built-in ripgrep-backed content search.
+                    "tool/search-code",
                 ]
             }),
         ),
@@ -833,6 +835,9 @@ async fn dispatch_method(
         "mcp.delete" | "mcp/delete" => handle_mcp_delete(state, id, &request.params).await,
         "mcp.testConnection" | "mcp/test-connection" => {
             handle_mcp_test_connection(state, id, &request.params).await
+        }
+        "tool.searchCode" | "tool/search-code" => {
+            handle_tool_search_code(state, id, &request.params).await
         }
         "provider.listPlugins" | "provider/list-plugins" => {
             handle_provider_list_plugins(id, &request.params)
@@ -1659,9 +1664,22 @@ async fn handle_orchestration_dispatch_command(
             // a missing snapshot (in-memory mode, orphan thread) is silent.
             let thread_id_str = thread_id.as_str();
             let pool = state.settings.read().await.pool.clone();
-            let _ = crate::thread_workflow_bridge::ensure_link_for_thread(pool.as_ref(), &thread_id_str).await;
-            if let Some(snapshot) = crate::thread_workflow_bridge::build_workflow_snapshot(pool.as_ref(), &thread_id_str, &user_input).await {
-                crate::thread_workflow_bridge::emit_workflow_context_push(&state.push_tx, &snapshot);
+            let _ = crate::thread_workflow_bridge::ensure_link_for_thread(
+                pool.as_ref(),
+                &thread_id_str,
+            )
+            .await;
+            if let Some(snapshot) = crate::thread_workflow_bridge::build_workflow_snapshot(
+                pool.as_ref(),
+                &thread_id_str,
+                &user_input,
+            )
+            .await
+            {
+                crate::thread_workflow_bridge::emit_workflow_context_push(
+                    &state.push_tx,
+                    &snapshot,
+                );
             }
             service.start_turn(thread_id, sequence, user_input).await
         }
@@ -1706,9 +1724,22 @@ async fn handle_orchestration_dispatch_command(
             // the `workflow.contextBound` push event for the frontend badge.
             let thread_id_str = thread_id.as_str();
             let pool = state.settings.read().await.pool.clone();
-            let _ = crate::thread_workflow_bridge::ensure_link_for_thread(pool.as_ref(), &thread_id_str).await;
-            if let Some(snapshot) = crate::thread_workflow_bridge::build_workflow_snapshot(pool.as_ref(), &thread_id_str, &user_input).await {
-                crate::thread_workflow_bridge::emit_workflow_context_push(&state.push_tx, &snapshot);
+            let _ = crate::thread_workflow_bridge::ensure_link_for_thread(
+                pool.as_ref(),
+                &thread_id_str,
+            )
+            .await;
+            if let Some(snapshot) = crate::thread_workflow_bridge::build_workflow_snapshot(
+                pool.as_ref(),
+                &thread_id_str,
+                &user_input,
+            )
+            .await
+            {
+                crate::thread_workflow_bridge::emit_workflow_context_push(
+                    &state.push_tx,
+                    &snapshot,
+                );
             }
             service.start_turn(thread_id, sequence, user_input).await
         }
@@ -10689,6 +10720,77 @@ async fn handle_mcp_test_connection(
     // catalog. Inline is what the editor sends when testing before save.
     let probe = crate::mcp_catalog::probe_mcp_server(params, timeout_ms).await;
     JsonRpcResponse::success(id, probe)
+}
+
+/// `tool/search-code` — built-in ripgrep-backed content search.
+///
+/// Searches the project tree rooted at `cwd` for `query`, returning up to
+/// `limit` matches (`SearchHit` records with path/line/column/matched_text).
+/// Honors `case_insensitive`, `regex` (vs literal), and `file_glob` filter.
+/// Respects `.gitignore`/`.ignore` during traversal.
+///
+/// Errors:
+/// - `-32602 INVALID_PARAMS` when `cwd`/`query` is missing/empty, regex is
+///   malformed, `file_glob` is malformed, or `cwd` does not exist
+/// - `-32603 INTERNAL_ERROR` for unexpected traversal/IO failures
+async fn handle_tool_search_code(_state: &WsState, id: Value, params: &Value) -> JsonRpcResponse {
+    let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+
+    if cwd.is_empty() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "cwd is required",
+        );
+    }
+    if query.is_empty() {
+        return JsonRpcResponse::error(
+            Some(id),
+            crate::error_codes::INVALID_PARAMS,
+            "query is required",
+        );
+    }
+
+    let input = crate::code_search::SearchInput {
+        cwd,
+        query,
+        limit: params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize),
+        file_glob: params.get("file_glob").and_then(|v| v.as_str()),
+        case_insensitive: params
+            .get("case_insensitive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        regex: params
+            .get("regex")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    };
+
+    match crate::code_search::search_code(input).await {
+        Ok(output) => {
+            JsonRpcResponse::success(id, serde_json::to_value(output).unwrap_or(Value::Null))
+        }
+        Err(e) => {
+            let (code, classify) = match &e {
+                crate::code_search::CodeSearchError::InvalidRegex(_)
+                | crate::code_search::CodeSearchError::InvalidFileGlob(_)
+                | crate::code_search::CodeSearchError::InvalidCwd(_) => {
+                    (crate::error_codes::INVALID_PARAMS, "invalid_params")
+                }
+                crate::code_search::CodeSearchError::MissingCwd
+                | crate::code_search::CodeSearchError::MissingQuery => {
+                    (crate::error_codes::INVALID_PARAMS, "invalid_params")
+                }
+                _ => (crate::error_codes::INTERNAL_ERROR, "internal_error"),
+            };
+            tracing::debug!(error = %e, classify, "tool/search-code failed");
+            JsonRpcResponse::error(Some(id), code, e.to_string())
+        }
+    }
 }
 
 /// Read `settings.skills.disabled` (array of lowercased skill names) from the

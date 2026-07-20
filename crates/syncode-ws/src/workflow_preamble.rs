@@ -118,6 +118,10 @@ mod tests {
             current_task_index: Some(50),
         };
         let out = build_workflow_preamble(Some(&input));
-        assert!(out.len() < 1024, "preamble length {} exceeds 1KB", out.len());
+        assert!(
+            out.len() < 1024,
+            "preamble length {} exceeds 1KB",
+            out.len()
+        );
     }
 }

@@ -20,17 +20,21 @@
 //! Gating: none — pure library calls against an in-memory SQLite pool, so
 //! this runs in the default `cargo test` invocation.
 
+use syncode_orchestration::workflow_state::WorkflowStateProvider;
 use syncode_persistence::SqlitePool;
 use syncode_ws::thread_workflow_bridge::{
-    build_workflow_snapshot, emit_workflow_context_push, ensure_link_for_thread,
-    ThreadWorkflowPreamble,
+    ThreadWorkflowPreamble, build_workflow_snapshot, emit_workflow_context_push,
+    ensure_link_for_thread,
 };
-use syncode_orchestration::workflow_state::WorkflowStateProvider;
 use tokio::sync::broadcast;
 
 async fn setup_pool() -> SqlitePool {
-    let pool = SqlitePool::connect(":memory:").await.expect("connect in-memory pool");
-    syncode_persistence::migrations::run(&pool).await.expect("run migrations");
+    let pool = SqlitePool::connect(":memory:")
+        .await
+        .expect("connect in-memory pool");
+    syncode_persistence::migrations::run(&pool)
+        .await
+        .expect("run migrations");
     pool
 }
 
@@ -120,7 +124,9 @@ async fn chat_turn_pipeline_is_silent_in_in_memory_mode() {
     assert!(wf_id.is_none(), "no pool → no workflow binding (silent)");
 
     let preamble_provider = ThreadWorkflowPreamble::new(None);
-    let preamble = preamble_provider.workflow_preamble("thread-mem-1", "do thing").await;
+    let preamble = preamble_provider
+        .workflow_preamble("thread-mem-1", "do thing")
+        .await;
     assert!(preamble.is_none(), "no pool → no preamble (silent)");
 
     let snapshot = build_workflow_snapshot(None, "thread-mem-1", "do thing").await;

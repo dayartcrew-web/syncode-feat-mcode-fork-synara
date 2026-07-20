@@ -781,7 +781,9 @@ mod tests {
             thread_id: EntityId::new(),
             turn_id: EntityId::new(),
             working_dir: "/tmp/proj".to_string(),
-            system_prompt: Some("--- WORKFLOW CONTEXT ---\nPhase: EXECUTE\n--- END ---".to_string()),
+            system_prompt: Some(
+                "--- WORKFLOW CONTEXT ---\nPhase: EXECUTE\n--- END ---".to_string(),
+            ),
             user_input: "fix the bug".to_string(),
             context_files: vec![],
         };
@@ -799,7 +801,10 @@ mod tests {
         assert_eq!(blocks.len(), 2, "preamble + input: {blocks:?}");
         assert_eq!(blocks[0]["type"], "text");
         assert!(
-            blocks[0]["text"].as_str().unwrap().contains("WORKFLOW CONTEXT"),
+            blocks[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("WORKFLOW CONTEXT"),
             "preamble must be first: {blocks:?}"
         );
         assert_eq!(blocks[1]["text"], "do step 1");
@@ -828,7 +833,11 @@ mod tests {
         peer.await.unwrap();
 
         let blocks = provider.prompt_blocks(&Some(json!({ "input": "x" }))).await;
-        assert_eq!(blocks.len(), 1, "no preamble when system_prompt empty: {blocks:?}");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "no preamble when system_prompt empty: {blocks:?}"
+        );
         provider.shutdown().await.unwrap();
     }
 
