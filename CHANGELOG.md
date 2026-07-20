@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-07-21
+
+### Bug Fixes
+- **tauri**: move WS default port 30101 -> 33101 (masday collision) + add panic log (ebe8736)
+
+### Documentation
+- **CHANGELOG**: add v0.1.0 changelog (556cc36)
+
+### CI/CD
+- **changelog**: auto-generate changelog + release notes via git-cliff (08c5a17)
+
 ## [0.1.0] - 2026-07-21
 
 ### Features
