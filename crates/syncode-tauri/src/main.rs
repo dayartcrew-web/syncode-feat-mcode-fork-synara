@@ -9,7 +9,7 @@ use syncode_tauri::{
     shell_commands, terminal_commands, ws_commands, ws_setup,
 };
 use tauri::Manager;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() {
     install_panic_hook();
@@ -82,7 +82,11 @@ fn main() {
             // so users can share logs when filing issues. The file is truncated
             // on each launch to keep it focused on the most recent session.
             let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new(if cfg!(debug_assertions) { "debug" } else { "info" })
+                EnvFilter::new(if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "info"
+                })
             });
             let registry = tracing_subscriber::registry().with(env_filter);
             let stderr_layer = fmt::layer().with_writer(std::io::stderr);
@@ -91,9 +95,7 @@ fn main() {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = std::fs::write(dir.join("syncode.log"), ""); // truncate on launch
                 let file_appender = tracing_appender::rolling::never(&dir, "syncode.log");
-                let file_layer = fmt::layer()
-                    .with_writer(file_appender)
-                    .with_ansi(false); // ANSI escapes don't render in Notepad
+                let file_layer = fmt::layer().with_writer(file_appender).with_ansi(false); // ANSI escapes don't render in Notepad
                 registry.with(stderr_layer).with(file_layer).init();
             } else {
                 registry.with(stderr_layer).init();
