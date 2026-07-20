@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-07-21
+
+### Bug Fixes
+- **tauri**: wire server-lifecycle push channels (welcome + 4 `*Updated`) to
+  the desktop transport — `createTauriNativeApi` never called
+  `bindServerLifecycleTransport`, so `onServerWelcome` listeners never fired
+  and the desktop splash screen hung on "Home folder is not available yet."
+  (root cause of the v0.1.1 stuck-on-logo bug)
+- **tauri**: add `tracing-appender` file logger under
+  `%APPDATA%\syncode\syncode.log` (mirrors `panic.log`). The desktop binary
+  sets `windows_subsystem = "windows"` which detaches stderr — every
+  `tracing::info!` in `ws_setup::boot` was silently discarded in release
+  builds. File is truncated on each launch to keep it focused on the latest
+  session.
+
 ## [0.1.1] - 2026-07-21
 
 ### Bug Fixes

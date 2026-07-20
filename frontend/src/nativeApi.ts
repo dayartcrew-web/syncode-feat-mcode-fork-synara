@@ -29,7 +29,7 @@ import {
   type TauriDesktopBridge,
   type TransportDispatcher,
 } from "./tauriNativeApi";
-import { createWsNativeApi } from "./wsNativeApi";
+import { bindServerLifecycleTransport, createWsNativeApi } from "./wsNativeApi";
 import { WsTransport } from "./wsTransport";
 
 // Desktop WS server default bind — mirrors
@@ -118,6 +118,14 @@ export function readNativeApi(): NativeApi | undefined {
     if (!desktopTransport) {
       desktopTransport = new WsTransport();
     }
+    // Wire the desktop transport to the server-lifecycle push channels
+    // (welcome, configUpdated, providerStatusesUpdated, maintenanceUpdated,
+    // settingsUpdated) so the exported `on*` helpers in `wsNativeApi.ts` work
+    // in Tauri mode. Without this, `instance` in wsNativeApi is never set
+    // (only `createWsNativeApi` sets it, and that path is browser-only), so
+    // `onServerWelcome` listeners never fire and the splash screen hangs on
+    // "Home folder is not available yet." — see `__root.tsx` welcome effect.
+    bindServerLifecycleTransport(desktopTransport);
     const transport = wrapWsTransportAsDispatcher(desktopTransport);
     const tauriApi = createTauriNativeApi(transport);
     cachedDesktopApi = tauriApi;
