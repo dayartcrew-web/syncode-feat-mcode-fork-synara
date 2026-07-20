@@ -1032,7 +1032,7 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
   }, [activeSplitView, togglePanePanel]);
 
   useEffect(() => {
-    const onOpenBrowserPanelRequest = window.desktopBridge?.browser.onBrowserUseOpenPanelRequest;
+    const onOpenBrowserPanelRequest = window.desktopBridge?.browser?.onBrowserUseOpenPanelRequest;
     if (typeof onOpenBrowserPanelRequest !== "function" || !activeSplitView) {
       return;
     }
@@ -1800,7 +1800,7 @@ function SingleChatSurface(props: {
   }, [props.threadId, requestImmediateDockHydration, toggleSingletonPane]);
 
   useEffect(() => {
-    const onOpenBrowserPanelRequest = window.desktopBridge?.browser.onBrowserUseOpenPanelRequest;
+    const onOpenBrowserPanelRequest = window.desktopBridge?.browser?.onBrowserUseOpenPanelRequest;
     if (typeof onOpenBrowserPanelRequest !== "function") {
       return;
     }

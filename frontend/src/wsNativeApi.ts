@@ -67,7 +67,7 @@ const serverMaintenanceUpdatedListeners = new Set<(payload: ServerLifecycleStrea
 const serverSettingsUpdatedListeners = new Set<(payload: ServerSettingsUpdatedPayload) => void>();
 const gitActionProgressListeners = new Set<(payload: GitActionProgressEvent) => void>();
 
-function omitNullUserInputAnswers(
+export function omitNullUserInputAnswers(
   command: Parameters<NativeApi["orchestration"]["dispatchCommand"]>[0],
 ) {
   if (command.type !== "thread.user-input.respond") {
