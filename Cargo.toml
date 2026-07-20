@@ -18,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Syncode Team"]
 license = "MIT"
@@ -67,6 +67,12 @@ petgraph = "0.7"
 # Logging & tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# File appender for desktop shell release-mode logging — the Tauri binary
+# runs with `windows_subsystem = "windows"` which detaches stderr; without a
+# file appender every `tracing::info!` call in `ws_setup::boot` is silently
+# discarded. Adding here so any crate can pull it in, though only
+# `syncode-tauri` wires it today.
+tracing-appender = "0.2"
 
 # Error handling
 thiserror = "2"

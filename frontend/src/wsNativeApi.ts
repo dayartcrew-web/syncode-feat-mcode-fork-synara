@@ -43,6 +43,21 @@ import { WsTransport } from "./wsTransport";
 import { emitWsTransportState } from "./wsTransportEvents";
 
 let instance: { api: NativeApi; transport: WsTransport } | null = null;
+// Transport wired to the server-lifecycle push channels (welcome +
+// configUpdated + providerStatusesUpdated + maintenanceUpdated +
+// settingsUpdated). Used for two purposes:
+//   1. Fanout: each lifecycle push fans out to the matching `*Listeners` set
+//      that the exported `on*` helpers consume.
+//   2. Replay: when an `on*` listener is registered AFTER the push already
+//      arrived, the transport's `latestPushByChannel` cache lets us replay it.
+//
+// Set by BOTH `createWsNativeApi` (browser/dev mode) AND `nativeApi.ts`
+// (Tauri shell mode) via `bindServerLifecycleTransport`. Without the Tauri
+// path, the `on*` helpers are no-ops in the desktop app — `instance` is only
+// set inside `createWsNativeApi`, which never runs in Tauri mode — so the
+// welcome push never reaches `__root.tsx`'s `onServerWelcome` listener and
+// the splash screen hangs on "Home folder is not available yet.".
+let serverLifecycleTransport: WsTransport | null = null;
 const welcomeListeners = new Set<(payload: WsWelcomePayload) => void>();
 const serverConfigUpdatedListeners = new Set<(payload: ServerConfigUpdatedPayload) => void>();
 const serverProviderStatusesUpdatedListeners = new Set<
@@ -207,6 +222,65 @@ function resolveFallbackBrowserTab(state: ThreadBrowserState, tabId?: string) {
 }
 
 /**
+ * Wire a `WsTransport` to the 5 server-lifecycle push channels (welcome,
+ * configUpdated, providerStatusesUpdated, maintenanceUpdated, settingsUpdated)
+ * and register it as the replay source for the exported `on*` helpers.
+ *
+ * Called from BOTH code paths that own a real `WsTransport`:
+ *   - `createWsNativeApi` (browser/dev mode) wires its in-file transport.
+ *   - `nativeApi.ts` (Tauri shell mode) wires the desktop transport it creates
+ *     for `createTauriNativeApi`.
+ *
+ * Without the Tauri-side bind, the `on*` helpers never fire — `instance` is
+ * only set inside `createWsNativeApi`, which never runs in Tauri mode, so
+ * the welcome push arrives at the transport but never fans out to listeners
+ * and the replay cache is never consulted.
+ *
+ * Safe to call multiple times: the transport reference is replaced (prior
+ * transport's subscriptions live until that transport is disposed).
+ */
+export function bindServerLifecycleTransport(transport: WsTransport): void {
+  serverLifecycleTransport = transport;
+  transport.subscribe(WS_CHANNELS.serverWelcome, (message) => {
+    fanoutLifecycle(welcomeListeners, message.data as WsWelcomePayload);
+  });
+  transport.subscribe(WS_CHANNELS.serverConfigUpdated, (message) => {
+    fanoutLifecycle(
+      serverConfigUpdatedListeners,
+      message.data as ServerConfigUpdatedPayload,
+    );
+  });
+  transport.subscribe(WS_CHANNELS.serverProviderStatusesUpdated, (message) => {
+    fanoutLifecycle(
+      serverProviderStatusesUpdatedListeners,
+      message.data as ServerProviderStatusesUpdatedPayload,
+    );
+  });
+  transport.subscribe(WS_CHANNELS.serverMaintenanceUpdated, (message) => {
+    fanoutLifecycle(
+      serverMaintenanceUpdatedListeners,
+      message.data as ServerLifecycleStreamEvent,
+    );
+  });
+  transport.subscribe(WS_CHANNELS.serverSettingsUpdated, (message) => {
+    fanoutLifecycle(
+      serverSettingsUpdatedListeners,
+      message.data as ServerSettingsUpdatedPayload,
+    );
+  });
+}
+
+function fanoutLifecycle<T>(listeners: Set<(payload: T) => void>, payload: T): void {
+  for (const listener of listeners) {
+    try {
+      listener(payload);
+    } catch {
+      // Swallow listener errors — one bad callback must not break the dispatch loop.
+    }
+  }
+}
+
+/**
  * Subscribe to the server welcome message. If a welcome was already received
  * before this call, the listener fires synchronously with the cached payload.
  * This avoids the race between WebSocket connect and React effect registration.
@@ -214,7 +288,8 @@ function resolveFallbackBrowserTab(state: ThreadBrowserState, tabId?: string) {
 export function onServerWelcome(listener: (payload: WsWelcomePayload) => void): () => void {
   welcomeListeners.add(listener);
 
-  const latestWelcome = instance?.transport.getLatestPush(WS_CHANNELS.serverWelcome)?.data ?? null;
+  const latestWelcome =
+    serverLifecycleTransport?.getLatestPush(WS_CHANNELS.serverWelcome)?.data ?? null;
   if (latestWelcome) {
     try {
       listener(latestWelcome);
@@ -238,7 +313,7 @@ export function onServerConfigUpdated(
   serverConfigUpdatedListeners.add(listener);
 
   const latestConfig =
-    instance?.transport.getLatestPush(WS_CHANNELS.serverConfigUpdated)?.data ?? null;
+    serverLifecycleTransport?.getLatestPush(WS_CHANNELS.serverConfigUpdated)?.data ?? null;
   if (latestConfig) {
     try {
       listener(latestConfig);
@@ -261,7 +336,8 @@ export function onServerProviderStatusesUpdated(
   serverProviderStatusesUpdatedListeners.add(listener);
 
   const latestProviderStatuses =
-    instance?.transport.getLatestPush(WS_CHANNELS.serverProviderStatusesUpdated)?.data ?? null;
+    serverLifecycleTransport?.getLatestPush(WS_CHANNELS.serverProviderStatusesUpdated)?.data ??
+    null;
   if (latestProviderStatuses) {
     try {
       listener(latestProviderStatuses);
@@ -281,7 +357,7 @@ export function onServerMaintenanceUpdated(
   serverMaintenanceUpdatedListeners.add(listener);
 
   const latestMaintenance =
-    instance?.transport.getLatestPush(WS_CHANNELS.serverMaintenanceUpdated)?.data ?? null;
+    serverLifecycleTransport?.getLatestPush(WS_CHANNELS.serverMaintenanceUpdated)?.data ?? null;
   if (latestMaintenance) {
     try {
       listener(latestMaintenance);
@@ -301,7 +377,7 @@ export function onServerSettingsUpdated(
   serverSettingsUpdatedListeners.add(listener);
 
   const latestSettings =
-    instance?.transport.getLatestPush(WS_CHANNELS.serverSettingsUpdated)?.data ?? null;
+    serverLifecycleTransport?.getLatestPush(WS_CHANNELS.serverSettingsUpdated)?.data ?? null;
   if (latestSettings) {
     try {
       listener(latestSettings);
@@ -326,56 +402,10 @@ export function createWsNativeApi(): NativeApi {
   const transport = new WsTransport();
   transport.onStateChange((state) => emitWsTransportState(state));
 
-  transport.subscribe(WS_CHANNELS.serverWelcome, (message) => {
-    const payload = message.data;
-    for (const listener of welcomeListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
-      }
-    }
-  });
-  transport.subscribe(WS_CHANNELS.serverConfigUpdated, (message) => {
-    const payload = message.data;
-    for (const listener of serverConfigUpdatedListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
-      }
-    }
-  });
-  transport.subscribe(WS_CHANNELS.serverProviderStatusesUpdated, (message) => {
-    const payload = message.data;
-    for (const listener of serverProviderStatusesUpdatedListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
-      }
-    }
-  });
-  transport.subscribe(WS_CHANNELS.serverMaintenanceUpdated, (message) => {
-    const payload = message.data;
-    for (const listener of serverMaintenanceUpdatedListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
-      }
-    }
-  });
-  transport.subscribe(WS_CHANNELS.serverSettingsUpdated, (message) => {
-    const payload = message.data;
-    for (const listener of serverSettingsUpdatedListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
-      }
-    }
-  });
+  // Wire the 5 server-lifecycle channels (welcome, configUpdated,
+  // providerStatusesUpdated, maintenanceUpdated, settingsUpdated) and register
+  // the transport as the replay source for the exported `on*` helpers.
+  bindServerLifecycleTransport(transport);
   transport.subscribe(WS_CHANNELS.gitActionProgress, (message) => {
     const payload = message.data;
     for (const listener of gitActionProgressListeners) {
@@ -957,6 +987,7 @@ export function createWsNativeApi(): NativeApi {
 export function resetWsNativeApiForTest(): void {
   instance?.transport.dispose();
   instance = null;
+  serverLifecycleTransport = null;
   welcomeListeners.clear();
   serverConfigUpdatedListeners.clear();
   serverProviderStatusesUpdatedListeners.clear();
@@ -977,6 +1008,7 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     instance?.transport.dispose();
     instance = null;
+    serverLifecycleTransport = null;
     welcomeListeners.clear();
     serverConfigUpdatedListeners.clear();
     serverProviderStatusesUpdatedListeners.clear();
