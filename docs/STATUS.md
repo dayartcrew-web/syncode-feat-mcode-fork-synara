@@ -141,7 +141,7 @@
 | Contracts bridge (`@t3tools/contracts` shim) | ✅ complete — 139 Tier-3 symbols + RPC registry + 44-event union + branded IDs |
 | Transport (`wsTransport` JSON-RPC) | ✅ Effect-free; `MCODE_TO_SERVED` (88 mappings) |
 | Standalone WS backend | ✅ `cargo run -p syncode-ws --bin server` (SQLite, env-configurable) |
-| **In-process WS server (Tauri)** | ✅ **DSK-1** — desktop `.setup()` spawns the same axum WS server (`ws_setup::boot`) on `SYNCODE_WS_PORT` (default **30101**); shared `WsState` managed by Tauri → IPC commands + WS handlers see the same backend. `/ws` endpoint verified reachable (101 upgrade + JSON-RPC ping round-trip). 5 integration tests (`tests/ws_spawn.rs`). |
+| **In-process WS server (Tauri)** | ✅ **DSK-1** — desktop `.setup()` spawns the same axum WS server (`ws_setup::boot`) on `SYNCODE_WS_PORT` (default **33101** — moved off `30101` to avoid collision with the masday MCP daemon; release-mode panics now also written to `%APPDATA%\syncode\panic.log` via the panic hook in `main.rs`); shared `WsState` managed by Tauri → IPC commands + WS handlers see the same backend. `/ws` endpoint verified reachable (101 upgrade + JSON-RPC ping round-trip). 5 integration tests (`tests/ws_spawn.rs`). |
 | Terminal live output | ✅ reader-task → push bus |
 | Automation execution | ✅ `ProcessRunExecutor` (sh -c) |
 | LLM ops | ✅ provider CLI one-shot (`llm.rs::invoke_llm_oneshot`) — **no API key** (providers use CLI auth) |
