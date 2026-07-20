@@ -136,10 +136,7 @@ pub fn emit_workflow_context_push(
         "aggregateId": snapshot.thread_id,
         "data": data,
     });
-    let _ = push_tx.send((
-        crate::channels::CHANNEL_ORCHESTRATION.to_string(),
-        payload,
-    ));
+    let _ = push_tx.send((crate::channels::CHANNEL_ORCHESTRATION.to_string(), payload));
 }
 
 /// Production [`WorkflowStateProvider`] backed by the `thread_workflow_links`
@@ -215,7 +212,9 @@ pub async fn ensure_link_for_thread(pool: Option<&SqlitePool>, thread_id: &str) 
     }
 
     let workflow_id = Uuid::new_v4().to_string();
-    if let Err(e) = syncode_persistence::thread_workflow_link::upsert(pool, thread_id, &workflow_id).await {
+    if let Err(e) =
+        syncode_persistence::thread_workflow_link::upsert(pool, thread_id, &workflow_id).await
+    {
         tracing::warn!(
             thread_id = thread_id,
             error = %e,
@@ -291,7 +290,9 @@ mod tests {
     async fn preamble_provider_returns_none_when_no_link() {
         let pool = setup_pool().await;
         let provider = ThreadWorkflowPreamble::new(Some(pool));
-        let result = provider.workflow_preamble("orphan-thread", "do thing").await;
+        let result = provider
+            .workflow_preamble("orphan-thread", "do thing")
+            .await;
         assert!(result.is_none(), "no link → no preamble");
     }
 
@@ -305,8 +306,14 @@ mod tests {
             .workflow_preamble("t1", "fix the bug")
             .await
             .expect("preamble present after C1 seeds the link");
-        assert!(preamble.contains("WORKFLOW CONTEXT"), "preamble missing header: {preamble}");
-        assert!(preamble.contains("EXECUTE"), "preamble missing phase: {preamble}");
+        assert!(
+            preamble.contains("WORKFLOW CONTEXT"),
+            "preamble missing header: {preamble}"
+        );
+        assert!(
+            preamble.contains("EXECUTE"),
+            "preamble missing phase: {preamble}"
+        );
         assert!(
             preamble.contains("fix the bug"),
             "preamble must surface the user input as current task: {preamble}"

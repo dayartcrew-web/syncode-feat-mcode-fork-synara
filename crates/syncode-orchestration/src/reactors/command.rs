@@ -310,10 +310,7 @@ impl ProviderCommandReactor {
     /// for callers that don't yet wire workflow state, so existing
     /// construction sites compile unchanged.
     #[must_use]
-    pub fn with_workflow_state(
-        mut self,
-        workflow_state: Arc<dyn WorkflowStateProvider>,
-    ) -> Self {
+    pub fn with_workflow_state(mut self, workflow_state: Arc<dyn WorkflowStateProvider>) -> Self {
         self.workflow_state = Some(workflow_state);
         self
     }
