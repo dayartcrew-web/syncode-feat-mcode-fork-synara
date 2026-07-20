@@ -23,12 +23,25 @@ talk to.
 - **Agentic subsystems** — supervised `WorkflowExecutor` pipelines with an
   optional `Critic` review step, a structure-only DAG runtime (cycle-safe +
   idempotent), and a hybrid `MemoryProvider` for multi-store context retrieval
-  (vector / graph / episodic — backend trait ready, concrete backends deferred).
-- **WebSocket JSON-RPC server** — ~97 RPCs across all MCode domains (project,
-  thread, turn, message, git, terminal, automation, server config) plus push
-  channels for live updates.
+  (FTS5 baseline + optional vector / graph / episodic backends, PR #210).
+- **WebSocket JSON-RPC server** — ~169 RPCs across all MCode domains (project,
+  thread, turn, message, git, terminal, automation, server config, MCP servers,
+  tools) plus push channels for live updates.
 - **Provider orchestration** — start/stop/interrupt provider sessions, stream
-  tokens, queued-turn pipeline, steering support, memory-augmented system prompts.
+  tokens, queued-turn pipeline, steering support, memory-augmented system prompts,
+  and MCP server forwarding to ACP-speaking providers (cursor/grok/gemini, PR #205).
+- **MCP server discovery & management** — read-only discovery from
+  `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, and
+  project-local `.mcp.json` / `.cursor/mcp.json`, plus full CRUD for
+  syncode-owned entries at `~/.syncode/mcp.json` and a `Settings → MCP Servers`
+  panel (PR #209). Env-var values are redacted at the parser boundary.
+- **Built-in ripgrep code search** — `tool/search-code` backed by BurntSushi's
+  `grep-searcher` / `grep-regex` / `ignore` / `globset` stack with literal,
+  case-insensitive, and regex modes; runs inside `spawn_blocking` so the WS
+  runtime is never blocked (PR #212).
+- **Chat ↔ workflow state binding** — `thread_workflow_bridge` injects the
+  active workflow / plan / task / agent into every chat turn preamble so
+  providers see the same context the orchestrator sees (PR #211).
 - **Skill discovery** — filesystem catalog across 10 provider origins
   (mcode/codex/claude/cursor/gemini/grok/kilo/opencode/pi/agents) with dedupe
   and a 15s TTL cache.
@@ -157,11 +170,11 @@ crates/
   syncode-automation/    L1 scheduler + retry/misfire/completion
   syncode-auth/          L1 credentials, auth policy, secret store
   syncode-http/          L1 REST routes (/health, /api/project-favicon) + middleware
-  syncode-orchestration/ L2 CQRS: Decider, Orchestrator, Projector, Reactors + Critic + DAG
-  syncode-ws/            L3 WebSocket JSON-RPC server + push bus + skills_catalog
+  syncode-orchestration/ L2 CQRS: Decider, Orchestrator, Projector, Reactors + Critic + DAG + workflow bridge
+  syncode-ws/            L3 WebSocket JSON-RPC server + push bus + skills_catalog + mcp_catalog + code_search + thread_workflow_bridge + workflow_preamble
   syncode-tauri/         L4 Tauri desktop shell
 frontend/                React 19 + Vite UI
-docs/                    ARCHITECTURE.md, STATUS.md, CRATES.md
+docs/                    ARCHITECTURE.md, STATUS.md, CRATES.md, PRODUCTION-READINESS.md
 tests/                   cross-crate integration tests
 ```
 

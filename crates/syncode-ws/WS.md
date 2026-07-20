@@ -16,6 +16,10 @@ for server-initiated events, channel management, and a connection state machine.
 | `push` | `PushBus` — fan-out server-initiated events to subscribed connections |
 | `skills_catalog` | Filesystem skill discovery across 10 provider origins (mcode/codex/claude/cursor/gemini/grok/kilo/opencode/pi/agents); 15s TTL cache, dedupe by lowercased name |
 | `llm` | LLM invocation via provider CLI (`invoke_llm_oneshot`) — used by `server.generateAutomationIntent`, `server.generateThreadRecap`, `git.summarizeDiff` |
+| `mcp_catalog` | MCP server discovery from 4 sources (`~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, project-local `.mcp.json`/`.cursor/mcp.json`) + syncode-owned store at `~/.syncode/mcp.json` (PR #209) |
+| `code_search` | Built-in ripgrep content search via BurntSushi library crates (`grep-searcher`, `grep-matcher`, `grep-regex`, `ignore`) with tokio spawn-blocking (PR #212) |
+| `thread_workflow_bridge` | Binds chat threads to workflow state, emits workflow context push on `CHANNEL_ORCHESTRATION` (PR #211) |
+| `workflow_preamble` | Pure formatting helpers for `WorkflowStateProvider` — builds WORKFLOW CONTEXT system message (PR #211) |
 | `voice` | Optional whisper-CLI STT behind the `stt` Cargo feature (graceful "not configured" stub when off) |
 | `local_server` | `LocalServerManager` — spawn / reap child WS servers (`server.startLocalServer` / `stopLocalServer`) |
 | `error_codes` | JSON-RPC error code constants |
@@ -42,6 +46,12 @@ for server-initiated events, channel management, and a connection state machine.
 | `session/prompt` | Send a prompt to a session |
 | `session/cancel` | Interrupt an in-flight turn |
 | `git/status` | Query repository status |
+| `provider/list-mcp-catalog` | Aggregate MCP discovery from 4 sources + syncode-owned store (PR #209) |
+| `mcp/create` | Create syncode-owned MCP server entry (PR #209) |
+| `mcp/update` | Update syncode-owned MCP server entry (PR #209) |
+| `mcp/delete` | Delete syncode-owned MCP server entry (PR #209) |
+| `mcp/test-connection` | Probe MCP server handshake (PR #209) |
+| `tool/search-code` | Built-in ripgrep content search (PR #212) |
 | `terminal/spawn` | Open a PTY session |
 
 ## Integration points
@@ -62,6 +72,36 @@ for server-initiated events, channel management, and a connection state machine.
   `"SKILL.md"` byte string via `is_readable_skill_md(path)`, so behaviour is
   identical on case-sensitive (Linux/macOS) and case-insensitive (Windows)
   filesystems. Pinned by `skills_catalog::tests::collects_flat_markdown_for_pi_origin`.
+
+- **PR #209 — MCP catalog and CRUD:**
+  Added `mcp_catalog` module for filesystem MCP discovery from 4 sources
+  (`~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, project-local
+  `.mcp.json`/`.cursor/mcp.json`) with dedupe by lowercased name and syncode-owned
+  precedence. Syncode-owned store at `~/.syncode/mcp.json` uses atomic writes and
+  mutex guarding. Env-var values are redacted at the parser boundary. 5 new RPCs:
+  `provider/list-mcp-catalog`, `mcp/create`, `mcp/update`, `mcp/delete`, `mcp/test-connection`.
+
+- **PR #210 — FTS5 retrieval + hybrid memory backends:**
+  `SqliteMemoryStore` now uses FTS5 virtual table with recency fallback
+  (non-matching query → recency-N, NOT `NO_PRIOR_CONTEXT`). Added `MemoryBackend`
+  trait, `Scope` enum, `MemoryEntry`, `MemoryRecord` types. New backends:
+  `EpisodicBackend` (always built, append-only JSONL), `VectorBackend` (feature
+  `pgvector`), `GraphBackend` (feature `age`). `HybridMemoryProvider` composes one
+  or more backends.
+
+- **PR #211 — chat-workflow bridge:**
+  Added `thread_workflow_bridge` module (`ThreadWorkflowPreamble`,
+  `build_workflow_snapshot()`, `emit_workflow_context_push()`) to bind chat
+  threads to workflow state and emit workflow context on `CHANNEL_ORCHESTRATION`.
+  Added `workflow_preamble` module for pure formatting helpers. `WorkflowStateProvider`
+  trait defined in `syncode-orchestration`, production impl in `syncode-ws`.
+
+- **PR #212 — built-in code search:**
+  Added `code_search` module with ripgrep-backed content search (`search_code()`)
+  using BurntSushi library crates (`grep-searcher`, `grep-matcher`, `grep-regex`,
+  `ignore`, `globset`, `regex-syntax`). CPU work runs on `tokio::task::spawn_blocking`.
+  New RPC `tool/search-code` with error mapping: invalid params → `-32602`,
+  unexpected failures → `-32603`. 11 unit + 9 RPC integration + 12 live WS e2e tests.
 
 ## Stub status
 

@@ -71,6 +71,25 @@ DagGraph                   → next_ready / frontier  (structure-only scheduling
 | `ActivityView` | Audit-log entries |
 | `CheckpointView` | Per-turn diff checkpoint (used by `git.getTurnDiff` / `getFullThreadDiff`) |
 
+## Workflow runtime (PR #207)
+
+The `workflow` module implements agent-driven workflows with supervised execution:
+
+- `WorkflowExecutor` trait — `execute(step, ctx) -> Result<String, WorkflowError>`
+- `execute_workflow` — runs an executor with guardrails
+- `execute_workflow_with_critic` — adds a `Critic` review step before persistence
+- `WorkflowError` enum — 3 variants for execution failures
+
+## Workflow state injection (PR #211)
+
+The `WorkflowStateProvider` trait (defined in orchestration, implemented in `syncode-ws`)
+injects workflow context into chat sessions:
+
+- Production impl: `ThreadWorkflowPreamble` in `crates/syncode-ws/src/thread_workflow_bridge.rs`
+- Formats WORKFLOW CONTEXT block (≤1KB) injected as system message
+- Captures thread→workflow_id binding from `thread_workflow_links` table
+- Emits workflow context push on `CHANNEL_ORCHESTRATION`
+
 ## Agentic subsystems (added by PR #207)
 
 These three subsystems are **additive** — pre-existing `Decider`, `Projector`,
@@ -122,6 +141,7 @@ lifetime of the graph — removal does not renumber survivors).
 - Dispatches side-effects to `syncode-provider`, `syncode-git`, `syncode-automation`.
 - Consumes `syncode-memory::MemoryProvider` when composing agent pipelines.
 - Exposes queries to `syncode-tauri` IPC and `syncode-ws` RPC handlers.
+- Chat-workflow bridge in `syncode-ws` implements `WorkflowStateProvider` (PR #211).
 
 ## Stub status
 

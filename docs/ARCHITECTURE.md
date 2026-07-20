@@ -1,6 +1,6 @@
 # Syncode — Architecture
 
-> **Architecture reference** (2026-06-27). The **clone+rewire arc (PR #6–#32)** since added: a standalone WS server (`syncode-ws/src/bin/server.rs`, SQLite) serving **97 RPCs** across all MCode domains, terminal live-output push, `ProcessRunExecutor` (executing automations), and LLM ops via provider CLI. For the authoritative current REAL-vs-STUB status see [`STATUS.md`](./STATUS.md). Supersedes the planning-stage `COMPARISON-*.md` docs. Generated alongside `.masday/intel/` (intel is pre-clone + stale in places — trust `STATUS.md` + live `cargo test` for current counts).
+> **Architecture reference** (2026-07-20). The **clone+rewire arc (PR #6–#32)** since added: a standalone WS server (`syncode-ws/src/bin/server.rs`, SQLite) serving **169 RPCs** across all MCode domains, terminal live-output push, `ProcessRunExecutor` (executing automations), LLM ops via provider CLI, and agentic subsystems (orchestration + memory). For the authoritative current REAL-vs-STUB status see [`STATUS.md`](./STATUS.md). Supersedes the planning-stage `COMPARISON-*.md` docs. Generated alongside `.masday/intel/` (intel is pre-clone + stale in places — trust `STATUS.md` + live `cargo test` for current counts).
 
 ## 1. What is Syncode?
 
@@ -13,12 +13,13 @@ Syncode is a **Rust DDD (Domain-Driven Design) blueprint of [MCode](https://gith
 | Concern | Choice |
 |---|---|
 | Language | Rust 2024 edition, MSRV 1.85.0 |
-| Workspace | Cargo, `resolver = 2`, 12 internal crates |
+| Workspace | Cargo, `resolver = 2`, 13 internal crates |
 | Async | Tokio ("full") |
 | HTTP / WebSocket | Axum 0.8, tokio-tungstenite 0.26 |
-| Database | SQLx 0.8 + **SQLite** (event store + projections) |
+| Database | SQLx 0.8 + **SQLite** (event store + projections) + **PostgreSQL** (optional, pgvector/Age features) |
 | Git | git2 0.20 |
 | Terminal | portable-pty 0.9 |
+| Content search | **ripgrep** (grep-searcher, grep-matcher, grep-regex) |
 | Serialization | serde + serde_json |
 | Rust → TypeScript | ts-rs 10 (exports `frontend/src/types/*.ts`) |
 | Desktop | Tauri v2 |
@@ -34,7 +35,9 @@ Syncode is a **Rust DDD (Domain-Driven Design) blueprint of [MCode](https://gith
                 │  (transitive) 
 ┌───────────────▼──────────────────────────────────────────────┐
 │  WebSocket JSON-RPC Server (syncode-ws, L3)   GET /ws         │
-│  ~16 RPC methods · 6 push channels · best-effort push bus     │
+│  169 RPC methods · 6 push channels · best-effort push bus     │
+│  + mcp_catalog (PR #209) + code_search (PR #212)              │
+│  + thread_workflow_bridge (PR #211)                           │
 └───────────────┬──────────────────────────────────────────────┘
                 │
 ┌───────────────▼──────────────────────────────────────────────┐
@@ -68,6 +71,7 @@ WS request → ws::rpc::handle_rpc
                3. event_repo.append_events    (optimistic concurrency, expected_version)
                4. Projector::project_many     → ReadModelStore
                5. (optional) ProviderCommandReactor side effect
+               6. (optional) workflow-preamble injection (PR #211) → ThreadWorkflowPreamble adds workflow context as system message
            → return updated entity + broadcast PushEvent
 ```
 
@@ -79,15 +83,16 @@ Provider read-back: `ProviderEvent → ingest_provider_event() → DomainEvent` 
 |---|---|---|
 | **L0 kernel** | `syncode-core` | domain kernel — entities, 44 events, 7 port traits (**universal dependency**) |
 | **L0 kernel** | `syncode-contracts` | shared DTOs + ts-rs codegen |
-| **L1 leaf** | `syncode-provider` | `ProviderAdapter` trait + 10 adapters + SessionManager + registry |
+| **L1 leaf** | `syncode-provider` | `ProviderAdapter` trait + 10 adapters + SessionManager + registry + MCP server forwarding to ACP providers (PR #205) |
 | **L1 leaf** | `syncode-persistence` | SQLite event store + projections + snapshots (CQRS write/read side) |
+| **L1 leaf** | `syncode-memory` | `MemoryProvider` trait + FTS5 SQLite store + `HybridMemoryProvider` (EpisodicBackend + VectorBackend + GraphBackend, PR #210) |
 | **L1 leaf** | `syncode-git` | git2: status/diff/branch/commit/checkpoint/worktree/stacked-actions |
 | **L1 leaf** | `syncode-terminal` | portable-pty PTY + ack-buffered output + sessions |
 | **L1 leaf** | `syncode-automation` | scheduler + retry/misfire/completion policies |
 | **L1 leaf** | `syncode-auth` | credentials, auth policy, secret store, principal/session/authenticator (**wired into WS — opt-in**) |
 | **L1 leaf** | `syncode-http` | *(stub)* future REST surface |
-| **L2 engine** | `syncode-orchestration` | CQRS: 48 Commands, Decider, Orchestrator, Projector, Reactors, ApplicationService |
-| **L3 transport** | `syncode-ws` | WebSocket JSON-RPC server + push bus |
+| **L2 engine** | `syncode-orchestration` | CQRS: 48 Commands, Decider, Orchestrator, Projector, Reactors, ApplicationService + agentic subsystems (Critic + DAG runtime + Workflow executor + Thread↔workflow bridge, PR #211) |
+| **L3 transport** | `syncode-ws` | WebSocket JSON-RPC server + push bus + mcp_catalog (PR #209) + code_search (PR #212) |
 | **L4 shell** | `syncode-tauri` | Tauri desktop binary (tray, updater, IPC) |
 
 `syncode-core` is depended on by **every** other crate — it is the highest-impact surface in the repo.

@@ -206,6 +206,13 @@ tests, which drive the client over an in-process `tokio::io::duplex` with a
 fake pi peer emitting canned event sequences (text deltas → agent_end; tool
 cycle; error stop-reason) — no real binary required.
 
+## MCP server forwarding (PR #205)
+
+ACP-speaking providers (cursor/grok/gemini) receive the `mcpServers` array at
+`session/new` time. The wire point is `extract_provider_extras()` in
+`crates/syncode-ws/src/settings.rs` (line ~745). The ACP provider shape is
+unchanged — only the source of the `mcpServers` vec grew from settings extraction.
+
 ## Factory
 
 [`registry::create_by_id`](src/registry.rs) / [`registry::acp_config_for`]
