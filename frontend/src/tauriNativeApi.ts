@@ -33,6 +33,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { adaptPushEnvelope, createPushAdaptContext } from "./contracts/adaptPushEvent";
 import { WS_CHANNELS } from "./contracts/tier3/ws";
+import { omitNullUserInputAnswers } from "./wsNativeApi";
 
 import type {
   AuthBootstrapInput,
@@ -868,7 +869,15 @@ function makeTauriNativeApi(
       getSnapshot: () => callTransport<OrchestrationReadModel>("project/get"),
       getShellSnapshot: () => callTransport<OrchestrationShellSnapshot>("shell/getSnapshot"),
       dispatchCommand: (command: ClientOrchestrationCommand) =>
-        callTransport<{ sequence: number }>("orchestration/dispatch", command),
+        // Backend accepts `orchestration.dispatchCommand` (dot) or
+        // `orchestration/dispatch-command` (slash + kebab). The literal
+        // `orchestration/dispatch` (no `-command`) was a typo that the backend
+        // rejects with "Method not found", which surfaced as the Tauri shell
+        // hanging during `prewarmHomeChatProject` (browser path was unaffected
+        // because `wsNativeApi.ts` uses `ORCHESTRATION_WS_METHODS.dispatchCommand`).
+        callTransport<{ sequence: number }>("orchestration.dispatchCommand", {
+          command: omitNullUserInputAnswers(command),
+        }),
       importThread: (input: OrchestrationImportThreadInput) =>
         callTransport<OrchestrationImportThreadResult>("orchestration/importThread", input),
       repairState: () => callTransport<OrchestrationReadModel>("orchestration/repair"),
