@@ -265,7 +265,7 @@ const NO_TRANSPORT_REASON =
 // ─── Push delivery (mirrors wsNativeApi demux) ───────────────────────────
 //
 // The desktop shell boots its own embedded axum WS server
-// (`crates/syncode-tauri/src/ws_setup.rs`, default 127.0.0.1:30101) and the
+// (`crates/syncode-tauri/src/ws_setup.rs`, default 127.0.0.1:33101) and the
 // frontend reaches it via the SAME `WsTransport` the browser uses. Push
 // frames therefore arrive on `WsTransport`'s channel-keyed subscribe surface
 // — this module demuxes them exactly like `wsNativeApi.ts` and routes to the

@@ -111,7 +111,7 @@ typed stubs that return default/empty states rather than rejecting.
 
 | Method | Mapping | Notes |
 |---|---|---|
-| getWsUrl | provider callback | Tauri entrypoint supplies the WS URL (DSK-1: `SYNCODE_WS_PORT`, default 30101). |
+| getWsUrl | provider callback | Tauri entrypoint supplies the WS URL (DSK-1: `SYNCODE_WS_PORT`, default 33101). |
 | pickFolder / confirm | direct (as dialogs) | ✅ |
 | setTheme | direct (`Window.setTheme`) | `system` → `null`. |
 | openExternal / showInFolder | invoke (DSK-2) | ✅ |

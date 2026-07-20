@@ -9,7 +9,7 @@
  *      surfaces (server/provider/orchestration/automation/stats/projects/
  *      filesystem) AND live push delivery delegate to a real `WsTransport`
  *      pointing at the desktop's embedded WS server
- *      (`crates/syncode-tauri/src/ws_setup.rs`, default 127.0.0.1:30101).
+ *      (`crates/syncode-tauri/src/ws_setup.rs`, default 127.0.0.1:33101).
  *   3. The browser/WebSocket implementation (`createWsNativeApi`) as the final
  *      fallback for browser-mode dev/test.
  *
@@ -33,11 +33,11 @@ import { createWsNativeApi } from "./wsNativeApi";
 import { WsTransport } from "./wsTransport";
 
 // Desktop WS server default bind — mirrors
-// `crates/syncode-tauri/src/ws_setup.rs::DEFAULT_PORT` (30101) so the eager
+// `crates/syncode-tauri/src/ws_setup.rs::DEFAULT_PORT` (33101) so the eager
 // `WsTransport.openSession()` has a usable URL even before the
 // `get_ws_endpoint` invoke resolves (typically <1 frame; this is just a
 // safety net for the boot race).
-const DESKTOP_WS_DEFAULT_URL = "ws://127.0.0.1:30101";
+const DESKTOP_WS_DEFAULT_URL = "ws://127.0.0.1:33101";
 
 let cachedDesktopApi: NativeApi | undefined;
 let desktopTransport: WsTransport | undefined;

@@ -11,6 +11,7 @@ use syncode_tauri::{
 use tauri::Manager;
 
 fn main() {
+    install_panic_hook();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -124,4 +125,43 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Syncode Tauri application");
+}
+
+/// Install a panic hook that writes the panic payload + location to a log
+/// file in the user's data directory.
+///
+/// Why: in release mode `windows_subsystem = "windows"` is set (line 5 above),
+/// which detaches stdout/stderr — a `setup()` failure (e.g. WS port already
+/// taken) panics silently and the app just disappears. The hook preserves the
+/// default behavior (printing to stderr when one exists) and additionally
+/// writes the panic to `%APPDATA%\syncode\panic.log` (Windows) or
+/// `~/.local/share/syncode/panic.log` (Linux/macOS) so users have a breadcrumb
+/// to share when filing an issue. The file is overwritten each launch so it
+/// always reflects the most recent panic.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let full_msg = format!(
+            "Syncode desktop panicked at {location}\n  payload: {msg}\n  utc:    {ts}\n",
+            ts = chrono::Utc::now().to_rfc3339()
+        );
+        // Best-effort file write — never let logging itself panic.
+        if let Some(dir) = syncode_tauri::paths::log_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("panic.log"), &full_msg);
+        }
+        default_hook(info);
+    }));
 }

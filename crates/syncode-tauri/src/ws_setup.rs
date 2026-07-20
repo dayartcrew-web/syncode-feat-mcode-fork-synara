@@ -17,10 +17,12 @@
 //!
 //! Mirrors the standalone binary's env-var contract so ops/docs stay uniform:
 //! - `SYNCODE_WS_HOST` — bind host (default `127.0.0.1`).
-//! - `SYNCODE_WS_PORT` — bind port (default `30101`). The desktop default
+//! - `SYNCODE_WS_PORT` — bind port (default `33101`). The desktop default
 //!   differs from the standalone binary's `3000` so a developer running both
 //!   simultaneously (standalone for the browser UI + desktop shell) don't fight
-//!   over a port; either is overridable via env.
+//!   over a port; either is overridable via env. The historical default `30101`
+//!   collided with the `masday` MCP daemon which binds the same port; `33101`
+//!   avoids that collision without env configuration.
 //! - `SYNCODE_DB` — SQLite DB path (default `syncode.db`; empty → in-memory).
 //! - `SYNCODE_DEFAULT_PROVIDER` — provider id armed on the chat pipeline
 //!   (default `claude`); when the CLI is absent the orchestrator falls back to
@@ -50,8 +52,10 @@ use tokio::task::JoinHandle;
 const DEFAULT_HOST: &str = "127.0.0.1";
 /// Default bind port for the **desktop** shell. Picked distinct from the
 /// standalone binary's `3000` so concurrent runs don't collide; override with
-/// `SYNCODE_WS_PORT`.
-const DEFAULT_PORT: u16 = 30101;
+/// `SYNCODE_WS_PORT`. The previous default (`30101`) collided with the
+/// `masday` MCP daemon — `33101` is in the same memorable shape but unused by
+/// known local-first tools.
+const DEFAULT_PORT: u16 = 33101;
 /// Default SQLite DB filename (resolved against the process cwd, matching the
 /// standalone binary). Set `SYNCODE_DB=` (empty) for an in-memory store.
 const DEFAULT_DB_PATH: &str = "syncode.db";
