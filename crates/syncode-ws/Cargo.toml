@@ -69,6 +69,21 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+# `grep-*` library crates from BurntSushi/ripgrep power the built-in
+# `tool/search-code` content search (crates/syncode-ws/src/code_search.rs).
+# `grep-searcher` is the file walker + matcher sink; `grep-matcher` is the
+# Matcher trait abstraction; `grep-regex` is the default regex-based Matcher
+# impl; `ignore` respects `.gitignore`/`.ignore` during traversal; `globset`
+# powers the optional `file_glob` filter.
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+grep-regex = "0.1"
+ignore = "0.4"
+globset = "0.4"
+# `regex-syntax` is used only for `regex_syntax::escape` — escapes regex
+# metacharacters in a caller-supplied literal query so the matcher treats it
+# as a verbatim substring match.
+regex-syntax = "0.8"
 
 [dev-dependencies]
 futures-util = "0.3"
