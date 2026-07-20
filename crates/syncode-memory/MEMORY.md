@@ -61,11 +61,12 @@ table linked via `content='interactions'` and an AFTER INSERT trigger that
 keeps the FTS index in sync on every write. No UPDATE / DELETE triggers are
 needed because the store is append-only.
 
-### Retrieval paths
+### Retrieval paths (PR #210)
 
 - **Empty query:** recent-N by `timestamp DESC` (matches the prior contract).
 - **Non-empty query:** FTS5 `MATCH` ordered by `bm25() ASC` with `timestamp DESC`
-  tiebreak — the most relevant matches surface first.
+  tiebreak — the most relevant matches surface first. If FTS5 finds no matches,
+  the query falls back to recency-N (NOT `NO_PRIOR_CONTEXT`).
 
 ## Backend feature flags
 
@@ -114,9 +115,9 @@ the Rust crate to run them.
 
 ## Status
 
-Real implementation, production-ready.
+Real implementation, production-ready (PRs #208, #210).
 
-- **Default path:** `SqliteMemoryStore` (FTS5-backed retrieval).
+- **Default path:** `SqliteMemoryStore` (FTS5-backed retrieval with recency fallback).
 - **Append-only history:** `EpisodicBackend` (JSONL, zero external deps).
 - **Hybrid composition:** `HybridMemoryProvider` merges multiple backends
   with stable score-descending ordering.

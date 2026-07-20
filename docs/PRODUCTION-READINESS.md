@@ -1,10 +1,10 @@
 # Syncode Production-Readiness Assessment
 
-**Date:** 2026-07-17 (updated) · **Master:** `34557ec` · **Source of truth:** [`mcode`](https://github.com/...) at `/home/vibe-dev/mcode`
-**Audited against current code** (post Bug #2 fixes #184–#186/#188, git panel #189–#192, production-readiness blocker fixes #194–#201, AND stub-gap cleanup #202–#204).
+**Date:** 2026-07-20 (updated) · **Master:** current · **Source of truth:** [`mcode`](https://github.com/...) at `/home/vibe-dev/mcode`
+**Audited against current code** (post Bug #2 fixes #184–#186/#188, git panel #189–#192, production-readiness blocker fixes #194–#204, AND stub-gap cleanup #202–#204, AND agentic features #205–#212).
 
-> **Headline: 13 of 15 subsystems fully production-ready; 2 at-parity (not blocking).**
-> All 5 production blockers from the initial audit are **SHIPPED** (#194–#204). Stub/gap cleanup also done: 8 dead .t1-legacy files deleted (#202), git unstage implemented (#203), RenameProject command added (#204). The 2 non-✅ items are: **Memory** (🟡 SQLite interactions log — parity with mcode, not vector/graph by design) and **MCP/tools** (⚪ not-implemented — mcode also lacks it, parity). Neither is a regression or blocker.
+> **Headline: 15 of 15 subsystems fully production-ready.**
+> All 5 production blockers from the initial audit are **SHIPPED** (#194–#204). Stub/gap cleanup also done: 8 dead .t1-legacy files deleted (#202), git unstage implemented (#203), RenameProject command added (#204). **New agentic features** (PRs #205–#212): MCP server discovery/management (#209), FTS5 hybrid memory backends (#210), code search via ripgrep (#212), chat-workflow binding (#211), provider MCP forwarding (#205), skills catalog case fix (#206), agentic patterns port (#207), tests + docs (#208).
 
 ## Status table
 
@@ -21,14 +21,14 @@
 | 7 | Skills | ✅ Prod | None | 10-origin faithful port of mcode `skillsCatalog.ts` (`syncode-ws/src/skills_catalog.rs`) |
 | 8 | Git ops | ✅ Prod | Low | git2 + CLI subprocess, 14 ops (incl unstage #203), real upstream detection (#189–#192) |
 | 9 | Automations | ✅ Prod (**ahead**) | Low | real scheduler + `ProcessRunExecutor` + retry policies (mcode stubs retry) + LLM completion eval |
-| 10 | MCP / tools | ⚪ N/A | None | zero handlers — mcode also has none (parity, not a regression) |
+| 10 | MCP / tools | ✅ Prod (#209) | Low | MCP server discovery/management (`mcp_catalog.rs`): reads `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, project-local configs. CRUD on `~/.syncode/mcp.json`. 5 RPCs: `provider/list-mcp-catalog`, `mcp/create`, `mcp/update`, `mcp/delete`, `mcp/test-connection`. |
 | 11 | **Desktop (Tauri)** | ✅ Prod (#199) | Low | bootable shell + 28 IPC handlers + **real WS push channel** (#199: nativeApi constructs WsTransport → embedded WS server, tauriNativeApi demux mirrors wsNativeApi). Browser path unchanged. |
 | 12 | Auth | ✅ Prod | Low | shared-secret + pairing + `constant_time_eq` (local-first, matches mcode modes) |
 | 13 | Terminals | ✅ Prod | None | real `portable_pty` + scrollback persistence |
 | 14 | Local servers | ✅ Prod | None | real tokio subprocess lifecycle manager |
-| 15 | Memory | 🟡 Partial | Low | SQLite interactions log (recent-N context) — **parity with mcode**, not vector/graph |
+| 15 | Memory | ✅ Prod (#210) | Low | SQLite interactions log (recent-N context) + FTS5 full-text search + recency fallback — **parity with mcode**. Optional `VectorBackend` (pgvector) and `GraphBackend` (Apache AGE) via Cargo features. |
 
-Legend: ✅ Production-ready · 🟡 Partial · 🔴/⚪ Stub/Not-implemented · "ahead" = syncode strictly better than mcode.
+Legend: ✅ Production-ready · 🔴/⚪ Stub/Not-implemented · "ahead" = syncode strictly better than mcode.
 
 ## Production blockers — ALL RESOLVED (#194–#200)
 
