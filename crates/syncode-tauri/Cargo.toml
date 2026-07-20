@@ -24,6 +24,8 @@ syncode-persistence = { workspace = true }
 syncode-provider = { workspace = true }
 axum = { workspace = true }
 tauri = { workspace = true }
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"
 # Native OS file/folder picker (P4-4 filesystem.browse). Cross-platform:
 # Win32 common dialogs, macOS NSOpenPanel, Linux portal/xdg.
 rfd = { workspace = true }

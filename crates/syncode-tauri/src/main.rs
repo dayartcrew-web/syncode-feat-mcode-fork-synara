@@ -12,6 +12,8 @@ use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::ProviderRegistryState::new())
         .manage(commands::SessionStoreState::new())
         // Managed updater state — desktop commands (DSK-2) read/mutate this
