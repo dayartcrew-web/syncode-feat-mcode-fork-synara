@@ -23,7 +23,7 @@ age-integration = ["age"]
 [dependencies]
 async-trait = "0.1"
 chrono = { workspace = true }
-fastembed = { version = "5", optional = true, default-features = false }
+fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 pgvector = { version = "0.4", optional = true, features = ["sqlx"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

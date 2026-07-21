@@ -46,19 +46,14 @@
 //! The WS upgrade endpoint is `/ws` (see `build_ws_router`). The web UI's
 //! `wsTransport.ts` resolves to `ws://<host>:<port>/ws`.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use syncode_core::ports::EventRepository;
-use syncode_orchestration::Orchestrator;
-use syncode_persistence::SqlitePool;
 use syncode_persistence::adapters::SqliteEventRepository;
-use syncode_provider::{FileResumeCursorStore, SessionManager};
-use syncode_ws::settings::{
-    extract_provider_extras, resolve_default_model, resolve_default_provider,
-};
+use syncode_provider::FileResumeCursorStore;
+use syncode_ws::orchestrator_setup::build_orchestrator;
 use syncode_ws::{WsState, server::build_app};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -147,7 +142,7 @@ async fn build_state() -> WsState {
             // picker) before choosing an adapter. Previously the orchestrator
             // was armed first and always fell back to the env-var default,
             // ignoring the user's pick until next restart.
-            let orchestrator = build_orchestrator(repo, &settings_pool).await;
+            let orchestrator = build_orchestrator(repo, Some(&settings_pool)).await;
             tracing::info!(db_path = %db_path, "SQLite-backed event store initialized");
             let state = WsState::new(PUSH_CAPACITY, orchestrator);
             // Attach the pool to the in-memory settings store: loads any
@@ -172,227 +167,3 @@ async fn build_state() -> WsState {
     }
 }
 
-/// Build the orchestrator with a [`ProviderCommandReactor`] + a provider
-/// adapter, so turns actually invoke a provider and AI responses stream back.
-///
-/// Provider id precedence (post-SRV-1):
-///   1. `server_settings.textGenerationModelSelection.provider` — the Settings
-///      panel's picker (loaded fresh from `settings_pool`).
-///   2. `SYNCODE_DEFAULT_PROVIDER` env var — operator override.
-///   3. [`DEFAULT_PROVIDER`] (`"opencode"`) — backwards-compatible default.
-///
-/// Per-provider extras (`binaryPath`, `serverUrl`, `launchArgs`, …) are
-/// pulled from the same persisted settings so adapters launch with the
-/// user-configured CLI path and credentials. The model id follows the same
-/// precedence chain via [`resolve_default_model`].
-///
-/// When the resolved provider's CLI is unavailable (the adapter factory
-/// returns `None`), this falls back to [`Orchestrator::new`] — turns are
-/// still recorded but no AI response is generated, and the server still
-/// boots (graceful degradation, logged at `WARN`).
-///
-/// `WsState::new` wraps the orchestrator's push bus as a
-/// [`syncode_ws::push::WsDomainEventPublisher`] via
-/// [`Orchestrator::with_event_publisher`], so provider-stream-sourced domain
-/// events (tokens, tool calls, completion) are pushed to subscribed clients.
-///
-/// # P0-4: resume-cursor rehydration
-///
-/// After wiring the adapter the orchestrator asks the [`SessionManager`] to
-/// [`rehydrate_sessions`](SessionManager::rehydrate_sessions) from
-/// [`FileResumeCursorStore`]. Cursor-bearing sessions that were in flight
-/// before the restart are re-registered and the provider adapter is asked to
-/// `resume_session` for each — best-effort, never blocks startup.
-async fn build_orchestrator(
-    repo: Arc<dyn EventRepository>,
-    settings_pool: &SqlitePool,
-) -> Orchestrator {
-    // Load persisted ServerSettings (best-effort). On any failure (fresh DB,
-    // pre-SRV-1 schema, IO error) we fall through to env-only resolution so
-    // the server still boots — matches the existing in-memory fallback.
-    let settings = match syncode_persistence::settings_store::load_settings(settings_pool).await {
-        Ok(Some(value)) => value,
-        Ok(None) => serde_json::Value::Null,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "failed to load persisted ServerSettings — falling back to env-only provider selection"
-            );
-            serde_json::Value::Null
-        }
-    };
-
-    let env_provider = std::env::var("SYNCODE_DEFAULT_PROVIDER").ok();
-    let env_model = std::env::var("SYNCODE_DEFAULT_MODEL").ok();
-    let default_provider = resolve_default_provider(&settings, env_provider.as_deref());
-    let default_model = resolve_default_model(&settings, env_model.as_deref());
-    let provider_extras = extract_provider_extras(&default_provider, &settings);
-
-    // PR-1-2: construct the shared read model handle first so the reactor and
-    // the orchestrator can both see it. The reactor uses it to resolve a
-    // thread's project root path as the session working directory; the
-    // orchestrator's projector writes to it as commands are handled. Sharing
-    // the Arc (not cloning the store) keeps them in lock-step.
-    let read_model: Arc<tokio::sync::RwLock<syncode_orchestration::ReadModelStore>> = Arc::new(
-        tokio::sync::RwLock::new(syncode_orchestration::ReadModelStore::new()),
-    );
-
-    let session_manager = SessionManager::new();
-    // C2: attach a workflow-state provider so freshly started chat sessions
-    // carry syncode's workflow context (phase, current task, constraints) as
-    // a leading block in their system prompt. Backed by the
-    // `thread_workflow_links` sidecar — None when no SQLite pool is attached
-    // (in-memory mode) → identical to prior behavior.
-    let workflow_state: Arc<dyn syncode_orchestration::workflow_state::WorkflowStateProvider> =
-        Arc::new(
-            syncode_ws::thread_workflow_bridge::ThreadWorkflowPreamble::new(Some(
-                settings_pool.clone(),
-            )),
-        );
-    let reactor = Arc::new(
-        syncode_orchestration::ProviderCommandReactor::new(session_manager)
-            .with_read_model(Arc::clone(&read_model))
-            .with_workflow_state(workflow_state),
-    );
-
-    let orchestrator = match syncode_provider::registry::create_by_id(&default_provider) {
-        Some(adapter) => {
-            // Spawn the provider adapter (launches codex app-server / claude CLI).
-            {
-                let mut guard = adapter.write().await;
-                let config = syncode_provider::ProviderConfig {
-                    provider_id: default_provider.clone(),
-                    model: default_model.clone(),
-                    api_key: None,
-                    base_url: None,
-                    max_tokens: Some(4096),
-                    extra: provider_extras,
-                };
-                match guard.spawn(config).await {
-                    Ok(()) => {
-                        tracing::info!(provider = %default_provider, "provider adapter spawned")
-                    }
-                    Err(e) => {
-                        tracing::error!(provider = %default_provider, error = %e, "failed to spawn provider adapter — turns will fail")
-                    }
-                }
-            }
-
-            tracing::info!(
-                provider = %default_provider,
-                model = %default_model,
-                "chat pipeline armed: turns will dispatch to the provider"
-            );
-
-            // P0-4: rehydrate persisted sessions before the orchestrator takes
-            // ownership of the adapter — pass a clone of the SharedAdapter
-            // (Arc<RwLock<dyn …>>) so the rehydrate path can call
-            // `resume_session` without an extra lock dance.
-            let store = FileResumeCursorStore::new();
-            let rehydrated = reactor
-                .session_manager()
-                .rehydrate_sessions(&store, &adapter)
-                .await;
-            let reattached = rehydrated
-                .iter()
-                .filter(|r| matches!(r.outcome, syncode_provider::RehydrationOutcome::Reattached))
-                .count();
-            let failed = rehydrated.len() - reattached;
-            tracing::info!(
-                rehydrated = rehydrated.len(),
-                reattached,
-                failed,
-                "session resume cursors rehydrated"
-            );
-
-            // PR-1-2: pass the shared read model so the reactor can resolve
-            // the session working directory from the thread's project root.
-            let mut orchestrator = Orchestrator::with_reactor_adapter_and_read_model(
-                repo, reactor, adapter, read_model,
-            );
-
-            // Per-thread provider dispatch: spawn + register adapters for
-            // every AVAILABLE provider (not just the default), so threads
-            // created with a different provider (e.g. Claude) dispatch to
-            // the correct adapter instead of the global default (Codex).
-            // The default provider is already spawned above; skip it here.
-            let mut registry_entries: Vec<(String, syncode_provider::registry::SharedAdapter)> =
-                Vec::new();
-            // Always include the default adapter in the registry.
-            registry_entries.push((
-                default_provider.clone(),
-                orchestrator.adapter().cloned().unwrap(),
-            ));
-            for &pid in syncode_provider::ALL_PROVIDERS {
-                // Skip the default (already registered) and HTTP-only providers.
-                if pid == default_provider.as_str()
-                    || pid == syncode_provider::PROVIDER_ANTHROPIC
-                    || pid == syncode_provider::PROVIDER_OPENAI
-                {
-                    continue;
-                }
-                if let Some(extra_adapter) = syncode_provider::registry::create_by_id(pid) {
-                    // Spawn the adapter so it's ready for sessions. Best-effort:
-                    // a spawn failure (CLI not installed) logs but doesn't abort —
-                    // threads using that provider will fail at turn time with a
-                    // clear adapter error, and other providers stay functional.
-                    let cfg = syncode_provider::ProviderConfig {
-                        provider_id: pid.to_string(),
-                        model: String::new(), // each provider uses its own default model
-                        api_key: None,
-                        base_url: None,
-                        max_tokens: Some(4096),
-                        extra: HashMap::new(),
-                    };
-                    {
-                        let mut guard = extra_adapter.write().await;
-                        if let Err(e) = guard.spawn(cfg).await {
-                            tracing::warn!(
-                                provider = pid,
-                                error = %e,
-                                "non-default provider adapter spawn failed — \
-                                 threads using this provider will fail at turn time"
-                            );
-                            continue; // don't register an unspawned adapter
-                        }
-                    }
-                    tracing::info!(
-                        provider = pid,
-                        "provider adapter spawned for per-thread dispatch"
-                    );
-                    registry_entries.push((pid.to_string(), extra_adapter));
-                }
-            }
-            orchestrator = orchestrator.with_adapter_registry(registry_entries);
-            orchestrator
-        }
-        None => {
-            tracing::warn!(
-                provider = %default_provider,
-                "provider adapter not available — chat will be inert \
-                 (turns recorded but no AI response). Install the provider CLI \
-                 or set SYNCODE_DEFAULT_PROVIDER to an available provider id."
-            );
-            Orchestrator::new(repo)
-        }
-    };
-
-    // Replay the read model from the event store so threads/projects from
-    // previous sessions appear in the shell snapshot on startup. Without this,
-    // the in-memory read model is empty and the frontend sees no existing
-    // threads — the root cause of "shell snapshot returns 0 threads".
-    match orchestrator.replay_read_model().await {
-        Ok((snapshots, events)) => {
-            tracing::info!(
-                snapshots_loaded = snapshots,
-                events_replayed = events,
-                "read model replayed from event store"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to replay read model — starting with empty store");
-        }
-    }
-
-    orchestrator
-}

@@ -2534,35 +2534,30 @@ fn render_diff_summary(summary: &syncode_git::diff::DiffSummary) -> String {
         .collect::<String>()
 }
 
-/// `orchestration.replayEvents` — re-project the read model from the event
-/// store. Without an `aggregateId` this is a full replay
-/// (`Orchestrator::replay_read_model`); with an `aggregateId` it still falls
-/// back to a full replay (the orchestrator's public API does not expose a
-/// single-aggregate replay without reaching into the event repo), but the
-/// returned `scope` reflects the requested scope so callers can distinguish.
+/// `orchestration.replayEvents` — gap-fill query used by the per-thread
+/// catch-up poller (`THREAD_DETAIL_CATCHUP_INTERVAL_MS = 1.5s` in
+/// `__root.tsx`). The UI fires this on every running turn for each subscribed
+/// thread; the response is consumed as a `Vec<OrchestrationEvent>` and
+/// filtered client-side.
+///
+/// Historically this handler delegated to `Orchestrator::replay_read_model`,
+/// which rebuilds the GLOBAL in-memory read model under its write lock. With
+/// ~2000 events in the store that is roughly 1s of work — and at a 1.5s poll
+/// cadence it consumed ~66% of backend CPU during turns, producing the
+/// v0.1.5 "responses are slow" regression. Push events already keep the
+/// thread view live; this RPC is a safety-net gap fill that the frontend
+/// silently discards when the shape does not match.
+///
+/// The cheap path: return an empty array. No state mutation, no lock
+/// acquisition, no replay. A follow-up can wire this to
+/// `EventRepository::replay_events(aggregate_id)` for true per-thread gap
+/// filling without rebuilding global state.
 async fn handle_orchestration_replay_events(
-    state: &WsState,
+    _state: &WsState,
     id: Value,
-    params: &Value,
+    _params: &Value,
 ) -> JsonRpcResponse {
-    let aggregate_id = params.get("aggregateId").and_then(|v| v.as_str());
-    let scope = aggregate_id.unwrap_or("all").to_string();
-
-    match state.orchestrator.replay_read_model().await {
-        Ok((replayed, seeded)) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({
-                "replayed": replayed,
-                "seeded": seeded,
-                "scope": scope,
-            }),
-        ),
-        Err(e) => JsonRpcResponse::error(
-            Some(id),
-            crate::error_codes::INTERNAL_ERROR,
-            format!("replay failed: {e}"),
-        ),
-    }
+    JsonRpcResponse::success(id, serde_json::json!([]))
 }
 
 /// `orchestration.repairState` — detect read-model drift and optionally
@@ -3044,7 +3039,7 @@ async fn handle_push_unsubscribe(
 ///
 /// Returns the session token, role, subject, and expiry. The token is
 /// opaque and should be treated as a bearer secret by the client.
-async fn handle_auth_bootstrap(
+pub(crate) async fn handle_auth_bootstrap(
     state: &WsState,
     conn_id: ConnectionId,
     id: Value,
@@ -3151,7 +3146,7 @@ async fn handle_auth_logout(state: &WsState, conn_id: ConnectionId, id: Value) -
 /// `credential` is the secret the joining client must present to
 /// `auth/bootstrap`; it is NOT retrievable after this call (the store matches
 /// it opaquely during bootstrap).
-async fn handle_auth_create_pairing_credential(
+pub(crate) async fn handle_auth_create_pairing_credential(
     state: &WsState,
     id: Value,
     params: &Value,
@@ -3213,7 +3208,7 @@ async fn handle_auth_create_pairing_credential(
 /// Returns `{ "revoked": bool, "hadLink": bool }`. `hadLink=false` means the
 /// id was already absent (or expired-and-purged); the call is still considered
 /// successful because the end state ("no such link exists") is achieved.
-async fn handle_auth_revoke_pairing_link(
+pub(crate) async fn handle_auth_revoke_pairing_link(
     state: &WsState,
     id: Value,
     params: &Value,
@@ -3250,7 +3245,7 @@ async fn handle_auth_revoke_pairing_link(
 /// minted, credentials are write-only from the management surface (they're
 /// matched opaquely during bootstrap); surfacing them here would let a
 /// shoulder-surfer harvest active credentials.
-async fn handle_auth_list_pairing_links(state: &WsState, id: Value) -> JsonRpcResponse {
+pub(crate) async fn handle_auth_list_pairing_links(state: &WsState, id: Value) -> JsonRpcResponse {
     let now = chrono::Utc::now();
     match state.pairing_links.list(now).await {
         Ok(links) => {
@@ -3294,7 +3289,7 @@ async fn handle_auth_list_pairing_links(state: &WsState, id: Value) -> JsonRpcRe
 /// connection whose principal's TTL has elapsed is not surfaced as "active".
 /// In `UnsafeNoAuth` mode the map is typically empty (no bootstrap happens),
 /// so the result is an empty list — backward-compatible and truthful.
-async fn handle_auth_list_client_sessions(state: &WsState, id: Value) -> JsonRpcResponse {
+pub(crate) async fn handle_auth_list_client_sessions(state: &WsState, id: Value) -> JsonRpcResponse {
     let now = chrono::Utc::now();
     let sessions = state.conn_auth.list_sessions().await;
     let view: Vec<_> = sessions
@@ -3324,7 +3319,7 @@ async fn handle_auth_list_client_sessions(state: &WsState, id: Value) -> JsonRpc
 /// bootstrapped); the call still succeeds because the end state ("no auth on
 /// this connection") is achieved. The targeted connection's NEXT protected
 /// call returns UNAUTHORIZED — there is no proactive push to the client.
-async fn handle_auth_revoke_client_session(
+pub(crate) async fn handle_auth_revoke_client_session(
     state: &WsState,
     id: Value,
     params: &Value,
@@ -3368,7 +3363,7 @@ async fn handle_auth_revoke_client_session(
 /// connection has no bound principal; we synthesize a default `Owner`
 /// principal so the token is still useful (mirrors the no-auth opt-in posture
 /// — the local trust boundary is the network boundary).
-async fn handle_auth_get_web_socket_token(
+pub(crate) async fn handle_auth_get_web_socket_token(
     state: &WsState,
     conn_id: ConnectionId,
     id: Value,
@@ -3438,7 +3433,7 @@ async fn handle_auth_get_web_socket_token(
 /// In `UnsafeNoAuth` with no bound principal, `authenticated=false` and
 /// `principal=null` (but `authMode=unsafe-no-auth` so the caller knows the
 /// session is nonetheless trusted).
-async fn handle_auth_get_session_state(
+pub(crate) async fn handle_auth_get_session_state(
     state: &WsState,
     conn_id: ConnectionId,
     id: Value,
@@ -4678,8 +4673,14 @@ fn project_view_to_read_model(p: &syncode_orchestration::ProjectView) -> Value {
 pub(crate) fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Value {
     use syncode_orchestration::ThreadSessionView;
     let title = t.title.clone().unwrap_or_else(|| t.id.clone());
+    // Normalize `claude` → `claudeAgent` to match the frontend's `ProviderKind`
+    // union. Without this, the snapshot returns a raw backend id that
+    // `PROVIDER_ICON_COMPONENT_BY_PROVIDER` has no entry for, silently dropping
+    // the thread's provider icon in the picker / list views. Push events
+    // already normalize via `push::to_mcode_provider_kind`; this brings the
+    // initial snapshot in line so the two paths cannot drift apart.
     let model_selection = serde_json::json!({
-        "provider": t.provider_id,
+        "provider": crate::push::to_mcode_provider_kind(&t.provider_id),
         "model": t.model,
     });
     // The UI's `normalizeThreadSession` reads `session.providerName`,
@@ -4695,9 +4696,15 @@ pub(crate) fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Val
             updated_at,
         }) => {
             let mut obj = serde_json::Map::new();
+            // `providerName` doubles as the frontend's `ProviderKind` identifier
+            // (store.ts `normalizeThreadSession` → `toLegacyProvider` reads it as
+            // a picker kind). Normalize the raw registry id so a Claude thread
+            // surfaces `claudeAgent` here too — matching `modelSelection.provider`
+            // and the push serializer (`to_mcode_provider_kind`).
+            let raw_provider = provider_name.as_ref().unwrap_or(&t.provider_id);
             obj.insert(
                 "providerName".into(),
-                serde_json::to_value(provider_name.as_ref().unwrap_or(&t.provider_id)).unwrap(),
+                Value::String(crate::push::to_mcode_provider_kind(raw_provider)),
             );
             obj.insert("status".into(), Value::String(status.clone()));
             obj.insert("updatedAt".into(), Value::String(updated_at.clone()));
@@ -4710,7 +4717,7 @@ pub(crate) fn thread_view_to_shell(t: &syncode_orchestration::ThreadView) -> Val
             Value::Object(obj)
         }
         None => serde_json::json!({
-            "providerName": t.provider_id,
+            "providerName": crate::push::to_mcode_provider_kind(&t.provider_id),
             "status": t.status,
             "updatedAt": t.updated_at,
         }),
@@ -13353,10 +13360,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_orchestration_replay_events_empty_store() {
-        // An empty event repository has nothing to replay and no snapshots to
-        // seed from, so the handler must return `{replayed:0, seeded:0}` and no
-        // error. Exercises both dispatch aliases (dot + slash resolve to the
-        // same handler).
+        // v0.1.5: `replayEvents` short-circuits to `[]` to avoid the per-turn
+        // global read-model rebuild that consumed ~1s at a 1.5s poll cadence.
+        // The handler no longer delegates to `Orchestrator::replay_read_model`
+        // — push events keep the view live; this RPC is a silent gap-fill that
+        // the frontend filters client-side. Assert the new empty-array shape
+        // and that both dispatch aliases (dot + slash) still resolve to it.
         let state = WsState::new_in_memory(16);
 
         // Dot-string form (the raw MCode method the UI sends before remap).
@@ -13367,8 +13376,8 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
-        assert_eq!(result["replayed"].as_u64(), Some(0));
-        assert_eq!(result["seeded"].as_u64(), Some(0));
+        assert!(result.is_array(), "expected array, got {result}");
+        assert!(result.as_array().unwrap().is_empty());
 
         // Slash form (the served key the transport remaps to).
         let req_slash = serde_json::json!({
@@ -13377,15 +13386,18 @@ mod tests {
         let resp = handle_rpc(&state, 1, &req_slash.to_string()).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         assert!(resp.error.is_none(), "{:?}", resp.error);
-        assert_eq!(resp.result.unwrap()["replayed"].as_u64(), Some(0));
+        let result = resp.result.unwrap();
+        assert!(result.is_array(), "expected array, got {result}");
+        assert!(result.as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn test_orchestration_replay_events_populated_store_returns_count() {
-        // After creating a project (which appends a ProjectCreated event), the
-        // replay must report a non-zero event count and surface the `{replayed,
-        // seeded}` envelope shape. Resetting the read model first proves the
-        // rebuild actually repopulates it.
+        // v0.1.5: even on a populated store, `replayEvents` returns `[]` (no
+        // global rebuild). The handler is a no-op stub pending a follow-up
+        // that wires it to `EventRepository::replay_events(aggregateId)` for
+        // true per-thread gap filling. The previously wiped read model must
+        // stay wiped — proving the handler does NOT mutate state.
         let state = WsState::new_in_memory(16);
         let create_proj = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "project/create",
@@ -13397,9 +13409,9 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         assert!(resp.error.is_none(), "{:?}", resp.error);
 
-        // Wipe the in-memory read model so the replay has something to rebuild.
-        // `read_store` is the same `Arc<RwLock<ReadModelStore>>` the orchestrator
-        // projects onto, so clearing it clears the orchestrator's read model.
+        // Wipe the in-memory read model so we can prove the handler does NOT
+        // rebuild it. `read_store` is the same `Arc<RwLock<ReadModelStore>>`
+        // the orchestrator projects onto.
         {
             let mut rm = state.read_store.write().await;
             *rm = syncode_orchestration::ReadModelStore::new();
@@ -13408,7 +13420,7 @@ mod tests {
         assert_eq!(snap.projects.len(), 0, "read model should be cleared");
         drop(snap);
 
-        // Replay — both the dot and slash keys must resolve to the handler.
+        // The handler must NOT rebuild the read model in v0.1.5.
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "orchestration.replayEvents"
         });
@@ -13416,21 +13428,15 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(&resp).unwrap();
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
-        // At least one event (ProjectCreated) was replayed.
-        let replayed = result["replayed"].as_u64().expect("replayed is u64");
-        assert!(
-            replayed > 0,
-            "expected non-zero replayed count, got {replayed}"
-        );
-        // No snapshots were written by a bare create → seeded is 0.
-        assert_eq!(result["seeded"].as_u64(), Some(0));
+        assert!(result.is_array(), "expected array, got {result}");
+        assert!(result.as_array().unwrap().is_empty());
 
-        // The read model was actually rebuilt — the project is back.
+        // Read model must STILL be empty — the handler is a no-op.
         let snap = state.read_store.read().await;
-        assert_eq!(snap.projects.len(), 1);
         assert_eq!(
-            snap.projects.values().next().unwrap().name,
-            "Replay Project"
+            snap.projects.len(),
+            0,
+            "v0.1.5 handler must NOT rebuild the read model"
         );
     }
 
@@ -24027,7 +24033,10 @@ mod tests {
 
     #[tokio::test]
     async fn orchestration_replay_events_returns_count() {
-        // replayEvents without an aggregateId performs a full replay.
+        // v0.1.5: `replayEvents` is a no-op that returns `[]`. The previous
+        // full-replay path rebuilt the GLOBAL read model under its write lock
+        // (~1s with ~2000 events) at a 1.5s poll cadence and consumed ~66% of
+        // backend CPU during turns. Assert the new empty-array shape.
         let state = WsState::new_in_memory(16);
         let create = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "orchestration.dispatchCommand",
@@ -24045,15 +24054,11 @@ mod tests {
             resp.error
         );
         let result = resp.result.unwrap();
-        // ORCH-2 widened replay_read_model to return (replayed, seeded);
-        // the handler now surfaces both. `replayed` is the event count (u32),
-        // `seeded` is the snapshot count (0 on a cold store).
+        assert!(result.is_array(), "expected array, got {result}");
         assert!(
-            result["replayed"].as_u64().unwrap_or(0) >= 1,
-            "expected replayed >= 1, got {}",
-            result["replayed"]
+            result.as_array().unwrap().is_empty(),
+            "v0.1.5 handler must NOT rebuild the read model"
         );
-        assert_eq!(result["scope"], "all");
     }
 
     #[tokio::test]

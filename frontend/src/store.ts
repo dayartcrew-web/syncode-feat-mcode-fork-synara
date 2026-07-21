@@ -1553,8 +1553,19 @@ function normalizeThreadSession(
     incoming.lastError && !isNonFatalThreadErrorMessage(incoming.lastError)
       ? incoming.lastError
       : undefined;
+  // The push adapter (`adaptPushEnvelope`) synthesizes `thread.session-set`
+  // events from `TurnStarted`/`TurnCompleted` with `providerName: null`
+  // whenever the per-connection `ctx.session` cache hasn't been seeded by a
+  // prior `ThreadSessionSet`. Without preservation, `toLegacyProvider(null)`
+  // falls through to the silent `"codex"` default and clobbers a known Claude
+  // (or any) provider on every turn start — surfacing the wrong icon in the
+  // chat header. Keep the previous provider when the incoming event carries
+  // no provider signal.
+  const nextProvider = incoming.providerName
+    ? toLegacyProvider(incoming.providerName)
+    : (previous?.provider ?? toLegacyProvider(null));
   const nextSession = {
-    provider: toLegacyProvider(incoming.providerName),
+    provider: nextProvider,
     status: toLegacySessionStatus(incoming.status),
     orchestrationStatus: incoming.status,
     activeTurnId: incoming.activeTurnId ?? undefined,
@@ -2004,6 +2015,16 @@ function toLegacySessionStatus(
 }
 
 function toLegacyProvider(providerName: string | null): ProviderKind {
+  // The backend's ThreadSessionView stores `provider_name` as the raw registry
+  // id, which for Claude is `"claude"` (PROVIDER_CLAUDE in syncode-provider),
+  // not the frontend `ProviderKind` literal `"claudeAgent"`. Without this
+  // remap the chat header's `thread.session?.provider` resolves to `"claude"`,
+  // falls through the picker-kind allowlist, and wrongly defaults to `"codex"`
+  // — surfacing the OpenAI icon on a Claude thread. Same id-bridge the push
+  // serializer applies via `to_mcode_provider_kind` (push.rs).
+  if (providerName === "claude") {
+    return "claudeAgent";
+  }
   if (
     providerName === "codex" ||
     providerName === "claudeAgent" ||

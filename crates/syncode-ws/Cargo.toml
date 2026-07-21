@@ -88,3 +88,7 @@ regex-syntax = "0.8"
 [dev-dependencies]
 futures-util = "0.3"
 tempfile = "3"
+# `tower` with `util` provides `ServiceExt::oneshot` for auth_rest routing unit tests.
+tower = { version = "0.5", features = ["util"] }
+# `http-body-util` provides `BodyExt::collect` to read response bodies in tests.
+http-body-util = "0.1"

@@ -32,6 +32,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { adaptPushEnvelope, createPushAdaptContext } from "./contracts/adaptPushEvent";
+import { ORCHESTRATION_WS_METHODS } from "./contracts/tier3/orchestration";
 import { WS_CHANNELS } from "./contracts/tier3/ws";
 import { omitNullUserInputAnswers } from "./wsNativeApi";
 
@@ -866,8 +867,17 @@ function makeTauriNativeApi(
 
     // ─── orchestration (WS transport — primary served surface) ──────────
     orchestration: {
-      getSnapshot: () => callTransport<OrchestrationReadModel>("project/get"),
-      getShellSnapshot: () => callTransport<OrchestrationShellSnapshot>("shell/getSnapshot"),
+      getSnapshot: () =>
+        // Backend dispatch table (`rpc.rs:429`): `snapshot/get` and
+        // `orchestration.getSnapshot` are the only accepted names. The previous
+        // literal `project/get` returned a single `ProjectSummary` (not the full
+        // `OrchestrationReadModel`), so the Tauri shell received an empty
+        // projects/threads list and the settings/provider/chat panels never
+        // initialized. Browser path was unaffected because `wsNativeApi.ts`
+        // uses `ORCHESTRATION_WS_METHODS.getSnapshot`.
+        callTransport<OrchestrationReadModel>(ORCHESTRATION_WS_METHODS.getSnapshot),
+      getShellSnapshot: () =>
+        callTransport<OrchestrationShellSnapshot>(ORCHESTRATION_WS_METHODS.getShellSnapshot),
       dispatchCommand: (command: ClientOrchestrationCommand) =>
         // Backend accepts `orchestration.dispatchCommand` (dot) or
         // `orchestration/dispatch-command` (slash + kebab). The literal
@@ -875,29 +885,66 @@ function makeTauriNativeApi(
         // rejects with "Method not found", which surfaced as the Tauri shell
         // hanging during `prewarmHomeChatProject` (browser path was unaffected
         // because `wsNativeApi.ts` uses `ORCHESTRATION_WS_METHODS.dispatchCommand`).
-        callTransport<{ sequence: number }>("orchestration.dispatchCommand", {
+        callTransport<{ sequence: number }>(ORCHESTRATION_WS_METHODS.dispatchCommand, {
           command: omitNullUserInputAnswers(command),
         }),
       importThread: (input: OrchestrationImportThreadInput) =>
-        callTransport<OrchestrationImportThreadResult>("orchestration/importThread", input),
-      repairState: () => callTransport<OrchestrationReadModel>("orchestration/repair"),
+        callTransport<OrchestrationImportThreadResult>(
+          ORCHESTRATION_WS_METHODS.importThread,
+          input,
+        ),
+      repairState: () =>
+        // Backend accepts `orchestration.repairState` (dot) /
+        // `orchestration/repair-state` (slash + kebab) /
+        // `orchestration.repairReadModel` / `orchestration/repair-read-model`.
+        // The previous literal `orchestration/repair` was rejected with
+        // "Method not found".
+        callTransport<OrchestrationReadModel>(ORCHESTRATION_WS_METHODS.repairState),
       getTurnDiff: (input: OrchestrationGetTurnDiffInput) =>
-        callTransport<OrchestrationGetTurnDiffResult>("orchestration/getTurnDiff", input),
+        // Backend (`rpc.rs:1249`) accepts `orchestration.getTurnDiff` (dot) or
+        // `orchestration/get-turn-diff` (slash + kebab). The previous literal
+        // `orchestration/getTurnDiff` (camelCase after slash) was rejected.
+        callTransport<OrchestrationGetTurnDiffResult>(
+          ORCHESTRATION_WS_METHODS.getTurnDiff,
+          input,
+        ),
       getFullThreadDiff: (input: OrchestrationGetFullThreadDiffInput) =>
+        // Backend (`rpc.rs:1252`) accepts `orchestration.getFullThreadDiff`
+        // (dot) or `orchestration/get-full-thread-diff` (slash + kebab). The
+        // previous camelCase-after-slash form was rejected.
         callTransport<OrchestrationGetFullThreadDiffResult>(
-          "orchestration/getFullThreadDiff",
+          ORCHESTRATION_WS_METHODS.getFullThreadDiff,
           input,
         ),
       replayEvents: (fromSequenceExclusive: number) =>
-        callTransport<OrchestrationEvent[]>("orchestration/replayEvents", {
+        // Backend (`rpc.rs:1255`) accepts `orchestration.replayEvents` (dot)
+        // or `orchestration/replay-events` (slash + kebab). The previous
+        // camelCase-after-slash form was rejected.
+        callTransport<OrchestrationEvent[]>(ORCHESTRATION_WS_METHODS.replayEvents, {
           fromSequenceExclusive,
         }),
-      subscribeShell: () => callTransport<void>("push/subscribe", { channel: "shell" }),
-      unsubscribeShell: () => callTransport<void>("push/unsubscribe", { channel: "shell" }),
+      subscribeShell: () =>
+        // Backend dispatch (`rpc.rs:472`): the shell-hydration handler lives
+        // at `orchestration.subscribeShell` — it emits the initial ShellSnapshot
+        // and registers the connection for shell pushes. The previous literal
+        // `push/subscribe` was a different handler (generic push channel) that
+        // never emitted the shell snapshot, so the Tauri webview never received
+        // the initial shell read model beyond the `getShellSnapshot` RPC.
+        callTransport<void>(ORCHESTRATION_WS_METHODS.subscribeShell, {}),
+      unsubscribeShell: () =>
+        callTransport<void>(ORCHESTRATION_WS_METHODS.unsubscribeShell, {}),
       subscribeThread: (input: OrchestrationSubscribeThreadInput) =>
-        callTransport<void>("push/subscribe", { ...input, channel: "thread" }),
+        // Backend dispatch (`rpc.rs:485`): the thread-hydration handler lives
+        // at `orchestration.subscribeThread` — it emits the initial
+        // thread-detail snapshot (`{ snapshotSequence, thread }`) which
+        // `__root.tsx`'s `requestThreadSnapshot` uses to render an existing
+        // thread's messages on open/reload. The previous literal
+        // `push/subscribe` registered on the generic push channel but never
+        // emitted the thread snapshot, so opening an existing thread URL kept
+        // the conversation stuck on the stub/new-chat view.
+        callTransport<void>(ORCHESTRATION_WS_METHODS.subscribeThread, input),
       unsubscribeThread: (input: OrchestrationSubscribeThreadInput) =>
-        callTransport<void>("push/unsubscribe", { ...input, channel: "thread" }),
+        callTransport<void>(ORCHESTRATION_WS_METHODS.unsubscribeThread, input),
       onDomainEvent: (callback: (event: OrchestrationEvent) => void) => {
         orchestrationDomainEventListeners.add(callback);
         return () => {

@@ -8,6 +8,7 @@
 #![recursion_limit = "512"]
 
 pub mod auth;
+pub mod auth_rest;
 pub mod channels;
 pub mod code_search;
 pub mod completion;
@@ -15,6 +16,7 @@ pub mod llm;
 pub mod local_server;
 pub mod mcp_catalog;
 pub mod orchestration_executor;
+pub mod orchestrator_setup;
 pub mod project_fs;
 pub mod provider_versions;
 pub mod push;

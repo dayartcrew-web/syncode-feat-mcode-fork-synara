@@ -16,6 +16,10 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# `reqwest` fetches `<url>/favicon.ico` for the `/api/site-favicon` proxy
+# (crates/syncode-http/src/routes.rs). CSP forbids the webview from fetching
+# cross-origin directly, so the server proxies the request. Workspace-pinned.
+reqwest = { workspace = true }
 
 [dev-dependencies]
 # `tower` with `util` provides `ServiceExt::oneshot` for routing unit tests.
