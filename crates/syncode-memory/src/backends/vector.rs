@@ -45,10 +45,10 @@
 use crate::hybrid::{MemoryBackend, MemoryEntry, MemoryRecord, Scope};
 use crate::provider::{MemoryProviderError, Result};
 use async_trait::async_trait;
-use fastembed::{InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
 /// Embedding dim for the default BAAI/bge-small-en-v1.5 model. Must match
@@ -66,8 +66,9 @@ pub struct VectorBackend {
     pool: PgPool,
     /// Lazily-loaded embedding model shared across all clones of this
     /// backend. The first `store` / `retrieve` call pays the cold-start
-    /// cost; later clones reuse the same instance.
-    model: Arc<OnceCell<Arc<TextEmbedding>>>,
+    /// cost; later clones reuse the same instance. The inner `Mutex` is
+    /// required because fastembed 5.x's `embed` takes `&mut self`.
+    model: Arc<OnceCell<Arc<Mutex<TextEmbedding>>>>,
 }
 
 impl VectorBackend {
@@ -99,18 +100,23 @@ impl VectorBackend {
     /// the cached instance. Errors surface as `Store` for additive error
     /// enum compatibility.
     async fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
+        // fastembed 5.x's `TextEmbedding::embed` requires `&mut self`
+        // (it mutates internal ONNX session state). We wrap the model in
+        // a `Mutex` so the shared OnceCell can hand out clonable handles
+        // that the blocking spawn can lock without holding the async runtime.
         let model = self
             .model
             .get_or_try_init(|| async {
                 let init = TextEmbedding::try_new(
-                    InitOptions::new(Default::default()).with_show_progress(false),
+                    TextInitOptions::new(EmbeddingModel::default())
+                        .with_show_download_progress(false),
                 )
                 .map_err(|e| {
                     MemoryProviderError::Store(sqlx::Error::Configuration(
                         format!("fastembed model init failed: {e}").into(),
                     ))
                 })?;
-                Ok::<_, MemoryProviderError>(Arc::new(init))
+                Ok::<_, MemoryProviderError>(Arc::new(Mutex::new(init)))
             })
             .await?
             .clone();
@@ -118,25 +124,35 @@ impl VectorBackend {
         // fastembed::TextEmbedding is blocking — spawn on a blocking
         // thread so the async runtime isn't held.
         let text_owned = text.to_string();
-        tokio::task::spawn_blocking(move || model.embed(vec![text_owned], None))
-            .await
-            .map_err(|e| {
-                MemoryProviderError::Store(sqlx::Error::Configuration(
-                    format!("embed task join failed: {e}").into(),
-                ))
-            })?
-            .map_err(|e| {
+        let embed_result = tokio::task::spawn_blocking(move || {
+            model
+                .lock()
+                .map_err(|e| {
+                    MemoryProviderError::Store(sqlx::Error::Configuration(
+                        format!("fastembed model lock poisoned: {e}").into(),
+                    ))
+                })?
+                .embed(vec![text_owned], None)
+        })
+        .await
+        .map_err(|e| {
+            MemoryProviderError::Store(sqlx::Error::Configuration(
+                format!("embed task join failed: {e}").into(),
+            ))
+        })
+        .and_then(|inner| {
+            inner.map_err(|e| {
                 MemoryProviderError::Store(sqlx::Error::Configuration(
                     format!("fastembed embed failed: {e}").into(),
                 ))
-            })?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                MemoryProviderError::Store(sqlx::Error::Configuration(
-                    "fastembed returned no embedding".into(),
-                ))
             })
+        })?;
+
+        embed_result.into_iter().next().ok_or_else(|| {
+            MemoryProviderError::Store(sqlx::Error::Configuration(
+                "fastembed returned no embedding".into(),
+            ))
+        })
     }
 }
 
@@ -171,10 +187,10 @@ impl MemoryBackend for VectorBackend {
         .bind(&entry.response)
         .bind(&entry.provider)
         .bind(i32::try_from(entry.tokens).unwrap_or(i32::MAX))
-        .bind(pgvector::PgVector(embedding))
+        .bind(pgvector::Vector::from(embedding))
         .execute(&self.pool)
         .await
-        .map_err(|e| MemoryProviderError::Store(e))?;
+        .map_err(MemoryProviderError::Store)?;
         Ok(())
     }
 
@@ -194,8 +210,7 @@ impl MemoryBackend for VectorBackend {
             // Recency path — mirror episodic decay so merge ordering is
             // consistent across backends in the hybrid provider.
             let rows = sqlx::query_as::<_, VectorRow>(
-                r#"SELECT prompt, response, provider, tokens,
-                          EXTRACT(EPOCH FROM created_at) AS ts
+                r#"SELECT prompt, response, provider, tokens
                      FROM memory_vectors
                     WHERE user_id = $1 AND scope = $2
                     ORDER BY created_at DESC
@@ -215,7 +230,6 @@ impl MemoryBackend for VectorBackend {
         let q_vec = self.embed_one(trimmed).await?;
         let rows = sqlx::query_as::<_, VectorRowWithDistance>(
             r#"SELECT prompt, response, provider, tokens,
-                          EXTRACT(EPOCH FROM created_at) AS ts,
                           embedding <=> $3 AS distance
                  FROM memory_vectors
                 WHERE user_id = $1 AND scope = $2
@@ -224,7 +238,7 @@ impl MemoryBackend for VectorBackend {
         )
         .bind(user_id)
         .bind(scope.as_str())
-        .bind(pgvector::PgVector(q_vec))
+        .bind(pgvector::Vector::from(q_vec))
         .bind(i32::try_from(k).unwrap_or(i32::MAX))
         .fetch_all(&self.pool)
         .await
@@ -254,7 +268,6 @@ struct VectorRow {
     response: String,
     provider: String,
     tokens: i32,
-    ts: f64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -263,7 +276,6 @@ struct VectorRowWithDistance {
     response: String,
     provider: String,
     tokens: i32,
-    ts: f64,
     distance: f64,
 }
 
@@ -306,7 +318,6 @@ mod tests {
             response: "r".into(),
             provider: "x".into(),
             tokens: 1,
-            ts: 0.0,
         };
         let scored = score_recency(vec![row]);
         assert_eq!(scored.len(), 1);
@@ -321,7 +332,6 @@ mod tests {
                 response: "r".into(),
                 provider: "x".into(),
                 tokens: 1,
-                ts: 0.0,
             })
             .collect();
         let scored = score_recency(rows);

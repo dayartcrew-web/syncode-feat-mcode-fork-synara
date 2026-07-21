@@ -1,5 +1,6 @@
 //! WebSocket server (axum)
 
+use crate::auth_rest::auth_rest_router;
 use crate::rpc::handle_rpc;
 use crate::{ConnectionId, WsState};
 use axum::Router;
@@ -18,15 +19,22 @@ pub fn build_ws_router(state: Arc<WsState>) -> Router {
         .with_state(state)
 }
 
-/// Build the full app router (WS + HTTP REST routes from `syncode-http`).
+/// Build the full app router (WS + HTTP REST routes from `syncode-http` +
+/// stateful auth REST shims from `auth_rest`).
 ///
 /// The stateless REST surface (`/health`, `/api/project-favicon`) lives in the
 /// `syncode-http` leaf crate and is merged here so the standalone server
 /// binary exposes both transports from one Axum app. The WS router carries
 /// `Arc<WsState>` as its state; the HTTP router is stateless (`Router<()>`),
 /// so `Router::merge` composes them without a state conflict.
+///
+/// v0.1.5: the 10 `/api/auth/*` REST routes live in [`crate::auth_rest`]
+/// (they delegate to RPC handlers that need `&WsState`, so they can't live
+/// in the leaf). Mounted here via the same `Router::merge` pattern.
 pub fn build_app(state: Arc<WsState>) -> Router {
-    build_ws_router(state).merge(syncode_http::http_router())
+    build_ws_router(state.clone())
+        .merge(auth_rest_router(state))
+        .merge(syncode_http::http_router())
 }
 
 /// WebSocket upgrade handler

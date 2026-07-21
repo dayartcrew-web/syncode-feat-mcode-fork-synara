@@ -142,8 +142,75 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Syncode Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building Syncode Tauri application")
+        .run(|app_handle, event| {
+            // v0.1.5: flush provider SessionManager resume cursors to disk
+            // before the process tears down. Without this, closing the window
+            // mid-conversation drops the session (the next launch can't
+            // reattach). The standalone binary handles this via SIGINT; the
+            // desktop shell needs the same flush on ExitRequested. Best-effort
+            // with a 2s budget so a stuck write can't hang exit.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                flush_resume_cursors(app_handle);
+            }
+        });
+}
+
+/// Graceful-shutdown helper: flush the provider `SessionManager` resume
+/// cursors to disk before the desktop process exits (v0.1.5).
+///
+/// Why: if the desktop is closed mid-conversation, the in-memory cursors
+/// that let the next launch reattach to in-flight provider sessions are
+/// lost without this flush. The standalone server has the same handler
+/// keyed off Ctrl-C / SIGINT (see `crates/syncode-ws/src/bin/server.rs`);
+/// until v0.1.5 the Tauri shell had no equivalent, so closing the window
+/// during an active turn dropped the session.
+///
+/// Caps the flush at 2s so a stuck write can't hang the exit; worst case
+/// (timeout exceeded) the next start replays one extra message — acceptable
+/// per the v0.1.5 plan.
+///
+/// **Runtime-tear-down safety (v0.1.5 post-smoke fix):** when the desktop
+/// is force-killed (Ctrl-C in dev, task manager, OS shutdown), Tauri's
+/// `ExitRequested` can fire after the Tokio runtime has already begun
+/// tearing down. Calling `block_on(...)` at that point panics with
+/// `"there is no reactor running"`. The handler detects the no-runtime
+/// case via [`tokio::runtime::Handle::try_current`] and skips the flush
+/// cleanly — the documented worst-case (one message replayed on next
+/// start) is exactly the same as a timeout, so the behavior contract holds.
+fn flush_resume_cursors(app: &tauri::AppHandle) {
+    let Some(ws_state) = app.try_state::<ws_setup::WsRuntimeState>() else {
+        tracing::info!("no WsRuntimeState — skipping cursor flush");
+        return;
+    };
+    let runtime = ws_state.0.lock().expect("WsRuntimeState poisoned");
+    let Some(handle) = runtime.as_ref() else {
+        tracing::info!("WsRuntimeState has no handle — skipping cursor flush");
+        return;
+    };
+    let Some(reactor) = handle.state.orchestrator.command_reactor() else {
+        tracing::info!("no command reactor configured — skipping cursor flush");
+        return;
+    };
+    // Detect "Tokio runtime already torn down" before attempting block_on —
+    // force-kill paths (Ctrl-C, OS shutdown) can reach ExitRequested after
+    // the runtime is gone, in which case block_on would panic.
+    let Ok(rt_handle) = tokio::runtime::Handle::try_current() else {
+        tracing::info!("no Tokio runtime at flush time — skipping cursor flush");
+        return;
+    };
+    let mgr = reactor.session_manager();
+    let store = syncode_provider::FileResumeCursorStore::new();
+    let flush = async {
+        let n = mgr.persist_sessions(&store).await;
+        tracing::info!(persisted = n, "resume cursors persisted on shutdown");
+    };
+    // 2s timeout — see doc comment. Best-effort: a timeout logs + continues.
+    let _ = rt_handle.block_on(tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        flush,
+    ));
 }
 
 /// Install a panic hook that writes the panic payload + location to a log

@@ -44,3 +44,7 @@ chrono = { workspace = true }
 # real TCP and round-trips a JSON-RPC frame — needs a WS client + stream util.
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
+# v0.1.5 smoke E2E (tests/v015_smoke.rs) hits the HTTP routes (/health,
+# /api/editor-icon, /api/local-image, /api/site-favicon) and the 10 auth
+# REST routes mounted on the same Axum app. Workspace-pinned.
+reqwest = { workspace = true }

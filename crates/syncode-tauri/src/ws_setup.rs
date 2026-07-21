@@ -40,9 +40,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use syncode_core::ports::EventRepository;
-use syncode_orchestration::{Orchestrator, ProviderCommandReactor, ReadModelStore};
 use syncode_persistence::adapters::SqliteEventRepository;
-use syncode_provider::SessionManager;
+use syncode_ws::orchestrator_setup::build_orchestrator;
 use syncode_ws::{WsState, server::build_app};
 use tauri::Manager;
 use tokio::task::JoinHandle;
@@ -214,10 +213,19 @@ pub async fn spawn_with_state(state: WsState, config: &WsConfig) -> Result<WsHan
     })
 }
 
-/// Build the [`WsState`]: prefer SQLite (persists events + read model across
-/// restarts); fall back to in-memory on any init failure so the desktop always
-/// boots (graceful degradation — logged at `WARN`). Mirrors the standalone
-/// binary's `build_state`.
+/// Build the [`WsState`]: prefer SQLite (persists events + read model +
+/// server settings across restarts); fall back to in-memory on any init
+/// failure so the desktop always boots (graceful degradation — logged at
+/// `WARN`). Mirrors the standalone binary's `build_state`.
+///
+/// v0.1.5: now wires the shared [`build_orchestrator`] helper so the Tauri
+/// shell gets the same provider-spawn / adapter-registry / session-rehydrate /
+/// read-model-replay pipeline the standalone binary has had since P0-4. Before
+/// this change the desktop orchestrator was a 28-line stub missing
+/// `adapter.spawn`, `with_adapter_registry`, and `rehydrate_sessions` — which
+/// is why providers did not work in Tauri even after the v0.1.4 WS-connection
+/// fix. The SQLite pool is also attached to the in-memory settings store so
+/// `server/set-settings` writes survive a restart (SRV-1 parity).
 async fn build_state(config: &WsConfig) -> WsState {
     // Empty db_path → explicit opt-out → in-memory.
     if config.db_path.is_empty() {
@@ -227,10 +235,29 @@ async fn build_state(config: &WsConfig) -> WsState {
 
     match syncode_persistence::init_database(&PathBuf::from(&config.db_path)).await {
         Ok(pool) => {
+            // SRV-1: clone the pool so the settings store can persist
+            // config/settings documents to the same SQLite database. The
+            // original pool backs the event repository (below).
+            let settings_pool = pool.clone();
             let repo: Arc<dyn EventRepository> = Arc::new(SqliteEventRepository::new(pool));
-            let orchestrator = build_orchestrator(repo, &config.default_provider);
+            // v0.1.5: shared helper handles provider selection, adapter spawn,
+            // adapter registry, session rehydrate, and read-model replay.
+            let orchestrator = build_orchestrator(repo, Some(&settings_pool)).await;
             tracing::info!(db_path = %config.db_path, "SQLite-backed event store initialized");
-            WsState::new(PUSH_CAPACITY, orchestrator)
+            let state = WsState::new(PUSH_CAPACITY, orchestrator);
+            // Attach the pool to the in-memory settings store: loads any
+            // persisted config/settings from disk and enables write-through on
+            // every subsequent mutation. Best-effort — a failure here leaves
+            // the store in-memory (the desktop still boots).
+            {
+                let mut store = state.settings.write().await;
+                store.attach_pool(settings_pool).await;
+            }
+            tracing::info!(
+                db_path = %config.db_path,
+                "server settings persistence enabled (SRV-1)"
+            );
+            state
         }
         Err(e) => {
             tracing::warn!(
@@ -239,42 +266,6 @@ async fn build_state(config: &WsConfig) -> WsState {
                 "SQLite init failed — falling back to in-memory event store"
             );
             WsState::new_in_memory(PUSH_CAPACITY)
-        }
-    }
-}
-
-/// Build the orchestrator with a [`ProviderCommandReactor`] + a provider
-/// adapter (when available), so turns actually invoke a provider and AI
-/// responses stream back. When the named provider's CLI is unavailable the
-/// adapter factory returns `None` and this falls back to inert mode (turns are
-/// still recorded but no AI response is generated, and the server still boots).
-/// Mirrors the standalone binary's `build_orchestrator`.
-fn build_orchestrator(repo: Arc<dyn EventRepository>, default_provider: &str) -> Orchestrator {
-    // PR-1-2: share the read model between reactor and orchestrator so the
-    // reactor can resolve the session working directory from the thread's
-    // project root path. Mirrors the standalone binary's build_orchestrator.
-    let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
-        Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
-    let reactor = Arc::new(
-        ProviderCommandReactor::new(SessionManager::new()).with_read_model(Arc::clone(&read_model)),
-    );
-
-    match syncode_provider::registry::create_by_id(default_provider) {
-        Some(adapter) => {
-            tracing::info!(
-                provider = %default_provider,
-                "chat pipeline armed: turns will dispatch to the provider"
-            );
-            Orchestrator::with_reactor_adapter_and_read_model(repo, reactor, adapter, read_model)
-        }
-        None => {
-            tracing::warn!(
-                provider = %default_provider,
-                "provider adapter not available — chat will be inert \
-                 (turns recorded but no AI response). Install the provider CLI \
-                 or set SYNCODE_DEFAULT_PROVIDER to an available provider id."
-            );
-            Orchestrator::new(repo)
         }
     }
 }

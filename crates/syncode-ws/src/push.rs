@@ -354,7 +354,13 @@ fn project_summary(p: &rm::ProjectView) -> dto::ProjectSummary {
 
 /// Map a Rust provider_id to the MCode frontend `ProviderKind` string.
 /// The frontend uses "claudeAgent" while the Rust backend uses "claude".
-fn to_mcode_provider_kind(provider_id: &str) -> String {
+///
+/// Shared by both the push snapshot serializer (`thread_summary`) and the RPC
+/// read-model serializer (`thread_view_to_shell`) so live push events and the
+/// initial `orchestration.getSnapshot` response cannot drift apart. A raw
+/// `"claude"` leaking into the snapshot causes `PROVIDER_ICON_COMPONENT_BY_PROVIDER["claude"]`
+/// to return undefined, silently dropping the thread's provider icon in the UI.
+pub(crate) fn to_mcode_provider_kind(provider_id: &str) -> String {
     match provider_id {
         "claude" => "claudeAgent".to_string(),
         other => other.to_string(),
