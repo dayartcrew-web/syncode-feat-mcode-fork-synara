@@ -1,12 +1,12 @@
-## [0.1.3] - 2026-07-20
+## [0.1.4] - 2026-07-21
 
 ### Bug Fixes
 
-- **tauri**: Dispatch + onBrowserUseOpenPanelRequest crashes (v0.1.3) (#218) (b36c52b)
+- **tauri**: Drop devUrl + open CSP for in-process WS backend (v0.1.4) (#219) (149247e)
 
 
 ### Documentation
 
-- **changelog**: Update for v0.1.2 (6f1f874)
+- **changelog**: Update for v0.1.3 (3869ecd)
 
 
