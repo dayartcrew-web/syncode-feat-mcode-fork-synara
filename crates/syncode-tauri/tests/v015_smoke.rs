@@ -55,7 +55,12 @@ async fn boot_server() -> (String, String, std::sync::Arc<tokio::task::JoinHandl
         .strip_suffix("/ws")
         .and_then(|s| s.strip_prefix("ws://"))
         .map(|host| format!("http://{host}"))
-        .unwrap_or_else(|| ws_url.replace("ws://", "http://").trim_end_matches("/ws").to_string());
+        .unwrap_or_else(|| {
+            ws_url
+                .replace("ws://", "http://")
+                .trim_end_matches("/ws")
+                .to_string()
+        });
 
     (ws_url, http_origin, handle.serve_task)
 }
@@ -121,7 +126,11 @@ async fn v015_full_server_parity_smoke() {
                 .strip_suffix("/ws")
                 .and_then(|s| s.strip_prefix("ws://"))
                 .map(|host| format!("http://{host}"))
-                .unwrap_or_else(|| url.replace("ws://", "http://").trim_end_matches("/ws").to_string());
+                .unwrap_or_else(|| {
+                    url.replace("ws://", "http://")
+                        .trim_end_matches("/ws")
+                        .to_string()
+                });
             (url, http_origin, None)
         }
         None => {
@@ -138,7 +147,11 @@ async fn v015_full_server_parity_smoke() {
 
     // ping — server is dispatching JSON-RPC.
     let ping = rpc_call(&mut stream, "ping", json!({})).await;
-    assert!(ping.get("error").is_none(), "ping error: {:?}", ping["error"]);
+    assert!(
+        ping.get("error").is_none(),
+        "ping error: {:?}",
+        ping["error"]
+    );
 
     rpc_project_cycle(&mut stream).await;
     let project_id = rpc_project_id(&mut stream).await;

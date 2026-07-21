@@ -32,22 +32,22 @@
 //! HTTP requests carry no Authorization header in the current frontend.
 //! Proper bearer-token middleware for REST is deferred (tracked separately).
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
+use axum::Json;
 use axum::Router;
 use axum::extract::{Json as AxumJson, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::rpc::{
-    handle_auth_bootstrap, handle_auth_create_pairing_credential,
-    handle_auth_get_session_state, handle_auth_get_web_socket_token,
-    handle_auth_list_client_sessions, handle_auth_list_pairing_links,
-    handle_auth_revoke_client_session, handle_auth_revoke_pairing_link,
+    handle_auth_bootstrap, handle_auth_create_pairing_credential, handle_auth_get_session_state,
+    handle_auth_get_web_socket_token, handle_auth_list_client_sessions,
+    handle_auth_list_pairing_links, handle_auth_revoke_client_session,
+    handle_auth_revoke_pairing_link,
 };
 use crate::{ConnectionId, JsonRpcResponse, WsState};
 
@@ -61,7 +61,10 @@ pub fn auth_rest_router(state: Arc<WsState>) -> Router {
         .route("/api/auth/ws-token", post(auth_ws_token))
         .route("/api/auth/pairing-token", post(auth_pairing_token))
         .route("/api/auth/pairing-links", get(auth_list_pairing_links))
-        .route("/api/auth/pairing-links/revoke", post(auth_revoke_pairing_link))
+        .route(
+            "/api/auth/pairing-links/revoke",
+            post(auth_revoke_pairing_link),
+        )
         .route("/api/auth/clients", get(auth_list_clients))
         .route("/api/auth/clients/revoke", post(auth_revoke_client))
         .route(
@@ -123,7 +126,10 @@ async fn auth_session(State(state): State<Arc<WsState>>) -> Response {
 ///
 /// Body: `{ "credential": string }`. In no-auth mode the credential is ignored
 /// and the call returns a synthetic `authenticated: true` result.
-async fn auth_bootstrap(State(state): State<Arc<WsState>>, AxumJson(body): AxumJson<Value>) -> Response {
+async fn auth_bootstrap(
+    State(state): State<Arc<WsState>>,
+    AxumJson(body): AxumJson<Value>,
+) -> Response {
     let conn_id = next_http_conn_id(&state);
     let params = json!({ "credential": body.get("credential").cloned().unwrap_or(Value::Null) });
     let resp = handle_auth_bootstrap(&state, conn_id, Value::Null, &params).await;
@@ -147,7 +153,10 @@ async fn auth_bootstrap_bearer(
     if resp.error.is_none() {
         let mut result = resp.result.clone().unwrap_or(Value::Null);
         if let Some(obj) = result.as_object_mut() {
-            obj.insert("sessionMethod".into(), Value::String("bearer-session-token".into()));
+            obj.insert(
+                "sessionMethod".into(),
+                Value::String("bearer-session-token".into()),
+            );
         }
         let augmented = JsonRpcResponse::success(Value::Null, result);
         return rpc_to_response(augmented);
@@ -283,7 +292,12 @@ mod tests {
         let state = test_state();
         let app = auth_rest_router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/auth/session").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -299,13 +313,21 @@ mod tests {
         let state = test_state();
         let app = auth_rest_router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/auth/pairing-links").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/pairing-links")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
         // Frontend expects a bare array, not `{ links: [...] }`.
-        assert!(body.is_array(), "pairing-links response should be a bare array: {body}");
+        assert!(
+            body.is_array(),
+            "pairing-links response should be a bare array: {body}"
+        );
     }
 
     #[tokio::test]
@@ -313,12 +335,20 @@ mod tests {
         let state = test_state();
         let app = auth_rest_router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/auth/clients").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/clients")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
-        assert!(body.is_array(), "clients response should be a bare array: {body}");
+        assert!(
+            body.is_array(),
+            "clients response should be a bare array: {body}"
+        );
     }
 
     #[tokio::test]
@@ -338,7 +368,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
-        assert!(body.get("credential").is_some(), "pairing-token should return credential: {body}");
+        assert!(
+            body.get("credential").is_some(),
+            "pairing-token should return credential: {body}"
+        );
     }
 
     #[tokio::test]
@@ -357,6 +390,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
-        assert!(body.get("revokedCount").is_some(), "revoke-others should return revokedCount: {body}");
+        assert!(
+            body.get("revokedCount").is_some(),
+            "revoke-others should return revokedCount: {body}"
+        );
     }
 }

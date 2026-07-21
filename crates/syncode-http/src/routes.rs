@@ -26,8 +26,8 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::Query;
-use axum::http::header;
 use axum::http::StatusCode;
+use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Deserialize;
@@ -142,11 +142,7 @@ async fn local_image_handler(Query(params): Query<LocalImageParams>) -> impl Int
                 (StatusCode::NOT_FOUND, "image not found").into_response()
             }
         },
-        Err(()) => (
-            StatusCode::FORBIDDEN,
-            "path outside allowed roots",
-        )
-            .into_response(),
+        Err(()) => (StatusCode::FORBIDDEN, "path outside allowed roots").into_response(),
     }
 }
 
@@ -176,12 +172,7 @@ async fn site_favicon_handler(Query(params): Query<SiteFaviconParams>) -> impl I
     match fetch_favicon(&fetch_url).await {
         Ok(bytes) => {
             let mime = sniff_favicon_mime(&bytes);
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, mime)],
-                bytes,
-            )
-                .into_response()
+            (StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response()
         }
         Err(e) => {
             tracing::debug!(error = %e, url = %fetch_url, "favicon fetch failed — returning placeholder");
@@ -423,7 +414,10 @@ mod tests {
         let (status, body) = get_route("/api/editor-icon?id=cursor").await;
         assert_eq!(status, StatusCode::OK);
         // PNG magic bytes.
-        assert_eq!(&body[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &body[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
     }
 
     #[tokio::test]
@@ -462,7 +456,10 @@ mod tests {
         let path = dir.join("test.png");
         std::fs::write(&path, [0x89, 0x50, 0x4E, 0x47]).unwrap();
 
-        let uri = format!("/api/local-image?path={}", url_encode(&path.to_string_lossy()));
+        let uri = format!(
+            "/api/local-image?path={}",
+            url_encode(&path.to_string_lossy())
+        );
         let (status, body) = get_route(&uri).await;
         assert_eq!(status, StatusCode::OK, "uri: {uri}");
         assert_eq!(&body[..4], &[0x89, 0x50, 0x4E, 0x47]);
@@ -486,7 +483,10 @@ mod tests {
             get_route("/api/site-favicon?url=https://nonexistent.invalid.favicon.test").await;
         assert_eq!(status, StatusCode::OK);
         // PNG magic bytes — placeholder fallback.
-        assert_eq!(&body[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &body[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
     }
 
     #[test]

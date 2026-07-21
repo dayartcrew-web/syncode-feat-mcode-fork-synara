@@ -3289,7 +3289,10 @@ pub(crate) async fn handle_auth_list_pairing_links(state: &WsState, id: Value) -
 /// connection whose principal's TTL has elapsed is not surfaced as "active".
 /// In `UnsafeNoAuth` mode the map is typically empty (no bootstrap happens),
 /// so the result is an empty list — backward-compatible and truthful.
-pub(crate) async fn handle_auth_list_client_sessions(state: &WsState, id: Value) -> JsonRpcResponse {
+pub(crate) async fn handle_auth_list_client_sessions(
+    state: &WsState,
+    id: Value,
+) -> JsonRpcResponse {
     let now = chrono::Utc::now();
     let sessions = state.conn_auth.list_sessions().await;
     let view: Vec<_> = sessions

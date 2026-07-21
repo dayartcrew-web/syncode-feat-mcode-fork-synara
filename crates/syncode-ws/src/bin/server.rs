@@ -166,4 +166,3 @@ async fn build_state() -> WsState {
         }
     }
 }
-

@@ -39,9 +39,7 @@ use syncode_orchestration::Orchestrator;
 use syncode_persistence::SqlitePool;
 use syncode_provider::{FileResumeCursorStore, SessionManager};
 
-use crate::settings::{
-    extract_provider_extras, resolve_default_model, resolve_default_provider,
-};
+use crate::settings::{extract_provider_extras, resolve_default_model, resolve_default_provider};
 
 /// Build the orchestrator with a [`ProviderCommandReactor`] + a provider
 /// adapter, so turns actually invoke a provider and AI responses stream back.

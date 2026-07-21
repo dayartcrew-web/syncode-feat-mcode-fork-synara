@@ -125,11 +125,14 @@ impl VectorBackend {
         // thread so the async runtime isn't held.
         let text_owned = text.to_string();
         let embed_result = tokio::task::spawn_blocking(move || {
-            model.lock().map_err(|e| {
-                MemoryProviderError::Store(sqlx::Error::Configuration(
-                    format!("fastembed model lock poisoned: {e}").into(),
-                ))
-            })?.embed(vec![text_owned], None)
+            model
+                .lock()
+                .map_err(|e| {
+                    MemoryProviderError::Store(sqlx::Error::Configuration(
+                        format!("fastembed model lock poisoned: {e}").into(),
+                    ))
+                })?
+                .embed(vec![text_owned], None)
         })
         .await
         .map_err(|e| {
@@ -145,14 +148,11 @@ impl VectorBackend {
             })
         })?;
 
-        embed_result
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                MemoryProviderError::Store(sqlx::Error::Configuration(
-                    "fastembed returned no embedding".into(),
-                ))
-            })
+        embed_result.into_iter().next().ok_or_else(|| {
+            MemoryProviderError::Store(sqlx::Error::Configuration(
+                "fastembed returned no embedding".into(),
+            ))
+        })
     }
 }
 
