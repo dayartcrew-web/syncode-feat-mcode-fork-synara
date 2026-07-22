@@ -1,17 +1,24 @@
-## [0.1.9] - 2026-07-22
+## [0.1.10] - 2026-07-22
 
 ### Bug Fixes
 
-- **desktop**: Hide provider CLI cmd windows + make devtools default-on (#227) (139a2aa)
+- **desktop**: Global cmd-window hide — shared chokepoint for ALL subprocess spawns (#230) (4407cef)
 
 
 ### Documentation
 
-- **changelog**: Update for v0.1.8 (5f98c45)
+- **changelog**: Update for v0.1.9 (3063a6c)
 
 
 ### Miscellaneous
 
-- Bump version to 0.1.9 (b50c925)
+- Bump version to 0.1.10 (43d0213)
+
+
+### Tests
+
+- **desktop**: WDIO functional specs + console-window hide on shell spawns (#229) (205b7f5)
+
+- **desktop**: WebdriverIO functional harness (embedded WebDriver) (#228) (e6f98be)
 
 
