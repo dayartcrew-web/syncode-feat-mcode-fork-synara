@@ -1,17 +1,17 @@
-## [0.1.8] - 2026-07-22
+## [0.1.9] - 2026-07-22
 
 ### Bug Fixes
 
-- **tauri**: Cache cascade + provider normalize (desktop-only bugs) (#226) (35bd106)
+- **desktop**: Hide provider CLI cmd windows + make devtools default-on (#227) (139a2aa)
 
 
 ### Documentation
 
-- **changelog**: Update for v0.1.7 (9caeccb)
+- **changelog**: Update for v0.1.8 (5f98c45)
 
 
 ### Miscellaneous
 
-- Bump version to 0.1.8 (b14b3bd)
+- Bump version to 0.1.9 (b50c925)
 
 
