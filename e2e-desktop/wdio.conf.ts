@@ -50,6 +50,7 @@ export const config: Options.Testrunner = {
       {
         appBinaryPath,
         driverProvider: "embedded",
+        captureBackendLogs: true,
       },
     ],
   ],

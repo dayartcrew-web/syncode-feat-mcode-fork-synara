@@ -48,7 +48,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             xvfb \
-            weston
+            weston \
+            webkit2gtk-driver
 
       - uses: actions/setup-node@v6
         with:
