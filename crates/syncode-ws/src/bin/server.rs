@@ -142,7 +142,7 @@ async fn build_state() -> WsState {
             // picker) before choosing an adapter. Previously the orchestrator
             // was armed first and always fell back to the env-var default,
             // ignoring the user's pick until next restart.
-            let orchestrator = build_orchestrator(repo, Some(&settings_pool)).await;
+            let orchestrator = build_orchestrator(repo, Some(&settings_pool), None).await;
             tracing::info!(db_path = %db_path, "SQLite-backed event store initialized");
             let state = WsState::new(PUSH_CAPACITY, orchestrator);
             // Attach the pool to the in-memory settings store: loads any

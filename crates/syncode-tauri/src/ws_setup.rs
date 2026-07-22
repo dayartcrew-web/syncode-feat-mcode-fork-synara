@@ -101,7 +101,22 @@ impl WsConfig {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_PORT);
-        let db_path = std::env::var("SYNCODE_DB").unwrap_or_else(|_| DEFAULT_DB_PATH.to_string());
+        let db_path = std::env::var("SYNCODE_DB").unwrap_or_else(|_| {
+            // Anchor the SQLite DB under the per-OS app-data dir — the SAME
+            // place `syncode.log` lives (`paths::log_dir()` →
+            // `%APPDATA%\syncode` / `~/Library/Application Support/syncode` /
+            // `~/.local/share/syncode`). A cwd-relative `syncode.db` broke the
+            // release build: launched from a Start Menu shortcut the cwd is
+            // read-only (`C:\Program Files\…`) so `init_database` failed and
+            // the app fell back to the stub in-memory `Orchestrator::new`
+            // (no provider adapter / settings persistence / read model); and
+            // even when writable, a different launch cwd meant a different DB
+            // → fresh state every run. AppData is writable + stable across
+            // launches + updates.
+            crate::paths::log_dir()
+                .map(|d| d.join("syncode.db").to_string_lossy().into_owned())
+                .unwrap_or_else(|| DEFAULT_DB_PATH.to_string())
+        });
         let default_provider = std::env::var("SYNCODE_DEFAULT_PROVIDER")
             .unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
         Self {
@@ -242,7 +257,9 @@ async fn build_state(config: &WsConfig) -> WsState {
             let repo: Arc<dyn EventRepository> = Arc::new(SqliteEventRepository::new(pool));
             // v0.1.5: shared helper handles provider selection, adapter spawn,
             // adapter registry, session rehydrate, and read-model replay.
-            let orchestrator = build_orchestrator(repo, Some(&settings_pool)).await;
+            let orchestrator =
+                build_orchestrator(repo, Some(&settings_pool), Some(&config.default_provider))
+                    .await;
             tracing::info!(db_path = %config.db_path, "SQLite-backed event store initialized");
             let state = WsState::new(PUSH_CAPACITY, orchestrator);
             // Attach the pool to the in-memory settings store: loads any
