@@ -315,9 +315,10 @@ pub async fn open_external(target: String) -> Result<(), String> {
         return Err("target must be a non-empty URL or path".to_string());
     }
     let opener = default_opener();
-    std::process::Command::new(&opener)
-        .arg(&target)
-        .spawn()
+    let mut cmd = std::process::Command::new(&opener);
+    cmd.arg(&target);
+    syncode_core::util::subprocess::hide_console_window_std(&mut cmd);
+    cmd.spawn()
         .map_err(|e| format!("failed to open \"{target}\" via {opener}: {e}"))?;
     Ok(())
 }
@@ -345,8 +346,9 @@ pub async fn open_in_editor(
     if let Some(line) = line {
         cmd.arg(format!("+{line}"));
     }
-    cmd.arg(&target)
-        .spawn()
+    cmd.arg(&target);
+    syncode_core::util::subprocess::hide_console_window_std(&mut cmd);
+    cmd.spawn()
         .map_err(|e| format!("failed to launch editor \"{editor}\": {e}"))?;
     Ok(())
 }

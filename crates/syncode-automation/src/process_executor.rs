@@ -335,12 +335,14 @@ fn shell_command(cmd: &str) -> tokio::process::Command {
     {
         let mut c = tokio::process::Command::new("sh");
         c.arg("-c").arg(cmd);
+        syncode_core::util::subprocess::hide_console_window(&mut c);
         c
     }
     #[cfg(not(unix))]
     {
         let mut c = tokio::process::Command::new("cmd");
         c.arg("/C").arg(cmd);
+        syncode_core::util::subprocess::hide_console_window(&mut c);
         c
     }
 }

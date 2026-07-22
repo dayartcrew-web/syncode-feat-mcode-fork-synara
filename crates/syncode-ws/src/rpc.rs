@@ -8544,17 +8544,17 @@ fn handle_git_create_detached_worktree(id: Value, params: &Value) -> JsonRpcResp
         .workdir()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let output = match std::process::Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "--detach",
-            &wt_path.to_string_lossy(),
-            commit_ish,
-        ])
-        .current_dir(&cwd)
-        .output()
-    {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args([
+        "worktree",
+        "add",
+        "--detach",
+        &wt_path.to_string_lossy(),
+        commit_ish,
+    ])
+    .current_dir(&cwd);
+    syncode_core::util::subprocess::hide_console_window_std(&mut cmd);
+    let output = match cmd.output() {
         Ok(o) => o,
         Err(e) => {
             return git_error(
@@ -11804,9 +11804,10 @@ async fn run_cli_capture(bin: &str, cwd: &str, args: &[&str]) -> Result<String, 
             "`{bin}` CLI not found on PATH — install it and (for gh) run `gh auth login`"
         ));
     }
-    let output = tokio::process::Command::new(bin)
-        .args(args)
-        .current_dir(cwd)
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args).current_dir(cwd);
+    syncode_core::util::subprocess::hide_console_window(&mut cmd);
+    let output = cmd
         .output()
         .await
         .map_err(|e| format!("`{bin}` spawn failed: {e}"))?;
@@ -12102,6 +12103,7 @@ async fn run_gh_pr_create(
 
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args(&arg_refs).current_dir(cwd);
+    syncode_core::util::subprocess::hide_console_window(&mut cmd);
     let output = match cmd.output().await {
         Ok(o) => o,
         Err(e) => {

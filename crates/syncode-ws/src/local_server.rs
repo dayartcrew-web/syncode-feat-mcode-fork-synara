@@ -99,6 +99,7 @@ impl LocalServerManager {
         }
 
         let mut cmd = Command::new(&command);
+        syncode_core::util::subprocess::hide_console_window(&mut cmd);
         cmd.args(&args);
         cmd.envs(env);
         // Detach std streams — we don't read server output here.

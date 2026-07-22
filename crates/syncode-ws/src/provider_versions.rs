@@ -130,13 +130,13 @@ async fn probe_installed_version(pid: &str, settings: &Value) -> Option<String> 
     // `--version` is the conventional flag across all 6 v1 providers (codex,
     // claude, gemini, grok, kilo, pi). tokio::process needs `kill_on_drop` so
     // a timed-out child is reaped rather than leaked.
-    let output = tokio::time::timeout(
-        Duration::from_secs(PROBE_TIMEOUT_SECS),
-        Command::new(&binary).arg("--version").output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let mut cmd = Command::new(&binary);
+    cmd.arg("--version");
+    syncode_core::util::subprocess::hide_console_window(&mut cmd);
+    let output = tokio::time::timeout(Duration::from_secs(PROBE_TIMEOUT_SECS), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
     if !output.status.success() {
         return None;
     }

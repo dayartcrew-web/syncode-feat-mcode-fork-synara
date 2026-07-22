@@ -957,6 +957,7 @@ async fn probe_stdio(params: &serde_json::Value, timeout_ms: u64) -> Result<u64,
         .stderr(std::process::Stdio::null());
     // Kill on drop — guarantees the child dies even on timeout / panic.
     cmd.kill_on_drop(true);
+    syncode_core::util::subprocess::hide_console_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     let stdin = child

@@ -4,3 +4,4 @@
 //! dynamic OS awareness (Windows / Linux / macOS).
 
 pub mod path;
+pub mod subprocess;
