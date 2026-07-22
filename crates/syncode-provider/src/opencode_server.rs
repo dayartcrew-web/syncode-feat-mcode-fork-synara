@@ -287,6 +287,7 @@ impl OpenCodeServerClient {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+        crate::subprocess::hide_console_window(&mut cmd);
         // Inherit the parent env so the server finds its config/credentials.
         let mut child = cmd.spawn().map_err(ProviderAdapterError::Io)?;
         let stdout = child

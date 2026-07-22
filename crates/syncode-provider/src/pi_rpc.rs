@@ -110,6 +110,7 @@ impl PiTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        crate::subprocess::hide_console_window(&mut cmd);
 
         let mut child = cmd.spawn().map_err(ProviderAdapterError::Io)?;
         let stdin = child

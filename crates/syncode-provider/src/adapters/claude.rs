@@ -786,6 +786,7 @@ impl ProviderAdapter for ClaudeAdapter {
         if let Some(key) = api_key {
             cmd.env("ANTHROPIC_API_KEY", key);
         }
+        crate::subprocess::hide_console_window(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| {
             ProviderAdapterError::ProcessExited(format!(
                 "failed to spawn `claude` ({resolved_bin}): {e}"

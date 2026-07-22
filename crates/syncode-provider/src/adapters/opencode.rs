@@ -282,6 +282,7 @@ impl OpenCodeAdapter {
         }
         // Inherit parent env (HOME/PATH must reach the process so auth.json is
         // found — tokio Command inherits env by default; do NOT env_clear).
+        crate::subprocess::hide_console_window(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
             ProviderAdapterError::ProcessExited(format!(
