@@ -12,13 +12,14 @@
  *    (`getCurrentWindow`, `Window.theme`, browser `Notification`).
  *  - Git ops: existing syncode-tauri `git_*` commands via `invoke`.
  *  - Terminal PTY: existing syncode-tauri `terminal_*` commands via `invoke`.
- *  - Server/provider/orchestration/automation/stats/projects/filesystem: these
- *    are NOT shell capabilities — they are served by the backend over the
- *    JSON-RPC WebSocket transport (T5). The `wsNativeApi` adapter delegates
- *    those to `WsTransport`; this Tauri impl routes them through an injected
- *    `transport` callback so the same Rust handlers serve both modes.
- *    If no transport is wired, callers get `UnsupportedError` ("requires ws
- *    transport") — the shell still boots (window/dialogs/shell/git/terminal).
+ *  - Server/provider/orchestration/automation/stats/projects/filesystem/mcp:
+ *    these are NOT shell capabilities — they are served by the backend over
+ *    the JSON-RPC WebSocket transport (T5). The `wsNativeApi` adapter
+ *    delegates those to `WsTransport`; this Tauri impl routes them through
+ *    an injected `transport` callback so the same Rust handlers serve both
+ *    modes. PR #199 makes the transport REQUIRED — `readNativeApi()` always
+ *    supplies a real `WsTransport` via `wrapWsTransportAsDispatcher`, so
+ *    every WS-routed method reaches the backend (no fallback stub).
  *  - Browser panels / CDP: `UnsupportedError` (Electron-only; Tauri has no
  *    embedded Chromium webview panel API).
  *
@@ -240,11 +241,13 @@ function unsupported<T>(capability: string, reason: string): Promise<T> {
 }
 
 /**
- * Optional transport hook for the WS-routed NativeApi surfaces
+ * Required transport hook for the WS-routed NativeApi surfaces
  * (server/provider/orchestration/automation/stats/projects/filesystem).
- * When omitted, those methods reject with `UnsupportedError("ws-transport",
- * "requires JSON-RPC WebSocket transport")`. The `wsNativeApi` adapter
- * supplies this hook by delegating to its `WsTransport` instance.
+ * PR #199 wires this via `wrapWsTransportAsDispatcher` in `nativeApi.ts`,
+ * which adapts the real `WsTransport` instance pointing at the desktop's
+ * embedded WS server. There is no fallback — every WS-routed method goes
+ * through `transport.call`, and a missing transport is a programming error
+ * surfaced at factory-call time (not a runtime `UnsupportedError`).
  *
  * `subscribe` is optional: when present, `createTauriNativeApi` registers a
  * one-time push demux (mirroring `wsNativeApi`) so live push frames from the
@@ -260,9 +263,6 @@ export interface TransportDispatcher {
     listener: (message: { readonly data: unknown }) => void,
   ) => () => void;
 }
-
-const NO_TRANSPORT_REASON =
-  "requires JSON-RPC WebSocket transport — wire createTauriNativeApi({ transport }) from wsNativeApi";
 
 // ─── Push delivery (mirrors wsNativeApi demux) ───────────────────────────
 //
@@ -379,10 +379,6 @@ function registerPushDemux(transport: TransportDispatcher): void {
   });
 }
 
-function noTransport<T>(): Promise<T> {
-  return unsupported<T>("ws-transport", NO_TRANSPORT_REASON);
-}
-
 // ─── Window state helpers ────────────────────────────────────────────────
 
 async function getWindowState(): Promise<{
@@ -426,24 +422,22 @@ function defaultBrowserState(threadId: BrowserOpenInput["threadId"]): ThreadBrow
 /**
  * Construct a Tauri-backed `NativeApi`. Boot-critical shell surfaces
  * (dialogs/shell/git/terminal/notifications/window) are wired; WS-routed
- * surfaces delegate to the optional `transport`. Browser panels reject with
+ * surfaces (server/provider/orchestration/automation/stats/projects/
+ * filesystem/mcp) delegate to the required `transport`, which
+ * `readNativeApi()` in `nativeApi.ts` always supplies via
+ * `wrapWsTransportAsDispatcher` (PR #199). Browser panels reject with
  * `UnsupportedError`.
  *
- * @param transport Optional JSON-RPC transport for server-side surfaces.
+ * @param transport Required JSON-RPC transport for server-side surfaces.
  */
-export function createTauriNativeApi(
-  transport: TransportDispatcher | null = null,
-): NativeApi {
-  const callTransport = <R>(method: string, params?: unknown): Promise<R> => {
-    if (!transport) return noTransport<R>();
-    return transport.call<R>(method, params);
-  };
+export function createTauriNativeApi(transport: TransportDispatcher): NativeApi {
+  const callTransport = <R>(method: string, params?: unknown): Promise<R> =>
+    transport.call<R>(method, params);
 
-  // Wire the one-time push demux if the transport exposes `subscribe`. Until
-  // a transport is supplied the push callbacks below stay no-op (chat stuck).
-  if (transport) {
-    registerPushDemux(transport);
-  }
+  // Wire the one-time push demux if the transport exposes `subscribe`. The
+  // demux is what routes live push frames to `onDomainEvent`/`onShellEvent`/
+  // `onThreadEvent`/`onEvent`/`onActionProgress`/`onDevServerEvent`.
+  registerPushDemux(transport);
 
   const api: NativeApi = makeTauriNativeApi(callTransport);
 
