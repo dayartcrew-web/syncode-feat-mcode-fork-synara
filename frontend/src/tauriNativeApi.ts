@@ -287,6 +287,13 @@ const terminalEventListeners = new Set<(event: TerminalEvent) => void>();
 const gitActionProgressListeners = new Set<(event: GitActionProgressEvent) => void>();
 const automationEventListeners = new Set<(event: AutomationStreamEvent) => void>();
 const projectDevServerEventListeners = new Set<(event: ProjectDevServerEvent) => void>();
+// Browser state/copy-link listener Sets. Unlike the Sets above, these are
+// NEVER fanned-out into in the Tauri shell — see the `browser.onState` /
+// `browser.onCopyLink` comment below for the platform limitation. They exist
+// so the surface stays internally consistent with the file's demux pattern
+// (real unsubscribe, typed callback) rather than a silent no-op.
+const browserStateListeners = new Set<(state: ThreadBrowserState) => void>();
+const browserCopyLinkListeners = new Set<(event: BrowserCopyLinkEvent) => void>();
 
 // Per-connection push adapter context (resets on page reload; reconnect
 // mid-turn is a known edge case — see adaptPushEvent.ts risks). Mirrors
@@ -1047,8 +1054,44 @@ function makeTauriNativeApi(
         Promise.resolve(defaultBrowserState(input.threadId)),
       openDevTools: (_input: BrowserTabInput) =>
         unsupported<void>("browser.openDevTools", "no embedded webview panel in Tauri"),
-      onState: (_callback: (state: ThreadBrowserState) => void) => noopUnsubscribe(),
-      onCopyLink: (_callback: (event: BrowserCopyLinkEvent) => void) => noopUnsubscribe(),
+      // ─── Browser push callbacks — platform-limited (typed fallback) ───
+      //
+      // Why no events ever fire here (and won't until a real backend/Tauri
+      // surface is wired):
+      //  1. The syncode-ws backend does NOT serve browser state over the
+      //     JSON-RPC WS transport — `rpc.rs` has no `browser.*` handlers
+      //     (browser is a pure desktop-shell capability, not a server one).
+      //     So there is no WS channel for `registerPushDemux` to subscribe
+      //     to, unlike terminal/git/automation.
+      //  2. Tauri v2's WebviewWindow API has no embedded Chromium webview
+      //     panel surface — the desktop shell hosts a SINGLE webview (the
+      //     React app itself) and exposes no tab enumeration, page-level
+      //     state push, or copy-link chord. See
+      //     `crates/syncode-tauri/src/browser_commands.rs` for the canonical
+      //     statement of this limitation.
+      // The Electron shell pushes these events from its embedded BrowserView
+      // via `window.desktopBridge.browser.onState`/`onBrowserCopyLink`; the
+      // Tauri shell has no equivalent bridge.
+      //
+      // We therefore register the callback in a typed listener Set (so the
+      // unsubscribe is real and the surface mirrors the file's demux pattern)
+      // but the Sets are never fan-out'd into. `BrowserPanel.tsx` still gets a
+      // correct initial state via the `browser.open`/`getState` RPCs above
+      // (which return `defaultBrowserState`), so the panel renders the
+      // "open in OS browser" fallback rather than hanging on a live-webview
+      // view that will never arrive.
+      onState: (callback: (state: ThreadBrowserState) => void) => {
+        browserStateListeners.add(callback);
+        return () => {
+          browserStateListeners.delete(callback);
+        };
+      },
+      onCopyLink: (callback: (event: BrowserCopyLinkEvent) => void) => {
+        browserCopyLinkListeners.add(callback);
+        return () => {
+          browserCopyLinkListeners.delete(callback);
+        };
+      },
     },
   };
 
