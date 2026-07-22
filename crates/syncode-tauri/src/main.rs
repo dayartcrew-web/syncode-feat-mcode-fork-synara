@@ -5,8 +5,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use syncode_tauri::{
-    browser_commands, commands, desktop_commands, filesystem_commands, git_commands,
-    shell_commands, terminal_commands, ws_commands, ws_setup,
+    browser_commands, commands, desktop_commands, filesystem_commands, shell_commands,
+    terminal_commands, ws_commands, ws_setup,
 };
 use tauri::Manager;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -54,16 +54,6 @@ fn main() {
             // falls back to an empty-selection result when the dialog plugin
             // isn't registered.
             filesystem_commands::browse,
-            // git
-            git_commands::git_status,
-            git_commands::git_diff,
-            git_commands::git_log,
-            git_commands::git_branches,
-            git_commands::git_add,
-            git_commands::git_commit,
-            git_commands::git_create_branch,
-            git_commands::git_delete_branch,
-            git_commands::git_checkout,
             // terminal
             terminal_commands::terminal_create_session,
             terminal_commands::terminal_write,

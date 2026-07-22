@@ -7,7 +7,6 @@ pub mod browser_commands;
 pub mod commands;
 pub mod desktop_commands;
 pub mod filesystem_commands;
-pub mod git_commands;
 pub mod paths;
 pub mod shell_commands;
 pub mod terminal_commands;
