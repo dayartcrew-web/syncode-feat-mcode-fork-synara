@@ -10,6 +10,7 @@
     "test:smoke": "wdio run wdio.conf.ts --suite smoke"
   },
   "dependencies": {
+    "@wdio/cli": "^9.0.0",
     "@wdio/tauri-service": "^1.2.0",
     "@wdio/local-runner": "^9.0.0",
     "@wdio/mocha-framework": "^9.0.0",
