@@ -13,9 +13,19 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 fn main() {
     install_panic_hook();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+    // Embedded WebDriver server + WebdriverIO backend access — ONLY in
+    // test/dogfood binaries built with `--features webdriver`. Never ship in a
+    // production release (the embedded driver can drive the webview). The
+    // `let builder` shadowing pattern keeps `#[cfg]` off the method chain
+    // (attribute-on-call-in-chain is unreliable).
+    #[cfg(feature = "webdriver")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio_webdriver::init())
+        .plugin(tauri_plugin_wdio::init());
+    builder
         .manage(commands::ProviderRegistryState::new())
         .manage(commands::SessionStoreState::new())
         // Shared terminal PTY session manager. The `terminal_*` commands take
