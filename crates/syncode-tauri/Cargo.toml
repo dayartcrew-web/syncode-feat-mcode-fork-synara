@@ -22,6 +22,12 @@ description = "Tauri desktop integration — app shell, IPC commands, auto-updat
 # can pass `--no-default-features`.)
 default = ["devtools"]
 devtools = ["tauri/devtools"]
+# Embedded WebDriver server + WebdriverIO backend access for functional
+# desktop testing. Off by default (never in shipped releases).
+webdriver = [
+    "dep:tauri-plugin-wdio-webdriver",
+    "dep:tauri-plugin-wdio",
+]
 
 [build-dependencies]
 tauri-build = { workspace = true }
@@ -42,6 +48,12 @@ axum = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
+# WebdriverIO desktop functional testing (embedded WebDriver server). Gated
+# behind the `webdriver` feature — NEVER ship in a production release build
+# (the embedded driver lets any local client drive the webview). Test/dogfood
+# binaries only: `cargo build --release --features webdriver`.
+tauri-plugin-wdio-webdriver = { version = "1", optional = true }
+tauri-plugin-wdio = { version = "1", optional = true }
 # Native OS file/folder picker (P4-4 filesystem.browse). Cross-platform:
 # Win32 common dialogs, macOS NSOpenPanel, Linux portal/xdg.
 rfd = { workspace = true }
