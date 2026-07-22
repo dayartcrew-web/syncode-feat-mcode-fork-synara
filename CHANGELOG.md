@@ -1,19 +1,17 @@
-## [0.1.7] - 2026-07-22
+## [0.1.8] - 2026-07-22
 
 ### Bug Fixes
 
-- **tauri**: Eliminate desktop stubs — settings/git/skills/mcp/terminal/devtools/updater (#225) (618444e)
+- **tauri**: Cache cascade + provider normalize (desktop-only bugs) (#226) (35bd106)
 
 
 ### Documentation
 
-- **changelog**: Update for v0.1.6 (bcecbbf)
+- **changelog**: Update for v0.1.7 (9caeccb)
 
 
 ### Miscellaneous
 
-- Bump version to 0.1.7 (89cbf9c)
-
-- Bump tauri version to 0.1.6 (04f4480)
+- Bump version to 0.1.8 (b14b3bd)
 
 
