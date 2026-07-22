@@ -101,9 +101,15 @@ fn main() {
                 let _ = std::fs::write(dir.join("syncode.log"), ""); // truncate on launch
                 let file_appender = tracing_appender::rolling::never(&dir, "syncode.log");
                 let file_layer = fmt::layer().with_writer(file_appender).with_ansi(false); // ANSI escapes don't render in Notepad
-                registry.with(stderr_layer).with(file_layer).init();
+                // `try_init` (not `init`) so the app doesn't PANIC if a plugin
+                // already installed a global subscriber. The webdriver test
+                // build (`--features webdriver`) pulls tauri-plugin-wdio which
+                // sets a subscriber during plugin setup; the panicking `.init()`
+                // then aborted startup with code 101 ("SetLoggerError").
+                // Normal builds: no conflict, this succeeds as before.
+                registry.with(stderr_layer).with(file_layer).try_init().ok();
             } else {
-                registry.with(stderr_layer).init();
+                registry.with(stderr_layer).try_init().ok();
             }
 
             tracing::info!("Syncode desktop starting — PID: {}", std::process::id());
