@@ -12,6 +12,15 @@ description = "Tauri desktop integration — app shell, IPC commands, auto-updat
 # entirely unavailable in release (the v0.1.6 regression). Release builds in
 # `.github/workflows/release.yml` pass `--features devtools`.
 [features]
+# `devtools` is DEFAULT-ON so the webview DevTools API (`open_devtools`/
+# `close_devtools`/`is_devtools_open`) + the `toggle_devtools` IPC command +
+# the F12/Ctrl+Shift+I binding (`main.tsx`) work in EVERY build, including
+# GitHub release builds. Previously this was opt-in via `--features devtools`
+# in release.yml, but if the flag isn't forwarded the `toggle_devtools`
+# command compiles to a silent no-op and F12 does nothing — the "devtools
+# silent error". Default-on guarantees it. (Builds that want a leaner binary
+# can pass `--no-default-features`.)
+default = ["devtools"]
 devtools = ["tauri/devtools"]
 
 [build-dependencies]

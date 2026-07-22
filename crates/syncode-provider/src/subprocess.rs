@@ -35,6 +35,23 @@ use crate::trait_def::{ProviderAdapterError, ProviderError, ProviderRequest, Pro
 /// MCP servers sequentially) and for AI turn completion on slow connections.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Hide the console window on Windows when spawning a provider CLI subprocess.
+///
+/// Without `CREATE_NO_WINDOW` (0x0800_0000), every `claude`/`codex`/`opencode`/
+/// … spawn pops a visible `cmd` window — the "cmd server double run, not in
+/// background" desktop bug. `tokio::process::Command` exposes `creation_flags`
+/// on Windows (mirrors `std::os::windows::process::CommandExt`). No-op on
+/// non-Windows. Call this on every provider-subprocess `Command` before
+/// `.spawn()`.
+#[cfg(windows)]
+pub fn hide_console_window(cmd: &mut tokio::process::Command) {
+    cmd.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+#[allow(unused_variables)]
+pub fn hide_console_window(cmd: &mut tokio::process::Command) {}
+
 /// Spawn specification for a subprocess, mirroring MCode's `AcpSpawnInput`
 /// `{ command, args, cwd?, env? }`.
 #[derive(Debug, Clone)]
@@ -175,6 +192,7 @@ impl JsonRpcTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        hide_console_window(&mut cmd);
 
         let mut child = cmd.spawn().map_err(ProviderAdapterError::Io)?;
         let stdin = child
