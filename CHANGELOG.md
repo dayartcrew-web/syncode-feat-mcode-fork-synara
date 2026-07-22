@@ -1,3 +1,10 @@
+## [0.1.7] - 2026-07-22
+
+### Bug Fixes
+
+- **tauri**: Eliminate desktop stubs — WS notation mismatch (settings/git/skills/agents/mcp now persist + work), 11 git stale stubs unstubbed, terminal `SharedSessionManager` registered (terminal no longer dead), DevTools available in release via F12 (`devtools` feature + `toggle_devtools`), updater wired to the real `tauri-plugin-updater`, CSP wildcard loopback port (#225) (618444e)
+
+
 ## [0.1.6] - 2026-07-22
 
 ### Bug Fixes
