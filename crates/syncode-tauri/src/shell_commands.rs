@@ -22,9 +22,10 @@ pub async fn shell_open_editor(cwd: String, editor: Option<String>) -> Result<()
                 "xdg-open".to_string()
             }
         });
-    std::process::Command::new(&editor)
-        .arg(&cwd)
-        .spawn()
+    let mut cmd = std::process::Command::new(&editor);
+    cmd.arg(&cwd);
+    crate::process_ext::hide_console_window(&mut cmd);
+    cmd.spawn()
         .map_err(|e| format!("failed to launch editor \"{editor}\": {e}"))?;
     Ok(())
 }
