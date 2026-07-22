@@ -53,6 +53,7 @@ use crate::settings::{extract_provider_extras, resolve_default_model, resolve_de
 pub async fn build_orchestrator(
     repo: Arc<dyn EventRepository>,
     settings_pool: Option<&SqlitePool>,
+    default_provider_override: Option<&str>,
 ) -> Orchestrator {
     let settings = match settings_pool {
         Some(pool) => match syncode_persistence::settings_store::load_settings(pool).await {
@@ -69,7 +70,16 @@ pub async fn build_orchestrator(
         None => serde_json::Value::Null,
     };
 
-    let env_provider = std::env::var("SYNCODE_DEFAULT_PROVIDER").ok();
+    // The caller-supplied default (e.g. the desktop `WsConfig.default_provider`,
+    // "claude") wins over the `SYNCODE_DEFAULT_PROVIDER` env var, which wins
+    // over `DEFAULT_PROVIDER`. Without this override a fresh DB (no persisted
+    // settings row) armed the `DEFAULT_PROVIDER` const ("opencode") — whose CLI
+    // is rarely installed on a user machine — so every turn failed in the
+    // release build ("provider/chat broken"), while skills/agents/mcp (catalog
+    // data, independent of the orchestrator) kept working.
+    let env_provider = default_provider_override
+        .map(str::to_owned)
+        .or_else(|| std::env::var("SYNCODE_DEFAULT_PROVIDER").ok());
     let env_model = std::env::var("SYNCODE_DEFAULT_MODEL").ok();
     let default_provider = resolve_default_provider(&settings, env_provider.as_deref());
     let default_model = resolve_default_model(&settings, env_model.as_deref());
