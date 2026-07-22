@@ -397,6 +397,15 @@ async function getWindowState(): Promise<{
   return { isMaximized, isFullscreen };
 }
 
+/**
+ * Returns the canonical no-op unsubscribe function for `on*` callbacks that
+ * have no event source on this platform. Used exclusively for
+ * PLATFORM-LIMITED surfaces (classification (b) per the audit) — never for
+ * WS-wireable events (those use a listener Set + transport demux, see
+ * `registerPushDemux`). Each call site documents why no events will ever
+ * fire. Keeping a single factory avoids scattering `() => {}` literals and
+ * makes grep-based audits of dead subscriptions trivial.
+ */
 function noopUnsubscribe(): () => void {
   return () => {};
 }
@@ -1047,7 +1056,22 @@ function makeTauriNativeApi(
         Promise.resolve(defaultBrowserState(input.threadId)),
       openDevTools: (_input: BrowserTabInput) =>
         unsupported<void>("browser.openDevTools", "no embedded webview panel in Tauri"),
+      // PLATFORM-LIMITED (b): Tauri v2 has no embedded Chromium webview panel
+      // API — every state-mutating browser method above either rejects with
+      // `UnsupportedError` or degrades to openExternal (OS browser). There is
+      // no in-app browser whose state could change, so this callback would
+      // never fire even if we kept a listener Set. BrowserPanel.tsx still
+      // subscribes (line 641) when its tab is opened; it renders its initial
+      // stub `defaultBrowserState` indefinitely, which is the correct UX for
+      // an unavailable feature. Electing no-op over UnsupportedError because
+      // the NativeApi `onState` contract returns an unsubscribe function, not
+      // a Promise that could reject. See `docs/SHELL-GAPS.md`.
       onState: (_callback: (state: ThreadBrowserState) => void) => noopUnsubscribe(),
+      // PLATFORM-LIMITED (b): `copyLink` itself rejects with UnsupportedError
+      // (no embedded webview to read the active URL from), so the
+      // `BrowserCopyLinkEvent` this would deliver has no source. Kept as a
+      // typed no-op so BrowserPanel.tsx (line 1257) can subscribe without a
+      // feature-flag at the call site.
       onCopyLink: (_callback: (event: BrowserCopyLinkEvent) => void) => noopUnsubscribe(),
     },
   };
@@ -1176,6 +1200,17 @@ export function createTauriDesktopBridge(
       },
       getState: () => getWindowState(),
       onState: (listener) => {
+        // PLATFORM-LIMITED (b): the bridge is constructed unconditionally by
+        // `createTauriDesktopBridge` (and by tests that import this module),
+        // but native window events (`onResized`) only exist when running
+        // inside the Tauri webview. Outside Tauri — browser unit tests, SSR
+        // sweeps, or the rare case the bridge is installed in a non-Tauri
+        // Electron preload — there is no native window to observe, so we
+        // return a typed no-op unsubscribe. This is NOT wireable via WS: the
+        // desktop's own window state is a host-OS concern, not a backend
+        // push channel. The `installDesktopBridgeIfNeeded` path in
+        // `nativeApi.ts` only runs after the `isTauri()` gate, so this branch
+        // is primarily defensive for tests.
         if (!isTauri()) return noopUnsubscribe();
         const win = getCurrentWindow();
         let unlisten: UnlistenFn | undefined;
