@@ -2,30 +2,18 @@
 
 ### Bug Fixes
 
-- **tauri**: Eliminate desktop stubs — WS notation mismatch (settings/git/skills/agents/mcp now persist + work), 11 git stale stubs unstubbed, terminal `SharedSessionManager` registered (terminal no longer dead), DevTools available in release via F12 (`devtools` feature + `toggle_devtools`), updater wired to the real `tauri-plugin-updater`, CSP wildcard loopback port (#225) (618444e)
-
-
-## [0.1.6] - 2026-07-22
-
-### Bug Fixes
-
-- **tauri**: Eliminate UnsupportedError ws-transport paths in TransportDispatcher (#224) (e525bda)
+- **tauri**: Eliminate desktop stubs — settings/git/skills/mcp/terminal/devtools/updater (#225) (618444e)
 
 
 ### Documentation
 
-- **tauri**: Document all noopUnsubscribe sites as platform-limited (#221) (c6246b9)
-
-- **changelog**: Update for v0.1.4 (ab1f3ed)
+- **changelog**: Update for v0.1.6 (bcecbbf)
 
 
-### Features
+### Miscellaneous
 
-- **tauri**: V0.1.5 provider parity, HTTP/auth REST, latency fix (#220) (6f2c207)
+- Bump version to 0.1.7 (89cbf9c)
 
-
-### Refactor
-
-- **tauri**: Remove duplicated IPC git ops — route through WS (#223) (23caa09)
+- Bump tauri version to 0.1.6 (04f4480)
 
 
