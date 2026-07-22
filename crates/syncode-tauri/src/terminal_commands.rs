@@ -11,6 +11,15 @@ use tokio::sync::RwLock;
 /// Shared session manager state
 pub type SharedSessionManager = Arc<RwLock<SessionManager>>;
 
+/// Construct a fresh shared [`SessionManager`] ready to be `.manage()`d in the
+/// Tauri Builder. The `terminal_*` commands take `State<SharedSessionManager>`;
+/// if this state is never managed, every `terminal_*` invoke rejects with
+/// "state not managed" and the terminal panel renders dead. The Builder in
+/// `main.rs` MUST register this alongside the other managed states.
+pub fn shared_session_manager() -> SharedSessionManager {
+    Arc::new(RwLock::new(SessionManager::new()))
+}
+
 /// Result for creating a terminal session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

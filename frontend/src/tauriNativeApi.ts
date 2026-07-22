@@ -10,7 +10,10 @@
  * Mapping strategy (see the method→command table in `SHELL-GAPS.md`):
  *  - Window/theme/notifications: `@tauri-apps/api` direct JS APIs
  *    (`getCurrentWindow`, `Window.theme`, browser `Notification`).
- *  - Git ops: existing syncode-tauri `git_*` commands via `invoke`.
+ *  - Git ops: served by the backend over the JSON-RPC WebSocket transport
+ *    (the duplicated `git_*` IPC handlers were removed in PR #223; all git
+ *    RPCs route through `WS_METHODS.gitX` here — same handlers as the
+ *    browser shell).
  *  - Terminal PTY: existing syncode-tauri `terminal_*` commands via `invoke`.
  *  - Server/provider/orchestration/automation/stats/projects/filesystem/mcp:
  *    these are NOT shell capabilities — they are served by the backend over
@@ -20,6 +23,11 @@
  *    modes. PR #199 makes the transport REQUIRED — `readNativeApi()` always
  *    supplies a real `WsTransport` via `wrapWsTransportAsDispatcher`, so
  *    every WS-routed method reaches the backend (no fallback stub).
+ *    All WS method strings use the `WS_METHODS` enum (dot+camel) from
+ *    `contracts/tier3/ws.ts` — identical to `wsNativeApi` — so the backend
+ *    dispatch arms always match (a prior version hand-typed slash+camel
+ *    literals like `server/updateSettings`, which the backend rejects with
+ *    "Method not found" since its arms only accept dot+camel or slash+kebab).
  *  - Browser panels / CDP: `UnsupportedError` (Electron-only; Tauri has no
  *    embedded Chromium webview panel API).
  *
@@ -34,7 +42,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { adaptPushEnvelope, createPushAdaptContext } from "./contracts/adaptPushEvent";
 import { ORCHESTRATION_WS_METHODS } from "./contracts/tier3/orchestration";
-import { WS_CHANNELS } from "./contracts/tier3/ws";
+import { WS_CHANNELS, WS_METHODS } from "./contracts/tier3/ws";
 import { omitNullUserInputAnswers } from "./wsNativeApi";
 
 import type {
@@ -577,25 +585,28 @@ function makeTauriNativeApi(
     // ─── projects (WS transport — no syncode-tauri command) ─────────────
     projects: {
       create: (input: ProjectCreateParams) =>
-        callTransport<ProjectSummary>("project/create", input),
+        callTransport<ProjectSummary>(WS_METHODS.projectCreate, input),
       discoverScripts: (input: ProjectDiscoverScriptsInput) =>
-        callTransport<ProjectDiscoverScriptsResult>("project/discoverScripts", input),
+        callTransport<ProjectDiscoverScriptsResult>(WS_METHODS.projectsDiscoverScripts, input),
       listDirectories: (input: ProjectListDirectoriesInput) =>
-        callTransport<ProjectListDirectoriesResult>("project/listDirectories", input),
+        callTransport<ProjectListDirectoriesResult>(WS_METHODS.projectsListDirectories, input),
       searchEntries: (input: ProjectSearchEntriesInput) =>
-        callTransport<ProjectSearchEntriesResult>("project/searchEntries", input),
+        callTransport<ProjectSearchEntriesResult>(WS_METHODS.projectsSearchEntries, input),
       searchLocalEntries: (input: ProjectSearchLocalEntriesInput) =>
-        callTransport<ProjectSearchLocalEntriesResult>("project/searchLocalEntries", input),
+        callTransport<ProjectSearchLocalEntriesResult>(
+          WS_METHODS.projectsSearchLocalEntries,
+          input,
+        ),
       readFile: (input: ProjectReadFileInput) =>
-        callTransport<ProjectReadFileResult>("project/readFile", input),
+        callTransport<ProjectReadFileResult>(WS_METHODS.projectsReadFile, input),
       writeFile: (input: ProjectWriteFileInput) =>
-        callTransport<ProjectWriteFileResult>("project/writeFile", input),
+        callTransport<ProjectWriteFileResult>(WS_METHODS.projectsWriteFile, input),
       runDevServer: (input: ProjectRunDevServerInput) =>
-        callTransport<ProjectRunDevServerResult>("project/runDevServer", input),
+        callTransport<ProjectRunDevServerResult>(WS_METHODS.projectsRunDevServer, input),
       stopDevServer: (input: ProjectStopDevServerInput) =>
-        callTransport<ProjectStopDevServerResult>("project/stopDevServer", input),
+        callTransport<ProjectStopDevServerResult>(WS_METHODS.projectsStopDevServer, input),
       listDevServers: () =>
-        callTransport<ProjectListDevServersResult>("project/listDevServers"),
+        callTransport<ProjectListDevServersResult>(WS_METHODS.projectsListDevServers),
       onDevServerEvent: (callback: (event: ProjectDevServerEvent) => void) => {
         projectDevServerEventListeners.add(callback);
         return () => {
@@ -607,7 +618,7 @@ function makeTauriNativeApi(
     // ─── filesystem (WS transport) ──────────────────────────────────────
     filesystem: {
       browse: (input: FilesystemBrowseInput) =>
-        callTransport<FilesystemBrowseResult>("filesystem/browse", input),
+        callTransport<FilesystemBrowseResult>(WS_METHODS.filesystemBrowse, input),
     },
 
     // ─── shell (openExternal via Tauri open / openInEditor via opener) ──
@@ -642,79 +653,52 @@ function makeTauriNativeApi(
     //   injected WsTransport — same code path as the browser shell.) ──────
     git: {
       githubRepository: (input: GitHubRepositoryInput) =>
-        callTransport<GitHubRepositoryResult>("git/githubRepository", input),
+        callTransport<GitHubRepositoryResult>(WS_METHODS.gitGithubRepository, input),
       listBranches: (input: GitListBranchesInput) =>
-        callTransport<GitListBranchesResult>("git/listBranches", input),
-      createWorktree: (_input: GitCreateWorktreeInput) =>
-        unsupported<GitCreateWorktreeResult>(
-          "git.createWorktree",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      createDetachedWorktree: (_input: GitCreateDetachedWorktreeInput) =>
-        unsupported<GitCreateDetachedWorktreeResult>(
-          "git.createDetachedWorktree",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      removeWorktree: (_input: GitRemoveWorktreeInput) =>
-        unsupported<void>(
-          "git.removeWorktree",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      createBranch: (input: GitCreateBranchInput) =>
-        callTransport<void>("git/createBranch", input),
-      checkout: (input: GitCheckoutInput) => callTransport<void>("git/checkout", input),
-      stashAndCheckout: (_input: GitStashAndCheckoutInput) =>
-        unsupported<void>(
-          "git.stashAndCheckout",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      stashDrop: (_input: GitStashDropInput) =>
-        unsupported<void>(
-          "git.stashDrop",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      stashInfo: (_input: GitStashInfoInput) =>
-        unsupported<GitStashInfoResult>(
-          "git.stashInfo",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      removeIndexLock: (_input: GitRemoveIndexLockInput) =>
-        unsupported<void>(
-          "git.removeIndexLock",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      init: (_input: GitInitInput) =>
-        unsupported<void>("git.init", "no syncode-tauri command — needs T6b backend addition"),
-      stageFiles: (input: GitStageFilesInput) =>
-        callTransport<GitStageFilesResult>("git/stageFiles", input),
-      unstageFiles: (_input: GitUnstageFilesInput) =>
-        unsupported<GitUnstageFilesResult>(
-          "git.unstageFiles",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      handoffThread: (input: GitHandoffThreadInput) =>
-        callTransport<GitHandoffThreadResult>("git/handoffThread", input),
-      resolvePullRequest: (input: GitPullRequestRefInput) =>
-        callTransport<GitResolvePullRequestResult>("git/resolvePullRequest", input),
-      preparePullRequestThread: (input: GitPreparePullRequestThreadInput) =>
-        callTransport<GitPreparePullRequestThreadResult>(
-          "git/preparePullRequestThread",
+        callTransport<GitListBranchesResult>(WS_METHODS.gitListBranches, input),
+      createWorktree: (input: GitCreateWorktreeInput) =>
+        callTransport<GitCreateWorktreeResult>(WS_METHODS.gitCreateWorktree, input),
+      createDetachedWorktree: (input: GitCreateDetachedWorktreeInput) =>
+        callTransport<GitCreateDetachedWorktreeResult>(
+          WS_METHODS.gitCreateDetachedWorktree,
           input,
         ),
-      pull: (input: GitPullInput) => callTransport<GitPullResult>("git/pull", input),
-      status: (input: GitStatusInput) => callTransport<GitStatusResult>("git/status", input),
+      removeWorktree: (input: GitRemoveWorktreeInput) =>
+        callTransport<void>(WS_METHODS.gitRemoveWorktree, input),
+      createBranch: (input: GitCreateBranchInput) =>
+        callTransport<void>(WS_METHODS.gitCreateBranch, input),
+      checkout: (input: GitCheckoutInput) => callTransport<void>(WS_METHODS.gitCheckout, input),
+      stashAndCheckout: (input: GitStashAndCheckoutInput) =>
+        callTransport<void>(WS_METHODS.gitStashAndCheckout, input),
+      stashDrop: (input: GitStashDropInput) =>
+        callTransport<void>(WS_METHODS.gitStashDrop, input),
+      stashInfo: (input: GitStashInfoInput) =>
+        callTransport<GitStashInfoResult>(WS_METHODS.gitStashInfo, input),
+      removeIndexLock: (input: GitRemoveIndexLockInput) =>
+        callTransport<void>(WS_METHODS.gitRemoveIndexLock, input),
+      init: (input: GitInitInput) => callTransport<void>(WS_METHODS.gitInit, input),
+      stageFiles: (input: GitStageFilesInput) =>
+        callTransport<GitStageFilesResult>(WS_METHODS.gitStageFiles, input),
+      unstageFiles: (input: GitUnstageFilesInput) =>
+        callTransport<GitUnstageFilesResult>(WS_METHODS.gitUnstageFiles, input),
+      handoffThread: (input: GitHandoffThreadInput) =>
+        callTransport<GitHandoffThreadResult>(WS_METHODS.gitHandoffThread, input),
+      resolvePullRequest: (input: GitPullRequestRefInput) =>
+        callTransport<GitResolvePullRequestResult>(WS_METHODS.gitResolvePullRequest, input),
+      preparePullRequestThread: (input: GitPreparePullRequestThreadInput) =>
+        callTransport<GitPreparePullRequestThreadResult>(
+          WS_METHODS.gitPreparePullRequestThread,
+          input,
+        ),
+      pull: (input: GitPullInput) => callTransport<GitPullResult>(WS_METHODS.gitPull, input),
+      status: (input: GitStatusInput) =>
+        callTransport<GitStatusResult>(WS_METHODS.gitStatus, input),
       readWorkingTreeDiff: (input: GitReadWorkingTreeDiffInput) =>
-        callTransport<GitReadWorkingTreeDiffResult>("git/readWorkingTreeDiff", input),
-      summarizeDiff: (_input: GitSummarizeDiffInput) =>
-        unsupported<GitSummarizeDiffResult>(
-          "git.summarizeDiff",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
-      runStackedAction: (_input: GitRunStackedActionInput) =>
-        unsupported<GitRunStackedActionResult>(
-          "git.runStackedAction",
-          "no syncode-tauri command — needs T6b backend addition",
-        ),
+        callTransport<GitReadWorkingTreeDiffResult>(WS_METHODS.gitReadWorkingTreeDiff, input),
+      summarizeDiff: (input: GitSummarizeDiffInput) =>
+        callTransport<GitSummarizeDiffResult>(WS_METHODS.gitSummarizeDiff, input),
+      runStackedAction: (input: GitRunStackedActionInput) =>
+        callTransport<GitRunStackedActionResult>(WS_METHODS.gitRunStackedAction, input),
       onActionProgress: (callback: (event: GitActionProgressEvent) => void) => {
         gitActionProgressListeners.add(callback);
         return () => {
@@ -738,11 +722,12 @@ function makeTauriNativeApi(
 
     // ─── server (WS transport) ──────────────────────────────────────────
     server: {
-      getConfig: () => callTransport<ServerConfig>("server/getConfig"),
-      getEnvironment: () => callTransport<ServerGetEnvironmentResult>("server/getEnvironment"),
-      getSettings: () => callTransport<ServerGetSettingsResult>("server/getSettings"),
+      getConfig: () => callTransport<ServerConfig>(WS_METHODS.serverGetConfig),
+      getEnvironment: () =>
+        callTransport<ServerGetEnvironmentResult>(WS_METHODS.serverGetEnvironment),
+      getSettings: () => callTransport<ServerGetSettingsResult>(WS_METHODS.serverGetSettings),
       updateSettings: (input: ServerUpdateSettingsInput) =>
-        callTransport<ServerUpdateSettingsResult>("server/updateSettings", input),
+        callTransport<ServerUpdateSettingsResult>(WS_METHODS.serverUpdateSettings, input),
       getAuthSession: () => callTransport<AuthSessionState>("auth/status"),
       bootstrapAuth: (input: AuthBootstrapInput) =>
         callTransport<AuthBootstrapResult>("auth/bootstrap", input),
@@ -762,84 +747,92 @@ function makeTauriNativeApi(
       revokeOtherAuthClients: () =>
         callTransport<{ revokedCount: number }>("auth/revokeOtherClients"),
       refreshProviders: () =>
-        callTransport<ServerRefreshProvidersResult>("server/refreshProviders"),
+        callTransport<ServerRefreshProvidersResult>(WS_METHODS.serverRefreshProviders),
       updateProvider: (input: ServerProviderUpdateInput) =>
-        callTransport<ServerProviderUpdateResult>("server/updateProvider", input),
-      listWorktrees: () => callTransport<ServerListWorktreesResult>("server/listWorktrees"),
+        callTransport<ServerProviderUpdateResult>(WS_METHODS.serverUpdateProvider, input),
+      listWorktrees: () =>
+        callTransport<ServerListWorktreesResult>(WS_METHODS.serverListWorktrees),
       listLocalServers: () =>
-        callTransport<ServerListLocalServersResult>("server/listLocalServers"),
+        callTransport<ServerListLocalServersResult>(WS_METHODS.serverListLocalServers),
       stopLocalServer: (input: ServerStopLocalServerInput) =>
-        callTransport<ServerStopLocalServerResult>("server/stopLocalServer", input),
+        callTransport<ServerStopLocalServerResult>(WS_METHODS.serverStopLocalServer, input),
       getProviderUsageSnapshot: (input: ServerGetProviderUsageSnapshotInput) =>
         callTransport<ServerGetProviderUsageSnapshotResult>(
-          "server/getProviderUsageSnapshot",
+          WS_METHODS.serverGetProviderUsageSnapshot,
           input,
         ),
       listProviderUsage: (input: ServerListProviderUsageInput) =>
-        callTransport<ServerListProviderUsageResult>("server/listProviderUsage", input),
-      getDiagnostics: () => callTransport<ServerDiagnosticsResult>("server/getDiagnostics"),
+        callTransport<ServerListProviderUsageResult>(
+          WS_METHODS.serverListProviderUsage,
+          input,
+        ),
+      getDiagnostics: () =>
+        callTransport<ServerDiagnosticsResult>(WS_METHODS.serverGetDiagnostics),
       generateThreadRecap: (input: ServerGenerateThreadRecapInput) =>
         callTransport<ServerGenerateThreadRecapResult>(
-          "server/generateThreadRecap",
+          WS_METHODS.serverGenerateThreadRecap,
           input,
         ),
       generateAutomationIntent: (input: ServerGenerateAutomationIntentInput) =>
         callTransport<ServerGenerateAutomationIntentResult>(
-          "server/generateAutomationIntent",
+          WS_METHODS.serverGenerateAutomationIntent,
           input,
         ),
       transcribeVoice: (input: ServerVoiceTranscriptionInput) =>
-        callTransport<ServerVoiceTranscriptionResult>("server/transcribeVoice", input),
+        callTransport<ServerVoiceTranscriptionResult>(WS_METHODS.serverTranscribeVoice, input),
       upsertKeybinding: (input: ServerUpsertKeybindingInput) =>
-        callTransport<ServerUpsertKeybindingResult>("server/upsertKeybinding", input),
+        callTransport<ServerUpsertKeybindingResult>(WS_METHODS.serverUpsertKeybinding, input),
     },
 
     // ─── stats (WS transport) ───────────────────────────────────────────
     stats: {
       getProfileStats: (input: StatsGetProfileStatsInput) =>
-        callTransport<StatsGetProfileStatsResult>("stats/getProfileStats", input),
+        callTransport<StatsGetProfileStatsResult>(WS_METHODS.statsGetProfileStats, input),
       getProfileTokenStats: (input: StatsGetProfileTokenStatsInput) =>
-        callTransport<StatsGetProfileTokenStatsResult>("stats/getProfileTokenStats", input),
+        callTransport<StatsGetProfileTokenStatsResult>(
+          WS_METHODS.statsGetProfileTokenStats,
+          input,
+        ),
     },
 
     // ─── provider (WS transport) ────────────────────────────────────────
     provider: {
       getComposerCapabilities: (input: ProviderGetComposerCapabilitiesInput) =>
         callTransport<ProviderComposerCapabilities>(
-          "provider/getComposerCapabilities",
+          WS_METHODS.providerGetComposerCapabilities,
           input,
         ),
       compactThread: (input: ProviderCompactThreadInput) =>
-        callTransport<void>("provider/compactThread", input),
+        callTransport<void>(WS_METHODS.providerCompactThread, input),
       listCommands: (input: ProviderListCommandsInput) =>
-        callTransport<ProviderListCommandsResult>("provider/listCommands", input),
+        callTransport<ProviderListCommandsResult>(WS_METHODS.providerListCommands, input),
       listSkills: (input: ProviderListSkillsInput) =>
-        callTransport<ProviderListSkillsResult>("provider/listSkills", input),
+        callTransport<ProviderListSkillsResult>(WS_METHODS.providerListSkills, input),
       listSkillsCatalog: (input: ProviderSkillsCatalogInput) =>
         callTransport<ProviderSkillsCatalogResult>(
-          "provider/listSkillsCatalog",
+          WS_METHODS.providerListSkillsCatalog,
           input,
         ),
       listPlugins: (input: ProviderListPluginsInput) =>
-        callTransport<ProviderListPluginsResult>("provider/listPlugins", input),
+        callTransport<ProviderListPluginsResult>(WS_METHODS.providerListPlugins, input),
       readPlugin: (input: ProviderReadPluginInput) =>
-        callTransport<ProviderReadPluginResult>("provider/readPlugin", input),
+        callTransport<ProviderReadPluginResult>(WS_METHODS.providerReadPlugin, input),
       listModels: (input: ProviderListModelsInput) =>
-        callTransport<ProviderListModelsResult>("provider/listModels", input),
+        callTransport<ProviderListModelsResult>(WS_METHODS.providerListModels, input),
       listAgents: (input: ProviderListAgentsInput) =>
-        callTransport<ProviderListAgentsResult>("provider/listAgents", input),
+        callTransport<ProviderListAgentsResult>(WS_METHODS.providerListAgents, input),
       listMcpCatalog: (input: ProviderListMcpCatalogInput) =>
-        callTransport<McpCatalogResponse>("provider/listMcpCatalog", input),
+        callTransport<McpCatalogResponse>(WS_METHODS.providerListMcpCatalog, input),
     },
     mcp: {
       create: (input: McpServerInput) =>
-        callTransport<McpCreateResult>("mcp/create", input),
+        callTransport<McpCreateResult>(WS_METHODS.mcpCreate, input),
       update: (input: McpUpdateInput) =>
-        callTransport<McpUpdateResult>("mcp/update", input),
+        callTransport<McpUpdateResult>(WS_METHODS.mcpUpdate, input),
       delete: (input: McpDeleteInput) =>
-        callTransport<McpDeleteResult>("mcp/delete", input),
+        callTransport<McpDeleteResult>(WS_METHODS.mcpDelete, input),
       testConnection: (input: McpTestConnectionInput) =>
-        callTransport<McpTestConnectionResult>("mcp/testConnection", input),
+        callTransport<McpTestConnectionResult>(WS_METHODS.mcpTestConnection, input),
     },
 
     // ─── orchestration (WS transport — primary served surface) ──────────
@@ -945,21 +938,21 @@ function makeTauriNativeApi(
     // ─── automation (WS transport) ──────────────────────────────────────
     automation: {
       list: (input?: AutomationListInput) =>
-        callTransport<AutomationListResult>("automation/list", input),
+        callTransport<AutomationListResult>(WS_METHODS.automationList, input),
       create: (input: AutomationCreateInput) =>
-        callTransport<AutomationDefinition>("automation/create", input),
+        callTransport<AutomationDefinition>(WS_METHODS.automationCreate, input),
       update: (input: AutomationUpdateInput) =>
-        callTransport<AutomationDefinition>("automation/update", input),
+        callTransport<AutomationDefinition>(WS_METHODS.automationUpdate, input),
       delete: (input: AutomationDeleteInput) =>
-        callTransport<void>("automation/delete", input),
+        callTransport<void>(WS_METHODS.automationDelete, input),
       runNow: (input: AutomationRunNowInput) =>
-        callTransport<AutomationRunNowResult>("automation/runNow", input),
+        callTransport<AutomationRunNowResult>(WS_METHODS.automationRunNow, input),
       cancelRun: (input: AutomationCancelRunInput) =>
-        callTransport<AutomationCancelRunResult>("automation/cancelRun", input),
+        callTransport<AutomationCancelRunResult>(WS_METHODS.automationCancelRun, input),
       markRunRead: (input: AutomationMarkRunReadInput) =>
-        callTransport<AutomationRunActionResult>("automation/markRunRead", input),
+        callTransport<AutomationRunActionResult>(WS_METHODS.automationMarkRunRead, input),
       archiveRun: (input: AutomationArchiveRunInput) =>
-        callTransport<AutomationRunActionResult>("automation/archiveRun", input),
+        callTransport<AutomationRunActionResult>(WS_METHODS.automationArchiveRun, input),
       onEvent: (callback: (event: AutomationStreamEvent) => void) => {
         automationEventListeners.add(callback);
         return () => {

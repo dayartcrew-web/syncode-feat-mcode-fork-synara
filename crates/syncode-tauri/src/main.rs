@@ -18,6 +18,10 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::ProviderRegistryState::new())
         .manage(commands::SessionStoreState::new())
+        // Shared terminal PTY session manager. The `terminal_*` commands take
+        // `State<SharedSessionManager>`; without this every invoke rejects with
+        // "state not managed" and the terminal panel renders dead.
+        .manage(terminal_commands::shared_session_manager())
         // Managed updater state — desktop commands (DSK-2) read/mutate this
         // to drive the check-for-updates / apply-update flow.
         .manage(syncode_tauri::updater::UpdaterState::new())
@@ -45,6 +49,7 @@ fn main() {
             desktop_commands::apply_update,
             desktop_commands::open_external,
             desktop_commands::open_in_editor,
+            desktop_commands::toggle_devtools,
             // browser (DSK-2) — captureScreenshot / listTabs. Graceful
             // platform-limited stubs (no portable webview-capture / tab-list
             // API in Tauri v2 today); return typed fallbacks.
