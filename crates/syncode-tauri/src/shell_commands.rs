@@ -24,7 +24,7 @@ pub async fn shell_open_editor(cwd: String, editor: Option<String>) -> Result<()
         });
     let mut cmd = std::process::Command::new(&editor);
     cmd.arg(&cwd);
-    syncode_core::util::subprocess::hide_console_window_std(&mut cmd);
+    crate::process_ext::hide_console_window(&mut cmd);
     cmd.spawn()
         .map_err(|e| format!("failed to launch editor \"{editor}\": {e}"))?;
     Ok(())

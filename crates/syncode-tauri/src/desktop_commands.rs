@@ -317,7 +317,7 @@ pub async fn open_external(target: String) -> Result<(), String> {
     let opener = default_opener();
     let mut cmd = std::process::Command::new(&opener);
     cmd.arg(&target);
-    syncode_core::util::subprocess::hide_console_window_std(&mut cmd);
+    crate::process_ext::hide_console_window(&mut cmd);
     cmd.spawn()
         .map_err(|e| format!("failed to open \"{target}\" via {opener}: {e}"))?;
     Ok(())
@@ -347,7 +347,7 @@ pub async fn open_in_editor(
         cmd.arg(format!("+{line}"));
     }
     cmd.arg(&target);
-    syncode_core::util::subprocess::hide_console_window_std(&mut cmd);
+    crate::process_ext::hide_console_window(&mut cmd);
     cmd.spawn()
         .map_err(|e| format!("failed to launch editor \"{editor}\": {e}"))?;
     Ok(())
