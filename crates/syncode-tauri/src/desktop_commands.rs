@@ -21,6 +21,48 @@
 
 use crate::updater::{UpdateStatus, UpdaterState};
 use serde::{Deserialize, Serialize};
+use tauri_plugin_updater::UpdaterExt;
+
+/// Toggle the webview DevTools window for the main window (or a named label).
+///
+/// Frontend binds F12 / Ctrl+Shift+I → `invoke("toggle_devtools")`. The Tauri
+/// devtools API is gated behind the `devtools` Cargo feature (or a debug
+/// build); without it the command is a graceful no-op returning `false`, so
+/// the same frontend hotkey works regardless of build config. Release builds
+/// pass `--features devtools` (see `.github/workflows/release.yml`) so
+/// dogfooders can inspect the webview to diagnose issues — without it, the
+/// `open_devtools` symbols don't exist and DevTools is entirely unavailable
+/// in a release build (the v0.1.6 regression).
+///
+/// Returns `true` when DevTools is now open, `false` when now closed (or
+/// unavailable because the feature is off).
+#[tauri::command]
+pub async fn toggle_devtools(app: tauri::AppHandle, label: Option<String>) -> Result<bool, String> {
+    #[cfg(any(debug_assertions, feature = "devtools"))]
+    {
+        use tauri::Manager;
+        let window = match label.as_deref() {
+            Some(l) if !l.is_empty() => app
+                .get_webview_window(l)
+                .ok_or_else(|| format!("webview window '{l}' not found"))?,
+            _ => app
+                .get_webview_window("main")
+                .ok_or_else(|| "main webview window not found".to_string())?,
+        };
+        let now_open = !window.is_devtools_open();
+        if now_open {
+            window.open_devtools();
+        } else {
+            window.close_devtools();
+        }
+        Ok(now_open)
+    }
+    #[cfg(not(any(debug_assertions, feature = "devtools")))]
+    {
+        let _ = (app, label);
+        Ok(false)
+    }
+}
 
 /// Result of [`check_for_updates`]: a projection of [`UpdateStatus`] into the
 /// shape the MCode UI expects (camelCase + `available` boolean). The
@@ -126,20 +168,46 @@ pub fn default_opener() -> String {
 /// Check for an application update.
 ///
 /// Frontend invokes `invoke("check_for_updates")`. The command flips the
-/// managed [`UpdaterState`] to [`UpdateStatus::Checking`], simulates a probe
-/// (the real probe is delegated to the `tauri-plugin-updater` when wired;
-/// here we treat the configured endpoint as unreachable-in-dev and return
-/// `UpToDate`), and returns the projected status. This keeps the UI's update
-/// badge accurate without a network round-trip in tests / dev builds.
+/// managed [`UpdaterState`] to [`UpdateStatus::Checking`], then runs a REAL
+/// probe via `tauri-plugin-updater` (registered in `main.rs`): the plugin
+/// fetches the configured `latest.json` endpoint, verifies the signature, and
+/// `check()` returns `Some(Update)` when a newer signed version exists. The
+/// status transitions to `Available { version, release_notes }`, `UpToDate`,
+/// or `Error { message }` accordingly, and the projected DTO is returned.
 #[tauri::command]
-pub fn check_for_updates(
+pub async fn check_for_updates(
+    app: tauri::AppHandle,
     updater: tauri::State<'_, UpdaterState>,
 ) -> Result<CheckForUpdatesResult, String> {
     updater.set_status(UpdateStatus::Checking);
-    // No live network probe in-process — treat as up-to-date. The
-    // tauri-plugin-updater (when registered in `main.rs`) replaces this arm
-    // with a real HTTP fetch against `UpdaterConfig::endpoint`.
-    updater.set_status(UpdateStatus::UpToDate);
+    // Real probe via tauri-plugin-updater (registered in `main.rs`). The
+    // plugin fetches the configured `latest.json` endpoint + verifies the
+    // signature; `check()` returns `Some(Update)` when a newer version exists.
+    match app.updater() {
+        Ok(ext) => match ext.check().await {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                let release_notes = update.body.clone().unwrap_or_default();
+                updater.set_status(UpdateStatus::Available {
+                    version,
+                    release_notes,
+                });
+            }
+            Ok(None) => {
+                updater.set_status(UpdateStatus::UpToDate);
+            }
+            Err(e) => {
+                updater.set_status(UpdateStatus::Error {
+                    message: e.to_string(),
+                });
+            }
+        },
+        Err(e) => {
+            updater.set_status(UpdateStatus::Error {
+                message: format!("updater plugin unavailable: {e}"),
+            });
+        }
+    }
     Ok(CheckForUpdatesResult::from_status(&updater.status()))
 }
 
@@ -153,29 +221,86 @@ pub fn check_for_updates(
 /// absent, we surface a graceful not-configured reason so the UI can show a
 /// "restart to update" hint only when there's truly something to apply.
 #[tauri::command]
-pub fn apply_update(updater: tauri::State<'_, UpdaterState>) -> Result<ApplyUpdateResult, String> {
+pub async fn apply_update(
+    app: tauri::AppHandle,
+    updater: tauri::State<'_, UpdaterState>,
+) -> Result<ApplyUpdateResult, String> {
     let status = updater.status();
-    let version = match &status {
-        UpdateStatus::Available { version, .. } | UpdateStatus::Ready { version } => version,
-        _ => {
+    if !matches!(
+        status,
+        UpdateStatus::Available { .. } | UpdateStatus::Ready { .. }
+    ) {
+        return Ok(ApplyUpdateResult {
+            installed: false,
+            version: None,
+            reason: Some(format!("no update pending (status: {status})")),
+        });
+    }
+    let ext = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
             return Ok(ApplyUpdateResult {
                 installed: false,
                 version: None,
-                reason: Some(format!("no update pending (status: {status})")),
+                reason: Some(format!("updater plugin unavailable: {e}")),
             });
         }
     };
-    // Mark installed — a real implementation would call
-    // `app.updater().download_and_install()` here. The state transition is
-    // what the frontend reads to know it should prompt for a restart.
-    updater.set_status(UpdateStatus::Installed {
-        version: version.clone(),
-    });
-    Ok(ApplyUpdateResult {
-        installed: true,
-        version: Some(version.clone()),
-        reason: None,
-    })
+    // Re-check to obtain a fresh `Update` handle (it owns the signed download
+    // URL + is consumed by `download_and_install`).
+    match ext.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            updater.set_status(UpdateStatus::Downloading { progress: 0.0 });
+            // download + install (signature-verified by the plugin). On
+            // success the installer replaces the app; on NSIS (Windows) the
+            // plugin relaunches. Progress callback is a best-effort no-op
+            // here (coarse state suffices for the badge).
+            match update
+                .download_and_install(|_chunk_len, _total| {}, || {})
+                .await
+            {
+                Ok(()) => {
+                    updater.set_status(UpdateStatus::Installed {
+                        version: version.clone(),
+                    });
+                    Ok(ApplyUpdateResult {
+                        installed: true,
+                        version: Some(version),
+                        reason: None,
+                    })
+                }
+                Err(e) => {
+                    updater.set_status(UpdateStatus::Error {
+                        message: e.to_string(),
+                    });
+                    Ok(ApplyUpdateResult {
+                        installed: false,
+                        version: None,
+                        reason: Some(format!("download/install failed: {e}")),
+                    })
+                }
+            }
+        }
+        Ok(None) => {
+            updater.set_status(UpdateStatus::UpToDate);
+            Ok(ApplyUpdateResult {
+                installed: false,
+                version: None,
+                reason: Some("no update available on re-check".to_string()),
+            })
+        }
+        Err(e) => {
+            updater.set_status(UpdateStatus::Error {
+                message: e.to_string(),
+            });
+            Ok(ApplyUpdateResult {
+                installed: false,
+                version: None,
+                reason: Some(format!("re-check failed: {e}")),
+            })
+        }
+    }
 }
 
 /// Open a URL in the OS default browser / handler.

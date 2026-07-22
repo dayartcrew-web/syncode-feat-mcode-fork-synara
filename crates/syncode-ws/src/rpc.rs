@@ -924,17 +924,16 @@ async fn dispatch_method(
         // rollback if the checkout fails after a real stash. See
         // `handle_git_stash_and_checkout` below.
         //
-        // Deferred / unserved (still in `UNSERVED_RPC`): `git.runStackedAction`
-        // (LLM-backed multi-phase commit/push/PR — would need provider wiring),
-        // `git.createDetachedWorktree`. NOTE: `git.subscribeActionProgress`
-        // and `git.unsubscribeActionProgress` are NOW SERVED (GIT-4) — they
-        // register/drop the connection on CHANNEL_GIT for live progress
-        // push frames during a stacked-action run. NOTE: `git.summarizeDiff` was SERVED in
-        // T6c-13 (LLM-backed one-shot — see the LLM-backed-ops block below).
+        // Now SERVED (UNSERVED_RPC is empty — rpc.rs:1129 "ZERO unserved RPCs"):
+        // `git.runStackedAction` (real GIT-4 — `syncode_git::stacked_actions`
+        // pipeline), `git.createDetachedWorktree` (real — `git worktree add
+        // --detach`). `git.subscribeActionProgress` +
+        // `git.unsubscribeActionProgress` (GIT-4) register/drop the connection
+        // on CHANNEL_GIT for live progress push frames during a stacked-action
+        // run. `git.summarizeDiff` (LLM-backed one-shot, T6c-13) and
         // `git.githubRepository` + `git.resolvePullRequest` + `git.handoffThread`
-        // + `git.preparePullRequestThread` were UNSERVED until T6c-14; they are
-        // NOW SERVED via the GitHub-API ops block below (shelling out to the
-        // `gh` CLI — auth delegated to `gh auth login`, no token handling).
+        // + `git.preparePullRequestThread` (T6c-14, shell out to the `gh` CLI —
+        // auth delegated to `gh auth login`, no token handling) are all SERVED.
         //
         // Dispatch accepts BOTH the MCode dot-name AND a slash form for
         // robustness. Entry order matches the MCODE_TO_SERVED append block to

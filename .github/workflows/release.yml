@@ -15,11 +15,11 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --features devtools"
           - platform: ubuntu-22.04
-            args: ""
+            args: "--features devtools"
           - platform: windows-latest
-            args: ""
+            args: "--features devtools"
 
     runs-on: ${{ matrix.platform }}
     steps:

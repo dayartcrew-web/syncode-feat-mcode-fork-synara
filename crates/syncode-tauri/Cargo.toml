@@ -6,6 +6,14 @@ authors.workspace = true
 license.workspace = true
 description = "Tauri desktop integration — app shell, IPC commands, auto-update, system tray"
 
+# Enables the Tauri webview DevTools API (`open_devtools`/`close_devtools`/
+# `is_devtools_open`) so the `toggle_devtools` IPC command works in a release
+# build. Without this feature those symbols are stripped and DevTools is
+# entirely unavailable in release (the v0.1.6 regression). Release builds in
+# `.github/workflows/release.yml` pass `--features devtools`.
+[features]
+devtools = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { workspace = true }
 
