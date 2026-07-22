@@ -1626,7 +1626,14 @@ async fn handle_orchestration_dispatch_command(
                 .and_then(|s| s.get("provider"))
                 .and_then(|v| v.as_str())
                 .or_else(|| pctx.params.get("providerId").and_then(|v| v.as_str()))
-                .map(|s| s.to_string());
+                // Normalize the MCode ProviderKind (`claudeAgent`) to the
+                // backend id (`claude`) — `CreateThread`/`thread.create`/
+                // `resolve_thread_create_provider` all normalize; without it
+                // here, the stored `provider_id="claudeAgent"` misses the
+                // adapter registry at turn dispatch and falls back to the
+                // armed (default) provider — the "settings/provider still
+                // broken" bug.
+                .map(|s| normalize_provider_id(s).to_string());
             let model = selection
                 .and_then(|s| s.get("model"))
                 .and_then(|v| v.as_str())

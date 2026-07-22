@@ -98,7 +98,17 @@ function wrapWsTransportAsDispatcher(transport: WsTransport): TransportDispatche
 
 export function readNativeApi(): NativeApi | undefined {
   if (typeof window === "undefined") return undefined;
-  if (cachedDesktopApi && window.nativeApi === cachedDesktopApi) return cachedDesktopApi;
+  // Return the cached desktop API on every subsequent call. `readNativeApi` is
+  // invoked from ~250 sites; the Tauri path builds the API AND binds the
+  // server-lifecycle push subscriptions (welcome/settings/config/…) ONCE.
+  // Without this cache each call would re-run the Tauri setup, re-subscribing
+  // the push channels so each welcome push fans out N times — the "double
+  // cmd server" bug (server commands / navigations fired repeatedly on boot,
+  // racing the chat cycle, threads, and thread-id resolution). In Tauri the
+  // webview never sets `window.nativeApi`, so the old
+  // `window.nativeApi === cachedDesktopApi` guard never matched and the cache
+  // never hit — this plain `cachedDesktopApi` check fixes it.
+  if (cachedDesktopApi) return cachedDesktopApi;
 
   // 1. Preloaded bridge (Tauri entrypoint or Electron preload).
   if (window.nativeApi) {
