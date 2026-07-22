@@ -632,16 +632,16 @@ function makeTauriNativeApi(
       },
     },
 
-    // ─── git (existing syncode-tauri git_* commands where available) ────
+    // ─── git (all git/* RPCs route through the in-process WS backend, which
+    //   is backed by the same syncode-git crate the former IPC handlers used.
+    //   The duplicated #[tauri::command] git_* handlers were removed from
+    //   syncode-tauri; the desktop webview reaches the WS handlers via the
+    //   injected WsTransport — same code path as the browser shell.) ──────
     git: {
-      // syncode-tauri has: git_status, git_diff, git_log, git_branches,
-      // git_add, git_commit, git_create_branch, git_delete_branch, git_checkout.
       githubRepository: (input: GitHubRepositoryInput) =>
         callTransport<GitHubRepositoryResult>("git/githubRepository", input),
-      listBranches: async (input: GitListBranchesInput) => {
-        const params = input as unknown as { path?: string };
-        return invoke<GitListBranchesResult>("git_branches", { path: params.path ?? "" });
-      },
+      listBranches: (input: GitListBranchesInput) =>
+        callTransport<GitListBranchesResult>("git/listBranches", input),
       createWorktree: (_input: GitCreateWorktreeInput) =>
         unsupported<GitCreateWorktreeResult>(
           "git.createWorktree",
@@ -657,18 +657,9 @@ function makeTauriNativeApi(
           "git.removeWorktree",
           "no syncode-tauri command — needs T6b backend addition",
         ),
-      createBranch: async (input: GitCreateBranchInput) => {
-        const params = input as unknown as { path?: string; name?: string; checkout?: boolean };
-        await invoke<unknown>("git_create_branch", {
-          path: params.path ?? "",
-          name: params.name ?? "",
-          checkout: params.checkout ?? true,
-        });
-      },
-      checkout: async (input: GitCheckoutInput) => {
-        const params = input as unknown as { path?: string; ref?: string };
-        await invoke<void>("git_checkout", { path: params.path ?? "", refName: params.ref ?? "" });
-      },
+      createBranch: (input: GitCreateBranchInput) =>
+        callTransport<void>("git/createBranch", input),
+      checkout: (input: GitCheckoutInput) => callTransport<void>("git/checkout", input),
       stashAndCheckout: (_input: GitStashAndCheckoutInput) =>
         unsupported<void>(
           "git.stashAndCheckout",
@@ -691,11 +682,8 @@ function makeTauriNativeApi(
         ),
       init: (_input: GitInitInput) =>
         unsupported<void>("git.init", "no syncode-tauri command — needs T6b backend addition"),
-      stageFiles: async (input: GitStageFilesInput) => {
-        const params = input as unknown as { path?: string; files?: string[] };
-        await invoke<void>("git_add", { path: params.path ?? "", files: params.files ?? [] });
-        return { ok: true } as unknown as GitStageFilesResult;
-      },
+      stageFiles: (input: GitStageFilesInput) =>
+        callTransport<GitStageFilesResult>("git/stageFiles", input),
       unstageFiles: (_input: GitUnstageFilesInput) =>
         unsupported<GitUnstageFilesResult>(
           "git.unstageFiles",
@@ -711,23 +699,9 @@ function makeTauriNativeApi(
           input,
         ),
       pull: (input: GitPullInput) => callTransport<GitPullResult>("git/pull", input),
-      status: async (input: GitStatusInput) => {
-        const params = input as unknown as { path?: string };
-        return invoke<GitStatusResult>("git_status", { path: params.path ?? "" });
-      },
-      readWorkingTreeDiff: async (input: GitReadWorkingTreeDiffInput) => {
-        const params = input as unknown as {
-          path?: string;
-          oldRef?: string;
-          newRef?: string;
-        };
-        const result = await invoke<unknown>("git_diff", {
-          path: params.path ?? "",
-          oldRef: params.oldRef ?? null,
-          newRef: params.newRef ?? null,
-        });
-        return result as unknown as GitReadWorkingTreeDiffResult;
-      },
+      status: (input: GitStatusInput) => callTransport<GitStatusResult>("git/status", input),
+      readWorkingTreeDiff: (input: GitReadWorkingTreeDiffInput) =>
+        callTransport<GitReadWorkingTreeDiffResult>("git/readWorkingTreeDiff", input),
       summarizeDiff: (_input: GitSummarizeDiffInput) =>
         unsupported<GitSummarizeDiffResult>(
           "git.summarizeDiff",
