@@ -664,6 +664,7 @@ pub async fn run_script(
     let (shell, shell_flag): (&str, &str) = ("cmd", "/C");
 
     let mut cmd = tokio::process::Command::new(shell);
+    syncode_core::util::subprocess::hide_console_window(&mut cmd);
     cmd.arg(shell_flag).current_dir(&cwd);
 
     let cmdline = match source {

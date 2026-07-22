@@ -7,16 +7,10 @@
 //! `windows_subsystem = "windows"` (see `main.rs`), so the main process has no
 //! console; this guard is for the child processes it launches.
 //!
-//! This mirrors `syncode_provider::subprocess::hide_console_window` (which
-//! covers `tokio::process::Command`) for the synchronous `std::process::Command`
-//! spawns in `shell_commands.rs` / `desktop_commands.rs`. No-op on non-Windows.
+//! Re-exports the shared implementation from `syncode_core::util::subprocess`
+//! so there is ONE `CREATE_NO_WINDOW` chokepoint across all crates
+//! (`syncode-provider` tokio spawns, `syncode-ws`/`syncode-git`/`syncode-automation`
+//! spawns, and these synchronous `std::process::Command` spawns here). No-op on
+//! non-Windows.
 
-#[cfg(windows)]
-pub fn hide_console_window(cmd: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(0x0800_0000);
-}
-
-#[cfg(not(windows))]
-#[allow(unused_variables)]
-pub fn hide_console_window(cmd: &mut std::process::Command) {}
+pub use syncode_core::util::subprocess::hide_console_window_std as hide_console_window;

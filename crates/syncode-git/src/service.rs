@@ -87,9 +87,10 @@ fn run_cli(
     let cwd_owned = cwd.to_path_buf();
     let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let handle = std::thread::spawn(move || -> Result<CommandOutput, GitError> {
-        let output = Command::new(bin)
-            .args(&args_owned)
-            .current_dir(&cwd_owned)
+        let mut cmd = Command::new(bin);
+        cmd.args(&args_owned).current_dir(&cwd_owned);
+        syncode_core::util::subprocess::hide_console_window_std(&mut cmd);
+        let output = cmd
             .output()
             .map_err(|e| GitError::GitOperation(git2::Error::from_str(&e.to_string())))?;
         Ok(CommandOutput {

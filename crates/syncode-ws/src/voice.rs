@@ -254,14 +254,16 @@ async fn transcribe_with_whisper(params: &Value) -> Result<String, String> {
         .parent()
         .ok_or_else(|| "temp file has no parent dir".to_string())?;
 
-    let output = tokio::process::Command::new(WHISPER_BIN)
-        .arg(&path)
+    let mut cmd = tokio::process::Command::new(WHISPER_BIN);
+    cmd.arg(&path)
         .arg("--model")
         .arg("tiny")
         .arg("--output_format")
         .arg("txt")
         .arg("--output_dir")
-        .arg(parent)
+        .arg(parent);
+    syncode_core::util::subprocess::hide_console_window(&mut cmd);
+    let output = cmd
         .output()
         .await
         .map_err(|e| format!("`whisper` spawn failed: {e}"))?;

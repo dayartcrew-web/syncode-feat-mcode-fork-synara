@@ -15,8 +15,11 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = "0.1"
 dunce = "1"
+# tokio::process::Command is used by `util::subprocess` (the shared
+# CREATE_NO_WINDOW chokepoint for hiding child console windows on Windows).
+# Already a transitive dep of every consumer; declaring it directly here makes
+# the helper available to all crates (syncode-provider/git/ws/automation/tauri).
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-# Required for `#[tokio::test]` macros in the harness unit tests.
-tokio = { workspace = true }

@@ -129,11 +129,13 @@ impl WorktreeManager {
                 .map_err(|e| WorktreeError::Git(format!("create_dir_all failed: {e}")))?;
         }
 
-        let output = Command::new("git")
-            .arg("worktree")
+        let mut cmd = Command::new("git");
+        cmd.arg("worktree")
             .arg("add")
             .arg(&path)
-            .current_dir(&self.repo_root)
+            .current_dir(&self.repo_root);
+        syncode_core::util::subprocess::hide_console_window(&mut cmd);
+        let output = cmd
             .output()
             .await
             .map_err(|e| WorktreeError::Git(format!("spawn failed: {e}")))?;
@@ -152,12 +154,14 @@ impl WorktreeManager {
     /// Remove a previously-created worktree (cleanup on failure). Runs
     /// `git worktree remove --force <path>`. Best-effort — logs on failure.
     pub async fn remove(&self, path: &Path) -> Result<(), WorktreeError> {
-        let output = Command::new("git")
-            .arg("worktree")
+        let mut cmd = Command::new("git");
+        cmd.arg("worktree")
             .arg("remove")
             .arg("--force")
             .arg(path)
-            .current_dir(&self.repo_root)
+            .current_dir(&self.repo_root);
+        syncode_core::util::subprocess::hide_console_window(&mut cmd);
+        let output = cmd
             .output()
             .await
             .map_err(|e| WorktreeError::Git(format!("spawn failed: {e}")))?;
