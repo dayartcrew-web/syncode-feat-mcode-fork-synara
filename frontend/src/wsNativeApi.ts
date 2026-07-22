@@ -240,6 +240,11 @@ function resolveFallbackBrowserTab(state: ThreadBrowserState, tabId?: string) {
  * transport's subscriptions live until that transport is disposed).
  */
 export function bindServerLifecycleTransport(transport: WsTransport): void {
+  // Idempotent: binding the SAME transport again would re-subscribe every
+  // lifecycle channel (welcome/configUpdated/settingsUpdated/…), so each push
+  // would fan out N times. `nativeApi.ts` calls this once per cached API build
+  // — guard defensively in case a caller re-invokes it.
+  if (serverLifecycleTransport === transport) return;
   serverLifecycleTransport = transport;
   transport.subscribe(WS_CHANNELS.serverWelcome, (message) => {
     fanoutLifecycle(welcomeListeners, message.data as WsWelcomePayload);

@@ -1066,8 +1066,20 @@ impl Orchestrator {
         let Some(pid) = provider_id else {
             return default_adapter.clone();
         };
-        // Resolve the adapter from the registry.
-        match self.adapter_registry.get(&pid) {
+        // Normalize the MCode frontend kind (`claudeAgent`) to the backend id
+        // (`claude`) at lookup time. The adapter registry is keyed by backend
+        // ids; older threads whose `provider_id` was written via
+        // `thread.meta.update` (before it normalized on write) hold
+        // `claudeAgent` and would otherwise miss the registry and silently
+        // fall back to the armed default provider. This is a no-op for already
+        // normalized ids. Mirrors `settings::normalize_provider_id` (kept in
+        // syncode-ws; inlined here to avoid a crate cycle).
+        let normalized = if pid == "claudeAgent" {
+            "claude"
+        } else {
+            pid.as_str()
+        };
+        match self.adapter_registry.get(normalized) {
             Some(adapter) => adapter.clone(),
             None => default_adapter.clone(),
         }
