@@ -1,24 +1,17 @@
-## [0.1.10] - 2026-07-22
+## [0.1.11] - 2026-07-22
 
 ### Bug Fixes
 
-- **desktop**: Global cmd-window hide — shared chokepoint for ALL subprocess spawns (#230) (4407cef)
+- **desktop**: Anchor DB to AppData + wire default_provider to arming (#231) (f49feac)
 
 
 ### Documentation
 
-- **changelog**: Update for v0.1.9 (3063a6c)
+- **changelog**: Update for v0.1.10 (51e1992)
 
 
 ### Miscellaneous
 
-- Bump version to 0.1.10 (43d0213)
-
-
-### Tests
-
-- **desktop**: WDIO functional specs + console-window hide on shell spawns (#229) (205b7f5)
-
-- **desktop**: WebdriverIO functional harness (embedded WebDriver) (#228) (e6f98be)
+- Bump version to 0.1.11 (a2e3db8)
 
 
