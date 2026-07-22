@@ -76,28 +76,6 @@ jobs:
         working-directory: e2e-desktop
         run: npm install --no-audit --no-fund
 
-      - name: Diagnose test-binary boot under weston (capture stderr)
-        # The embedded driver reports only "app exited code 101" (panic) without
-        # the panic message. Run the release+webdriver binary manually under the
-        # same weston env for 15s and dump stdout/stderr so the panic reason is
-        # visible in the run log.
-        run: |
-          xvfb-run -a --server-args="-screen 0 1280x800x24" bash -c '
-            export XDG_RUNTIME_DIR=/tmp/xdg-runtime
-            mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-            weston --backend=x11-backend.so --idle-time=0 --width=1280 --height=800 &
-            sleep 4
-            export WAYLAND_DISPLAY=wayland-0
-            export GDK_BACKEND=wayland
-            export LIBGL_ALWAYS_SOFTWARE=1
-            export RUST_BACKTRACE=full
-            timeout 15 ./target/release/syncode-tauri 2>&1 | tee /tmp/appboot.log
-            ec=${PIPESTATUS[0]}
-            echo "=== app exit code: $ec (124=timeout/ran-ok, 101=panic) ==="
-          '
-          echo "===== APP BOOT LOG (/tmp/appboot.log) ====="
-          cat /tmp/appboot.log 2>/dev/null || echo "(no log)"
-
       - name: Run WebDriver smoke under weston (nested Wayland)
         # The @wdio/tauri-service launches the test binary (which embeds the
         # WebDriver server). webkit2gtk needs a Wayland+GL surface, so we run

@@ -16,8 +16,10 @@ describe("Syncode desktop boot", () => {
       { timeout: 30_000, timeoutMsg: "app window never set a title" },
     );
     const title = await browser.getTitle();
-    // tauri.conf.json productName is "Syncode".
-    expect(title).toContain("Syncode");
+    // The Tauri window productName is "Syncode" but main.tsx sets
+    // document.title to APP_BASE_NAME ("MCode" — legacy branding). Accept
+    // either; the point is the app launched and set a title.
+    expect(title).toMatch(/MCode|Syncode/i);
   });
 
   it("renders the shell (non-empty document)", async () => {
