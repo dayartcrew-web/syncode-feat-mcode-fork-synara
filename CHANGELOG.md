@@ -1,17 +1,17 @@
-## [0.1.12] - 2026-07-23
+## [0.1.13] - 2026-07-23
 
 ### Bug Fixes
 
-- **desktop**: Provider status probe uses bin_resolver (release PATH narrower) (#232) (b278fe7)
+- **desktop**: Clear stale projectDraftThreadIdByProjectId after DB move (v7) (#233) (ec4f87e)
 
 
 ### Documentation
 
-- **changelog**: Update for v0.1.11 (de26e8c)
+- **changelog**: Update for v0.1.12 (1279778)
 
 
 ### Miscellaneous
 
-- Bump version to 0.1.12 (18500fb)
+- Bump version to 0.1.13 (9ead195)
 
 
