@@ -299,7 +299,24 @@ pub(crate) fn resolve_provider_binary(pid: &str, settings: &Value) -> (Option<Pa
             return (Some(found), true);
         }
     }
-    // 3. Nothing found.
+    // 3. Adapter-equivalent resolution (`bin_resolver`) — catches npm-global
+    //    CLIs (`%APPDATA%/npm/<name>.cmd`) and native-install dirs that are
+    //    NOT on the launcher's PATH. A Windows GUI app launched from a Start
+    //    Menu shortcut inherits a NARROWER PATH than a dev terminal, so
+    //    `which` (step 2) misses CLIs the adapter spawns fine via
+    //    `bin_resolver` — marking the provider "unavailable" (`available:
+    //    false` → `isProviderUsable` false → chat send disabled) in the
+    //    release build, while the terminal-launched local build reports
+    //    "ready". Using the SAME resolver as the adapter keeps the status
+    //    consistent with actual spawn capability. (`resolve_binary` returns
+    //    the bare name when nothing is found — `is_file` filters that out.)
+    for candidate in binary_candidates(pid) {
+        let resolved = syncode_provider::resolve_binary(&candidate);
+        if std::path::Path::new(&resolved).is_file() {
+            return (Some(PathBuf::from(resolved)), true);
+        }
+    }
+    // 4. Nothing found.
     (None, false)
 }
 
