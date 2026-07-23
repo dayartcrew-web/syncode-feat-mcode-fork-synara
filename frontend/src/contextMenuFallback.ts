@@ -69,7 +69,11 @@ export function showContextMenuFallback<T extends string>(
       }
     }
 
-    overlay.addEventListener("mousedown", () => cleanup(null));
+    // Use `click` (not `mousedown`) so a button-click inside the menu isn't
+    // pre-empted by the overlay catching the mousedown first (observed in
+    // WebView2/Tauri: the overlay's mousedown fired before the button's click,
+    // resolving the promise with null → delete/handover did nothing).
+    overlay.addEventListener("click", () => cleanup(null));
     document.addEventListener("keydown", onKeyDown);
 
     for (let i = 0; i < items.length; i++) {
