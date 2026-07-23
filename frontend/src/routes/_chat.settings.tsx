@@ -1612,14 +1612,6 @@ function SettingsRouteView() {
         />
       </SettingsSection>
 
-      <SettingsSection title="Updates">
-        <SettingsRow
-          title="Check for updates"
-          description="Check for new Syncode releases and install them (desktop app only)."
-          control={<UpdateChecker />}
-        />
-      </SettingsSection>
-
       <SettingsSection title="Sidebar organization">
         <SettingsRow
           title="Project order"
@@ -3302,6 +3294,11 @@ function SettingsRouteView() {
           title="Version"
           description="Current application version."
           control={<code className="text-xs font-medium text-muted-foreground">{APP_VERSION}</code>}
+        />
+        <SettingsRow
+          title="Check for updates"
+          description="Check for new Syncode releases and install them (desktop app only)."
+          control={<UpdateChecker />}
         />
         <SettingsRow
           title="Release history"

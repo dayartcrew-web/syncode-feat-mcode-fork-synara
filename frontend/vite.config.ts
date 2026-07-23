@@ -145,7 +145,18 @@ export default defineConfig({
   },
   define: {
     "import.meta.env.VITE_WS_URL": JSON.stringify(process.env.VITE_WS_URL ?? ""),
-    "import.meta.env.APP_VERSION": JSON.stringify(process.env.npm_package_version ?? "0.1.0"),
+    "import.meta.env.APP_VERSION": JSON.stringify(
+      (() => {
+        try {
+          const tauriConf = JSON.parse(
+            require("fs").readFileSync("../crates/syncode-tauri/tauri.conf.json", "utf-8"),
+          );
+          return tauriConf.version ?? "0.0.0";
+        } catch {
+          return process.env.npm_package_version ?? "0.0.0";
+        }
+      })(),
+    ),
   },
   clearScreen: false,
   server: {
