@@ -1436,7 +1436,9 @@ mod tests {
 
         assert_eq!(detail.thread.provider_id, "openai");
         assert_eq!(detail.turns.len(), 1);
-        assert_eq!(detail.messages.len(), 1);
+        // 2 messages: start_turn now persists the user prompt + the explicit
+        // assistant AddMessage.
+        assert_eq!(detail.messages.len(), 2);
     }
 
     #[tokio::test]
