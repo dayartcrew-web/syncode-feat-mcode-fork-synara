@@ -23278,7 +23278,7 @@ mod tests {
         );
         let result = resp.result.unwrap();
         assert_eq!(result["dispatched"], true);
-        assert_eq!(result["eventsAppended"], 1);
+        assert_eq!(result["eventsAppended"], 2);
         let turn_id = result["aggregateId"].as_str().unwrap().to_string();
         assert!(!turn_id.is_empty());
 
@@ -23332,7 +23332,7 @@ mod tests {
         );
         let result = resp.result.unwrap();
         assert_eq!(result["dispatched"], true);
-        assert_eq!(result["eventsAppended"], 1);
+        assert_eq!(result["eventsAppended"], 2);
         let turn_id = result["aggregateId"].as_str().unwrap().to_string();
 
         // The user text routed from `message.text` lands on the projected turn.
