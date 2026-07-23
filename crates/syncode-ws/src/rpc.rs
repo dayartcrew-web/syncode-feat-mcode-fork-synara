@@ -1183,7 +1183,7 @@ async fn dispatch_method(
         // listing). Accepts an optional `cwd`/`projectPath` param (defaults
         // to "." — same as the git.* form). Returns `{ worktrees: [...] }`.
         "server.listWorktrees" | "server/list-worktrees" | "server/listWorktrees" => {
-            handle_git_worktree_list(id, &request.params)
+            handle_server_list_worktrees(state, id, &request.params).await
         }
 
         // ─── Server legacy aliases (SRV-5 — thin dispatch to served equivalents) ──
@@ -7869,11 +7869,11 @@ fn handle_git_remove_index_lock(id: Value, params: &Value) -> JsonRpcResponse {
 /// `isMain`; here we keep snake_case `is_main` matching the syncode-git
 /// struct's serde rename — `WorktreeInfo` derives default serde, so fields
 /// serialize as their Rust names).
-fn handle_git_worktree_list(id: Value, params: &Value) -> JsonRpcResponse {
-    let repo = match open_git2_repo(id.clone(), params) {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
+/// Collect the main + linked worktrees of a repo into the wire shape
+/// `{ path, branch, is_main, is_locked }`. Extracted so both the per-repo
+/// `git.worktreeList` and the global `server.listWorktrees` (across projects)
+/// share one implementation.
+fn collect_worktrees(repo: &git2::Repository) -> Vec<Value> {
     let main_path = repo
         .workdir()
         .map(|p| p.to_string_lossy().to_string())
@@ -7894,30 +7894,72 @@ fn handle_git_worktree_list(id: Value, params: &Value) -> JsonRpcResponse {
         }));
     }
     // Linked worktrees (additional worktrees added via `git worktree add`).
-    let wt_names = match repo.worktrees() {
-        Ok(n) => n,
-        Err(e) => {
-            return git_error(
-                id,
-                crate::error_codes::INTERNAL_ERROR,
-                format!("git worktreeList: {e}"),
-            );
+    if let Ok(wt_names) = repo.worktrees() {
+        for wt_name_opt in &wt_names {
+            let Some(wt_name) = wt_name_opt else { continue };
+            let wt = match repo.find_worktree(wt_name) {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
+            let path = wt.path().to_string_lossy().to_string();
+            let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked { .. }));
+            arr.push(serde_json::json!({
+                "path": path,
+                "branch": wt_name,
+                "is_main": false,
+                "is_locked": is_locked,
+            }));
         }
+    }
+    arr
+}
+
+fn handle_git_worktree_list(id: Value, params: &Value) -> JsonRpcResponse {
+    let repo = match open_git2_repo(id.clone(), params) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
     };
-    for wt_name_opt in &wt_names {
-        let Some(wt_name) = wt_name_opt else { continue };
-        let wt = match repo.find_worktree(wt_name) {
-            Ok(w) => w,
-            Err(_) => continue,
-        };
-        let path = wt.path().to_string_lossy().to_string();
-        let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked { .. }));
-        arr.push(serde_json::json!({
-            "path": path,
-            "branch": wt_name,
-            "is_main": false,
-            "is_locked": is_locked,
-        }));
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "worktrees": collect_worktrees(&repo) }),
+    )
+}
+
+/// `server.listWorktrees` — the settings/worktrees GLOBAL view. Unlike
+/// `git.worktreeList` (single repo via an explicit `cwd`), this lists worktrees
+/// across ALL projects in the read model when no `cwd` is supplied. Without
+/// this, the settings page fell through to the process cwd (`.`), which in a
+/// release build is the install dir (not a repo) → "could not find repository
+/// at '.'". An explicit `cwd` still delegates to the single-repo path.
+async fn handle_server_list_worktrees(
+    state: &WsState,
+    id: Value,
+    params: &Value,
+) -> JsonRpcResponse {
+    let explicit = params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("path").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty() && *s != ".");
+    if explicit.is_some() {
+        return handle_git_worktree_list(id, params);
+    }
+    // No cwd → aggregate across every registered project's repo. Best-effort
+    // per project: a non-repo root is skipped, not fatal.
+    let project_roots: Vec<String> = {
+        let store = state.read_store.read().await;
+        store
+            .projects
+            .values()
+            .map(|p| p.root_path.clone())
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+    let mut arr: Vec<Value> = Vec::new();
+    for root in &project_roots {
+        if let Ok(repo) = git2::Repository::discover(root) {
+            arr.extend(collect_worktrees(&repo));
+        }
     }
     JsonRpcResponse::success(id, serde_json::json!({ "worktrees": arr }))
 }

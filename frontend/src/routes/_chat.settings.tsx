@@ -94,6 +94,7 @@ import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPane
 import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
 import { McpSettingsPanel } from "../components/settings/McpSettingsPanel";
 import { AgentsSettingsPanel } from "../components/settings/AgentsSettingsPanel";
+import { UpdateChecker } from "../components/settings/UpdateChecker";
 import {
   CHAT_CONTENT_CARD_CLASS_NAME,
   CHAT_MAIN_VIEWPORT_SHELL_CLASS_NAME,
@@ -1608,6 +1609,14 @@ function SettingsRouteView() {
               </SelectItem>
             </SettingsSelectControl>
           }
+        />
+      </SettingsSection>
+
+      <SettingsSection title="Updates">
+        <SettingsRow
+          title="Check for updates"
+          description="Check for new Syncode releases and install them (desktop app only)."
+          control={<UpdateChecker />}
         />
       </SettingsSection>
 
