@@ -69,7 +69,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "mcode:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 6;
+const COMPOSER_DRAFT_STORAGE_VERSION = 7;
 export type DraftThreadEnvMode = "local" | "worktree";
 type DraftThreadEntryPoint = "chat" | "terminal";
 const COMPOSER_PROVIDER_KINDS = [
@@ -2231,10 +2231,19 @@ function migratePersistedComposerDraftStoreState(
   // first reload after upgrade) is wiped before merge. In-session sticky
   // behavior is preserved by `setStickyModelSelection` operating purely in
   // memory.
+  // v7: clear the persisted `projectDraftThreadIdByProjectId` map. After the
+  // v0.1.11 DB move to AppData (fresh event store), this map still held
+  // projectIds from the OLD db — `handleNewThread` then dispatched
+  // `thread.create` with a stale projectId → backend "Project not found".
+  // Dropping the map forces fresh draft resolution against the live project
+  // set on next interaction. (Drafts themselves are keyed by threadId and
+  // reconciled against the live read model; only the stale projectId→threadId
+  // link is cleared.)
   return {
     ...normalized,
     stickyModelSelectionByProvider: {},
     stickyActiveProvider: null,
+    projectDraftThreadIdByProjectId: {},
   };
 }
 
