@@ -41,6 +41,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { adaptPushEnvelope, createPushAdaptContext } from "./contracts/adaptPushEvent";
+import { showContextMenuFallback } from "./contextMenuFallback";
 import { ORCHESTRATION_WS_METHODS } from "./contracts/tier3/orchestration";
 import { WS_CHANNELS, WS_METHODS } from "./contracts/tier3/ws";
 import { omitNullUserInputAnswers } from "./wsNativeApi";
@@ -710,13 +711,13 @@ function makeTauriNativeApi(
     // ─── contextMenu (renderer fallback) ────────────────────────────────
     contextMenu: {
       show: async <T extends string>(
-        _items: readonly ContextMenuItem<T>[],
-        _position?: { x: number; y: number },
+        items: readonly ContextMenuItem<T>[],
+        position?: { x: number; y: number },
       ): Promise<T | null> => {
         // Tauri v2 has @tauri-apps/api/menu but a full context-menu popover
-        // is non-trivial; renderer fallback (the existing showContextMenuFallback)
-        // is used by wsNativeApi. Here we return null to signal "no selection."
-        return null;
+        // is non-trivial; use the renderer fallback (same as wsNativeApi in
+        // browser mode). Without this right-click in the thread did nothing.
+        return showContextMenuFallback(items, position);
       },
     },
 
