@@ -1401,14 +1401,29 @@ impl Decider {
         user_input: String,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let id = EntityId::new();
-        let now = Timestamp::now();
-        Ok(vec![DomainEvent::TurnStarted {
-            id,
-            thread_id,
-            sequence,
-            user_input,
-            created_at: now,
-        }])
+        Ok(vec![
+            DomainEvent::TurnStarted {
+                id,
+                thread_id,
+                sequence,
+                user_input: user_input.clone(),
+                created_at: Timestamp::now(),
+            },
+            // Persist the user's prompt as a durable message so it survives
+            // thread reload / reopen. Without this, only the optimistic
+            // frontend state held the user message — the event-store snapshot
+            // carried only assistant messages → "user text disappears when
+            // opening a thread". The projector folds MessageAdded into
+            // `store.messages`, so the subscribeThread snapshot now includes
+            // the user message.
+            DomainEvent::MessageAdded {
+                id: EntityId::new(),
+                turn_id: id,
+                role: "user".to_string(),
+                content: user_input,
+                created_at: Timestamp::now(),
+            },
+        ])
     }
 
     fn decide_complete_turn(
