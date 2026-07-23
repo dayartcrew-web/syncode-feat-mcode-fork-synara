@@ -1401,14 +1401,29 @@ impl Decider {
         user_input: String,
     ) -> Result<Vec<DomainEvent>, DeciderError> {
         let id = EntityId::new();
-        let now = Timestamp::now();
-        Ok(vec![DomainEvent::TurnStarted {
-            id,
-            thread_id,
-            sequence,
-            user_input,
-            created_at: now,
-        }])
+        Ok(vec![
+            DomainEvent::TurnStarted {
+                id,
+                thread_id,
+                sequence,
+                user_input: user_input.clone(),
+                created_at: Timestamp::now(),
+            },
+            // Persist the user's prompt as a durable message so it survives
+            // thread reload / reopen. Without this, only the optimistic
+            // frontend state held the user message — the event-store snapshot
+            // carried only assistant messages → "user text disappears when
+            // opening a thread". The projector folds MessageAdded into
+            // `store.messages`, so the subscribeThread snapshot now includes
+            // the user message.
+            DomainEvent::MessageAdded {
+                id: EntityId::new(),
+                turn_id: id,
+                role: "user".to_string(),
+                content: user_input,
+                created_at: Timestamp::now(),
+            },
+        ])
     }
 
     fn decide_complete_turn(
@@ -2073,7 +2088,9 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(events.len(), 1);
+        // start_turn now emits TurnStarted + a durable MessageAdded for the
+        // user prompt (so it survives thread reopen).
+        assert_eq!(events.len(), 2);
         match &events[0] {
             DomainEvent::TurnStarted {
                 thread_id,
@@ -2086,6 +2103,13 @@ mod tests {
                 assert_eq!(user_input, "Hello");
             }
             _ => panic!("expected TurnStarted"),
+        }
+        match &events[1] {
+            DomainEvent::MessageAdded { role, content, .. } => {
+                assert_eq!(role, "user");
+                assert_eq!(content, "Hello");
+            }
+            _ => panic!("expected MessageAdded for the user prompt"),
         }
     }
 

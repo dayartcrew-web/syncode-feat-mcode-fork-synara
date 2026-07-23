@@ -1046,7 +1046,9 @@ mod tests {
         assert_eq!(store.projects.len(), 1);
         assert_eq!(store.threads.len(), 1);
         assert_eq!(store.turns.len(), 1);
-        assert_eq!(store.messages.len(), 2);
+        // 3 messages: start_turn now persists the user prompt (1 user) + the
+        // explicit user AddMessage + the explicit assistant AddMessage.
+        assert_eq!(store.messages.len(), 3);
 
         let project = store.projects.get(&pid.as_str()).unwrap();
         assert_eq!(project.thread_count, 1);
