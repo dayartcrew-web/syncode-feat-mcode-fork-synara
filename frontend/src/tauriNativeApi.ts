@@ -41,6 +41,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { adaptPushEnvelope, createPushAdaptContext } from "./contracts/adaptPushEvent";
+import { showConfirmDialogFallback } from "./confirmDialogFallback";
 import { showContextMenuFallback } from "./contextMenuFallback";
 import { ORCHESTRATION_WS_METHODS } from "./contracts/tier3/orchestration";
 import { WS_CHANNELS, WS_METHODS } from "./contracts/tier3/ws";
@@ -501,13 +502,18 @@ function makeTauriNativeApi(
         URL.revokeObjectURL(url);
         return input.defaultFilename;
       },
-      confirm: async (message: string) => {
-        // window.confirm works in the Tauri webview.
-        if (typeof window === "undefined" || typeof window.confirm !== "function") {
-          return false;
-        }
-        return window.confirm(message);
-      },
+      confirm: (message: string) =>
+        // The Tauri v2 webview (WebView2/WKWebView/WebKitGTK) suppresses the
+        // native JS dialog APIs — `window.confirm()` returns false without ever
+        // prompting, so every confirmation-gated operation (thread delete,
+        // archive, bulk delete, checkpoint revert, orphaned-worktree cleanup)
+        // silently aborted in the desktop app while the browser shell worked.
+        // Route through the same DOM-based `showConfirmDialogFallback` the
+        // browser path uses (`wsNativeApi.dialogs.confirm`), mirroring the
+        // existing `contextMenu.show` → `showContextMenuFallback` decision.
+        // No native dialog plugin is wired in tauri.conf.json, so there is no
+        // regression in native styling — only the suppressed call is replaced.
+        showConfirmDialogFallback(message),
     },
 
     // ─── terminal (existing syncode-tauri terminal_* commands) ──────────
