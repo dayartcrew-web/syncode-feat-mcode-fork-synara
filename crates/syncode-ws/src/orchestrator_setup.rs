@@ -31,7 +31,6 @@
 //! generated, and the server still boots (graceful degradation, logged at
 //! `WARN`).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use syncode_core::ports::EventRepository;
@@ -122,12 +121,24 @@ pub async fn build_orchestrator(
                     max_tokens: Some(4096),
                     extra: provider_extras,
                 };
-                match guard.spawn(config).await {
-                    Ok(()) => {
+                // Boot timeout: 10s for the default provider spawn so a hung
+                // CLI doesn't block startup indefinitely. The adapter is
+                // still registered even if spawn fails — turns will retry
+                // or surface the error at dispatch time.
+                match tokio::time::timeout(std::time::Duration::from_secs(10), guard.spawn(config))
+                    .await
+                {
+                    Ok(Ok(())) => {
                         tracing::info!(provider = %default_provider, "provider adapter spawned")
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::error!(provider = %default_provider, error = %e, "failed to spawn provider adapter — turns will fail")
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            provider = %default_provider,
+                            "provider adapter spawn timed out (10s) — turns will fail until CLI responds"
+                        )
                     }
                 }
             }
@@ -163,10 +174,13 @@ pub async fn build_orchestrator(
                 repo, reactor, adapter, read_model,
             );
 
-            // Per-thread provider dispatch: spawn + register adapters for
-            // every AVAILABLE provider (not just the default), so threads
-            // created with a different provider dispatch to the correct
-            // adapter instead of the global default.
+            // Per-thread provider dispatch: register un-spawned adapters for
+            // every known provider (excluding HTTP-only anthropic/openai). These
+            // adapters are spawned LAZILY — on the first turn that targets
+            // them — by `resolve_adapter_for_command` in the orchestrator
+            // pipeline. This keeps boot fast (only the default provider spawns
+            // at boot); non-default providers pay a one-time spawn cost on
+            // their first use instead of blocking startup.
             let mut registry_entries: Vec<(String, syncode_provider::registry::SharedAdapter)> =
                 Vec::new();
             registry_entries.push((
@@ -181,31 +195,11 @@ pub async fn build_orchestrator(
                     continue;
                 }
                 if let Some(extra_adapter) = syncode_provider::registry::create_by_id(pid) {
-                    let cfg = syncode_provider::ProviderConfig {
-                        provider_id: pid.to_string(),
-                        model: String::new(),
-                        api_key: None,
-                        base_url: None,
-                        max_tokens: Some(4096),
-                        extra: HashMap::new(),
-                    };
-                    {
-                        let mut guard = extra_adapter.write().await;
-                        if let Err(e) = guard.spawn(cfg).await {
-                            tracing::warn!(
-                                provider = pid,
-                                error = %e,
-                                "non-default provider adapter spawn failed — \
-                                 threads using this provider will fail at turn time"
-                            );
-                            continue;
-                        }
-                    }
-                    tracing::info!(
-                        provider = pid,
-                        "provider adapter spawned for per-thread dispatch"
-                    );
                     registry_entries.push((pid.to_string(), extra_adapter));
+                    tracing::debug!(
+                        provider = pid,
+                        "provider adapter registered (lazy spawn — will spawn on first turn)"
+                    );
                 }
             }
             orchestrator = orchestrator.with_adapter_registry(registry_entries);

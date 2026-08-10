@@ -534,6 +534,10 @@ impl ProviderAdapter for ClaudeAdapter {
         self.status.load(Ordering::Acquire).into()
     }
 
+    fn is_spawned(&self) -> bool {
+        self.spawned.load(Ordering::Acquire)
+    }
+
     fn available_models(&self) -> Vec<String> {
         // CLI aliases first, then a few well-known ids.
         vec![

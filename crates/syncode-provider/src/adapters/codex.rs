@@ -228,6 +228,10 @@ impl ProviderAdapter for CodexAdapter {
         self.status.load(Ordering::Acquire).into()
     }
 
+    fn is_spawned(&self) -> bool {
+        self.spawned.load(Ordering::Acquire)
+    }
+
     fn available_models(&self) -> Vec<String> {
         vec![
             "gpt-5.1".to_string(),

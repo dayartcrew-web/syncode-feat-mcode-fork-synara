@@ -193,6 +193,10 @@ impl ProviderAdapter for AcpProvider {
         self.status.load(Ordering::Acquire).into()
     }
 
+    fn is_spawned(&self) -> bool {
+        self.spawned.load(Ordering::Acquire)
+    }
+
     fn available_models(&self) -> Vec<String> {
         self.config.available_models.clone()
     }

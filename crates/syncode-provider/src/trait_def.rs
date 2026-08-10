@@ -327,6 +327,14 @@ pub trait ProviderAdapter: Send + Sync {
     /// Called once when the adapter is first registered.
     async fn spawn(&mut self, config: ProviderConfig) -> Result<(), ProviderAdapterError>;
 
+    /// Whether `spawn()` has been called and succeeded. Used by lazy-spawn
+    /// logic to skip re-spawning an already-active adapter. Default is `true`
+    /// (most adapters are spawned at boot); adapters with an explicit `spawned`
+    /// flag override this.
+    fn is_spawned(&self) -> bool {
+        true
+    }
+
     /// Gracefully shut down the provider process.
     async fn shutdown(&mut self) -> Result<(), ProviderAdapterError>;
 

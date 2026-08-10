@@ -1038,6 +1038,12 @@ impl Orchestrator {
     /// - the command doesn't carry a thread id (e.g. CreateThread),
     /// - the thread isn't in the read model yet (created in this command),
     /// - the thread's provider isn't registered (CLI not installed).
+    ///
+    /// **Lazy spawn**: adapters registered at boot without `.spawn()` (for
+    /// non-default providers) are spawned here on first use — the first turn
+    /// targeting that provider pays a one-time spawn cost (~2-5s for CLI
+    /// handshake). Subsequent turns use the already-spawned adapter. This
+    /// keeps boot fast while enabling per-thread provider dispatch.
     async fn resolve_adapter_for_command(
         &self,
         command: &Command,
@@ -1066,21 +1072,67 @@ impl Orchestrator {
         let Some(pid) = provider_id else {
             return default_adapter.clone();
         };
-        // Normalize the MCode frontend kind (`claudeAgent`) to the backend id
-        // (`claude`) at lookup time. The adapter registry is keyed by backend
-        // ids; older threads whose `provider_id` was written via
-        // `thread.meta.update` (before it normalized on write) hold
-        // `claudeAgent` and would otherwise miss the registry and silently
-        // fall back to the armed default provider. This is a no-op for already
-        // normalized ids. Mirrors `settings::normalize_provider_id` (kept in
-        // syncode-ws; inlined here to avoid a crate cycle).
+        // Normalize `claudeAgent` → `claude` (MCode frontend kind → backend id).
         let normalized = if pid == "claudeAgent" {
             "claude"
         } else {
             pid.as_str()
         };
         match self.adapter_registry.get(normalized) {
-            Some(adapter) => adapter.clone(),
+            Some(adapter) => {
+                // Lazy spawn: if this adapter hasn't been spawned yet (it was
+                // registered at boot without .spawn()), spawn it now. Only
+                // StartTurn triggers the spawn — other commands (PauseThread,
+                // StopThreadSession, etc.) use the adapter read-only and don't
+                // need a subprocess.
+                let needs_spawn = matches!(command, Command::StartTurn { .. })
+                    && !adapter.read().await.is_spawned();
+                if needs_spawn {
+                    tracing::info!(
+                        provider = normalized,
+                        "lazy-spawning provider adapter on first turn"
+                    );
+                    let cfg = syncode_provider::ProviderConfig {
+                        provider_id: normalized.to_string(),
+                        model: String::new(),
+                        api_key: None,
+                        base_url: None,
+                        max_tokens: Some(4096),
+                        extra: Default::default(),
+                    };
+                    // Boot timeout: 10s per provider spawn so a hung CLI
+                    // doesn't block the turn indefinitely.
+                    let spawn_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        adapter.write().await.spawn(cfg),
+                    )
+                    .await;
+                    match spawn_result {
+                        Ok(Ok(())) => {
+                            tracing::info!(
+                                provider = normalized,
+                                "provider adapter spawned (lazy)"
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!(
+                                provider = normalized,
+                                error = %e,
+                                "provider adapter spawn failed — falling back to default"
+                            );
+                            return default_adapter.clone();
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                provider = normalized,
+                                "provider adapter spawn timed out (10s) — falling back to default"
+                            );
+                            return default_adapter.clone();
+                        }
+                    }
+                }
+                adapter.clone()
+            }
             None => default_adapter.clone(),
         }
     }
