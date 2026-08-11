@@ -20,19 +20,56 @@ export interface AgentActivityTimelineState {
 }
 
 const REASONING_GROUP_PREFIX = "agent-reasoning";
+const EXPLORE_GROUP_PREFIX = "agent-explore";
 
 export function isReasoningUpdateWorkEntry(entry: WorkLogEntry): boolean {
+  if (entry.activityKind === "provider_reasoning") {
+    return true;
+  }
   const heading = normalizeWorkText(entry.toolTitle ?? entry.label);
   return heading === "reasoning" || heading === "reasoning update";
 }
 
+export function isSkillDispatchEntry(entry: WorkLogEntry): boolean {
+  return entry.activityKind === "provider_skill_dispatched";
+}
+
+export function isSubagentEventEntry(entry: WorkLogEntry): boolean {
+  return (
+    entry.activityKind === "provider_subagent_started" ||
+    entry.activityKind === "provider_subagent_completed"
+  );
+}
+
+export function isExploreEventEntry(entry: WorkLogEntry): boolean {
+  return (
+    entry.activityKind === "provider_explore_started" ||
+    entry.activityKind === "provider_explore_updated"
+  );
+}
+
 export function isAgentActivityWorkEntry(entry: WorkLogEntry): boolean {
-  return entry.itemType === "collab_agent_tool_call" || isReasoningUpdateWorkEntry(entry);
+  return (
+    entry.itemType === "collab_agent_tool_call" ||
+    isReasoningUpdateWorkEntry(entry) ||
+    isSkillDispatchEntry(entry) ||
+    isSubagentEventEntry(entry) ||
+    isExploreEventEntry(entry)
+  );
 }
 
 export function formatAgentActivityEntryTitle(entry: WorkLogEntry): string {
   if (isReasoningUpdateWorkEntry(entry)) {
     return "Reasoning";
+  }
+  if (isSkillDispatchEntry(entry)) {
+    return "Skill";
+  }
+  if (isSubagentEventEntry(entry)) {
+    return "Subagent";
+  }
+  if (isExploreEventEntry(entry)) {
+    return "Exploring";
   }
   const heading = normalizeCompactToolLabel(entry.toolTitle ?? entry.label).trim();
   if (!heading) {
@@ -44,6 +81,13 @@ export function formatAgentActivityEntryTitle(entry: WorkLogEntry): string {
 export function formatAgentActivityEntryPreview(entry: WorkLogEntry): string | null {
   if (isReasoningUpdateWorkEntry(entry)) {
     return cleanReasoningProgressText(entry.preview ?? entry.detail ?? entry.label);
+  }
+  if (isSkillDispatchEntry(entry) || isSubagentEventEntry(entry) || isExploreEventEntry(entry)) {
+    return (
+      normalizeOptionalText(entry.detail) ??
+      normalizeOptionalText(entry.preview) ??
+      normalizeOptionalText(entry.label)
+    );
   }
 
   if (entry.itemType === "collab_agent_tool_call") {
@@ -59,7 +103,12 @@ export function formatAgentActivityEntryPreview(entry: WorkLogEntry): string | n
 }
 
 export function formatAgentActivityEntrySummary(entry: WorkLogEntry): string | null {
-  if (isReasoningUpdateWorkEntry(entry)) {
+  if (
+    isReasoningUpdateWorkEntry(entry) ||
+    isSkillDispatchEntry(entry) ||
+    isSubagentEventEntry(entry) ||
+    isExploreEventEntry(entry)
+  ) {
     return formatAgentActivityEntryPreview(entry);
   }
 
@@ -80,6 +129,7 @@ export function deriveAgentActivityTimelineState(
   const timelineWorkEntries: WorkLogEntry[] = [];
   const detailById = new Map<string, AgentActivityDetail>();
   let pendingReasoningEntries: WorkLogEntry[] = [];
+  let pendingExploreEntries: WorkLogEntry[] = [];
 
   const flushReasoningEntries = () => {
     if (pendingReasoningEntries.length === 0) {
@@ -112,13 +162,49 @@ export function deriveAgentActivityTimelineState(
     detailById.set(groupId, buildAgentActivityDetail(groupId, displayEntry, groupEntries));
   };
 
+  const flushExploreEntries = () => {
+    if (pendingExploreEntries.length === 0) {
+      return;
+    }
+
+    const groupEntries = pendingExploreEntries;
+    pendingExploreEntries = [];
+    const first = groupEntries[0]!;
+    const latest = groupEntries[groupEntries.length - 1]!;
+    const groupId = `${EXPLORE_GROUP_PREFIX}:${first.id}`;
+    const latestPreview = findLatestPreview(groupEntries);
+    const updateCount = groupEntries.length;
+    const displayPreview =
+      updateCount > 1
+        ? latestPreview
+          ? `${updateCount} finds - ${latestPreview}`
+          : `${updateCount} finds`
+        : latestPreview;
+    const displayEntry: WorkLogEntry = {
+      ...latest,
+      id: groupId,
+      label: "Exploring",
+      toolTitle: "Exploring",
+      tone: "info",
+      ...(displayPreview ? { preview: displayPreview, detail: displayPreview } : {}),
+    };
+
+    timelineWorkEntries.push(displayEntry);
+    detailById.set(groupId, buildAgentActivityDetail(groupId, displayEntry, groupEntries));
+  };
+
   for (const entry of entries) {
     if (isReasoningUpdateWorkEntry(entry)) {
       pendingReasoningEntries.push(entry);
       continue;
     }
+    if (isExploreEventEntry(entry)) {
+      pendingExploreEntries.push(entry);
+      continue;
+    }
 
     flushReasoningEntries();
+    flushExploreEntries();
     timelineWorkEntries.push(entry);
     if (isAgentActivityWorkEntry(entry)) {
       detailById.set(entry.id, buildAgentActivityDetail(entry.id, entry, [entry]));
@@ -126,6 +212,7 @@ export function deriveAgentActivityTimelineState(
   }
 
   flushReasoningEntries();
+  flushExploreEntries();
   return { timelineWorkEntries, detailById };
 }
 

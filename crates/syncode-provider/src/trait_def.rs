@@ -192,6 +192,54 @@ pub enum ProviderEvent {
     },
     /// Provider status change (e.g., idle, busy, disconnected)
     StatusChanged { status: ProviderStatus },
+    /// Reasoning / thinking stream chunk (Anthropic "thinking", Codex
+    /// "reasoning", Gemini "thought"). Adapters SHOULD emit many of these per
+    /// turn; the frontend collapses them into a single expandable row via the
+    /// `agent-reasoning` group prefix. `is_delta` is `true` for incremental
+    /// chunks (streamed as the provider emits them) and `false` for a final
+    /// consolidated reasoning snapshot.
+    Reasoning {
+        session_id: String,
+        text: String,
+        is_delta: bool,
+    },
+    /// A skill was dispatched by the orchestrator/agent (e.g. "/kmr-build"
+    /// fired). `skill` is the kebab-case id; `args` is the raw invocation
+    /// payload (free-form JSON).
+    SkillDispatched {
+        session_id: String,
+        skill: String,
+        args: serde_json::Value,
+    },
+    /// A sub-agent (Task tool / Specialist) was spawned. `agent` is the role
+    /// id (e.g. "code-reviewer"); `task` is the delegated prompt.
+    SubagentStarted {
+        session_id: String,
+        agent: String,
+        task: String,
+    },
+    /// A sub-agent finished. `result` is the final summary the sub-agent
+    /// returned. The frontend pairs this with the prior `SubagentStarted` to
+    /// flip a panel from "running" to "done".
+    SubagentCompleted {
+        session_id: String,
+        agent: String,
+        result: String,
+    },
+    /// Explore/Grep/Glob walk started. `query` is the search pattern or
+    /// natural-language question. Followed by zero or more
+    /// [`ProviderEvent::ExploreUpdated`] events.
+    ExploreStarted {
+        session_id: String,
+        query: String,
+    },
+    /// Progress / partial result during an explore walk (e.g. "found 12
+    /// files"). All `ExploreUpdated` events fold into the preceding
+    /// `ExploreStarted` row in the UI.
+    ExploreUpdated {
+        session_id: String,
+        message: String,
+    },
 }
 
 /// Token usage metadata from provider responses
@@ -568,6 +616,35 @@ mod tests {
             ProviderEvent::StatusChanged {
                 status: ProviderStatus::Busy,
             },
+            // ── Real-time activity variants (P6) ───────────────────────────
+            ProviderEvent::Reasoning {
+                session_id: "sess-1".to_string(),
+                text: "Considering whether to read the file first".to_string(),
+                is_delta: true,
+            },
+            ProviderEvent::SkillDispatched {
+                session_id: "sess-1".to_string(),
+                skill: "kmr-build".to_string(),
+                args: serde_json::json!({"target": "release"}),
+            },
+            ProviderEvent::SubagentStarted {
+                session_id: "sess-1".to_string(),
+                agent: "code-reviewer".to_string(),
+                task: "Review auth module for OWASP issues".to_string(),
+            },
+            ProviderEvent::SubagentCompleted {
+                session_id: "sess-1".to_string(),
+                agent: "code-reviewer".to_string(),
+                result: "No critical issues found".to_string(),
+            },
+            ProviderEvent::ExploreStarted {
+                session_id: "sess-1".to_string(),
+                query: "where is auth middleware defined".to_string(),
+            },
+            ProviderEvent::ExploreUpdated {
+                session_id: "sess-1".to_string(),
+                message: "Found 12 candidate files".to_string(),
+            },
         ];
 
         for event in events {
@@ -576,6 +653,27 @@ mod tests {
             // Can't easily compare enum variants generically, just ensure roundtrip succeeds
             let _ = deserialized;
         }
+    }
+
+    #[test]
+    fn reasoning_event_serialization_shape() {
+        // The wire shape must be `{type: "Reasoning", data: {session_id, text, is_delta}}`
+        // so the PascalCase wire envelope round-trips correctly through the
+        // frontend push adapter (which only inspects the top-level PascalCase
+        // tag of the outer envelope, not this enum's tag — but the inner
+        // serialization still needs to be stable for any internal consumers
+        // and for inspection in traces).
+        let event = ProviderEvent::Reasoning {
+            session_id: "s1".to_string(),
+            text: "thinking...".to_string(),
+            is_delta: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "Reasoning");
+        assert_eq!(v["data"]["session_id"], "s1");
+        assert_eq!(v["data"]["text"], "thinking...");
+        assert_eq!(v["data"]["is_delta"], true);
     }
 
     #[test]

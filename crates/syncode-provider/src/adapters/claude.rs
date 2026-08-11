@@ -182,6 +182,23 @@ fn map_stream_event(event: &Value, session_id: &str) -> Vec<ProviderEvent> {
     let et = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match et {
         "content_block_delta" => {
+            // Anthropic's streaming format distinguishes text deltas
+            // (`delta.text`) from thinking deltas (`delta.thinking`). The
+            // latter is the model's chain-of-thought, surfaced when the model
+            // is configured with thinking enabled — we emit it as a Reasoning
+            // event so the frontend can show a collapsible "Thinking…" row.
+            if let Some(thinking) = event
+                .get("delta")
+                .and_then(|d| d.get("thinking"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return vec![ProviderEvent::Reasoning {
+                    session_id: session_id.to_string(),
+                    text: thinking.to_string(),
+                    is_delta: true,
+                }];
+            }
             if let Some(text) = event
                 .get("delta")
                 .and_then(|d| d.get("text"))
@@ -230,6 +247,21 @@ fn map_message_blocks(msg: &Value, session_id: &str) -> Vec<ProviderEvent> {
     for block in blocks {
         let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match btype {
+            "thinking" => {
+                // Assembled thinking block (final consolidated snapshot). The
+                // streamed thinking_delta chunks already surfaced progressive
+                // reasoning; this snapshot is the full text and is emitted with
+                // `is_delta: false` so downstream consumers can distinguish.
+                if let Some(text) = block.get("thinking").and_then(|v| v.as_str())
+                    && !text.is_empty()
+                {
+                    out.push(ProviderEvent::Reasoning {
+                        session_id: session_id.to_string(),
+                        text: text.to_string(),
+                        is_delta: false,
+                    });
+                }
+            }
             "tool_use" => out.push(ProviderEvent::ToolCall {
                 session_id: session_id.to_string(),
                 tool_name: block
@@ -905,7 +937,13 @@ impl ProviderAdapter for ClaudeAdapter {
                     | ProviderEvent::ToolCall { session_id, .. }
                     | ProviderEvent::ToolResult { session_id, .. }
                     | ProviderEvent::Completed { session_id, .. }
-                    | ProviderEvent::Error { session_id, .. } => session_id == &sid,
+                    | ProviderEvent::Error { session_id, .. }
+                    | ProviderEvent::Reasoning { session_id, .. }
+                    | ProviderEvent::SkillDispatched { session_id, .. }
+                    | ProviderEvent::SubagentStarted { session_id, .. }
+                    | ProviderEvent::SubagentCompleted { session_id, .. }
+                    | ProviderEvent::ExploreStarted { session_id, .. }
+                    | ProviderEvent::ExploreUpdated { session_id, .. } => session_id == &sid,
                     ProviderEvent::StatusChanged { .. } => true,
                 };
                 if owned {

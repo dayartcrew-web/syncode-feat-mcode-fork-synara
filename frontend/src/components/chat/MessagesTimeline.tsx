@@ -35,7 +35,9 @@ import { type TurnDiffSummary } from "../../types";
 import ChatMarkdown from "../ChatMarkdown";
 import { InlineLinkChip } from "../InlineLinkChip";
 import {
+  AgentIcon,
   BotIcon,
+  BrainIcon,
   CheckIcon,
   ChangesIcon,
   CircleAlertIcon,
@@ -47,7 +49,9 @@ import {
   McpIcon,
   NewThreadIcon,
   PinIcon,
+  SearchIcon,
   SkillCubeIcon,
+  SparklesIcon,
   SquarePenIcon,
   SteerIcon,
   TerminalIcon,
@@ -2162,6 +2166,23 @@ function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
       return HammerIcon;
     case "collab_agent_tool_call":
       return AgentTaskIcon;
+  }
+
+  // Real-time activity rows (reasoning/skill/subagent/explore) — classified by
+  // activityKind because they don't fit the tool-lifecycle itemType buckets.
+  if (workEntry.activityKind === "provider_reasoning") return BrainIcon;
+  if (workEntry.activityKind === "provider_skill_dispatched") return SparklesIcon;
+  if (
+    workEntry.activityKind === "provider_subagent_started" ||
+    workEntry.activityKind === "provider_subagent_completed"
+  ) {
+    return AgentIcon;
+  }
+  if (
+    workEntry.activityKind === "provider_explore_started" ||
+    workEntry.activityKind === "provider_explore_updated"
+  ) {
+    return SearchIcon;
   }
 
   return workToneIcon(workEntry.tone).icon;

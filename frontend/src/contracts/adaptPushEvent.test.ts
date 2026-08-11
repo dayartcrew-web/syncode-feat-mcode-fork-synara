@@ -170,4 +170,40 @@ describe("adaptPushEnvelope", () => {
     expect(p1.messageId).toBe(p2.messageId);
     expect(p1.threadId).toBe(p2.threadId);
   });
+
+  /**
+   * Phase 4: classifyActivityTone truth table. Each row emits an activityLogged
+   * frame with a namespaced `activity_type` and asserts the resulting wire tone
+   * on the synthesized `thread.activity-appended` event.
+   */
+  it.each([
+    { kind: "provider_reasoning", expected: "info" },
+    { kind: "provider_skill_dispatched", expected: "info" },
+    { kind: "provider_subagent_started", expected: "info" },
+    { kind: "provider_subagent_completed", expected: "info" },
+    { kind: "provider_explore_started", expected: "info" },
+    { kind: "provider_explore_updated", expected: "info" },
+    { kind: "turn.completed", expected: "info" },
+    { kind: "turn.failed", expected: "error" },
+    { kind: "tool_call", expected: "tool" },
+    { kind: "tool_result", expected: "tool" },
+    { kind: "activity", expected: "tool" },
+  ])("classifies activity_type=$kind as tone=$expected", ({ kind, expected }) => {
+    const ctx = createPushAdaptContext();
+    const out = adaptPushEnvelope(
+      env("ActivityLogged", threadId, {
+        thread_id: threadId,
+        turn_id: turnId,
+        activity_type: kind,
+        description: "irrelevant",
+        consumed: true,
+        created_at: "t",
+      }),
+      ctx,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.type).toBe("thread.activity-appended");
+    const activity = (out[0]!.payload as { activity: { tone: string } }).activity;
+    expect(activity.tone).toBe(expected);
+  });
 });

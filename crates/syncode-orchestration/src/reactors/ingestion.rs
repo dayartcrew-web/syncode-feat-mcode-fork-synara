@@ -157,6 +157,103 @@ pub fn ingest_provider_event(
             events: vec![],
             consumed: true,
         },
+
+        // ── Real-time activity stream (P6) ───────────────────────────────
+        // Each new variant becomes an `ActivityLogged` domain event with a
+        // namespaced `activity_type` so the frontend push adapter
+        // (`adaptPushEnvelope` → `activityLogged` case) can classify it via a
+        // simple string check rather than parsing the free-form `description`.
+
+        ProviderEvent::Reasoning { text, .. } => {
+            // Truncate to keep the activity log readable; the frontend
+            // collapses consecutive `provider_reasoning` rows into a single
+            // expandable thinking bubble, so we keep every chunk (no batching
+            // here) but cap the description size.
+            let truncated = truncate_str(&text, 500);
+            IngestionResult {
+                events: vec![DomainEvent::ActivityLogged {
+                    id: EntityId::new(),
+                    activity_type: "provider_reasoning".to_string(),
+                    description: truncated,
+                    thread_id,
+                    created_at: now,
+                }],
+                consumed: true,
+            }
+        }
+
+        ProviderEvent::SkillDispatched { skill, args, .. } => {
+            let description = format!(
+                "Skill dispatched: {} {}",
+                skill,
+                truncate_json(&args, 200)
+            );
+            IngestionResult {
+                events: vec![DomainEvent::ActivityLogged {
+                    id: EntityId::new(),
+                    activity_type: "provider_skill_dispatched".to_string(),
+                    description,
+                    thread_id,
+                    created_at: now,
+                }],
+                consumed: true,
+            }
+        }
+
+        ProviderEvent::SubagentStarted { agent, task, .. } => {
+            let description = format!("Subagent started: {agent} — {task}");
+            IngestionResult {
+                events: vec![DomainEvent::ActivityLogged {
+                    id: EntityId::new(),
+                    activity_type: "provider_subagent_started".to_string(),
+                    description,
+                    thread_id,
+                    created_at: now,
+                }],
+                consumed: true,
+            }
+        }
+
+        ProviderEvent::SubagentCompleted { agent, result, .. } => {
+            let description = format!("Subagent completed: {agent} — {result}");
+            IngestionResult {
+                events: vec![DomainEvent::ActivityLogged {
+                    id: EntityId::new(),
+                    activity_type: "provider_subagent_completed".to_string(),
+                    description,
+                    thread_id,
+                    created_at: now,
+                }],
+                consumed: true,
+            }
+        }
+
+        ProviderEvent::ExploreStarted { query, .. } => {
+            let description = format!("Exploring: {query}");
+            IngestionResult {
+                events: vec![DomainEvent::ActivityLogged {
+                    id: EntityId::new(),
+                    activity_type: "provider_explore_started".to_string(),
+                    description,
+                    thread_id,
+                    created_at: now,
+                }],
+                consumed: true,
+            }
+        }
+
+        ProviderEvent::ExploreUpdated { message, .. } => {
+            IngestionResult {
+                events: vec![DomainEvent::ActivityLogged {
+                    id: EntityId::new(),
+                    activity_type: "provider_explore_updated".to_string(),
+                    description: message,
+                    thread_id,
+                    created_at: now,
+                }],
+                consumed: true,
+            }
+        }
     }
 }
 
@@ -165,6 +262,16 @@ fn truncate_json(value: &serde_json::Value, max_len: usize) -> String {
     let s = serde_json::to_string(value).unwrap_or_default();
     if s.len() <= max_len {
         s
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
+/// Truncate a plain string for logging/metadata (used by `Reasoning` since
+/// the description is the reasoning text itself, not a JSON payload).
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
     } else {
         format!("{}...", &s[..max_len])
     }
@@ -420,6 +527,178 @@ mod tests {
         let result = truncate_json(&val, 50);
         assert!(result.ends_with("..."));
         assert!(result.len() <= 53);
+    }
+
+    // ─── Real-time activity variants (P6) ────────────────────────────────
+
+    #[test]
+    fn ingest_reasoning_produces_provider_reasoning_activity() {
+        let event = ProviderEvent::Reasoning {
+            session_id: "s1".to_string(),
+            text: "Considering whether to read the file first".to_string(),
+            is_delta: true,
+        };
+        let result = ingest_provider_event(event, make_turn_id(), None, None);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged {
+                activity_type,
+                description,
+                ..
+            } => {
+                assert_eq!(activity_type, "provider_reasoning");
+                assert_eq!(description, "Considering whether to read the file first");
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn ingest_reasoning_truncates_long_text() {
+        let long = "x".repeat(800);
+        let event = ProviderEvent::Reasoning {
+            session_id: "s1".to_string(),
+            text: long.clone(),
+            is_delta: true,
+        };
+        let result = ingest_provider_event(event, make_turn_id(), None, None);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged { description, .. } => {
+                assert!(description.ends_with("..."));
+                assert!(description.len() <= 503); // 500 + "..."
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn ingest_skill_dispatched_produces_activity() {
+        let event = ProviderEvent::SkillDispatched {
+            session_id: "s1".to_string(),
+            skill: "kmr-build".to_string(),
+            args: serde_json::json!({"target": "release"}),
+        };
+        let result = ingest_provider_event(event, make_turn_id(), None, None);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged {
+                activity_type,
+                description,
+                ..
+            } => {
+                assert_eq!(activity_type, "provider_skill_dispatched");
+                assert!(description.contains("kmr-build"));
+                assert!(description.contains("target"));
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn ingest_subagent_started_produces_activity() {
+        let event = ProviderEvent::SubagentStarted {
+            session_id: "s1".to_string(),
+            agent: "code-reviewer".to_string(),
+            task: "Review auth module".to_string(),
+        };
+        let result = ingest_provider_event(event, make_turn_id(), None, None);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged {
+                activity_type,
+                description,
+                ..
+            } => {
+                assert_eq!(activity_type, "provider_subagent_started");
+                assert!(description.contains("code-reviewer"));
+                assert!(description.contains("Review auth module"));
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn ingest_subagent_completed_produces_activity() {
+        let event = ProviderEvent::SubagentCompleted {
+            session_id: "s1".to_string(),
+            agent: "code-reviewer".to_string(),
+            result: "No critical issues".to_string(),
+        };
+        let result = ingest_provider_event(event, make_turn_id(), None, None);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged {
+                activity_type,
+                description,
+                ..
+            } => {
+                assert_eq!(activity_type, "provider_subagent_completed");
+                assert!(description.contains("code-reviewer"));
+                assert!(description.contains("No critical issues"));
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn ingest_explore_started_produces_activity() {
+        let event = ProviderEvent::ExploreStarted {
+            session_id: "s1".to_string(),
+            query: "where is auth middleware".to_string(),
+        };
+        let result = ingest_provider_event(event, make_turn_id(), None, None);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged {
+                activity_type,
+                description,
+                ..
+            } => {
+                assert_eq!(activity_type, "provider_explore_started");
+                assert_eq!(description, "Exploring: where is auth middleware");
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn ingest_explore_updated_produces_activity() {
+        let event = ProviderEvent::ExploreUpdated {
+            session_id: "s1".to_string(),
+            message: "Found 12 files".to_string(),
+        };
+        let result = ingest_provider_event(event, make_turn_id(), None, None);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged {
+                activity_type,
+                description,
+                ..
+            } => {
+                assert_eq!(activity_type, "provider_explore_updated");
+                assert_eq!(description, "Found 12 files");
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
+    }
+
+    #[test]
+    fn ingest_reasoning_threads_to_thread_id() {
+        // Real-time activities scope to the thread when one is provided so the
+        // frontend can route them to the right timeline row.
+        let thread_id = EntityId::new();
+        let event = ProviderEvent::Reasoning {
+            session_id: "s1".to_string(),
+            text: "thinking...".to_string(),
+            is_delta: true,
+        };
+        let result = ingest_provider_event(event, make_turn_id(), Some(thread_id), None);
+        match &result.events[0] {
+            DomainEvent::ActivityLogged { thread_id: tid, .. } => {
+                assert_eq!(*tid, Some(thread_id));
+            }
+            _ => panic!("Expected ActivityLogged"),
+        }
     }
 
     #[test]
