@@ -435,7 +435,13 @@ impl ProviderAdapter for AcpProvider {
                     | ProviderEvent::ToolCall { session_id, .. }
                     | ProviderEvent::ToolResult { session_id, .. }
                     | ProviderEvent::Completed { session_id, .. }
-                    | ProviderEvent::Error { session_id, .. } => session_id == &sid,
+                    | ProviderEvent::Error { session_id, .. }
+                    | ProviderEvent::Reasoning { session_id, .. }
+                    | ProviderEvent::SkillDispatched { session_id, .. }
+                    | ProviderEvent::SubagentStarted { session_id, .. }
+                    | ProviderEvent::SubagentCompleted { session_id, .. }
+                    | ProviderEvent::ExploreStarted { session_id, .. }
+                    | ProviderEvent::ExploreUpdated { session_id, .. } => session_id == &sid,
                     ProviderEvent::StatusChanged { .. } => true,
                 };
                 if owned {

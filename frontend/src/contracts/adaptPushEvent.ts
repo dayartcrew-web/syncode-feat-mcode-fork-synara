@@ -136,6 +136,28 @@ function pickTimestamp(raw: RawObj | null, ...keys: string[]): IsoDateTime {
   return new Date().toISOString() as IsoDateTime;
 }
 
+/**
+ * Classify a namespaced `activity_type` token into the wire-level tone.
+ *
+ * The wire type only carries `info | tool | approval | error`. The frontend
+ * display layer (`agentActivity.logic.ts`) upgrades reasoning entries to the
+ * local-only `"thinking"` tone when collapsing the reasoning group; here we
+ * only need to mark these as informational so they don't render as tool calls.
+ */
+function classifyActivityTone(kind: string): OrchestrationThreadActivityTone {
+  if (kind === "turn.failed") return "error";
+  if (
+    kind === "provider_reasoning" ||
+    kind === "provider_skill_dispatched" ||
+    kind.startsWith("provider_subagent_") ||
+    kind.startsWith("provider_explore_") ||
+    kind === "turn.completed"
+  ) {
+    return "info";
+  }
+  return "tool";
+}
+
 /** Resolve the owning threadId for an event whose payload may lack `thread_id`. */
 function resolveThreadId(
   raw: RawObj | null,
@@ -396,7 +418,7 @@ export function adaptPushEnvelope(
           { sequence: seq, occurredAt, aggregateId: threadId, aggregateKind: "thread" },
           {
             threadId: ThreadId.makeUnsafe(threadId),
-            activity: buildActivity(`act-${seq}`, kind, "tool", turnId ?? null, ts, raw ? normalizeValue(raw) : {}),
+            activity: buildActivity(`act-${seq}`, kind, classifyActivityTone(kind), turnId ?? null, ts, raw ? normalizeValue(raw) : {}),
           },
         ),
       );

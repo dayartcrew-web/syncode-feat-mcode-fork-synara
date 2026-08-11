@@ -3054,6 +3054,40 @@ pub(crate) mod tests {
                     code,
                 },
                 ProviderEvent::StatusChanged { status } => ProviderEvent::StatusChanged { status },
+                ProviderEvent::Reasoning { text, is_delta, .. } => ProviderEvent::Reasoning {
+                    session_id: sid.to_string(),
+                    text,
+                    is_delta,
+                },
+                ProviderEvent::SkillDispatched { skill, args, .. } => {
+                    ProviderEvent::SkillDispatched {
+                        session_id: sid.to_string(),
+                        skill,
+                        args,
+                    }
+                }
+                ProviderEvent::SubagentStarted { agent, task, .. } => {
+                    ProviderEvent::SubagentStarted {
+                        session_id: sid.to_string(),
+                        agent,
+                        task,
+                    }
+                }
+                ProviderEvent::SubagentCompleted { agent, result, .. } => {
+                    ProviderEvent::SubagentCompleted {
+                        session_id: sid.to_string(),
+                        agent,
+                        result,
+                    }
+                }
+                ProviderEvent::ExploreStarted { query, .. } => ProviderEvent::ExploreStarted {
+                    session_id: sid.to_string(),
+                    query,
+                },
+                ProviderEvent::ExploreUpdated { message, .. } => ProviderEvent::ExploreUpdated {
+                    session_id: sid.to_string(),
+                    message,
+                },
             };
             let _ = self.event_tx.send(ev);
         }
@@ -3170,7 +3204,13 @@ pub(crate) mod tests {
                         | ProviderEvent::ToolCall { session_id, .. }
                         | ProviderEvent::ToolResult { session_id, .. }
                         | ProviderEvent::Completed { session_id, .. }
-                        | ProviderEvent::Error { session_id, .. } => {
+                        | ProviderEvent::Error { session_id, .. }
+                        | ProviderEvent::Reasoning { session_id, .. }
+                        | ProviderEvent::SkillDispatched { session_id, .. }
+                        | ProviderEvent::SubagentStarted { session_id, .. }
+                        | ProviderEvent::SubagentCompleted { session_id, .. }
+                        | ProviderEvent::ExploreStarted { session_id, .. }
+                        | ProviderEvent::ExploreUpdated { session_id, .. } => {
                             session_id.as_str() == sid.as_str()
                         }
                         ProviderEvent::StatusChanged { .. } => true,

@@ -355,15 +355,31 @@ async fn route_notification(
                 raw: Value::Null,
             }));
         }
-        "item/agentMessage/delta"
-        | "item/reasoning/textDelta"
-        | "item/reasoning/summaryTextDelta" => {
+        "item/agentMessage/delta" => {
             if let Some(delta) = extract_delta(params) {
                 forward(
                     event_tx,
                     ProviderEvent::Token {
                         session_id: thread_id.to_string(),
                         content: delta,
+                    },
+                )
+                .await;
+            }
+        }
+        // Codex surfaces chain-of-thought via `item/reasoning/textDelta` and
+        // `item/reasoning/summaryTextDelta`. Previously these were promoted to
+        // Token events (mixed into the assistant message). Now they're emitted
+        // as Reasoning so the frontend can render a separate collapsible
+        // "Thinking…" row instead of polluting the assistant message.
+        "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
+            if let Some(delta) = extract_delta(params) {
+                forward(
+                    event_tx,
+                    ProviderEvent::Reasoning {
+                        session_id: thread_id.to_string(),
+                        text: delta,
+                        is_delta: true,
                     },
                 )
                 .await;
@@ -844,7 +860,10 @@ mod tests {
             "{events:?}"
         );
         assert!(
-            matches!(&events[1], ProviderEvent::Token { content, .. } if content == "(thinking)"),
+            matches!(
+                &events[1],
+                ProviderEvent::Reasoning { text, is_delta: true, .. } if text == "(thinking)"
+            ),
             "{events:?}"
         );
 

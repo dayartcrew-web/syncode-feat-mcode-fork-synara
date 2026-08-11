@@ -77,6 +77,13 @@ export interface WorkLogEntry {
   subagents?: ReadonlyArray<WorkLogSubagent>;
   subagentAction?: WorkLogSubagentAction;
   automation?: WorkLogAutomation;
+  /**
+   * Namespaced activity_type from the wire (e.g. "provider_reasoning",
+   * "provider_skill_dispatched"). Used by agentActivity.logic.ts to classify
+   * rows that don't fit the tool-lifecycle itemType buckets. Optional because
+   * legacy entries synthesized before this field existed don't carry it.
+   */
+  activityKind?: string;
 }
 
 // Created-automation rows render as a dedicated card (icon + name + cadence + Open)
