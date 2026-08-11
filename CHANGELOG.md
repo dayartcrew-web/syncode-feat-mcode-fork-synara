@@ -1,3 +1,10 @@
+## [0.1.20] - 2026-08-12
+
+### Features
+
+- **activity**: Surface real-time reasoning/skill/subagent/explore in chat timeline (#239) (95323fe)
+
+
 ## [0.1.19] - 2026-08-11
 
 ### Bug Fixes
