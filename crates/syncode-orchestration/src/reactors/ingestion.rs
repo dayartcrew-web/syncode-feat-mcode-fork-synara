@@ -163,7 +163,6 @@ pub fn ingest_provider_event(
         // namespaced `activity_type` so the frontend push adapter
         // (`adaptPushEnvelope` → `activityLogged` case) can classify it via a
         // simple string check rather than parsing the free-form `description`.
-
         ProviderEvent::Reasoning { text, .. } => {
             // Truncate to keep the activity log readable; the frontend
             // collapses consecutive `provider_reasoning` rows into a single
@@ -183,11 +182,7 @@ pub fn ingest_provider_event(
         }
 
         ProviderEvent::SkillDispatched { skill, args, .. } => {
-            let description = format!(
-                "Skill dispatched: {} {}",
-                skill,
-                truncate_json(&args, 200)
-            );
+            let description = format!("Skill dispatched: {} {}", skill, truncate_json(&args, 200));
             IngestionResult {
                 events: vec![DomainEvent::ActivityLogged {
                     id: EntityId::new(),
@@ -242,18 +237,16 @@ pub fn ingest_provider_event(
             }
         }
 
-        ProviderEvent::ExploreUpdated { message, .. } => {
-            IngestionResult {
-                events: vec![DomainEvent::ActivityLogged {
-                    id: EntityId::new(),
-                    activity_type: "provider_explore_updated".to_string(),
-                    description: message,
-                    thread_id,
-                    created_at: now,
-                }],
-                consumed: true,
-            }
-        }
+        ProviderEvent::ExploreUpdated { message, .. } => IngestionResult {
+            events: vec![DomainEvent::ActivityLogged {
+                id: EntityId::new(),
+                activity_type: "provider_explore_updated".to_string(),
+                description: message,
+                thread_id,
+                created_at: now,
+            }],
+            consumed: true,
+        },
     }
 }
 

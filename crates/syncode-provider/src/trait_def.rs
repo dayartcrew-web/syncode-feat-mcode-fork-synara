@@ -229,17 +229,11 @@ pub enum ProviderEvent {
     /// Explore/Grep/Glob walk started. `query` is the search pattern or
     /// natural-language question. Followed by zero or more
     /// [`ProviderEvent::ExploreUpdated`] events.
-    ExploreStarted {
-        session_id: String,
-        query: String,
-    },
+    ExploreStarted { session_id: String, query: String },
     /// Progress / partial result during an explore walk (e.g. "found 12
     /// files"). All `ExploreUpdated` events fold into the preceding
     /// `ExploreStarted` row in the UI.
-    ExploreUpdated {
-        session_id: String,
-        message: String,
-    },
+    ExploreUpdated { session_id: String, message: String },
 }
 
 /// Token usage metadata from provider responses

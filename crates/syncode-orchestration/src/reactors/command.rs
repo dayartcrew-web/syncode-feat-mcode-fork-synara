@@ -3059,16 +3059,20 @@ pub(crate) mod tests {
                     text,
                     is_delta,
                 },
-                ProviderEvent::SkillDispatched { skill, args, .. } => ProviderEvent::SkillDispatched {
-                    session_id: sid.to_string(),
-                    skill,
-                    args,
-                },
-                ProviderEvent::SubagentStarted { agent, task, .. } => ProviderEvent::SubagentStarted {
-                    session_id: sid.to_string(),
-                    agent,
-                    task,
-                },
+                ProviderEvent::SkillDispatched { skill, args, .. } => {
+                    ProviderEvent::SkillDispatched {
+                        session_id: sid.to_string(),
+                        skill,
+                        args,
+                    }
+                }
+                ProviderEvent::SubagentStarted { agent, task, .. } => {
+                    ProviderEvent::SubagentStarted {
+                        session_id: sid.to_string(),
+                        agent,
+                        task,
+                    }
+                }
                 ProviderEvent::SubagentCompleted { agent, result, .. } => {
                     ProviderEvent::SubagentCompleted {
                         session_id: sid.to_string(),
