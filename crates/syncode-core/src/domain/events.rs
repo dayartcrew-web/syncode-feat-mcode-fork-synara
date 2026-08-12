@@ -416,6 +416,12 @@ pub enum DomainEvent {
         /// events (which predate the field) deserializable as `None`.
         #[serde(default)]
         thread_id: Option<EntityId>,
+        /// Turn this activity was emitted during. `#[serde(default)]` keeps old
+        /// persisted events deserializable as `None`. Provider stream activities
+        /// (reasoning / tool_call / tool_result / skill / subagent / explore)
+        /// set this so the frontend's per-turn work-log filter keeps them.
+        #[serde(default)]
+        turn_id: Option<EntityId>,
         created_at: Timestamp,
     },
 
@@ -693,6 +699,7 @@ mod tests {
                     activity_type: "session_started".into(),
                     description: "d".into(),
                     thread_id: None,
+                    turn_id: None,
                     created_at: Timestamp::now(),
                 },
                 "ActivityLogged",

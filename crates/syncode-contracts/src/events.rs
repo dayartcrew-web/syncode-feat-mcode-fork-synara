@@ -383,6 +383,12 @@ pub enum DomainEventDto {
         description: String,
         #[serde(default)]
         thread_id: Option<EntityId>,
+        /// Turn this activity was emitted during. Mirrors the domain event
+        /// field added so provider stream activities (reasoning / tool call /
+        /// tool result / skill / subagent / explore) survive the frontend's
+        /// per-turn work-log filter.
+        #[serde(default)]
+        turn_id: Option<EntityId>,
         created_at: Timestamp,
     },
     // NOTE: `syncode_core::DomainEvent::Unknown` has no DTO mirror. The
@@ -892,12 +898,14 @@ impl TryFrom<&syncode_core::DomainEvent> for DomainEventDto {
                 activity_type,
                 description,
                 thread_id,
+                turn_id,
                 created_at,
             } => Self::ActivityLogged {
                 id: to_id(*id),
                 activity_type: activity_type.clone(),
                 description: description.clone(),
                 thread_id: thread_id.map(to_id),
+                turn_id: turn_id.map(to_id),
                 created_at: to_ts(*created_at),
             },
 
@@ -1180,19 +1188,23 @@ mod tests {
             activity_type: "session_started".into(),
             description: "started".into(),
             thread_id: Some(EntityId("t1".into())),
+            turn_id: Some(EntityId("turn-1".into())),
             created_at: Timestamp("2026-07-02T00:00:00Z".into()),
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"eventType\":\"activityLogged\""), "{json}");
         assert!(json.contains("\"threadId\":\"t1\""), "{json}");
-        // `#[serde(default)]` lets missing `threadId` deserialize as None.
+        assert!(json.contains("\"turnId\":\"turn-1\""), "{json}");
+        // `#[serde(default)]` lets missing `threadId`/`turnId` deserialize as None.
         let json_no_thread = r#"{"eventType":"activityLogged","data":{"id":"a2","activityType":"x","description":"d","createdAt":"t"}}"#;
         let back: DomainEventDto = serde_json::from_str(json_no_thread).unwrap();
         match back {
             DomainEventDto::ActivityLogged {
-                thread_id: None, ..
+                thread_id: None,
+                turn_id: None,
+                ..
             } => {}
-            _ => panic!("wrong variant or thread_id not None"),
+            _ => panic!("wrong variant or optional fields not None"),
         }
     }
 
@@ -1308,6 +1320,7 @@ mod tests {
                     activity_type: "x".into(),
                     description: "d".into(),
                     thread_id: Some(i),
+                    turn_id: None,
                     created_at: core_now,
                 },
                 "activityLogged",

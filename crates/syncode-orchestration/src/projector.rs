@@ -644,6 +644,7 @@ impl Projector {
                 activity_type,
                 description,
                 thread_id,
+                turn_id,
                 created_at,
             } => {
                 let view = ActivityView {
@@ -652,6 +653,7 @@ impl Projector {
                     description: description.clone(),
                     project_id: None,
                     thread_id: thread_id.map(|t| t.as_str()),
+                    turn_id: turn_id.map(|t| t.as_str()),
                     metadata: serde_json::Value::Object(serde_json::Map::new()),
                     created_at: created_at.to_string(),
                 };
@@ -904,6 +906,7 @@ mod tests {
             activity_type: "session_started".to_string(),
             description: "User started session".to_string(),
             thread_id: None,
+            turn_id: None,
             created_at: Timestamp::now(),
         };
         let mut store = ReadModelStore::new();
@@ -922,6 +925,7 @@ mod tests {
             activity_type: "session_started".to_string(),
             description: "User started session".to_string(),
             thread_id: Some(thread_id),
+            turn_id: None,
             created_at: Timestamp::now(),
         };
         let mut store = ReadModelStore::new();
@@ -944,6 +948,7 @@ mod tests {
             activity_type: "seed".to_string(),
             description: "seed activity".to_string(),
             thread_id: None,
+            turn_id: None,
             created_at: Timestamp::now(),
         };
         Projector::project(&seed, &mut store);
