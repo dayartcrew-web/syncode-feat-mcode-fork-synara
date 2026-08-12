@@ -155,25 +155,383 @@ enum SdkEmission {
     Ignore,
 }
 
-/// Decode one `SDKMessage` JSON line into events or a terminal outcome.
-fn map_sdk_message(msg: &Value, session_id: &str) -> SdkEmission {
-    let ty = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    match ty {
-        // Anthropic SSE delta wrapped by the CLI — text deltas and tool-use starts.
-        "stream_event" => {
-            let event = msg.get("event").or_else(|| msg.get("payload"));
-            SdkEmission::Events(
-                event
-                    .map(|e| map_stream_event(e, session_id))
-                    .unwrap_or_default(),
-            )
+/// Semantic kind for an in-flight `tool_use`. Tracked by [`TurnMapper`] keyed
+/// on the Anthropic `tool_use_id` so that the matching `tool_result` block
+/// (which arrives later in a `user` message and carries only `tool_use_id`,
+/// not the tool name) can be routed to the right PR #239 variant:
+///
+/// - `Subagent` tools → emit `SubagentCompleted` instead of generic `ToolResult`
+/// - `Explore` tools → emit `ExploreUpdated` (count summary) before `ToolResult`
+/// - `Skill`/`Plain` tools → emit `ToolResult` as before
+#[derive(Clone, Debug, PartialEq)]
+enum ToolKind {
+    Plain { name: String },
+    Explore { query: String },
+    Subagent { agent: String },
+    Skill { skill: String },
+}
+
+/// Classify a `tool_use` block by name + input into a [`ToolKind`]. Pure
+/// helper — does not consult any state. Used both to seed the in-flight map
+/// and to emit the initial `ProviderEvent` variant (ExploreStarted /
+/// SubagentStarted / SkillDispatched / ToolCall).
+fn classify_tool_use_kind(name: &str, input: &Value) -> ToolKind {
+    if EXPLORE_TOOL_NAMES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(name))
+    {
+        let query = input
+            .get("pattern")
+            .or_else(|| input.get("query"))
+            .or_else(|| input.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(name)
+            .to_string();
+        ToolKind::Explore { query }
+    } else if SUBAGENT_TOOL_NAMES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(name))
+    {
+        let agent = input
+            .get("subagent_type")
+            .or_else(|| input.get("agent"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("general-purpose")
+            .to_string();
+        ToolKind::Subagent { agent }
+    } else if SKILL_TOOL_NAMES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(name))
+    {
+        let skill = input
+            .get("skill")
+            .or_else(|| input.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(name)
+            .to_string();
+        ToolKind::Skill { skill }
+    } else {
+        ToolKind::Plain {
+            name: name.to_string(),
         }
-        // Assembled message — text already streamed via `stream_event`, so only
-        // its tool blocks are surfaced here (best-effort tool fidelity).
-        "assistant" | "user" => SdkEmission::Events(map_message_blocks(msg, session_id)),
-        // Terminal.
-        "result" => SdkEmission::Terminal(decode_result(msg)),
-        _ => SdkEmission::Ignore,
+    }
+}
+
+/// Stateful per-turn mapper that tracks `tool_use_id → ToolKind` so tool_result
+/// blocks can be routed to the right PR #239 variant. One instance lives for
+/// the lifetime of a single `run_turn` call; the in-flight map is scoped to
+/// the turn's tool calls and cleared implicitly when the turn ends.
+#[derive(Default)]
+struct TurnMapper {
+    in_flight: HashMap<String, ToolKind>,
+}
+
+impl TurnMapper {
+    /// Map one `SDKMessage` line. Updates `in_flight` as a side effect when
+    /// tool_use blocks arrive; consults it when tool_result blocks arrive.
+    fn map_sdk_message(&mut self, msg: &Value, session_id: &str) -> SdkEmission {
+        let ty = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "stream_event" => {
+                let event = msg.get("event").or_else(|| msg.get("payload"));
+                SdkEmission::Events(
+                    event
+                        .map(|e| self.map_stream_event(e, session_id))
+                        .unwrap_or_default(),
+                )
+            }
+            "assistant" | "user" => SdkEmission::Events(self.map_message_blocks(msg, session_id)),
+            "result" => SdkEmission::Terminal(decode_result(msg)),
+            _ => SdkEmission::Ignore,
+        }
+    }
+
+    /// Map an Anthropic stream event. Records tool_use starts into `in_flight`
+    /// so the eventual tool_result can be routed correctly.
+    fn map_stream_event(&mut self, event: &Value, session_id: &str) -> Vec<ProviderEvent> {
+        let et = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match et {
+            "content_block_delta" => map_delta(event, session_id),
+            "content_block_start" => self.map_block_start(event, session_id),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Map tool/thinking blocks of an assembled `assistant`/`user` message.
+    /// Records tool_use blocks into `in_flight` (authoritative — full input
+    /// available here, unlike the streaming path). Routes tool_result blocks
+    /// via `in_flight` lookup.
+    fn map_message_blocks(&mut self, msg: &Value, session_id: &str) -> Vec<ProviderEvent> {
+        let mut out = Vec::new();
+        let Some(blocks) = msg
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            return out;
+        };
+        for block in blocks {
+            let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match btype {
+                "thinking" => {
+                    if let Some(text) = block.get("thinking").and_then(|v| v.as_str())
+                        && !text.is_empty()
+                    {
+                        out.push(ProviderEvent::Reasoning {
+                            session_id: session_id.to_string(),
+                            text: text.to_string(),
+                            is_delta: false,
+                        });
+                    }
+                }
+                "tool_use" => {
+                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                    let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    // Record authoritative id → kind (full input available here).
+                    if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+                        self.in_flight
+                            .insert(id.to_string(), classify_tool_use_kind(name, &input));
+                    }
+                    out.push(classify_tool_use(name, &input, session_id));
+                }
+                "tool_result" => out.extend(self.route_tool_result(block, session_id)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// `content_block_start` for a `tool_use` block: classify the tool by name
+    /// (input is empty at this point — it streams in as `input_json_delta`),
+    /// record `id → kind` so the eventual tool_result can be routed, and emit
+    /// the initial ProviderEvent (ExploreStarted / SubagentStarted / etc.).
+    fn map_block_start(&mut self, event: &Value, session_id: &str) -> Vec<ProviderEvent> {
+        let block = match event.get("content_block") {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let name = match block.get("name").and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+        let input = block.get("input").cloned().unwrap_or(Value::Null);
+        if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+            // Streaming record — the assembled `assistant` message will overwrite
+            // this with the full-input classification when it arrives.
+            self.in_flight
+                .entry(id.to_string())
+                .or_insert_with(|| classify_tool_use_kind(name, &input));
+        }
+        vec![classify_tool_use(name, &input, session_id)]
+    }
+
+    /// Route a `tool_result` block to the right PR #239 variant by looking up
+    /// its `tool_use_id` in `in_flight`. Emits `SubagentCompleted` for subagent
+    /// tools, `ExploreUpdated` (count summary) + `ToolResult` for explore tools,
+    /// and a plain `ToolResult` otherwise.
+    fn route_tool_result(&self, block: &Value, session_id: &str) -> Vec<ProviderEvent> {
+        let sid = session_id.to_string();
+        let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str());
+        let kind = tool_use_id.and_then(|id| self.in_flight.get(id));
+        let result_text = extract_tool_result_text(block);
+        match kind {
+            Some(ToolKind::Subagent { agent }) => {
+                vec![ProviderEvent::SubagentCompleted {
+                    session_id: sid,
+                    agent: agent.clone(),
+                    result: result_text,
+                }]
+            }
+            Some(ToolKind::Explore { .. }) => {
+                let count = count_result_lines(&result_text);
+                let message = format!("Found {count} result{}", if count == 1 { "" } else { "s" });
+                vec![
+                    ProviderEvent::ExploreUpdated {
+                        session_id: sid.clone(),
+                        message,
+                    },
+                    ProviderEvent::ToolResult {
+                        session_id: sid,
+                        tool_name: "explore".to_string(),
+                        result: block
+                            .get("content")
+                            .cloned()
+                            .unwrap_or_else(|| block.clone()),
+                    },
+                ]
+            }
+            Some(ToolKind::Skill { skill }) => {
+                // Skill tool_result: synthesize a generic ToolResult. The
+                // SkillDispatched event already fired on the tool_use side.
+                vec![ProviderEvent::ToolResult {
+                    session_id: sid,
+                    tool_name: format!("Skill:{skill}"),
+                    result: block
+                        .get("content")
+                        .cloned()
+                        .unwrap_or_else(|| block.clone()),
+                }]
+            }
+            Some(ToolKind::Plain { .. }) | None => {
+                let tool_name = kind
+                    .and_then(|k| match k {
+                        ToolKind::Plain { name } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        block
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| tool_use_id.unwrap_or("tool").to_string());
+                vec![ProviderEvent::ToolResult {
+                    session_id: sid,
+                    tool_name,
+                    result: block
+                        .get("content")
+                        .cloned()
+                        .unwrap_or_else(|| block.clone()),
+                }]
+            }
+        }
+    }
+}
+
+/// Extract a best-effort flat text representation of a tool_result `content`
+/// field. Handles strings, arrays of `{type:"text", text:"..."}` blocks, and
+/// falls back to a JSON rendering for other shapes. Used to populate
+/// `SubagentCompleted.result` and to count explore matches.
+fn extract_tool_result_text(block: &Value) -> String {
+    let content = match block.get("content") {
+        Some(c) => c,
+        None => return block.to_string(),
+    };
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => {
+            let mut buf = String::new();
+            for item in items {
+                if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                    buf.push_str(t);
+                    buf.push('\n');
+                } else if let Some(c) = item.get("content").and_then(|v| v.as_str()) {
+                    buf.push_str(c);
+                    buf.push('\n');
+                }
+            }
+            buf.trim_end().to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Count non-empty lines in a tool_result text. Used to summarize explore
+/// tool output volume ("Found N results") without dumping the full result.
+fn count_result_lines(text: &str) -> usize {
+    text.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// Detect a leading slash command in a turn prompt (`/skill-name [args]`) and
+/// synthesize a `SkillDispatched` event for it. Claude has no built-in Skill
+/// tool by default, so this is the only production path that surfaces the
+/// `provider_skill_dispatched` activity type. Returns `None` for prompts that
+/// don't start with `/` followed by an alphabetic character.
+fn detect_slash_command_skill(prompt: &str, session_id: &str) -> Option<ProviderEvent> {
+    let trimmed = prompt.trim_start();
+    let rest = trimmed.strip_prefix('/')?;
+    // First char must be alphabetic — avoids treating shell-style "//" or
+    // filesystem paths as skill invocations.
+    let head = rest.chars().next()?;
+    if !head.is_ascii_alphabetic() {
+        return None;
+    }
+    // Skill name = run of [a-zA-Z0-9-_]; everything after the next whitespace
+    // is the argument payload.
+    let mut name_end = 0;
+    for (i, c) in rest.char_indices() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            name_end = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if name_end == 0 {
+        return None;
+    }
+    // Reject paths like `/path/to/file`: a skill invocation never has `/`
+    // immediately after the name. Anything after the name is either end-of
+    // string or whitespace-separated args.
+    if rest[name_end..].starts_with('/') {
+        return None;
+    }
+    let skill = rest[..name_end].to_string();
+    let args_str = rest[name_end..].trim();
+    let args = if args_str.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(args_str.to_string())
+    };
+    Some(ProviderEvent::SkillDispatched {
+        session_id: session_id.to_string(),
+        skill,
+        args,
+    })
+}
+
+// --- stateless wrappers (kept for backwards-compat with existing tests) ---
+
+/// Decode one `SDKMessage` JSON line into events or a terminal outcome.
+/// Stateless wrapper around [`TurnMapper::map_sdk_message`] — constructs a
+/// throwaway mapper per call, so tool_use_id tracking does NOT persist across
+/// calls. Use `TurnMapper` directly (via `run_turn`) for stateful behavior.
+#[cfg(test)]
+fn map_sdk_message(msg: &Value, session_id: &str) -> SdkEmission {
+    let mut mapper = TurnMapper::default();
+    mapper.map_sdk_message(msg, session_id)
+}
+
+/// Stateless wrapper around [`TurnMapper::map_stream_event`].
+#[cfg(test)]
+fn map_stream_event(event: &Value, session_id: &str) -> Vec<ProviderEvent> {
+    let mut mapper = TurnMapper::default();
+    mapper.map_stream_event(event, session_id)
+}
+
+/// Stateless wrapper around [`TurnMapper::map_message_blocks`].
+#[cfg(test)]
+fn map_message_blocks(msg: &Value, session_id: &str) -> Vec<ProviderEvent> {
+    let mut mapper = TurnMapper::default();
+    mapper.map_message_blocks(msg, session_id)
+}
+
+/// Map a content_block_delta event. Pure — does not consult any state.
+fn map_delta(event: &Value, session_id: &str) -> Vec<ProviderEvent> {
+    // thinking deltas → Reasoning; text deltas → Token.
+    if let Some(thinking) = event
+        .get("delta")
+        .and_then(|d| d.get("thinking"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return vec![ProviderEvent::Reasoning {
+            session_id: session_id.to_string(),
+            text: thinking.to_string(),
+            is_delta: true,
+        }];
+    }
+    if let Some(text) = event
+        .get("delta")
+        .and_then(|d| d.get("text"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        vec![ProviderEvent::Token {
+            session_id: session_id.to_string(),
+            content: text.to_string(),
+        }]
+    } else {
+        Vec::new()
     }
 }
 
@@ -203,7 +561,10 @@ const SKILL_TOOL_NAMES: &[&str] = &["Skill", "skill", "InvokeSkill"];
 fn classify_tool_use(name: &str, input: &Value, session_id: &str) -> ProviderEvent {
     let sid = session_id.to_string();
     let tool_input = input.clone();
-    if EXPLORE_TOOL_NAMES.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+    if EXPLORE_TOOL_NAMES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(name))
+    {
         // Glob/Grep input carries `pattern`; LS carries `path`; Search carries `query`.
         let query = input
             .get("pattern")
@@ -212,8 +573,14 @@ fn classify_tool_use(name: &str, input: &Value, session_id: &str) -> ProviderEve
             .and_then(|v| v.as_str())
             .unwrap_or(name)
             .to_string();
-        ProviderEvent::ExploreStarted { session_id: sid, query }
-    } else if SUBAGENT_TOOL_NAMES.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+        ProviderEvent::ExploreStarted {
+            session_id: sid,
+            query,
+        }
+    } else if SUBAGENT_TOOL_NAMES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(name))
+    {
         // Task tool input: { description, prompt, subagent_type }
         let agent = input
             .get("subagent_type")
@@ -232,7 +599,10 @@ fn classify_tool_use(name: &str, input: &Value, session_id: &str) -> ProviderEve
             agent,
             task,
         }
-    } else if SKILL_TOOL_NAMES.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+    } else if SKILL_TOOL_NAMES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(name))
+    {
         // Skill tool input: { skill: "name", ...args }
         let skill = input
             .get("skill")
@@ -252,127 +622,6 @@ fn classify_tool_use(name: &str, input: &Value, session_id: &str) -> ProviderEve
             tool_input,
         }
     }
-}
-
-/// Map an Anthropic stream event to token / tool-call events.
-fn map_stream_event(event: &Value, session_id: &str) -> Vec<ProviderEvent> {
-    let et = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    match et {
-        "content_block_delta" => {
-            // Anthropic's streaming format distinguishes text deltas
-            // (`delta.text`) from thinking deltas (`delta.thinking`). The
-            // latter is the model's chain-of-thought, surfaced when the model
-            // is configured with thinking enabled — we emit it as a Reasoning
-            // event so the frontend can show a collapsible "Thinking…" row.
-            if let Some(thinking) = event
-                .get("delta")
-                .and_then(|d| d.get("thinking"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                return vec![ProviderEvent::Reasoning {
-                    session_id: session_id.to_string(),
-                    text: thinking.to_string(),
-                    is_delta: true,
-                }];
-            }
-            if let Some(text) = event
-                .get("delta")
-                .and_then(|d| d.get("text"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                vec![ProviderEvent::Token {
-                    session_id: session_id.to_string(),
-                    content: text.to_string(),
-                }]
-            } else {
-                Vec::new()
-            }
-        }
-        "content_block_start" => {
-            // tool_use block start → classify by name. Explorer/delegation/skill
-            // tools surface as semantically richer variants so the timeline can
-            // render them as distinct rows; everything else falls back to a
-            // plain ToolCall. Input streams in later as `input_json_delta` and
-            // is captured on the assembled message, so the block_start event
-            // often has empty input — we still classify on the name alone.
-            if let Some(name) = event
-                .get("content_block")
-                .and_then(|b| b.get("name"))
-                .and_then(|v| v.as_str())
-            {
-                let input = event
-                    .get("content_block")
-                    .and_then(|b| b.get("input"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                vec![classify_tool_use(name, &input, session_id)]
-            } else {
-                Vec::new()
-            }
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Map the tool blocks of an assembled `assistant`/`user` message to events.
-fn map_message_blocks(msg: &Value, session_id: &str) -> Vec<ProviderEvent> {
-    let mut out = Vec::new();
-    let Some(blocks) = msg
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_array())
-    else {
-        return out;
-    };
-    for block in blocks {
-        let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match btype {
-            "thinking" => {
-                // Assembled thinking block (final consolidated snapshot). The
-                // streamed thinking_delta chunks already surfaced progressive
-                // reasoning; this snapshot is the full text and is emitted with
-                // `is_delta: false` so downstream consumers can distinguish.
-                if let Some(text) = block.get("thinking").and_then(|v| v.as_str())
-                    && !text.is_empty()
-                {
-                    out.push(ProviderEvent::Reasoning {
-                        session_id: session_id.to_string(),
-                        text: text.to_string(),
-                        is_delta: false,
-                    });
-                }
-            }
-            "tool_use" => {
-                // Same classification as the streaming path — explorer,
-                // delegation, and skill tools get richer variants. The
-                // assembled block carries the full input, so the variant
-                // fields (skill args, subagent task, explore query) are
-                // populated with real data here.
-                let name = block
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tool");
-                let input = block.get("input").cloned().unwrap_or(Value::Null);
-                out.push(classify_tool_use(name, &input, session_id));
-            }
-            "tool_result" => out.push(ProviderEvent::ToolResult {
-                session_id: session_id.to_string(),
-                tool_name: block
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tool")
-                    .to_string(),
-                result: block
-                    .get("content")
-                    .cloned()
-                    .unwrap_or_else(|| block.clone()),
-            }),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// Decode the terminal `result` message (usage is filled by [`run_turn`] from
@@ -450,6 +699,10 @@ where
     let mut reader = reader;
     let mut line = String::new();
     let mut last_usage: Option<UsageInfo> = None;
+    // Stateful mapper: tracks tool_use_id → ToolKind so tool_result blocks can
+    // be routed to the right PR #239 variant (SubagentCompleted / ExploreUpdated)
+    // rather than always falling through to a generic ToolResult.
+    let mut mapper = TurnMapper::default();
     loop {
         line.clear();
         let n = reader.read_line(&mut line).await?;
@@ -477,7 +730,7 @@ where
         if let Some(usage) = extract_usage(&msg) {
             last_usage = Some(usage);
         }
-        match map_sdk_message(&msg, session_id) {
+        match mapper.map_sdk_message(&msg, session_id) {
             SdkEmission::Events(events) => {
                 for ev in events {
                     let _ = event_tx.send(ev);
@@ -864,6 +1117,18 @@ impl ProviderAdapter for ClaudeAdapter {
         };
         let prompt = Self::turn_prompt(&request.params);
         let model = self.model_for(&request.params);
+
+        // PR #239: detect slash-command prompts (`/skill-name [args]`) and emit
+        // a SkillDispatched event before spawning the turn. Claude has no
+        // built-in Skill tool by default, so without this synthesized event the
+        // `provider_skill_dispatched` activity type would never fire in
+        // production. The detector is conservative: it requires an alphabetic
+        // first character after `/` to avoid false positives on shell-style
+        // paths.
+        if let Some(skill_event) = detect_slash_command_skill(&prompt, &session_id) {
+            let _ = self.event_tx.send(skill_event);
+        }
+
         let api_key = self
             .claude_config
             .api_key
@@ -1730,6 +1995,252 @@ mod tests {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             "the hardcoded working_dir differs from the actual process cwd — confirming the break"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR #240 follow-up: stateful tool_result routing (SubagentCompleted,
+    // ExploreUpdated) and slash-command SkillDispatched synthesis.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn turn_mapper_tracks_tool_use_id_and_routes_subagent_result() {
+        // Drive a TurnMapper through the same sequence Claude emits for a Task
+        // tool turn: assistant message carries the tool_use block, user message
+        // carries the matching tool_result. The result must surface as
+        // SubagentCompleted (not a generic ToolResult) because the originating
+        // tool was Task.
+        let mut mapper = TurnMapper::default();
+        let assistant = json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "tool_use", "id": "tu_1", "name": "Task",
+                  "input": { "subagent_type": "code-reviewer", "description": "review auth" } }
+            ] }
+        });
+        let user = json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "tu_1",
+                  "content": [{ "type": "text", "text": "approved" }] }
+            ] }
+        });
+
+        let ev1 = mapper.map_sdk_message(&assistant, "s1");
+        let ev2 = mapper.map_sdk_message(&user, "s1");
+
+        use SdkEmission::*;
+        let events1 = match ev1 {
+            Events(v) => v,
+            _ => Vec::new(),
+        };
+        let events2 = match ev2 {
+            Events(v) => v,
+            _ => Vec::new(),
+        };
+
+        // First message emits the SubagentStarted variant for the tool_use.
+        assert!(
+            events1.iter().any(|e| matches!(e,
+                ProviderEvent::SubagentStarted { agent, task, .. }
+                if agent == "code-reviewer" && task == "review auth")),
+            "expected SubagentStarted from tool_use, got {events1:?}"
+        );
+        // Second message emits SubagentCompleted (not ToolResult).
+        assert_eq!(events2.len(), 1, "expected exactly one event: {events2:?}");
+        assert!(
+            matches!(&events2[0], ProviderEvent::SubagentCompleted { agent, result, .. }
+                if agent == "code-reviewer" && result == "approved"),
+            "expected SubagentCompleted, got {:?}",
+            events2[0]
+        );
+    }
+
+    #[test]
+    fn turn_mapper_emits_explore_updated_with_count_before_tool_result() {
+        // Glob tool_use → tool_result. The result must emit ExploreUpdated with
+        // a line count summary THEN a generic ToolResult.
+        let mut mapper = TurnMapper::default();
+        let assistant = json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "tool_use", "id": "tu_2", "name": "Glob",
+                  "input": { "pattern": "**/*.rs" } }
+            ] }
+        });
+        let user = json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "tu_2",
+                  "content": "a.rs\nb.rs\nc.rs" }
+            ] }
+        });
+
+        let _ = mapper.map_sdk_message(&assistant, "s1");
+        let ev = mapper.map_sdk_message(&user, "s1");
+        let events = match ev {
+            SdkEmission::Events(v) => v,
+            _ => Vec::new(),
+        };
+
+        assert_eq!(
+            events.len(),
+            2,
+            "expected ExploreUpdated + ToolResult: {events:?}"
+        );
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreUpdated { message, .. }
+                if message.contains("Found 3")),
+            "expected ExploreUpdated with count, got {:?}",
+            events[0]
+        );
+        assert!(
+            matches!(&events[1], ProviderEvent::ToolResult { tool_name, .. }
+                if tool_name == "explore"),
+            "expected ToolResult with tool_name=explore, got {:?}",
+            events[1]
+        );
+    }
+
+    #[test]
+    fn turn_mapper_routes_unknown_tool_use_id_to_plain_tool_result() {
+        // A tool_result whose tool_use_id wasn't recorded (e.g. arrived before
+        // the assistant message in a replay) must fall back to a plain
+        // ToolResult — no panic, no SubagentCompleted.
+        let mut mapper = TurnMapper::default();
+        let user = json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "tu_unknown",
+                  "content": "ok" }
+            ] }
+        });
+        let ev = mapper.map_sdk_message(&user, "s1");
+        let events = match ev {
+            SdkEmission::Events(v) => v,
+            _ => Vec::new(),
+        };
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ProviderEvent::ToolResult { .. }));
+    }
+
+    #[test]
+    fn detect_slash_command_skill_recognizes_alpha_names() {
+        // /kmr-build release → SkillDispatched { skill: "kmr-build", args: "release" }
+        let ev = detect_slash_command_skill("/kmr-build release", "s1").expect("should detect");
+        assert!(
+            matches!(ev, ProviderEvent::SkillDispatched { ref skill, ref args, .. }
+                if skill == "kmr-build" && args == "release"),
+            "{ev:?}"
+        );
+
+        // No args.
+        let ev = detect_slash_command_skill("/lint", "s1").expect("should detect");
+        assert!(
+            matches!(ev, ProviderEvent::SkillDispatched { ref skill, ref args, .. }
+                if skill == "lint" && args == &serde_json::Value::Null),
+            "{ev:?}"
+        );
+
+        // Underscores and digits allowed in name.
+        let ev = detect_slash_command_skill("/skill_42", "s1").expect("should detect");
+        assert!(
+            matches!(ev, ProviderEvent::SkillDispatched { ref skill, .. } if skill == "skill_42"),
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn detect_slash_command_skill_rejects_non_alpha_and_paths() {
+        // Shell-style "//" and file paths must NOT be treated as skill invocations.
+        assert!(detect_slash_command_skill("//comment", "s1").is_none());
+        assert!(detect_slash_command_skill("/!bang", "s1").is_none());
+        assert!(detect_slash_command_skill("/path/to/file", "s1").is_none());
+        // Leading whitespace is tolerated; missing slash is not.
+        assert!(detect_slash_command_skill("plain prompt", "s1").is_none());
+        assert!(detect_slash_command_skill("   /kmr-build", "s1").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_turn_emits_subagent_completed_for_task_tool_chain() {
+        // End-to-end: feed run_turn the same NDJSON sequence a real Claude CLI
+        // emits for a Task-tool turn. Assert that both SubagentStarted (from
+        // the tool_use block) and SubagentCompleted (from the tool_result)
+        // reach the event bus.
+        let (event_tx, _) = broadcast::channel::<ProviderEvent>(64);
+        let mut rx = event_tx.subscribe();
+        let lines = concat!(
+            // Assistant emits a Task tool_use.
+            r#"{"type":"assistant","message":{"role":"assistant","content":["#,
+            r#"{"type":"tool_use","id":"tu_x","name":"Task","#,
+            r#""input":{"subagent_type":"general-purpose","description":"read README"}}]}}"#,
+            "\n",
+            // User emits the matching tool_result.
+            r#"{"type":"user","message":{"role":"user","content":["#,
+            r#"{"type":"tool_result","tool_use_id":"tu_x","#,
+            r#""content":[{"type":"text","text":"heading is SynCode"}]}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            "\n",
+        );
+        let outcome = run_turn(BufReader::new(lines.as_bytes()), "sx", &event_tx)
+            .await
+            .expect("run_turn");
+        assert_eq!(outcome.status, TurnStatus::Completed);
+
+        // Drain all events for our session id.
+        let mut events = Vec::new();
+        while let Ok(Ok(rx2)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            if let ProviderEvent::SubagentStarted { .. } | ProviderEvent::SubagentCompleted { .. } =
+                &rx2
+            {
+                events.push(rx2);
+            }
+        }
+        let has_started = events.iter().any(
+            |e| matches!(e, ProviderEvent::SubagentStarted { task, .. } if task == "read README"),
+        );
+        let has_completed = events.iter().any(|e| {
+            matches!(e,
+            ProviderEvent::SubagentCompleted { result, .. } if result == "heading is SynCode")
+        });
+        assert!(has_started, "SubagentStarted missing: {events:?}");
+        assert!(has_completed, "SubagentCompleted missing: {events:?}");
+    }
+
+    #[tokio::test]
+    async fn run_turn_emits_explore_updated_for_glob_result_chain() {
+        let (event_tx, _) = broadcast::channel::<ProviderEvent>(64);
+        let mut rx = event_tx.subscribe();
+        let lines = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","content":["#,
+            r#"{"type":"tool_use","id":"tu_g","name":"Glob","input":{"pattern":"**/*.rs"}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":["#,
+            r#"{"type":"tool_result","tool_use_id":"tu_g","#,
+            r#""content":"a.rs\nb.rs"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#,
+            "\n",
+        );
+        let outcome = run_turn(BufReader::new(lines.as_bytes()), "sg", &event_tx)
+            .await
+            .expect("run_turn");
+        assert_eq!(outcome.status, TurnStatus::Completed);
+
+        let mut explore_updates = Vec::new();
+        while let Ok(Ok(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            if let ProviderEvent::ExploreUpdated { message, .. } = ev {
+                explore_updates.push(message);
+            }
+        }
+        assert!(
+            explore_updates.iter().any(|m| m.contains("Found 2")),
+            "expected ExploreUpdated with Found 2, got {explore_updates:?}"
         );
     }
 }
