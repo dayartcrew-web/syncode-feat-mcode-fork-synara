@@ -177,6 +177,83 @@ fn map_sdk_message(msg: &Value, session_id: &str) -> SdkEmission {
     }
 }
 
+/// Tool names that represent codebase exploration. Mapped to `ExploreStarted`
+/// so the timeline surfaces a single "🔍 Exploring: {query}" row instead of a
+/// raw `ToolCall` row that the user has to mentally decode.
+const EXPLORE_TOOL_NAMES: &[&str] = &["Glob", "Grep", "LS", "find", "Search", "rg"];
+
+/// Tool names that delegate to a sub-agent. Mapped to `SubagentStarted`.
+/// `Task` is the legacy Claude Code name; `Agent` is the current SDK name
+/// (the harness shows real frames using `Agent`). `dispatch_agent` covers
+/// Codex-style adapters that may share this code path in future.
+const SUBAGENT_TOOL_NAMES: &[&str] = &["Task", "Agent", "dispatch_agent"];
+
+/// Tool names that invoke a skill. Mapped to `SkillDispatched`.
+const SKILL_TOOL_NAMES: &[&str] = &["Skill", "skill", "InvokeSkill"];
+
+/// Classify a `tool_use` block into the appropriate `ProviderEvent` variant.
+///
+/// Most tools emit a plain `ToolCall` (Read, Write, Edit, Bash, …). A small
+/// set of "navigation"/"delegation"/"slash-command" tools get a richer
+/// variant so the frontend can render them as semantically distinct rows
+/// (explore panel, subagent panel, skill chip) instead of generic tool rows.
+///
+/// Returns the single event to emit. Caller should push it in place of the
+/// default `ToolCall`.
+fn classify_tool_use(name: &str, input: &Value, session_id: &str) -> ProviderEvent {
+    let sid = session_id.to_string();
+    let tool_input = input.clone();
+    if EXPLORE_TOOL_NAMES.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+        // Glob/Grep input carries `pattern`; LS carries `path`; Search carries `query`.
+        let query = input
+            .get("pattern")
+            .or_else(|| input.get("query"))
+            .or_else(|| input.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(name)
+            .to_string();
+        ProviderEvent::ExploreStarted { session_id: sid, query }
+    } else if SUBAGENT_TOOL_NAMES.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+        // Task tool input: { description, prompt, subagent_type }
+        let agent = input
+            .get("subagent_type")
+            .or_else(|| input.get("agent"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("general-purpose")
+            .to_string();
+        let task = input
+            .get("description")
+            .or_else(|| input.get("prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        ProviderEvent::SubagentStarted {
+            session_id: sid,
+            agent,
+            task,
+        }
+    } else if SKILL_TOOL_NAMES.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+        // Skill tool input: { skill: "name", ...args }
+        let skill = input
+            .get("skill")
+            .or_else(|| input.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(name)
+            .to_string();
+        ProviderEvent::SkillDispatched {
+            session_id: sid,
+            skill,
+            args: tool_input,
+        }
+    } else {
+        ProviderEvent::ToolCall {
+            session_id: sid,
+            tool_name: name.to_string(),
+            tool_input,
+        }
+    }
+}
+
 /// Map an Anthropic stream event to token / tool-call events.
 fn map_stream_event(event: &Value, session_id: &str) -> Vec<ProviderEvent> {
     let et = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -214,18 +291,23 @@ fn map_stream_event(event: &Value, session_id: &str) -> Vec<ProviderEvent> {
             }
         }
         "content_block_start" => {
-            // tool_use block start → emit a ToolCall with its name (input streams
-            // later as input_json_delta; surfaced on the assembled message).
+            // tool_use block start → classify by name. Explorer/delegation/skill
+            // tools surface as semantically richer variants so the timeline can
+            // render them as distinct rows; everything else falls back to a
+            // plain ToolCall. Input streams in later as `input_json_delta` and
+            // is captured on the assembled message, so the block_start event
+            // often has empty input — we still classify on the name alone.
             if let Some(name) = event
                 .get("content_block")
                 .and_then(|b| b.get("name"))
                 .and_then(|v| v.as_str())
             {
-                vec![ProviderEvent::ToolCall {
-                    session_id: session_id.to_string(),
-                    tool_name: name.to_string(),
-                    tool_input: event.get("content_block").cloned().unwrap_or(Value::Null),
-                }]
+                let input = event
+                    .get("content_block")
+                    .and_then(|b| b.get("input"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                vec![classify_tool_use(name, &input, session_id)]
             } else {
                 Vec::new()
             }
@@ -262,15 +344,19 @@ fn map_message_blocks(msg: &Value, session_id: &str) -> Vec<ProviderEvent> {
                     });
                 }
             }
-            "tool_use" => out.push(ProviderEvent::ToolCall {
-                session_id: session_id.to_string(),
-                tool_name: block
+            "tool_use" => {
+                // Same classification as the streaming path — explorer,
+                // delegation, and skill tools get richer variants. The
+                // assembled block carries the full input, so the variant
+                // fields (skill args, subagent task, explore query) are
+                // populated with real data here.
+                let name = block
                     .get("name")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("tool")
-                    .to_string(),
-                tool_input: block.get("input").cloned().unwrap_or(Value::Null),
-            }),
+                    .unwrap_or("tool");
+                let input = block.get("input").cloned().unwrap_or(Value::Null);
+                out.push(classify_tool_use(name, &input, session_id));
+            }
             "tool_result" => out.push(ProviderEvent::ToolResult {
                 session_id: session_id.to_string(),
                 tool_name: block
@@ -1032,6 +1118,80 @@ mod tests {
             matches!(&events[0], ProviderEvent::ToolCall { tool_name, .. } if tool_name == "Read"),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn classify_tool_use_routes_exploration_tools_to_explore_started() {
+        // Glob with a pattern → ExploreStarted carrying the pattern as query.
+        let ev = classify_tool_use("Glob", &json!({ "pattern": "**/*.rs" }), "s1");
+        assert!(
+            matches!(&ev, ProviderEvent::ExploreStarted { query, .. } if query == "**/*.rs"),
+            "{ev:?}"
+        );
+        // Grep → ExploreStarted.
+        let ev = classify_tool_use("Grep", &json!({ "pattern": "TODO" }), "s1");
+        assert!(matches!(ev, ProviderEvent::ExploreStarted { .. }));
+        // Case-insensitive match.
+        let ev = classify_tool_use("grep", &json!({}), "s1");
+        assert!(matches!(ev, ProviderEvent::ExploreStarted { .. }));
+    }
+
+    #[test]
+    fn classify_tool_use_routes_task_to_subagent_started() {
+        let ev = classify_tool_use(
+            "Task",
+            &json!({ "description": "review auth", "subagent_type": "code-reviewer" }),
+            "s1",
+        );
+        assert!(
+            matches!(&ev, ProviderEvent::SubagentStarted { agent, task, .. }
+                if agent == "code-reviewer" && task == "review auth"),
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn classify_tool_use_routes_agent_tool_to_subagent_started() {
+        // The current Claude Code SDK spawns subagents via the `Agent` tool
+        // (not the legacy `Task` name). Both must classify to SubagentStarted.
+        let ev = classify_tool_use(
+            "Agent",
+            &json!({
+                "description": "Read README first heading",
+                "prompt": "read README.md"
+            }),
+            "s1",
+        );
+        assert!(
+            matches!(&ev, ProviderEvent::SubagentStarted { task, .. }
+                if task == "Read README first heading"),
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn classify_tool_use_routes_skill_to_skill_dispatched() {
+        let ev = classify_tool_use(
+            "Skill",
+            &json!({ "skill": "kmr-build", "target": "release" }),
+            "s1",
+        );
+        assert!(
+            matches!(&ev, ProviderEvent::SkillDispatched { skill, args, .. }
+                if skill == "kmr-build" && args["target"] == "release"),
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn classify_tool_use_passes_through_plain_tools() {
+        let ev = classify_tool_use("Read", &json!({ "path": "/x" }), "s1");
+        assert!(
+            matches!(&ev, ProviderEvent::ToolCall { tool_name, .. } if tool_name == "Read"),
+            "{ev:?}"
+        );
+        let ev = classify_tool_use("Bash", &json!({ "cmd": "ls" }), "s1");
+        assert!(matches!(ev, ProviderEvent::ToolCall { .. }));
     }
 
     #[test]

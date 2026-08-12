@@ -1206,6 +1206,7 @@ impl Decider {
             activity_type,
             description,
             thread_id: Some(id),
+            turn_id: None,
             created_at: Timestamp::now(),
         }])
     }

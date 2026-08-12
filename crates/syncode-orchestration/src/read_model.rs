@@ -109,6 +109,12 @@ pub struct ActivityView {
     pub description: String,
     pub project_id: Option<String>,
     pub thread_id: Option<String>,
+    /// Turn this activity was emitted during. Mirrors the domain event field;
+    /// provider stream activities (reasoning / tool call / tool result / skill
+    /// / subagent / explore) populate it from ingestion so the frontend's
+    /// per-turn work-log filter keeps them visible.
+    #[serde(default)]
+    pub turn_id: Option<String>,
     pub metadata: serde_json::Value,
     pub created_at: String,
 }

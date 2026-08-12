@@ -2326,6 +2326,128 @@ mod tests {
         );
     }
 
+    /// PR #239 — surface real-time reasoning/skill/subagent/explore activity in
+    /// the chat timeline. This test drives a synthetic provider stream that
+    /// emits every new `ProviderEvent` variant and asserts each one reaches the
+    /// WS-push publisher as an `ActivityLogged` domain event carrying the
+    /// namespaced `activity_type` the frontend adapter classifies on
+    /// (`classifyActivityTone` in `adaptPushEvent.ts`).
+    ///
+    /// If this test passes, the backend pipeline is correctly wired; any "still
+    /// Working only" symptom in the running app must therefore be caused by
+    /// (a) a stale frontend bundle / backend binary, or (b) the underlying
+    /// provider not actually emitting the rich signals (e.g. Claude without
+    /// extended thinking enabled never streams `delta.thinking`).
+    #[tokio::test]
+    async fn consume_provider_stream_emits_all_new_activity_variants() {
+        let repo: Arc<dyn EventRepository> = Arc::new(InMemoryEventRepo::new());
+        let read_model: Arc<tokio::sync::RwLock<ReadModelStore>> =
+            Arc::new(tokio::sync::RwLock::new(ReadModelStore::new()));
+        let recorder = Arc::new(RecordingPublisher::new());
+        let publisher: Arc<dyn DomainEventPublisher> = recorder.clone();
+        let turn_id = EntityId::new();
+
+        let stream: syncode_provider::ProviderStream = Box::pin(tokio_stream::iter(vec![
+            Ok(syncode_provider::ProviderEvent::Reasoning {
+                session_id: "s1".into(),
+                text: "thinking about the plan".into(),
+                is_delta: true,
+            }),
+            Ok(syncode_provider::ProviderEvent::SkillDispatched {
+                session_id: "s1".into(),
+                skill: "kmr-build".into(),
+                args: serde_json::json!({"target": "release"}),
+            }),
+            Ok(syncode_provider::ProviderEvent::SubagentStarted {
+                session_id: "s1".into(),
+                agent: "code-reviewer".into(),
+                task: "review the diff".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::SubagentCompleted {
+                session_id: "s1".into(),
+                agent: "code-reviewer".into(),
+                result: "approved".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::ExploreStarted {
+                session_id: "s1".into(),
+                query: "where is auth wired".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::ExploreUpdated {
+                session_id: "s1".into(),
+                message: "found 3 files".into(),
+            }),
+            Ok(syncode_provider::ProviderEvent::Completed {
+                session_id: "s1".into(),
+                output: "done".into(),
+                usage: None,
+            }),
+        ]));
+
+        consume_provider_stream(
+            stream,
+            Arc::clone(&repo),
+            Arc::clone(&read_model),
+            Some(publisher),
+            turn_id,
+            "s1".into(),
+        )
+        .await;
+
+        let calls = recorder.calls.lock().unwrap();
+        let activity_types: Vec<String> = calls
+            .iter()
+            .filter(|(_, et, _, _)| et == "ActivityLogged")
+            .map(|(_, _, _, data)| {
+                data.get("data")
+                    .and_then(|d| d.get("activity_type"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        assert!(
+            activity_types.contains(&"provider_reasoning".to_string()),
+            "Reasoning must reach the wire as provider_reasoning (got: {activity_types:?})"
+        );
+        assert!(
+            activity_types.contains(&"provider_skill_dispatched".to_string()),
+            "SkillDispatched must reach the wire as provider_skill_dispatched (got: {activity_types:?})"
+        );
+        assert!(
+            activity_types.contains(&"provider_subagent_started".to_string()),
+            "SubagentStarted must reach the wire as provider_subagent_started (got: {activity_types:?})"
+        );
+        assert!(
+            activity_types.contains(&"provider_subagent_completed".to_string()),
+            "SubagentCompleted must reach the wire as provider_subagent_completed (got: {activity_types:?})"
+        );
+        assert!(
+            activity_types.contains(&"provider_explore_started".to_string()),
+            "ExploreStarted must reach the wire as provider_explore_started (got: {activity_types:?})"
+        );
+        assert!(
+            activity_types.contains(&"provider_explore_updated".to_string()),
+            "ExploreUpdated must reach the wire as provider_explore_updated (got: {activity_types:?})"
+        );
+
+        // Every activity event must carry the snake_case `activity_type` field
+        // the frontend unwrapPayload extracts — a regression here would make
+        // classifyActivityTone fall through to the "tool" default and the
+        // timeline would never render the new entry kinds.
+        for (_, _, _, data) in calls.iter() {
+            if data.get("event_type").and_then(|v| v.as_str()) == Some("ActivityLogged") {
+                assert!(
+                    data.get("data")
+                        .and_then(|d| d.get("activity_type"))
+                        .and_then(|v| v.as_str())
+                        .is_some(),
+                    "ActivityLogged wire payload must carry data.activity_type (snake_case): {data}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn consume_provider_stream_tokens_become_message_delta() {
         // P0-2: Token ProviderEvents must produce MessageDeltaAppended domain

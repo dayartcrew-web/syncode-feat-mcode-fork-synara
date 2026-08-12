@@ -172,6 +172,7 @@ mod tests {
             activity_type: "test".into(),
             description: "test".into(),
             thread_id: None,
+            turn_id: None,
             created_at: syncode_core::Timestamp::now(),
         }];
 
