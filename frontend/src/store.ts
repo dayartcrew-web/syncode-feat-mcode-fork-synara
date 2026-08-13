@@ -45,7 +45,7 @@ import {
   type ThreadWorkspacePatch,
 } from "./types";
 import { Debouncer } from "@tanstack/react-pacer";
-import { hasLiveTurnTailWork } from "./session-logic";
+import { deriveLatestLiveActivity, hasLiveTurnTailWork } from "./session-logic";
 import { deriveThreadSummaryMetadata } from "@t3tools/shared/threadSummary";
 import { getThreadFromState, getThreadsFromState } from "./threadDerivation";
 import { toAttachmentPreviewUrl } from "./lib/wsHttpUrl";
@@ -138,6 +138,16 @@ const THREAD_SUMMARY_ACTIVITY_KINDS = new Set([
   "user-input.requested",
   "user-input.resolved",
   "provider.user-input.respond.failed",
+  // Provider in-flight activity (reasoning, skill, subagent, explore) drives
+  // the sidebar live-tail label (Thinking/Exploring/In Skill/Subagent). Without
+  // these entries the summary is not recomputed when these activities arrive,
+  // so the sidebar would stay stuck on whatever label was last derived.
+  "provider_reasoning",
+  "provider_skill_dispatched",
+  "provider_subagent_started",
+  "provider_subagent_completed",
+  "provider_explore_started",
+  "provider_explore_updated",
 ]);
 const PENDING_INTERACTION_REQUEST_KINDS = new Set(["approval.requested", "user-input.requested"]);
 
@@ -2053,6 +2063,7 @@ function resolveThreadSidebarMetadata(
   | "hasPendingUserInput"
   | "hasActionableProposedPlan"
   | "hasLiveTailWork"
+  | "latestLiveActivity"
 > {
   const needsDerivedMetadata =
     thread.latestUserMessageAt === undefined ||
@@ -2084,6 +2095,17 @@ function resolveThreadSidebarMetadata(
         session: thread.session,
       }),
     ),
+    latestLiveActivity: hasLiveTurnTailWork({
+      latestTurn: thread.latestTurn,
+      messages: thread.messages,
+      activities: thread.activities,
+      session: thread.session,
+    })
+      ? deriveLatestLiveActivity({
+          activities: thread.activities,
+          latestTurnId: thread.latestTurn?.turnId,
+        })
+      : null,
   };
 }
 
@@ -2180,6 +2202,10 @@ function sidebarThreadSummariesEqual(
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     left.hasLiveTailWork === right.hasLiveTailWork &&
+    // Only compare the label bucket (Thinking/Exploring/In Skill/Subagent),
+    // not the underlying kind string — reasoning streams 10+/sec but the
+    // label stays "Thinking" throughout, so we skip the re-render.
+    (left.latestLiveActivity?.label ?? null) === (right.latestLiveActivity?.label ?? null) &&
     (left.forkSourceThreadId ?? null) === (right.forkSourceThreadId ?? null) &&
     (left.sidechatSourceThreadId ?? null) === (right.sidechatSourceThreadId ?? null) &&
     deepEqualJson(left.lastKnownPr ?? null, right.lastKnownPr ?? null) &&
@@ -2219,6 +2245,7 @@ function buildSidebarThreadSummary(
     hasPendingUserInput: metadata.hasPendingUserInput,
     hasActionableProposedPlan: metadata.hasActionableProposedPlan,
     hasLiveTailWork: metadata.hasLiveTailWork,
+    latestLiveActivity: metadata.latestLiveActivity ?? null,
     forkSourceThreadId: thread.forkSourceThreadId ?? null,
     sidechatSourceThreadId: thread.sidechatSourceThreadId ?? null,
     lastKnownPr: thread.lastKnownPr ?? null,

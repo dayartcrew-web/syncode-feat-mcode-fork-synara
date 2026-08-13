@@ -65,6 +65,7 @@ contracts/generated/
 .omo/
 .claude/
 .kmr/
+.e2e-tmp/
 
 # TanStack Router generated route tree cache
 frontend/.tanstack/

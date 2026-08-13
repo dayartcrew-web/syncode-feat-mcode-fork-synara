@@ -195,6 +195,7 @@ import {
   deriveActiveWorkStartedAt,
   deriveActiveTaskListState,
   deriveActiveBackgroundTasksState,
+  deriveLatestLiveActivity,
   findSidebarProposedPlan,
   findLatestProposedPlan,
   deriveWorkLogEntries,
@@ -2454,6 +2455,15 @@ export default function ChatView({
     : hasLiveTurn
       ? deriveActiveWorkStartedAt(activeLatestTurn, activeThread?.session ?? null, null)
       : null;
+  // Drive the "Thinking/Exploring/In Skill/Subagent for Ns" live label on the
+  // chat timeline. Only meaningful while the turn is live — otherwise the row
+  // isn't rendered at all.
+  const liveActivityLabel = isWorking && activeThread
+    ? (deriveLatestLiveActivity({
+        activities: activeThread.activities,
+        latestTurnId: activeLatestTurn?.turnId,
+      })?.label ?? null)
+    : null;
   const activeTurnLayoutKey =
     activeThreadId === null ? null : `${activeThreadId}:${activeLatestTurn?.turnId ?? "idle"}`;
   const activeTurnInProgress = activeTurnLayoutLive || keepSettledActiveTurnLayout;
@@ -10209,6 +10219,7 @@ export default function ChatView({
                     isWorking={isWorking}
                     activeTurnInProgress={activeTurnInProgress}
                     activeTurnStartedAt={activeWorkStartedAt}
+                    liveActivityLabel={liveActivityLabel}
                     listRef={legendListRef}
                     timelineControllerRef={timelineControllerRef}
                     pinnedMessageIds={pinnedMessageIds}

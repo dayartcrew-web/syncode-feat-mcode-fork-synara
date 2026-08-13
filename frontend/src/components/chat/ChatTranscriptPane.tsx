@@ -31,6 +31,7 @@ interface ChatTranscriptPaneProps {
   activeTurnId?: TurnId | null;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
+  liveActivityLabel?: string | null;
   agentActivityDetail?: AgentActivityDetail | null;
   bottomContentInsetPx?: ComponentProps<typeof MessagesTimeline>["bottomContentInsetPx"];
   contentInsetRightPx?: ComponentProps<typeof MessagesTimeline>["contentInsetRightPx"];
@@ -85,6 +86,7 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
   activeTurnId,
   activeTurnInProgress,
   activeTurnStartedAt,
+  liveActivityLabel,
   agentActivityDetail,
   bottomContentInsetPx,
   contentInsetRightPx,
@@ -167,6 +169,7 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
             activeTurnId={activeTurnId ?? null}
             activeTurnInProgress={activeTurnInProgress}
             activeTurnStartedAt={activeTurnStartedAt}
+            {...(liveActivityLabel ? { liveActivityLabel } : {})}
             listRef={listRef}
             {...(timelineControllerRef ? { controllerRef: timelineControllerRef } : {})}
             {...(pinnedMessageIds ? { pinnedMessageIds } : {})}

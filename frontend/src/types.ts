@@ -281,6 +281,11 @@ export interface SidebarThreadSummary {
   hasPendingUserInput: boolean;
   hasActionableProposedPlan: boolean;
   hasLiveTailWork: boolean;
+  // When `hasLiveTailWork` is true, this carries the most recent classifiable
+  // activity on the live turn (reasoning/explore/skill/subagent). Lets the
+  // sidebar pill say "Thinking" instead of generic "Working". Null when no
+  // classifiable activity has fired yet, or when work isn't live.
+  latestLiveActivity?: { kind: string; label: string } | null;
   forkSourceThreadId?: ThreadId | null;
   sidechatSourceThreadId?: ThreadId | null;
   handoff?: ThreadHandoff | null;
