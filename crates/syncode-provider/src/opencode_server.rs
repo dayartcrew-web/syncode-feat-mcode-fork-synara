@@ -741,12 +741,25 @@ fn map_event(event: &Value, session_id: &str, usage: &mut Option<UsageInfo>) -> 
     };
 
     match ty {
-        // ---- streamed text / reasoning deltas ----
-        "message.part.delta" | "session.next.text.delta" | "session.next.reasoning.delta" => {
+        // ---- streamed text deltas (assistant message) ----
+        "message.part.delta" | "session.next.text.delta" => {
             if let Some(delta) = props.get("delta").and_then(|v| v.as_str())
                 && let Some(token) = token(session_id, delta)
             {
                 out.events.push(token);
+            }
+        }
+
+        // ---- streamed reasoning deltas (model thinking) → Reasoning ----
+        "session.next.reasoning.delta" => {
+            if let Some(delta) = props.get("delta").and_then(|v| v.as_str())
+                && !delta.is_empty()
+            {
+                out.events.push(ProviderEvent::Reasoning {
+                    session_id: session_id.to_string(),
+                    text: delta.to_string(),
+                    is_delta: true,
+                });
             }
         }
 
@@ -756,15 +769,29 @@ fn map_event(event: &Value, session_id: &str, usage: &mut Option<UsageInfo>) -> 
         // ---- tool lifecycle (newer `session.next.*` event family) ----
         "session.next.tool.called" => {
             if let Some(tool) = props.get("tool").and_then(|v| v.as_str()) {
-                out.events.push(ProviderEvent::ToolCall {
-                    session_id: session_id.to_string(),
-                    tool_name: tool.to_string(),
-                    tool_input: json!({}),
-                });
+                if is_opencode_explore_tool(tool) {
+                    out.events.push(ProviderEvent::ExploreStarted {
+                        session_id: session_id.to_string(),
+                        query: tool.to_string(),
+                    });
+                } else {
+                    out.events.push(ProviderEvent::ToolCall {
+                        session_id: session_id.to_string(),
+                        tool_name: tool.to_string(),
+                        tool_input: json!({}),
+                    });
+                }
             }
         }
         "session.next.tool.progress" | "session.next.tool.success" | "session.next.tool.failed" => {
             if let Some(tool) = props.get("tool").and_then(|v| v.as_str()) {
+                if is_opencode_explore_tool(tool) {
+                    let message = synthesize_opencode_explore_message(props);
+                    out.events.push(ProviderEvent::ExploreUpdated {
+                        session_id: session_id.to_string(),
+                        message,
+                    });
+                }
                 out.events.push(ProviderEvent::ToolResult {
                     session_id: session_id.to_string(),
                     tool_name: tool.to_string(),
@@ -774,15 +801,29 @@ fn map_event(event: &Value, session_id: &str, usage: &mut Option<UsageInfo>) -> 
         }
         "session.next.shell.started" => {
             if let Some(cmd) = props.get("command").and_then(|v| v.as_str()) {
-                out.events.push(ProviderEvent::ToolCall {
-                    session_id: session_id.to_string(),
-                    tool_name: format!("bash: {cmd}"),
-                    tool_input: json!({ "command": cmd }),
-                });
+                if let Some(query) = extract_explore_command_query(cmd) {
+                    out.events.push(ProviderEvent::ExploreStarted {
+                        session_id: session_id.to_string(),
+                        query,
+                    });
+                } else {
+                    out.events.push(ProviderEvent::ToolCall {
+                        session_id: session_id.to_string(),
+                        tool_name: format!("bash: {cmd}"),
+                        tool_input: json!({ "command": cmd }),
+                    });
+                }
             }
         }
         "session.next.shell.ended" => {
             if let Some(cmd) = props.get("command").and_then(|v| v.as_str()) {
+                if extract_explore_command_query(cmd).is_some() {
+                    let message = synthesize_opencode_explore_message(props);
+                    out.events.push(ProviderEvent::ExploreUpdated {
+                        session_id: session_id.to_string(),
+                        message,
+                    });
+                }
                 out.events.push(ProviderEvent::ToolResult {
                     session_id: session_id.to_string(),
                     tool_name: format!("bash: {cmd}"),
@@ -866,9 +907,11 @@ fn should_project_part(part: &Value) -> bool {
 }
 
 /// Map a `message.part.updated` event's `part` to events:
-/// - text/reasoning part → [`ProviderEvent::Token`] (non-empty `text`);
-/// - tool part → [`ProviderEvent::ToolCall`] (pending/running) or
-///   [`ProviderEvent::ToolResult`] (completed/error).
+/// - text part → [`ProviderEvent::Token`] (non-empty `text`);
+/// - reasoning part → [`ProviderEvent::Reasoning`] (non-empty `text`);
+/// - tool part → [`ProviderEvent::ToolCall`] / [`ProviderEvent::ToolResult`]
+///   (or [`ProviderEvent::ExploreStarted`] / `ExploreUpdated` when the tool is
+///   an explore-type tool — grep/glob/find/…).
 fn map_part_updated(props: &Value, session_id: &str) -> Vec<ProviderEvent> {
     let Some(part) = props.get("part") else {
         return Vec::new();
@@ -881,13 +924,26 @@ fn map_part_updated(props: &Value, session_id: &str) -> Vec<ProviderEvent> {
     }
     let ty = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match ty {
-        "text" | "reasoning" => {
+        "text" => {
             if let Some(content) = part.get("text").and_then(|v| v.as_str())
                 && let Some(t) = token(session_id, content)
             {
                 return vec![t];
             }
             Vec::new()
+        }
+        "reasoning" => {
+            if let Some(content) = part.get("text").and_then(|v| v.as_str())
+                && !content.is_empty()
+            {
+                vec![ProviderEvent::Reasoning {
+                    session_id: session_id.to_string(),
+                    text: content.to_string(),
+                    is_delta: false,
+                }]
+            } else {
+                Vec::new()
+            }
         }
         "tool" => {
             let tool = part
@@ -897,22 +953,43 @@ fn map_part_updated(props: &Value, session_id: &str) -> Vec<ProviderEvent> {
                 .to_string();
             let state = part.get("state").unwrap_or(&Value::Null);
             let status = state.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let explore = is_opencode_explore_tool(&tool);
             match status {
-                "completed" => vec![ProviderEvent::ToolResult {
-                    session_id: session_id.to_string(),
-                    tool_name: tool,
-                    result: state.get("output").cloned().unwrap_or(Value::Null),
-                }],
+                "completed" => {
+                    let mut events = Vec::new();
+                    if explore {
+                        let message = synthesize_opencode_explore_message(state);
+                        events.push(ProviderEvent::ExploreUpdated {
+                            session_id: session_id.to_string(),
+                            message,
+                        });
+                    }
+                    events.push(ProviderEvent::ToolResult {
+                        session_id: session_id.to_string(),
+                        tool_name: tool,
+                        result: state.get("output").cloned().unwrap_or(Value::Null),
+                    });
+                    events
+                }
                 "error" => vec![ProviderEvent::ToolResult {
                     session_id: session_id.to_string(),
                     tool_name: tool,
                     result: json!({ "error": state.get("error").cloned().unwrap_or(Value::Null) }),
                 }],
-                _ => vec![ProviderEvent::ToolCall {
-                    session_id: session_id.to_string(),
-                    tool_name: tool,
-                    tool_input: state.get("input").cloned().unwrap_or(Value::Null),
-                }],
+                _ => {
+                    if explore {
+                        vec![ProviderEvent::ExploreStarted {
+                            session_id: session_id.to_string(),
+                            query: tool,
+                        }]
+                    } else {
+                        vec![ProviderEvent::ToolCall {
+                            session_id: session_id.to_string(),
+                            tool_name: tool,
+                            tool_input: state.get("input").cloned().unwrap_or(Value::Null),
+                        }]
+                    }
+                }
             }
         }
         _ => Vec::new(),
@@ -965,6 +1042,72 @@ fn token(session_id: &str, content: &str) -> Option<ProviderEvent> {
         session_id: session_id.to_string(),
         content: content.to_string(),
     })
+}
+
+/// Tool-name prefixes whose invocation represents code-base exploration
+/// (search/grep/glob/list) rather than a side-effecting action. Mirrors the
+/// classifier in [`crate::acp`]; duplicated here to keep `opencode_server`
+/// self-contained (the OpenCode tool surface has a different vocabulary from
+/// ACP/Claude — `list_tools`, `read_file`, etc.).
+const OPENCODE_EXPLORE_TOOL_PREFIXES: &[&str] = &[
+    "grep", "glob", "find", "search", "list", "ls", "rg", "fd", "locate",
+];
+
+/// True if a tool name looks like an exploration tool. Case-insensitive
+/// prefix match.
+fn is_opencode_explore_tool(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    OPENCODE_EXPLORE_TOOL_PREFIXES
+        .iter()
+        .any(|prefix| lower == *prefix || lower.starts_with(prefix))
+}
+
+/// Inspect a `bash: {cmd}` shell command line. Returns `Some(query)` if the
+/// command is an explore-style invocation (`grep`, `find`, `ls`, `rg`, …) and
+/// we can extract a meaningful query/pattern from its arguments.
+fn extract_explore_command_query(cmd: &str) -> Option<String> {
+    let trimmed = cmd.trim();
+    let first = trimmed.split_whitespace().next()?;
+    let lower = first.to_ascii_lowercase();
+    let bare = lower.rsplit('/').next().unwrap_or(&lower);
+    if !OPENCODE_EXPLORE_TOOL_PREFIXES
+        .iter()
+        .any(|prefix| bare == *prefix || bare.starts_with(prefix))
+    {
+        return None;
+    }
+    let args: Vec<&str> = trimmed
+        .split_whitespace()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+    if args.is_empty() {
+        Some(first.to_string())
+    } else {
+        Some(args.join(" "))
+    }
+}
+
+/// Build a "Found N results" summary for an explore tool result. Reads
+/// `output`/`stdout` (whichever the event carries) and counts non-empty lines.
+fn synthesize_opencode_explore_message(props: &Value) -> String {
+    let text = props
+        .get("output")
+        .and_then(|v| v.as_str())
+        .or_else(|| props.get("stdout").and_then(|v| v.as_str()));
+    match text {
+        Some(s) => {
+            let count = s.lines().filter(|l| !l.trim().is_empty()).count();
+            format!("Found {count} result{}", if count == 1 { "" } else { "s" })
+        }
+        None => {
+            if let Some(arr) = props.get("output").and_then(|v| v.as_array()) {
+                let count = arr.len();
+                return format!("Found {count} result{}", if count == 1 { "" } else { "s" });
+            }
+            "Explore completed".to_string()
+        }
+    }
 }
 
 /// Parse the server's base URL out of a ready line like
@@ -1243,6 +1386,239 @@ mod tests {
         assert!(
             matches!(&failed.events[0], ProviderEvent::ToolResult { result, .. } if result["error"] == "denied")
         );
+    }
+
+    // ---- PR #239 variant mapping (Reasoning + Explore*) ----
+
+    #[test]
+    fn map_reasoning_delta_emits_reasoning_not_token() {
+        // Reasoning deltas must NOT be concatenated into the assistant message
+        // stream — they surface under the "Thinking…" UI affordance.
+        let mut usage = None;
+        let out = map(
+            json!({ "delta": "considering options" }),
+            "session.next.reasoning.delta",
+            "s1",
+            &mut usage,
+        );
+        assert_eq!(out.events.len(), 1);
+        assert!(
+            matches!(&out.events[0], ProviderEvent::Reasoning { text, is_delta, .. }
+            if text == "considering options" && *is_delta)
+        );
+    }
+
+    #[test]
+    fn map_reasoning_delta_empty_emits_nothing() {
+        let mut usage = None;
+        let out = map(
+            json!({ "delta": "" }),
+            "session.next.reasoning.delta",
+            "s1",
+            &mut usage,
+        );
+        assert!(out.events.is_empty());
+    }
+
+    #[test]
+    fn map_tool_called_explore_emits_explore_started() {
+        // grep/glob/find/list/... tool calls route to ExploreStarted, replacing
+        // the plain ToolCall emission (mirrors claude.rs's classify_tool_use).
+        let mut usage = None;
+        let out = map(
+            json!({ "sessionID": "s1", "tool": "grep" }),
+            "session.next.tool.called",
+            "s1",
+            &mut usage,
+        );
+        assert_eq!(out.events.len(), 1);
+        assert!(
+            matches!(&out.events[0], ProviderEvent::ExploreStarted { query, .. } if query == "grep")
+        );
+
+        // Case-insensitive.
+        let out = map(
+            json!({ "sessionID": "s1", "tool": "Glob" }),
+            "session.next.tool.called",
+            "s1",
+            &mut usage,
+        );
+        assert!(
+            matches!(&out.events[0], ProviderEvent::ExploreStarted { query, .. } if query == "Glob")
+        );
+    }
+
+    #[test]
+    fn map_tool_success_explore_emits_explore_updated_and_tool_result() {
+        // Completed explore tool emits BOTH ExploreUpdated (count summary)
+        // AND ToolResult (raw payload for audit trail).
+        let mut usage = None;
+        let out = map(
+            json!({
+                "sessionID": "s1", "tool": "grep",
+                "output": "src/a.rs\nsrc/b.rs\nsrc/c.rs\n"
+            }),
+            "session.next.tool.success",
+            "s1",
+            &mut usage,
+        );
+        assert_eq!(out.events.len(), 2, "{:?}", out.events);
+        assert!(
+            matches!(&out.events[0], ProviderEvent::ExploreUpdated { message, .. } if message == "Found 3 results")
+        );
+        assert!(
+            matches!(&out.events[1], ProviderEvent::ToolResult { tool_name, .. } if tool_name == "grep")
+        );
+    }
+
+    #[test]
+    fn map_shell_started_explore_command_emits_explore_started() {
+        // `bash: grep -r foo src/` is detected as exploration via the leading
+        // command word.
+        let mut usage = None;
+        let out = map(
+            json!({ "sessionID": "s1", "command": "rg TODO crates/" }),
+            "session.next.shell.started",
+            "s1",
+            &mut usage,
+        );
+        assert_eq!(out.events.len(), 1);
+        assert!(
+            matches!(&out.events[0], ProviderEvent::ExploreStarted { query, .. } if query == "TODO crates/")
+        );
+
+        // Non-explore shell commands still route to ToolCall.
+        let out = map(
+            json!({ "sessionID": "s1", "command": "echo hi" }),
+            "session.next.shell.started",
+            "s1",
+            &mut usage,
+        );
+        assert!(
+            matches!(&out.events[0], ProviderEvent::ToolCall { tool_name, .. } if tool_name == "bash: echo hi")
+        );
+    }
+
+    #[test]
+    fn map_shell_ended_explore_command_emits_explore_updated_and_tool_result() {
+        let mut usage = None;
+        let out = map(
+            json!({
+                "sessionID": "s1", "command": "grep foo src/",
+                "output": "src/a:foo\nsrc/b:foo\n"
+            }),
+            "session.next.shell.ended",
+            "s1",
+            &mut usage,
+        );
+        assert_eq!(out.events.len(), 2, "{:?}", out.events);
+        assert!(
+            matches!(&out.events[0], ProviderEvent::ExploreUpdated { message, .. } if message == "Found 2 results")
+        );
+        assert!(
+            matches!(&out.events[1], ProviderEvent::ToolResult { tool_name, .. } if tool_name == "bash: grep foo src/")
+        );
+    }
+
+    #[test]
+    fn map_part_updated_reasoning_emits_reasoning() {
+        // `message.part.updated` of a reasoning part → Reasoning (NOT Token).
+        // is_delta=false because part-updated carries a snapshot, not a delta.
+        let got = map_part_updated(
+            &json!({ "part": { "type": "reasoning", "text": "thinking it over" } }),
+            "s1",
+        );
+        assert_eq!(got.len(), 1);
+        assert!(
+            matches!(&got[0], ProviderEvent::Reasoning { text, is_delta, .. }
+            if text == "thinking it over" && !is_delta)
+        );
+    }
+
+    #[test]
+    fn map_part_updated_reasoning_empty_emits_nothing() {
+        let got = map_part_updated(
+            &json!({ "part": { "type": "reasoning", "text": "" } }),
+            "s1",
+        );
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn map_part_updated_explore_tool_routes_to_explore_started() {
+        // Tool part with explore-type tool name, pending state → ExploreStarted.
+        let got = map_part_updated(
+            &json!({
+                "part": { "type": "tool", "tool": "glob",
+                    "state": { "status": "running", "input": { "pattern": "**/*.rs" } } }
+            }),
+            "s1",
+        );
+        assert_eq!(got.len(), 1);
+        assert!(matches!(&got[0], ProviderEvent::ExploreStarted { query, .. } if query == "glob"));
+    }
+
+    #[test]
+    fn map_part_updated_explore_tool_completed_emits_explore_updated_and_tool_result() {
+        // Tool part completed with explore-type tool name → ExploreUpdated
+        // (count) + ToolResult (raw output).
+        let got = map_part_updated(
+            &json!({
+                "part": { "type": "tool", "tool": "grep",
+                    "state": { "status": "completed", "output": "a\nb\nc\nd" } }
+            }),
+            "s1",
+        );
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            matches!(&got[0], ProviderEvent::ExploreUpdated { message, .. } if message == "Found 4 results")
+        );
+        assert!(
+            matches!(&got[1], ProviderEvent::ToolResult { tool_name, result, .. }
+            if tool_name == "grep" && result == "a\nb\nc\nd")
+        );
+    }
+
+    #[test]
+    fn is_opencode_explore_tool_classifier_table() {
+        // Direct classifier truth-table for the OpenCode variant.
+        assert!(is_opencode_explore_tool("grep"));
+        assert!(is_opencode_explore_tool("Glob"));
+        assert!(is_opencode_explore_tool("find"));
+        assert!(is_opencode_explore_tool("List"));
+        assert!(is_opencode_explore_tool("list_files"));
+        assert!(!is_opencode_explore_tool("edit_file"));
+        assert!(!is_opencode_explore_tool("write_file"));
+        assert!(!is_opencode_explore_tool("read_file"));
+        assert!(!is_opencode_explore_tool("bash"));
+    }
+
+    #[test]
+    fn extract_explore_command_query_truth_table() {
+        // Recognized explore commands → query (positional args joined).
+        assert_eq!(
+            extract_explore_command_query("grep TODO src/"),
+            Some("TODO src/".to_string())
+        );
+        assert_eq!(
+            extract_explore_command_query("rg \"foo bar\""),
+            Some("\"foo bar\"".to_string())
+        );
+        assert_eq!(extract_explore_command_query("ls"), Some("ls".to_string()));
+        // Flags are filtered out so the query stays readable.
+        assert_eq!(
+            extract_explore_command_query("find . -name *.rs"),
+            Some(". *.rs".to_string())
+        );
+        // Bare-name path resolution: `/usr/bin/grep` still recognized.
+        assert_eq!(
+            extract_explore_command_query("/usr/bin/grep foo"),
+            Some("foo".to_string())
+        );
+        // Non-explore commands → None.
+        assert_eq!(extract_explore_command_query("echo hi"), None);
+        assert_eq!(extract_explore_command_query("rm -rf /"), None);
+        assert_eq!(extract_explore_command_query(""), None);
     }
 
     #[test]

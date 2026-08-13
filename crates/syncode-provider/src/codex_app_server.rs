@@ -545,8 +545,13 @@ fn parse_usage_from_value(usage: &Value) -> Option<UsageInfo> {
 }
 
 /// Best-effort mapping of an `item/*` notification to tool events:
-/// - `item/started` with a tool-typed item → [`ProviderEvent::ToolCall`];
-/// - `item/completed` with a tool-typed item → [`ProviderEvent::ToolResult`];
+/// - `item/started` with an explore-typed command (grep/glob/find/ls/rg/fd) →
+///   [`ProviderEvent::ExploreStarted`] (PR #239 ExploreStarted variant);
+/// - `item/started` with any other tool-typed item → [`ProviderEvent::ToolCall`];
+/// - `item/completed` with an explore-typed command →
+///   [`ProviderEvent::ExploreUpdated`] (count summary) followed by
+///   [`ProviderEvent::ToolResult`];
+/// - `item/completed` with any other tool-typed item → [`ProviderEvent::ToolResult`];
 /// - non-tool items (reasoning summaries, file reads surfaced as items, …) → none.
 ///
 /// The Codex item shape is rich and version-dependent; this maps the recognized
@@ -587,12 +592,28 @@ fn map_item_event(method: &str, params: &Value, thread_id: &str) -> Vec<Provider
         })
         .unwrap_or_else(|| kind.to_string());
 
+    let explore_query = extract_codex_explore_query(item);
+
     if method.ends_with("completed") {
         let result = item.get("result").cloned().unwrap_or_else(|| item.clone());
-        vec![ProviderEvent::ToolResult {
+        let mut events = Vec::new();
+        if explore_query.is_some() {
+            let message = synthesize_codex_explore_message(&result);
+            events.push(ProviderEvent::ExploreUpdated {
+                session_id: thread_id.to_string(),
+                message,
+            });
+        }
+        events.push(ProviderEvent::ToolResult {
             session_id: thread_id.to_string(),
             tool_name,
             result,
+        });
+        events
+    } else if let Some(query) = explore_query {
+        vec![ProviderEvent::ExploreStarted {
+            session_id: thread_id.to_string(),
+            query,
         }]
     } else {
         vec![ProviderEvent::ToolCall {
@@ -600,6 +621,69 @@ fn map_item_event(method: &str, params: &Value, thread_id: &str) -> Vec<Provider
             tool_name,
             tool_input: item.clone(),
         }]
+    }
+}
+
+/// Shell command prefixes that signal an explore/grep walk. When the first
+/// element of a `command_execution` item matches one of these (case-insensitive),
+/// the item is treated as an explore command and surfaces as
+/// [`ProviderEvent::ExploreStarted`] / [`ProviderEvent::ExploreUpdated`] instead
+/// of a generic [`ProviderEvent::ToolCall`] / [`ProviderEvent::ToolResult`].
+const CODEX_EXPLORE_COMMANDS: &[&str] = &["grep", "rg", "find", "fd", "ls", "glob", "search"];
+
+/// Detect a Codex explore command (`grep`/`rg`/`find`/`ls`/etc.) and return the
+/// best-effort query string. Returns `None` for non-explore items.
+///
+/// For `command_execution` items the query is the joined argument list after
+/// the binary name (e.g. `"grep -r foo src"` → `"-r foo src"`). For
+/// `dynamic_tool_call` items the query falls back to the tool `title`.
+fn extract_codex_explore_query(item: &Value) -> Option<String> {
+    let kind = item
+        .get("type")
+        .and_then(|v| v.as_str())
+        .or_else(|| item.get("kind").and_then(|v| v.as_str()))?;
+    match kind {
+        "command_execution" => {
+            let cmd = item.get("command").and_then(|c| c.as_array())?;
+            let first = cmd.first().and_then(|v| v.as_str())?;
+            let lower = first.to_lowercase();
+            if !CODEX_EXPLORE_COMMANDS.contains(&lower.as_str()) {
+                return None;
+            }
+            let args: Vec<&str> = cmd.iter().skip(1).filter_map(|v| v.as_str()).collect();
+            Some(args.join(" "))
+        }
+        "dynamic_tool_call" => {
+            let title = item.get("title").and_then(|v| v.as_str())?;
+            let lower = title.to_lowercase();
+            if CODEX_EXPLORE_COMMANDS.iter().any(|p| lower.starts_with(p)) {
+                Some(title.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Build the human-readable `ExploreUpdated` message for a completed explore
+/// command. Counts non-empty lines if the result is a string, counts elements
+/// if it's an array, otherwise falls back to "Explore completed".
+fn synthesize_codex_explore_message(result: &Value) -> String {
+    let count = if let Some(s) = result.as_str() {
+        Some(s.lines().filter(|l| !l.trim().is_empty()).count())
+    } else if let Some(arr) = result.as_array() {
+        Some(arr.len())
+    } else {
+        result
+            .get("output")
+            .and_then(|o| o.as_str())
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+    };
+    match count {
+        Some(1) => "Found 1 result".to_string(),
+        Some(n) => format!("Found {n} results"),
+        None => "Explore completed".to_string(),
     }
 }
 
@@ -1094,13 +1178,13 @@ mod tests {
     fn map_item_started_command_is_tool_call() {
         let events = map_item_event(
             "item/started",
-            &json!({ "item": { "type": "command_execution", "command": ["ls", "-la"], "title": "list" } }),
+            &json!({ "item": { "type": "command_execution", "command": ["echo", "hi"], "title": "echo" } }),
             "thr-1",
         );
         assert_eq!(events.len(), 1);
         assert!(
             matches!(&events[0], ProviderEvent::ToolCall { tool_name, tool_input, .. }
-            if tool_name == "ls -la" && tool_input["type"] == "command_execution"),
+            if tool_name == "echo hi" && tool_input["type"] == "command_execution"),
             "{events:?}"
         );
     }
@@ -1131,5 +1215,130 @@ mod tests {
             .is_empty()
         );
         assert!(map_item_event("item/started", &json!({}), "thr-1").is_empty());
+    }
+
+    #[test]
+    fn map_item_started_grep_emits_explore_started() {
+        let events = map_item_event(
+            "item/started",
+            &json!({ "item": { "type": "command_execution", "command": ["grep", "-r", "ProviderEvent"], "title": "grep" } }),
+            "thr-1",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreStarted { query, session_id, .. }
+            if query == "-r ProviderEvent" && session_id == "thr-1"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn map_item_started_find_emits_explore_started() {
+        let events = map_item_event(
+            "item/started",
+            &json!({ "item": { "type": "command_execution", "command": ["find", ".", "-name", "*.rs"] } }),
+            "thr-1",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreStarted { query, .. } if query == ". -name *.rs"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn map_item_started_non_explore_command_still_emits_tool_call() {
+        // Non-explore commands (e.g. `cargo build`) keep the existing ToolCall path.
+        let events = map_item_event(
+            "item/started",
+            &json!({ "item": { "type": "command_execution", "command": ["cargo", "build"], "title": "build" } }),
+            "thr-1",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::ToolCall { tool_name, .. } if tool_name == "cargo build"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn map_item_completed_grep_emits_explore_updated_then_tool_result() {
+        let events = map_item_event(
+            "item/completed",
+            &json!({
+                "item": {
+                    "type": "command_execution",
+                    "command": ["grep", "-r", "ProviderEvent"],
+                    "result": "src/a.rs:1:ProviderEvent\nsrc/b.rs:5:ProviderEvent\n"
+                }
+            }),
+            "thr-1",
+        );
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreUpdated { message, session_id, .. }
+            if message == "Found 2 results" && session_id == "thr-1"),
+            "{events:?}"
+        );
+        assert!(
+            matches!(&events[1], ProviderEvent::ToolResult { tool_name, .. } if tool_name == "grep -r ProviderEvent"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn map_item_started_dynamic_tool_call_search_emits_explore_started() {
+        let events = map_item_event(
+            "item/started",
+            &json!({ "item": { "type": "dynamic_tool_call", "title": "Search code" } }),
+            "thr-1",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreStarted { query, .. } if query == "Search code"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn map_item_started_dynamic_tool_call_non_search_emits_tool_call() {
+        let events = map_item_event(
+            "item/started",
+            &json!({ "item": { "type": "dynamic_tool_call", "title": "Format code" } }),
+            "thr-1",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::ToolCall { tool_name, .. } if tool_name == "Format code"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn extract_codex_explore_query_rejects_non_explore_commands() {
+        assert!(
+            extract_codex_explore_query(
+                &json!({ "type": "command_execution", "command": ["cargo", "build"] })
+            )
+            .is_none()
+        );
+        assert!(extract_codex_explore_query(&json!({ "type": "file_change" })).is_none());
+        // Empty command array.
+        assert!(
+            extract_codex_explore_query(&json!({ "type": "command_execution", "command": [] }))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn synthesize_codex_explore_message_counts_array_results() {
+        let msg = synthesize_codex_explore_message(&json!(["a", "b", "c"]));
+        assert_eq!(msg, "Found 3 results");
+    }
+
+    #[test]
+    fn synthesize_codex_explore_message_falls_back_when_no_count_available() {
+        let msg = synthesize_codex_explore_message(&json!({ "opaque": true }));
+        assert_eq!(msg, "Explore completed");
     }
 }
