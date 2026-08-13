@@ -312,13 +312,26 @@ fn map_session_update(params: &Value) -> Vec<ProviderEvent> {
         .unwrap_or("");
 
     match discriminant {
-        "agent_message_chunk" | "agent_thought_chunk" => {
+        "agent_message_chunk" => {
             let Some(text) = extract_text(update.get("content")) else {
                 return Vec::new();
             };
             vec![ProviderEvent::Token {
                 session_id,
                 content: text,
+            }]
+        }
+        "agent_thought_chunk" => {
+            // The agent's internal reasoning stream. Surfaced as Reasoning so
+            // the UI can collapse it behind a "Thinking…" affordance instead of
+            // interleaving it with the assistant message.
+            let Some(text) = extract_text(update.get("content")) else {
+                return Vec::new();
+            };
+            vec![ProviderEvent::Reasoning {
+                session_id,
+                text,
+                is_delta: true,
             }]
         }
         "tool_call" => {
@@ -328,11 +341,16 @@ fn map_session_update(params: &Value) -> Vec<ProviderEvent> {
                 .unwrap_or("tool")
                 .to_string();
             let tool_input = update.get("rawInput").cloned().unwrap_or(Value::Null);
-            vec![ProviderEvent::ToolCall {
-                session_id,
-                tool_name,
-                tool_input,
-            }]
+            if is_acp_explore_tool(&tool_name) {
+                let query = extract_acp_explore_query(&tool_input).unwrap_or(tool_name);
+                vec![ProviderEvent::ExploreStarted { session_id, query }]
+            } else {
+                vec![ProviderEvent::ToolCall {
+                    session_id,
+                    tool_name,
+                    tool_input,
+                }]
+            }
         }
         "tool_call_update" => {
             let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -343,11 +361,26 @@ fn map_session_update(params: &Value) -> Vec<ProviderEvent> {
                     .unwrap_or("tool")
                     .to_string();
                 let result = update.get("rawOutput").cloned().unwrap_or(Value::Null);
-                vec![ProviderEvent::ToolResult {
-                    session_id,
-                    tool_name,
-                    result,
-                }]
+                if is_acp_explore_tool(&tool_name) {
+                    let message = synthesize_acp_explore_message(&result);
+                    vec![
+                        ProviderEvent::ExploreUpdated {
+                            session_id: session_id.clone(),
+                            message,
+                        },
+                        ProviderEvent::ToolResult {
+                            session_id,
+                            tool_name,
+                            result,
+                        },
+                    ]
+                } else {
+                    vec![ProviderEvent::ToolResult {
+                        session_id,
+                        tool_name,
+                        result,
+                    }]
+                }
             } else {
                 // Intermediate tool progress — no ProviderEvent equivalent.
                 Vec::new()
@@ -357,6 +390,60 @@ fn map_session_update(params: &Value) -> Vec<ProviderEvent> {
         // config_option_update, session_info_update, user_message_chunk: no
         // direct ProviderEvent mapping (usage arrives in the PromptResponse).
         _ => Vec::new(),
+    }
+}
+
+/// Tool-name prefixes whose `tool_call` represents a code-base exploration
+/// (search/grep/glob/list) rather than a side-effecting action. Used to route
+/// those calls to the dedicated Explore* variants so the UI can group them.
+const ACP_EXPLORE_TOOL_PREFIXES: &[&str] = &[
+    "grep", "glob", "find", "search", "list", "ls", "rg", "fd", "locate",
+];
+
+/// True if a tool name looks like an exploration tool (grep/glob/find/...).
+/// Case-insensitive prefix match.
+fn is_acp_explore_tool(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ACP_EXPLORE_TOOL_PREFIXES
+        .iter()
+        .any(|prefix| lower == *prefix || lower.starts_with(prefix))
+}
+
+/// Extract a human-readable query from an ACP explore tool's `rawInput`.
+/// Falls back to `None` if no recognized field carries a query string.
+fn extract_acp_explore_query(input: &Value) -> Option<String> {
+    for field in ["pattern", "query", "path", "search", "regex", "glob"] {
+        if let Some(s) = input.get(field).and_then(|v| v.as_str())
+            && !s.trim().is_empty()
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// Build a short "Found N results" summary for an ACP explore tool's
+/// `rawOutput`. Counts non-empty lines for string output, array length for
+/// arrays, and falls back to a generic completion message when neither applies.
+fn synthesize_acp_explore_message(raw_output: &Value) -> String {
+    let count = match raw_output {
+        Value::String(s) => Some(s.lines().filter(|l| !l.trim().is_empty()).count()),
+        Value::Array(arr) => Some(arr.len()),
+        Value::Object(_) => raw_output
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .or_else(|| {
+                raw_output
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            }),
+        _ => None,
+    };
+    match count {
+        Some(n) => format!("Found {n} result{}", if n == 1 { "" } else { "s" }),
+        None => "Explore completed".to_string(),
     }
 }
 
@@ -797,7 +884,7 @@ mod tests {
         assert_eq!(events.len(), 4, "{events:?}");
         assert!(matches!(&events[0], ProviderEvent::Token { content, .. } if content == "Hello "));
         assert!(
-            matches!(&events[1], ProviderEvent::Token { content, .. } if content == "(reasoning)")
+            matches!(&events[1], ProviderEvent::Reasoning { text, .. } if text == "(reasoning)")
         );
         assert!(
             matches!(&events[2], ProviderEvent::ToolCall { tool_name, tool_input, .. }
@@ -1087,5 +1174,191 @@ mod tests {
     #[test]
     fn protocol_version_constant() {
         assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    // --- PR #239 variant mapping tests (Reasoning + Explore*) ---
+
+    #[test]
+    fn map_agent_thought_chunk_emits_reasoning() {
+        // Reasoning streams arrive as `agent_thought_chunk` — surface them as
+        // Reasoning so the UI groups them under the "Thinking…" affordance,
+        // NOT as inline assistant tokens.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": [{ "type": "text", "text": "planning the approach" }]
+            }
+        }));
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::Reasoning { text, is_delta, .. }
+            if text == "planning the approach" && *is_delta)
+        );
+    }
+
+    #[test]
+    fn map_agent_thought_chunk_empty_is_dropped() {
+        // Empty thought chunks emit nothing — avoids noise in the reasoning
+        // stream when an agent sends a heartbeat-style empty delta.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": [{ "type": "text", "text": "" }]
+            }
+        }));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn map_tool_call_explore_emits_explore_started() {
+        // A `grep` tool call with a recognized query field → ExploreStarted
+        // carrying the pattern as the query. ToolCall is NOT emitted.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call", "title": "grep",
+                "toolCallId": "t1", "rawInput": { "pattern": "TODO" }
+            }
+        }));
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreStarted { query, .. } if query == "TODO")
+        );
+
+        // Case-insensitive match — "Glob" should also route to ExploreStarted.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call", "title": "Glob",
+                "toolCallId": "t2", "rawInput": { "pattern": "**/*.rs" }
+            }
+        }));
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreStarted { query, .. } if query == "**/*.rs"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn map_tool_call_explore_without_query_falls_back_to_title() {
+        // When the explore tool's rawInput has no recognizable query field,
+        // fall back to the tool name so the UI still shows something useful.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call", "title": "find",
+                "toolCallId": "t3", "rawInput": { "unknown": "field" }
+            }
+        }));
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreStarted { query, .. } if query == "find")
+        );
+    }
+
+    #[test]
+    fn map_tool_call_update_explore_emits_explore_updated_then_tool_result() {
+        // A completed `grep` tool result produces BOTH ExploreUpdated (count
+        // summary) AND a plain ToolResult (audit trail), mirroring claude.rs.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "title": "grep", "status": "completed",
+                "rawOutput": "src/a.rs\nsrc/b.rs\nsrc/c.rs\n"
+            }
+        }));
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreUpdated { message, .. } if message == "Found 3 results")
+        );
+        assert!(
+            matches!(&events[1], ProviderEvent::ToolResult { tool_name, .. } if tool_name == "grep")
+        );
+    }
+
+    #[test]
+    fn map_tool_call_update_explore_array_counts_len() {
+        // When the explore result is a JSON array, count its length.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "title": "glob", "status": "completed",
+                "rawOutput": ["a", "b", "c", "d", "e"]
+            }
+        }));
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreUpdated { message, .. } if message == "Found 5 results"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn map_tool_call_update_explore_object_stdout_counts_lines() {
+        // ACP `rawOutput` is often an object with `stdout` for shell-style
+        // tools; the count should read the stdout lines.
+        let events = map_session_update(&json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "title": "rg", "status": "completed",
+                "rawOutput": { "stdout": "match1\nmatch2\n" }
+            }
+        }));
+        assert!(
+            matches!(&events[0], ProviderEvent::ExploreUpdated { message, .. } if message == "Found 2 results"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn is_acp_explore_tool_classifier_table() {
+        // Explore-prefix classifier — covers the prefixes we route specially.
+        assert!(is_acp_explore_tool("grep"));
+        assert!(is_acp_explore_tool("GREP"));
+        assert!(is_acp_explore_tool("Glob"));
+        assert!(is_acp_explore_tool("find"));
+        assert!(is_acp_explore_tool("Search"));
+        assert!(is_acp_explore_tool("list"));
+        assert!(is_acp_explore_tool("ls"));
+        assert!(is_acp_explore_tool("rg"));
+        assert!(is_acp_explore_tool("fd"));
+        // Substring-prefix match: "list_files" should match "list".
+        assert!(is_acp_explore_tool("list_files"));
+        // Non-explore tools stay classified as plain.
+        assert!(!is_acp_explore_tool("edit_file"));
+        assert!(!is_acp_explore_tool("read_file"));
+        assert!(!is_acp_explore_tool("bash"));
+        assert!(!is_acp_explore_tool("write_file"));
+    }
+
+    #[test]
+    fn synthesize_explore_message_singular_plural() {
+        // Exactly one result → singular ("Found 1 result"), otherwise plural.
+        assert_eq!(
+            synthesize_acp_explore_message(&json!("one match\n")),
+            "Found 1 result"
+        );
+        assert_eq!(
+            synthesize_acp_explore_message(&json!("a\nb\nc\n")),
+            "Found 3 results"
+        );
+        // Zero results still surfaces as "Found 0 results" (not dropped — the
+        // user benefits from the explicit "no matches" signal).
+        assert_eq!(
+            synthesize_acp_explore_message(&json!("")),
+            "Found 0 results"
+        );
+        // Unknown shape → generic completion message.
+        assert_eq!(
+            synthesize_acp_explore_message(&json!(42)),
+            "Explore completed"
+        );
+        assert_eq!(
+            synthesize_acp_explore_message(&Value::Null),
+            "Explore completed"
+        );
     }
 }
