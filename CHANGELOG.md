@@ -1,3 +1,10 @@
+## [0.1.22] - 2026-08-14
+
+### Features
+
+- **activity**: Wire claude reasoning + live label through sidebar summary (#242) (9520d9d)
+
+
 ## [0.1.21] - 2026-08-13
 
 ### Documentation
