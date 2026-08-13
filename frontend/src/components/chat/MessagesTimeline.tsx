@@ -231,6 +231,11 @@ interface MessagesTimelineProps {
   isWorking: boolean;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
+  // Replaces the generic "Working for Ns" wording on the live working row
+  // with "Thinking/Exploring/In Skill/Subagent for Ns" when the active turn
+  // has surfaced one of those activity types. Null/undefined falls back to
+  // "Working".
+  liveActivityLabel?: string | null;
   followLiveOutput?: boolean;
   emptyStateContent?: ReactNode;
   listRef?: RefObject<LegendListRef | null>;
@@ -290,6 +295,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isWorking,
   activeTurnInProgress,
   activeTurnStartedAt,
+  liveActivityLabel = null,
   followLiveOutput = false,
   listRef,
   controllerRef,
@@ -465,6 +471,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         activeTurnStartedAt,
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId,
+        liveActivityLabel,
       }),
     [
       timelineEntries,
@@ -474,6 +481,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnStartedAt,
       turnDiffSummaryByAssistantMessageId,
       revertTurnCountByUserMessageId,
+      liveActivityLabel,
     ],
   );
   const rows = useStableRows(rawRows);
@@ -1500,7 +1508,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         >
           {row.createdAt ? (
             <>
-              Working for{" "}
+              {row.liveActivityLabel ?? "Working"} for{" "}
               {nowIso ? (
                 (formatWorkingTimer(row.createdAt, nowIso) ?? "0s")
               ) : (
@@ -1508,7 +1516,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               )}
             </>
           ) : (
-            "Working..."
+            `${row.liveActivityLabel ?? "Working"}...`
           )}
         </div>
       )}

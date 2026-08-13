@@ -110,6 +110,10 @@ const THREAD_JUMP_COMMANDS = [
 export interface ThreadStatusPill {
   label:
     | "Working"
+    | "Thinking"
+    | "Exploring"
+    | "In Skill"
+    | "Subagent"
     | "Connecting"
     | "Completed"
     | "Pending Approval"
@@ -126,6 +130,10 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
   Working: 3,
+  Thinking: 3,
+  Exploring: 3,
+  "In Skill": 3,
+  Subagent: 3,
   Connecting: 3,
   "Plan Ready": 2,
   Completed: 1,
@@ -138,6 +146,9 @@ type ThreadStatusInput = Pick<
   proposedPlans?: Thread["proposedPlans"] | undefined;
   hasActionableProposedPlan?: boolean | undefined;
   hasLiveTailWork?: boolean | undefined;
+  // Carried from SidebarThreadSummary.latestLiveActivity — drives the
+  // Thinking/Exploring/In Skill/Subagent pill variants when the turn is live.
+  latestLiveActivity?: { kind: string; label: string } | null | undefined;
   dismissedStatusKey?: string | undefined;
 };
 
@@ -374,8 +385,15 @@ export function resolveThreadStatusPill(input: {
   }
 
   if (thread.hasLiveTailWork) {
+    const liveLabel = thread.latestLiveActivity?.label;
     return {
-      label: "Working",
+      label:
+        liveLabel === "Thinking" ||
+        liveLabel === "Exploring" ||
+        liveLabel === "In Skill" ||
+        liveLabel === "Subagent"
+          ? liveLabel
+          : "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
       pulse: true,
@@ -387,8 +405,15 @@ export function resolveThreadStatusPill(input: {
     thread.session?.status === "running" &&
     (thread.latestTurn === null || hasLiveLatestTurn(thread.latestTurn, thread.session))
   ) {
+    const liveLabel = thread.latestLiveActivity?.label;
     return {
-      label: "Working",
+      label:
+        liveLabel === "Thinking" ||
+        liveLabel === "Exploring" ||
+        liveLabel === "In Skill" ||
+        liveLabel === "Subagent"
+          ? liveLabel
+          : "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
       pulse: true,

@@ -651,8 +651,9 @@ export function deriveActiveBackgroundTasksState(
   return activeCount > 0 ? { activeCount } : null;
 }
 
-// Keeps the UI "working" while the provider still has visible assistant text or
-// background-task updates to finish for the latest turn.
+// Keeps the UI "working" while the provider still has visible assistant text,
+// in-flight provider activity (reasoning/explore/skill/subagent), or background
+// task updates to finish for the latest turn.
 export function hasLiveTurnTailWork(input: {
   latestTurn: Pick<OrchestrationLatestTurn, "turnId" | "completedAt"> | null;
   messages: ReadonlyArray<Pick<ChatMessage, "role" | "streaming" | "turnId">>;
@@ -685,7 +686,71 @@ export function hasLiveTurnTailWork(input: {
     return true;
   }
 
+  // In-flight provider activity (reasoning, skill dispatch, subagent, explore)
+  // counts as live tail work — the turn is actively progressing even though no
+  // streaming assistant text or background task has started yet. This is the
+  // common case during a Claude turn's thinking phase before any tool calls.
+  if (hasLiveProviderActivity(input.activities, latestTurnId)) {
+    return true;
+  }
+
   return false;
+}
+
+// True when the latest turn has at least one provider_* activity that
+// classifies to a non-null sidebar label (Thinking/Exploring/In Skill/Subagent).
+// Used to keep the working row visible during the reasoning phase before any
+// streaming assistant text or task lifecycle activity has landed.
+function hasLiveProviderActivity(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  latestTurnId: TurnId,
+): boolean {
+  for (const activity of activities) {
+    if (activity.turnId && activity.turnId !== latestTurnId) continue;
+    if (classifyLiveActivityLabel(activity.kind) !== null) return true;
+  }
+  return false;
+}
+
+// Sidebar live-activity classifier. Maps an `activity.kind` to a short,
+// stable label the thread row can show in place of "Working" while the
+// turn is live. Returns `null` for kinds that shouldn't override the
+// default "Working" label (lifecycle bookkeeping, approvals, plan notices,
+// generic tool output). Reasoning/explore/skill/subagent kinds are the
+// ones worth surfacing — those reflect *what the agent is doing right now*.
+export type LiveActivityLabel = "Thinking" | "Exploring" | "In Skill" | "Subagent";
+
+export function classifyLiveActivityLabel(
+  kind: OrchestrationThreadActivity["kind"],
+): LiveActivityLabel | null {
+  if (kind === "provider_reasoning") return "Thinking";
+  if (kind === "provider_explore_started" || kind === "provider_explore_updated") return "Exploring";
+  if (kind === "provider_skill_dispatched") return "In Skill";
+  if (kind === "provider_subagent_started" || kind === "provider_subagent_completed") {
+    return "Subagent";
+  }
+  return null;
+}
+
+// Picks the most recent activity on the live turn whose kind classifies to
+// a non-null label. Returns `null` when nothing matches (so the caller
+// falls back to "Working"). `turnId` is required — activities from prior
+// turns are irrelevant to the current "live" signal.
+export function deriveLatestLiveActivity(input: {
+  activities: ReadonlyArray<OrchestrationThreadActivity>;
+  latestTurnId: TurnId | undefined;
+}): { kind: OrchestrationThreadActivity["kind"]; label: LiveActivityLabel } | null {
+  if (!input.latestTurnId) return null;
+  const ordered = orderedActivities(input.activities);
+  for (let i = ordered.length - 1; i >= 0; i -= 1) {
+    const activity = ordered[i]!;
+    if (activity.turnId !== null && activity.turnId !== input.latestTurnId) continue;
+    const label = classifyLiveActivityLabel(activity.kind);
+    if (label !== null) {
+      return { kind: activity.kind, label };
+    }
+  }
+  return null;
 }
 
 function shouldOmitRoutedCollabAgentToolActivity(activity: OrchestrationThreadActivity): boolean {

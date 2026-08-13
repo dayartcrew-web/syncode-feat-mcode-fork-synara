@@ -1020,18 +1020,19 @@ impl ProviderCommandReactor {
         // an explicit Completed/Error on the bus.
         match &send_result {
             Ok(_) => {
-                if !events.iter().any(is_terminal_provider_event) {
-                    // send_request returned Ok — the turn completed. Synthesize
-                    // Completed regardless of whether non-terminal events were
-                    // captured. The pre-subscription may have missed events
-                    // (broadcast ring buffer full, subscription too late), but
-                    // the Ok result is authoritative: the turn finished.
-                    // (Pure-async adapters that return immediately also have
-                    // empty events; they leave the live stream consumer active
-                    // via the pipeline, so this is a harmless extra Completed
-                    // that the projector deduplicates by checking turn status.)
-                    // return immediately emit no events, so `saw_activity` is
-                    // false and we leave the stream consumer path active.)
+                // When the adapter emitted ANY events during send_request but
+                // none of them were terminal, synthesize a Completed so the
+                // turn cannot stick in pending. Synchronous adapters (codex,
+                // ACP) always fall into this arm because their Completed fires
+                // inside send_request.
+                //
+                // Pure-async adapters (claude's supervisor pattern) return Ok
+                // immediately with NO events — the turn is still in flight on
+                // a detached task. Skipping the synthesize keeps
+                // `reactor_captured_terminal` false so the pipeline spawns its
+                // live stream consumer and forwards events in real time as
+                // the supervisor emits them.
+                if !events.is_empty() && !events.iter().any(is_terminal_provider_event) {
                     events.push(ProviderEvent::Completed {
                         session_id: session_id.clone(),
                         output: String::new(),
@@ -1299,10 +1300,20 @@ pub(crate) mod tests {
         recorded_system_prompts: RecordedSystemPrompts,
         /// Working directory captured from each `start_session` call (PR-1-2).
         recorded_working_dirs: RecordedWorkingDirs,
+        /// Broadcast bus backing `event_stream`. The mock emits a single
+        /// non-terminal `Token` per `send_request` so the reactor's safety-net
+        /// (which now only fires when at least one event was captured) engages
+        /// and synthesizes a Completed — matching how real sync adapters
+        /// (codex/ACP) drive a turn to completion.
+        event_tx: tokio::sync::broadcast::Sender<ProviderEvent>,
+        /// Last session id assigned by `start_session`, stamped into emitted
+        /// events so the reactor's session-filtered subscription observes them.
+        last_session: std::sync::Mutex<Option<String>>,
     }
 
     impl CmdTestMock {
         fn new() -> Self {
+            let (event_tx, _) = tokio::sync::broadcast::channel(256);
             Self {
                 started_sessions: std::sync::Mutex::new(Vec::new()),
                 interrupted: std::sync::Mutex::new(Vec::new()),
@@ -1312,6 +1323,8 @@ pub(crate) mod tests {
                 supports_steering: false,
                 recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
                 recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                event_tx,
+                last_session: std::sync::Mutex::new(None),
             }
         }
 
@@ -1321,6 +1334,7 @@ pub(crate) mod tests {
         fn new_with_handles() -> (Self, Arc<std::sync::Mutex<Vec<String>>>, RecordedRequests) {
             let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
             let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (event_tx, _) = tokio::sync::broadcast::channel(256);
             let this = Self {
                 started_sessions: std::sync::Mutex::new(Vec::new()),
                 interrupted: std::sync::Mutex::new(Vec::new()),
@@ -1330,6 +1344,8 @@ pub(crate) mod tests {
                 supports_steering: false,
                 recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
                 recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                event_tx,
+                last_session: std::sync::Mutex::new(None),
             };
             (this, stopped, requests)
         }
@@ -1346,6 +1362,7 @@ pub(crate) mod tests {
             let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
             let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
             let steers = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (event_tx, _) = tokio::sync::broadcast::channel(256);
             let this = Self {
                 started_sessions: std::sync::Mutex::new(Vec::new()),
                 interrupted: std::sync::Mutex::new(Vec::new()),
@@ -1355,6 +1372,8 @@ pub(crate) mod tests {
                 supports_steering: true,
                 recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
                 recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                event_tx,
+                last_session: std::sync::Mutex::new(None),
             };
             (this, stopped, requests, steers)
         }
@@ -1371,6 +1390,7 @@ pub(crate) mod tests {
             let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
             let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
             let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (event_tx, _) = tokio::sync::broadcast::channel(256);
             let this = Self {
                 started_sessions: std::sync::Mutex::new(Vec::new()),
                 interrupted: std::sync::Mutex::new(Vec::new()),
@@ -1380,6 +1400,8 @@ pub(crate) mod tests {
                 supports_steering: false,
                 recorded_system_prompts: Arc::clone(&prompts),
                 recorded_working_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                event_tx,
+                last_session: std::sync::Mutex::new(None),
             };
             (this, stopped, requests, prompts)
         }
@@ -1396,6 +1418,7 @@ pub(crate) mod tests {
             let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
             let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
             let working_dirs = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (event_tx, _) = tokio::sync::broadcast::channel(256);
             let this = Self {
                 started_sessions: std::sync::Mutex::new(Vec::new()),
                 interrupted: std::sync::Mutex::new(Vec::new()),
@@ -1405,6 +1428,8 @@ pub(crate) mod tests {
                 supports_steering: false,
                 recorded_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
                 recorded_working_dirs: Arc::clone(&working_dirs),
+                event_tx,
+                last_session: std::sync::Mutex::new(None),
             };
             (this, stopped, requests, working_dirs)
         }
@@ -1456,6 +1481,7 @@ pub(crate) mod tests {
         ) -> Result<String, syncode_provider::ProviderAdapterError> {
             let sid = format!("cmd-{}", uuid::Uuid::new_v4().hyphenated());
             self.started_sessions.lock().unwrap().push(sid.clone());
+            *self.last_session.lock().unwrap() = Some(sid.clone());
             // Capture the system prompt so P3-4 tests can assert that memory
             // context was injected. The vector mirrors `started_sessions` —
             // one entry per start, in start order.
@@ -1496,6 +1522,22 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push((request.method.clone(), request.params.clone()));
+            // Emit a non-terminal Token so the reactor's safety-net engages
+            // (the new rule: synthesize Completed only when at least one event
+            // was captured and none were terminal). Real sync adapters (codex,
+            // ACP) emit many events during send_request; this Token stands in
+            // for that stream and lets the test pipeline drive the turn to
+            // completion without a manual CompleteTurn.
+            let sid = self
+                .last_session
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default();
+            let _ = self.event_tx.send(ProviderEvent::Token {
+                session_id: sid,
+                content: String::new(),
+            });
             Ok(ProviderResponse {
                 jsonrpc: "2.0".to_string(),
                 id: Some(1),
@@ -1523,10 +1565,40 @@ pub(crate) mod tests {
 
         fn event_stream(
             &self,
-            _session_id: &str,
+            session_id: &str,
         ) -> Result<syncode_provider::ProviderStream, syncode_provider::ProviderAdapterError>
         {
-            Ok(Box::pin(tokio_stream::empty()))
+            use tokio_stream::wrappers::ReceiverStream;
+            let mut rx = self.event_tx.subscribe();
+            let sid = session_id.to_string();
+            let (tx, recv) = tokio::sync::mpsc::channel::<
+                Result<ProviderEvent, syncode_provider::ProviderAdapterError>,
+            >(64);
+            tokio::spawn(async move {
+                while let Ok(event) = rx.recv().await {
+                    let owned = match &event {
+                        ProviderEvent::Started { session_id }
+                        | ProviderEvent::Token { session_id, .. }
+                        | ProviderEvent::ToolCall { session_id, .. }
+                        | ProviderEvent::ToolResult { session_id, .. }
+                        | ProviderEvent::Completed { session_id, .. }
+                        | ProviderEvent::Error { session_id, .. }
+                        | ProviderEvent::Reasoning { session_id, .. }
+                        | ProviderEvent::SkillDispatched { session_id, .. }
+                        | ProviderEvent::SubagentStarted { session_id, .. }
+                        | ProviderEvent::SubagentCompleted { session_id, .. }
+                        | ProviderEvent::ExploreStarted { session_id, .. }
+                        | ProviderEvent::ExploreUpdated { session_id, .. } => {
+                            session_id.as_str() == sid.as_str()
+                        }
+                        ProviderEvent::StatusChanged { .. } => true,
+                    };
+                    if owned && tx.send(Ok(event)).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(Box::pin(ReceiverStream::new(recv)))
         }
 
         async fn health_check(&self) -> Result<bool, syncode_provider::ProviderAdapterError> {
@@ -3287,6 +3359,41 @@ pub(crate) mod tests {
             |ev| matches!(ev, ProviderEvent::Token { content, .. } if content == "HELLO_FROM_AI"),
         );
         assert!(has_token, "Token events must be captured too");
+    }
+
+    /// Async-path coverage: when the adapter returns Ok but emits NO events
+    /// during `send_request` (the Claude supervisor pattern — the turn is
+    /// still in flight on a detached task), the reactor MUST NOT synthesize a
+    /// Completed. If it did, `reactor_captured_terminal` would be true and
+    /// the pipeline would skip spawning its live stream consumer — every
+    /// real-time event the supervisor emits later would be lost.
+    #[tokio::test]
+    async fn start_turn_does_not_synthesize_when_async_adapter_emits_no_events() {
+        let reactor = ProviderCommandReactor::new(SessionManager::new());
+        let adapter = SynchronousEventMock::new(vec![]).make_shared();
+
+        let result = reactor
+            .react(
+                &Command::StartTurn {
+                    thread_id: EntityId::new(),
+                    sequence: 1,
+                    user_input: "hi".to_string(),
+                },
+                &adapter,
+                Some(EntityId::new()),
+            )
+            .await
+            .expect("StartTurn should succeed");
+
+        let has_synthesized_completed = result
+            .events
+            .iter()
+            .any(|ev| matches!(ev, ProviderEvent::Completed { .. }));
+        assert!(
+            !has_synthesized_completed,
+            "an async adapter that returns Ok with empty events must NOT get a synthesized Completed; got {:?}",
+            result.events
+        );
     }
 
     /// Safety-net coverage: when the synchronous adapter returns Ok but emits

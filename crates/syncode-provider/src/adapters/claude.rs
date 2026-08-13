@@ -84,7 +84,6 @@ struct TurnOutcome {
     status: TurnStatus,
     output: String,
     usage: Option<UsageInfo>,
-    raw: Value,
 }
 
 /// Claude-specific configuration.
@@ -224,6 +223,13 @@ fn classify_tool_use_kind(name: &str, input: &Value) -> ToolKind {
 #[derive(Default)]
 struct TurnMapper {
     in_flight: HashMap<String, ToolKind>,
+    /// Whether we've already emitted the initial `Reasoning` event for this
+    /// turn. Claude CLI streams `system/thinking_tokens` frames progressively
+    /// as the model thinks (long before the assembled `assistant` message
+    /// arrives); we emit one `Reasoning` event on the first such frame so the
+    /// frontend's live activity label flips to "Thinking" without waiting for
+    /// end-of-turn.
+    reasoning_started: bool,
 }
 
 impl TurnMapper {
@@ -242,7 +248,29 @@ impl TurnMapper {
             }
             "assistant" | "user" => SdkEmission::Events(self.map_message_blocks(msg, session_id)),
             "result" => SdkEmission::Terminal(decode_result(msg)),
+            "system" => self.map_system_event(msg, session_id),
             _ => SdkEmission::Ignore,
+        }
+    }
+
+    /// Map a `system` SDK message. Claude CLI emits these with subtypes like
+    /// `init` (session handshake), `hook_started` / `hook_response` (lifecycle
+    /// hooks), and — crucially for live UX — `thinking_tokens` (a progressive
+    /// count of reasoning tokens streamed as the model thinks). The latter is
+    /// the only realtime signal we get before the assembled `assistant`
+    /// message; we use it to flip the live activity label to "Thinking" once
+    /// per turn.
+    fn map_system_event(&mut self, msg: &Value, session_id: &str) -> SdkEmission {
+        let subtype = msg.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+        if subtype == "thinking_tokens" && !self.reasoning_started {
+            self.reasoning_started = true;
+            SdkEmission::Events(vec![ProviderEvent::Reasoning {
+                session_id: session_id.to_string(),
+                text: "Thinking…".to_string(),
+                is_delta: false,
+            }])
+        } else {
+            SdkEmission::Ignore
         }
     }
 
@@ -646,7 +674,6 @@ fn decode_result(msg: &Value) -> TurnOutcome {
         status,
         output,
         usage: None,
-        raw: msg.clone(),
     }
 }
 
@@ -751,12 +778,18 @@ where
 pub struct ClaudeAdapter {
     config: Option<ProviderConfig>,
     claude_config: ClaudeConfig,
-    status: AtomicU64,
+    /// Arc-wrapped so the detached turn-supervisor task (spawned by
+    /// `send_request`) can flip status back to `Idle` when `run_turn` returns
+    /// without borrowing `&self`.
+    status: Arc<AtomicU64>,
     sessions: Mutex<HashMap<String, ClaudeSession>>,
     /// In-flight turn subprocesses keyed by session id, so `interrupt` can kill
     /// the turn's `claude` process. The stdout handle is taken out (the turn
     /// reader owns it); the entry holds the child for liveness/kill only.
-    active_children: Mutex<HashMap<String, Child>>,
+    /// Arc-wrapped so the detached turn-supervisor task (spawned by
+    /// `send_request`) can reap the child when `run_turn` returns without
+    /// borrowing `&self`.
+    active_children: Arc<Mutex<HashMap<String, Child>>>,
     /// Most recently opened session id (used to resolve a request without an
     /// explicit `session_id`, mirroring codex's `current_thread`).
     current_session: Mutex<Option<String>>,
@@ -782,9 +815,9 @@ impl ClaudeAdapter {
         Self {
             config: None,
             claude_config,
-            status: AtomicU64::new(ProviderStatus::Disconnected.into()),
+            status: Arc::new(AtomicU64::new(ProviderStatus::Disconnected.into())),
             sessions: Mutex::new(HashMap::new()),
-            active_children: Mutex::new(HashMap::new()),
+            active_children: Arc::new(Mutex::new(HashMap::new())),
             current_session: Mutex::new(None),
             event_tx,
             spawned: AtomicBool::new(false),
@@ -793,6 +826,13 @@ impl ClaudeAdapter {
 
     fn set_status(&self, status: ProviderStatus) {
         self.status.store(status.into(), Ordering::Release);
+    }
+
+    /// Hand out a cloneable handle to the status slot so a detached task can
+    /// update status without borrowing `&self`. Used by the turn-supervisor
+    /// spawned in `send_request`.
+    fn status_slot(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.status)
     }
 
     /// Resolve the model for a turn: explicit `params.model` wins, else the
@@ -1201,79 +1241,81 @@ impl ProviderAdapter for ClaudeAdapter {
             .insert(session_id.clone(), child);
         self.set_status(ProviderStatus::Busy);
 
-        let turn = run_turn(BufReader::new(stdout), &session_id, &self.event_tx).await;
+        // Non-blocking supervisor: spawn a detached task that drives the
+        // stream-json turn to completion, emitting ProviderEvents (including
+        // the terminal Completed/Error) on the broadcast bus as they arrive.
+        // This lets the reactor return immediately and the pipeline's live
+        // stream consumer forward events in real time, instead of batch-
+        // draining at end-of-turn. The supervisor reaps the child and flips
+        // status back to Idle when the turn finishes (or errors).
+        let active_children = Arc::clone(&self.active_children);
+        let event_tx = self.event_tx.clone();
+        let status_slot = self.status_slot();
+        let supervisor_session_id = session_id.clone();
+        tokio::spawn(async move {
+            let turn = run_turn(BufReader::new(stdout), &supervisor_session_id, &event_tx).await;
 
-        // Reap the child (waits for exit → stderr drain task sees EOF).
-        if let Some(mut child) = self.active_children.lock().await.remove(&session_id) {
-            let _ = child.wait().await;
-        }
-        let stderr_buf = match stderr_rx {
-            Some(rx) => rx.await.unwrap_or_default(),
-            None => String::new(),
-        };
+            // Reap the child (waits for exit → stderr drain task sees EOF).
+            if let Some(mut child) = active_children.lock().await.remove(&supervisor_session_id) {
+                let _ = child.wait().await;
+            }
+            let stderr_buf = match stderr_rx {
+                Some(rx) => rx.await.unwrap_or_default(),
+                None => String::new(),
+            };
 
-        let turn = match turn {
-            Ok(o) => o,
-            Err(e) => {
-                let mut diag = e.to_string();
-                let trimmed = stderr_buf.trim();
-                if !trimmed.is_empty() {
-                    diag.push_str(" | stderr: ");
-                    diag.push_str(trimmed);
+            let turn = match turn {
+                Ok(o) => o,
+                Err(e) => {
+                    let mut diag = e.to_string();
+                    let trimmed = stderr_buf.trim();
+                    if !trimmed.is_empty() {
+                        diag.push_str(" | stderr: ");
+                        diag.push_str(trimmed);
+                    }
+                    let _ = event_tx.send(ProviderEvent::Error {
+                        session_id: supervisor_session_id.clone(),
+                        message: diag,
+                        code: None,
+                    });
+                    set_status_from_slot(&status_slot, ProviderStatus::Idle);
+                    return;
                 }
-                let _ = self.event_tx.send(ProviderEvent::Error {
-                    session_id: session_id.clone(),
-                    message: diag.clone(),
-                    code: None,
-                });
-                self.set_status(ProviderStatus::Idle);
-                return Err(ProviderAdapterError::ProcessExited(diag));
-            }
-        };
+            };
 
-        match turn.status {
-            TurnStatus::Completed => {
-                let _ = self.event_tx.send(ProviderEvent::Completed {
-                    session_id: session_id.clone(),
-                    output: turn.output.clone(),
-                    usage: turn.usage.clone(),
-                });
-                self.set_status(ProviderStatus::Idle);
-                Ok(ProviderResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: Some(request.id),
-                    result: Some(json!({
-                        "output": turn.output,
-                        "usage": turn.usage,
-                        "raw": turn.raw,
-                    })),
-                    error: None,
-                })
-            }
-            TurnStatus::Failed => {
-                let message = if turn.output.is_empty() {
-                    "claude turn failed".to_string()
-                } else {
-                    turn.output.clone()
-                };
-                let _ = self.event_tx.send(ProviderEvent::Error {
-                    session_id: session_id.clone(),
-                    message: message.clone(),
-                    code: None,
-                });
-                self.set_status(ProviderStatus::Idle);
-                Ok(ProviderResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: Some(request.id),
-                    result: None,
-                    error: Some(ProviderError {
-                        code: -32000,
+            match turn.status {
+                TurnStatus::Completed => {
+                    let _ = event_tx.send(ProviderEvent::Completed {
+                        session_id: supervisor_session_id.clone(),
+                        output: turn.output.clone(),
+                        usage: turn.usage.clone(),
+                    });
+                }
+                TurnStatus::Failed => {
+                    let message = if turn.output.is_empty() {
+                        "claude turn failed".to_string()
+                    } else {
+                        turn.output.clone()
+                    };
+                    let _ = event_tx.send(ProviderEvent::Error {
+                        session_id: supervisor_session_id.clone(),
                         message,
-                        data: Some(turn.raw.clone()),
-                    }),
-                })
+                        code: None,
+                    });
+                }
             }
-        }
+            set_status_from_slot(&status_slot, ProviderStatus::Idle);
+        });
+
+        // Return immediately with a placeholder response. The supervisor task
+        // emits the real terminal event (Completed/Error) on the broadcast bus;
+        // callers that need the final outcome subscribe to `event_stream`.
+        Ok(ProviderResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request.id),
+            result: Some(json!({ "async": true })),
+            error: None,
+        })
     }
 
     fn event_stream(&self, session_id: &str) -> Result<ProviderStream, ProviderAdapterError> {
@@ -1313,6 +1355,13 @@ impl ProviderAdapter for ClaudeAdapter {
         }
         Ok(self.status() != ProviderStatus::Disconnected && self.status() != ProviderStatus::Error)
     }
+}
+
+/// Write a status value through a cloned `Arc<AtomicU64>` slot. Used by the
+/// detached turn-supervisor in `send_request` to flip status back to `Idle`
+/// without holding a borrow on the adapter (which would not be `Send`).
+fn set_status_from_slot(slot: &Arc<AtomicU64>, status: ProviderStatus) {
+    slot.store(status.into(), Ordering::Release);
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,6 +1687,93 @@ mod tests {
             .expect("run_turn");
         assert_eq!(outcome.status, TurnStatus::Completed);
         assert_eq!(outcome.output, "ok");
+    }
+
+    #[tokio::test]
+    async fn run_turn_emits_reasoning_on_first_thinking_tokens_system_event() {
+        // Claude CLI streams `system/thinking_tokens` frames progressively as
+        // the model thinks — long before the assembled `assistant` message.
+        // We must flip the live activity label to "Thinking" on the FIRST
+        // such frame, and ignore subsequent frames so we don't flood the
+        // activity log with reasoning duplicates.
+        let (event_tx, _) = broadcast::channel::<ProviderEvent>(64);
+        let rx = event_tx.subscribe();
+        let lines = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"abc"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":1,"estimated_tokens_delta":1}"#,
+            "\n",
+            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":3,"estimated_tokens_delta":2}"#,
+            "\n",
+            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":5,"estimated_tokens_delta":2}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"full reasoning text"},{"type":"text","text":"done"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            "\n",
+        );
+        let outcome = run_turn(BufReader::new(lines.as_bytes()), "s-think", &event_tx)
+            .await
+            .expect("run_turn");
+        assert_eq!(outcome.status, TurnStatus::Completed);
+
+        // Collect all Reasoning events for this session.
+        let mut reasoning_texts = Vec::new();
+        let mut rx = rx;
+        while let Ok(recv) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            if let Ok(ProviderEvent::Reasoning {
+                text, session_id, ..
+            }) = recv
+                && session_id == "s-think"
+            {
+                reasoning_texts.push(text);
+            }
+        }
+        // Exactly two: one from the first thinking_tokens (the "Thinking…" marker),
+        // one from the assembled assistant thinking block. NOT three (we skip
+        // subsequent thinking_tokens frames).
+        assert_eq!(
+            reasoning_texts.len(),
+            2,
+            "expected exactly 2 Reasoning events (1 from thinking_tokens + 1 from assembled), got {reasoning_texts:?}"
+        );
+        assert_eq!(reasoning_texts[0], "Thinking…");
+        assert_eq!(reasoning_texts[1], "full reasoning text");
+    }
+
+    #[tokio::test]
+    async fn run_turn_ignores_hook_system_events() {
+        // Hook lifecycle events (`hook_started` / `hook_response`) must not
+        // trigger Reasoning emission — only `thinking_tokens` should.
+        let (event_tx, _) = broadcast::channel::<ProviderEvent>(64);
+        let rx = event_tx.subscribe();
+        let lines = concat!(
+            r#"{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"SessionStart:startup"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"hook_response","hook_id":"h1","output":""}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#,
+            "\n",
+        );
+        let outcome = run_turn(BufReader::new(lines.as_bytes()), "s-hooks", &event_tx)
+            .await
+            .expect("run_turn");
+        assert_eq!(outcome.status, TurnStatus::Completed);
+
+        let mut any_reasoning = false;
+        let mut rx = rx;
+        while let Ok(recv) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            if let Ok(ProviderEvent::Reasoning { session_id, .. }) = recv
+                && session_id == "s-hooks"
+            {
+                any_reasoning = true;
+            }
+        }
+        assert!(!any_reasoning, "hook events must not emit Reasoning");
     }
 
     // --- adapter lifecycle / glue (no real binary touched) ---

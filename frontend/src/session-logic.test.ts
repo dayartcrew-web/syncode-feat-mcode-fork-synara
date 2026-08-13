@@ -9,9 +9,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSourceProposedPlanReference,
+  classifyLiveActivityLabel,
   deriveActiveBackgroundTasksState,
   deriveActiveWorkStartedAt,
   deriveActiveTaskListState,
+  deriveLatestLiveActivity,
   hasLiveLatestTurn,
   hasLiveTurnTailWork,
   PROVIDER_OPTIONS,
@@ -3183,6 +3185,101 @@ describe("hasLiveTurnTailWork", () => {
       }),
     ).toBe(false);
   });
+
+  it("keeps the turn live while provider reasoning activity is streaming", () => {
+    expect(
+      hasLiveTurnTailWork({
+        latestTurn,
+        messages: [],
+        activities: [
+          makeActivity({
+            id: "reasoning-1",
+            kind: "provider_reasoning",
+            summary: "Thinking…",
+            turnId: "turn-1",
+            payload: { itemType: "agent_reasoning" },
+          }),
+        ],
+        session: { orchestrationStatus: "running" },
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the turn live while a provider skill dispatch is in flight", () => {
+    expect(
+      hasLiveTurnTailWork({
+        latestTurn,
+        messages: [],
+        activities: [
+          makeActivity({
+            id: "skill-1",
+            kind: "provider_skill_dispatched",
+            summary: "Skill dispatched: kmr-build",
+            turnId: "turn-1",
+            payload: { itemType: "skill_dispatched" },
+          }),
+        ],
+        session: { orchestrationStatus: "running" },
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the turn live while a provider subagent activity is in flight", () => {
+    expect(
+      hasLiveTurnTailWork({
+        latestTurn,
+        messages: [],
+        activities: [
+          makeActivity({
+            id: "subagent-1",
+            kind: "provider_subagent_started",
+            summary: "Subagent started: code-reviewer",
+            turnId: "turn-1",
+            payload: { itemType: "subagent_event" },
+          }),
+        ],
+        session: { orchestrationStatus: "running" },
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the turn live while a provider explore activity is in flight", () => {
+    expect(
+      hasLiveTurnTailWork({
+        latestTurn,
+        messages: [],
+        activities: [
+          makeActivity({
+            id: "explore-1",
+            kind: "provider_explore_started",
+            summary: "Exploring: src/",
+            turnId: "turn-1",
+            payload: { itemType: "explore_event" },
+          }),
+        ],
+        session: { orchestrationStatus: "running" },
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores provider activity once the session is no longer running", () => {
+    expect(
+      hasLiveTurnTailWork({
+        latestTurn,
+        messages: [],
+        activities: [
+          makeActivity({
+            id: "reasoning-1",
+            kind: "provider_reasoning",
+            summary: "Thinking…",
+            turnId: "turn-1",
+            payload: { itemType: "agent_reasoning" },
+          }),
+        ],
+        session: { orchestrationStatus: "ready" },
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("PROVIDER_OPTIONS", () => {
@@ -3332,5 +3429,112 @@ describe("PROVIDER_OPTIONS", () => {
       itemType: "command_execution",
       toolCallId: "call_UmQKQmLCCrj9PF82rupLIFDO",
     });
+  });
+});
+
+describe("classifyLiveActivityLabel", () => {
+  it("maps provider_reasoning to Thinking", () => {
+    expect(classifyLiveActivityLabel("provider_reasoning")).toBe("Thinking");
+  });
+
+  it("maps provider_explore_started to Exploring", () => {
+    expect(classifyLiveActivityLabel("provider_explore_started")).toBe("Exploring");
+  });
+
+  it("maps provider_explore_updated to Exploring", () => {
+    expect(classifyLiveActivityLabel("provider_explore_updated")).toBe("Exploring");
+  });
+
+  it("maps provider_skill_dispatched to In Skill", () => {
+    expect(classifyLiveActivityLabel("provider_skill_dispatched")).toBe("In Skill");
+  });
+
+  it("maps provider_subagent_started to Subagent", () => {
+    expect(classifyLiveActivityLabel("provider_subagent_started")).toBe("Subagent");
+  });
+
+  it("maps provider_subagent_completed to Subagent", () => {
+    expect(classifyLiveActivityLabel("provider_subagent_completed")).toBe("Subagent");
+  });
+
+  it("returns null for generic tool lifecycle kinds", () => {
+    expect(classifyLiveActivityLabel("tool.started")).toBeNull();
+    expect(classifyLiveActivityLabel("tool.completed")).toBeNull();
+  });
+
+  it("returns null for unknown kinds", () => {
+    expect(classifyLiveActivityLabel("turn.completed")).toBeNull();
+    expect(classifyLiveActivityLabel("not_a_real_kind")).toBeNull();
+  });
+});
+
+describe("deriveLatestLiveActivity", () => {
+  it("returns null when no latestTurnId is given", () => {
+    expect(
+      deriveLatestLiveActivity({
+        activities: [
+          makeActivity({ id: "r1", kind: "provider_reasoning", turnId: "turn-1" }),
+        ],
+        latestTurnId: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("returns the latest classifiable activity on the live turn", () => {
+    const result = deriveLatestLiveActivity({
+      activities: [
+        makeActivity({
+          id: "r1",
+          kind: "provider_reasoning",
+          turnId: "turn-1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+        }),
+        makeActivity({
+          id: "r2",
+          kind: "provider_skill_dispatched",
+          turnId: "turn-1",
+          createdAt: "2026-02-23T00:00:02.000Z",
+        }),
+      ],
+      latestTurnId: TurnId.makeUnsafe("turn-1"),
+    });
+    expect(result).toEqual({ kind: "provider_skill_dispatched", label: "In Skill" });
+  });
+
+  it("skips activities from other turns", () => {
+    const result = deriveLatestLiveActivity({
+      activities: [
+        makeActivity({
+          id: "r0",
+          kind: "provider_subagent_started",
+          turnId: "turn-0",
+          createdAt: "2026-02-23T00:00:03.000Z",
+        }),
+        makeActivity({
+          id: "r1",
+          kind: "provider_reasoning",
+          turnId: "turn-1",
+          createdAt: "2026-02-23T00:00:01.000Z",
+        }),
+      ],
+      latestTurnId: TurnId.makeUnsafe("turn-1"),
+    });
+    expect(result).toEqual({ kind: "provider_reasoning", label: "Thinking" });
+  });
+
+  it("returns null when only non-classifiable activities exist on the live turn", () => {
+    expect(
+      deriveLatestLiveActivity({
+        activities: [
+          makeActivity({
+            id: "r1",
+            kind: "tool.completed",
+            turnId: "turn-1",
+            createdAt: "2026-02-23T00:00:01.000Z",
+          }),
+        ],
+        latestTurnId: TurnId.makeUnsafe("turn-1"),
+      }),
+    ).toBeNull();
   });
 });

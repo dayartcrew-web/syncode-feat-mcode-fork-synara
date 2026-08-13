@@ -734,6 +734,90 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toBeNull();
   });
+
+  it("prefers the live activity label when work is live (hasLiveTailWork)", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasLiveTailWork: true,
+          latestLiveActivity: { kind: "provider_reasoning", label: "Thinking" },
+        },
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+      }),
+    ).toMatchObject({ label: "Thinking", pulse: true });
+  });
+
+  it("prefers the live activity label when only session.status is running", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasLiveTailWork: false,
+          latestLiveActivity: { kind: "provider_explore_updated", label: "Exploring" },
+        },
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+      }),
+    ).toMatchObject({ label: "Exploring", pulse: true });
+  });
+
+  it("falls back to Working when latestLiveActivity is null even if work is live", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasLiveTailWork: true,
+          latestLiveActivity: null,
+        },
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+      }),
+    ).toMatchObject({ label: "Working", pulse: true });
+  });
+
+  it("falls back to Working when latestLiveActivity.label is unknown", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasLiveTailWork: true,
+          latestLiveActivity: { kind: "tool.completed", label: "Definitely Not A Real Label" },
+        },
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+      }),
+    ).toMatchObject({ label: "Working", pulse: true });
+  });
+
+  it("surfaces 'In Skill' label for provider_skill_dispatched", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasLiveTailWork: true,
+          latestLiveActivity: { kind: "provider_skill_dispatched", label: "In Skill" },
+        },
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+      }),
+    ).toMatchObject({ label: "In Skill", pulse: true });
+  });
+
+  it("surfaces 'Subagent' label for provider_subagent_started", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasLiveTailWork: true,
+          latestLiveActivity: { kind: "provider_subagent_started", label: "Subagent" },
+        },
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+      }),
+    ).toMatchObject({ label: "Subagent", pulse: true });
+  });
 });
 
 describe("resolveThreadRowClassName", () => {
