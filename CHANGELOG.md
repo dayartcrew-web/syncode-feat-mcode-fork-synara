@@ -5,9 +5,11 @@
 - **e2e**: Preserve WebSocket static constants in ws-probe (#243) (f30a45d)
 
 
-### Tests
+### Documentation
 
-- **tauri**: Add live provider event push end-to-end over real WS (#244) (9a9bc13)
+- **changelog**: Update for v0.1.23 (24d2a10)
+
+- **changelog**: Update for v0.1.22 (0588eae)
 
 
 ### Miscellaneous
@@ -15,20 +17,8 @@
 - Bump version to 0.1.23 (f996e40)
 
 
-## [0.1.22] - 2026-08-13
+### Tests
 
-### Documentation
-
-- **changelog**: Update for v0.1.21 (cf252b4)
-
-
-### Features
-
-- **activity**: Wire claude reasoning + live label through sidebar summary (#242) (9520d9d)
-
-
-### Miscellaneous
-
-- Bump version to 0.1.22 (f37129e)
+- **tauri**: Add live provider event push end-to-end over real WS (#244) (9a9bc13)
 
 
