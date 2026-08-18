@@ -206,4 +206,44 @@ describe("adaptPushEnvelope", () => {
     const activity = (out[0]!.payload as { activity: { tone: string } }).activity;
     expect(activity.tone).toBe(expected);
   });
+
+  // The work-log heading chain (toDerivedWorkLogEntry label/fallbackLabel)
+  // reads activity.summary; dropping the frame's description renders
+  // icon-only rows for provider_* activities.
+  it("carries description as activity summary", () => {
+    const ctx = createPushAdaptContext();
+    const out = adaptPushEnvelope(
+      env("ActivityLogged", threadId, {
+        thread_id: threadId,
+        turn_id: turnId,
+        activity_type: "provider_skill_dispatched",
+        description: "Skill dispatched: kmr-build",
+        consumed: true,
+        created_at: "t",
+      }),
+      ctx,
+    );
+    const activity = (out[0]!.payload as { activity: { summary?: string } }).activity;
+    expect(activity.summary).toBe("Skill dispatched: kmr-build");
+  });
+
+  it.each([
+    { label: "absent", frame: {} },
+    { label: "blank", frame: { description: "   " } },
+    { label: "non-string", frame: { description: 42 } },
+  ])("leaves summary undefined when description is $label", ({ frame }) => {
+    const ctx = createPushAdaptContext();
+    const out = adaptPushEnvelope(
+      env("ActivityLogged", threadId, {
+        thread_id: threadId,
+        activity_type: "provider_reasoning",
+        consumed: true,
+        created_at: "t",
+        ...frame,
+      }),
+      ctx,
+    );
+    const activity = (out[0]!.payload as { activity: { summary?: string } }).activity;
+    expect(activity.summary).toBeUndefined();
+  });
 });
