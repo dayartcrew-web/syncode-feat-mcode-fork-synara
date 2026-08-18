@@ -1,29 +1,17 @@
-## [0.1.25] - 2026-08-19
+## [0.1.25] - 2026-08-18
 
 ### Bug Fixes
 
 - **frontend**: Replace vendored upstream release history with syncode fork history (#246) (163c44a)
 
 
-### Miscellaneous
-
-- Bump version to 0.1.25
-
-
-## [0.1.24] - 2026-08-18
-
-### Bug Fixes
-
-- **contracts**: Carry activityLogged description as summary (#245) (5236180)
-
-
 ### Documentation
 
-- **changelog**: Update for v0.1.23 (2692e93)
+- **changelog**: Update for v0.1.24 (f7bbf1a)
 
 
 ### Miscellaneous
 
-- Bump version to 0.1.24 (6c225df)
+- Bump version to 0.1.25 (321092c)
 
 
