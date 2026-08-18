@@ -251,11 +251,23 @@ function buildActivity(
     id: EventId.makeUnsafe(activityId),
     tone,
     kind,
-    summary: undefined,
+    summary: readActivitySummary(payload),
     payload,
     turnId: turnId ? TurnId.makeUnsafe(turnId) : null,
     createdAt,
   };
+}
+
+// The work-log heading chain (toDerivedWorkLogEntry label/fallbackLabel) reads
+// activity.summary; the backend only sends the human-readable text as
+// `description` on the activityLogged frame — without this, provider_*
+// activities render icon-only rows.
+function readActivitySummary(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const description = (payload as Record<string, unknown>)["description"];
+  if (typeof description !== "string") return undefined;
+  const trimmed = description.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 // ─── The adapter ──────────────────────────────────────────────────────
